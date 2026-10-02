@@ -33,9 +33,15 @@ async function load() {
   try {
     dbs.value = await api.pgDbs();
     if (Array.isArray(dbs.value)) roles.value = await api.pgRoles();
+  } catch (e: any) {
+    dbs.value = [];
+    roles.value = [];
+    msg.error(`PostgreSQL: ${e.message}`);
+  }
+  try {
     redis.value = await api.redis();
   } catch (e: any) {
-    msg.error(e.message);
+    redis.value = { error: e.message };
   }
 }
 

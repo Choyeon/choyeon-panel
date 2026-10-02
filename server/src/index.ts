@@ -17,10 +17,31 @@ import * as backups from './backups.js';
 import * as files from './files.js';
 import { startChecker, runChecks } from './alerts.js';
 
-const app = Fastify({ logger: process.env.CP_LOG ? { level: 'info' } : false, bodyLimit: 50 * 1024 * 1024 });
+const app = Fastify({
+  logger: process.env.CP_LOG ? { level: 'info' } : false,
+  bodyLimit: 50 * 1024 * 1024,
+  trustProxy: process.env.CP_TRUST_PROXY === '1',
+});
 app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
 await app.register(jwt, { secret: jwtSecret() });
 await app.register(fastifyWebsocket);
+
+app.addHook('onSend', async (_req, reply, payload) => {
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('X-Frame-Options', 'SAMEORIGIN');
+  reply.header('Referrer-Policy', 'same-origin');
+  reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  return payload;
+});
+
+app.setErrorHandler((err, req, reply) => {
+  if ((err as any).validation) {
+    return reply.code(400).send({ error: '请求参数不合法' });
+  }
+  req.log?.error({ err, url: req.url, method: req.method }, 'request error');
+  const code = reply.statusCode >= 400 ? reply.statusCode : 500;
+  return reply.code(code).send({ error: process.env.CP_LOG ? (err as Error).message : '服务器内部错误' });
+});
 
 const PORT = Number(process.env.CP_PORT || 3210);
 const HOST = process.env.CP_HOST || '127.0.0.1';
@@ -47,8 +68,14 @@ function rateLimit(ip: string) {
   rec.n += 1;
   return rec.n > 10;
 }
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, rec] of loginAttempts) if (now - rec.t > 600_000) loginAttempts.delete(ip);
+}, 600_000).unref();
 
 // ---------- public auth routes ----------
+app.get('/api/health', async () => ({ ok: true, uptime: process.uptime() }));
+
 app.get('/api/auth/status', async () => {
   const u = db.prepare('SELECT username FROM users LIMIT 1').get() as { username: string } | undefined;
   return { needsSetup: !u, username: u?.username ?? null };
@@ -283,18 +310,18 @@ app.register(
     });
 
     // databases
-    api.get('/api/db/pg/databases', async () => {
+    api.get('/api/db/pg/databases', async (req, reply) => {
       try {
         return await pg.listDbs();
       } catch (e: any) {
-        return { error: e.message };
+        return reply.code(502).send({ error: e.message });
       }
     });
-    api.get('/api/db/pg/roles', async () => {
+    api.get('/api/db/pg/roles', async (req, reply) => {
       try {
         return await pg.listRoles();
       } catch (e: any) {
-        return { error: e.message };
+        return reply.code(502).send({ error: e.message });
       }
     });
     api.post<{ Body: { action: string; name: string; owner?: string; password?: string; db?: string } }>(
@@ -325,15 +352,15 @@ app.register(
         return reply.code(400).send({ error: e.message });
       }
     });
-    api.get('/api/db/redis', async () => {
+    api.get('/api/db/redis', async (req, reply) => {
       try {
         return await pg.redisInfo();
       } catch (e: any) {
-        return { error: e.message };
+        return reply.code(502).send({ error: e.message });
       }
     });
     api.post<{ Body: { password: string } }>('/api/db/redis/password', async (req) => {
-      pg.setRedisPassword(req.body.password || '');
+      pg.setRedisPassword(req.body?.password || '');
       return { ok: true };
     });
 
@@ -405,8 +432,9 @@ app.register(
     });
     api.post<{ Body: { action: string; path: string; path2?: string } }>('/api/files/action', async (req, reply) => {
       try {
-        const r = files.fsAction(req.body.action, req.body.path, req.body.path2);
-        audit(whoami(req), `file:${req.body.action}`, req.body.path);
+        const body = req.body ?? ({} as any);
+        const r = files.fsAction(body.action, body.path, body.path2);
+        audit(whoami(req), `file:${body.action}`, body.path);
         return r;
       } catch (e: any) {
         return reply.code(400).send({ error: e.message });
@@ -427,28 +455,30 @@ app.register(
     });
     api.post<{ Body: { username: string; password: string; role: string } }>('/api/users', async (req, reply) => {
       if (forbid(req, reply)) return;
-      if (!/^[A-Za-z0-9_-]{3,32}$/.test(req.body.username || '')) return reply.code(400).send({ error: '用户名不合法' });
-      if (!req.body.password || req.body.password.length < 8) return reply.code(400).send({ error: '密码至少 8 位' });
-      const role = req.body.role === 'viewer' ? 'viewer' : 'admin';
+      const body = req.body ?? ({} as any);
+      if (!/^[A-Za-z0-9_-]{3,32}$/.test(body.username || '')) return reply.code(400).send({ error: '用户名不合法' });
+      if (!body.password || body.password.length < 8) return reply.code(400).send({ error: '密码至少 8 位' });
+      const role = body.role === 'viewer' ? 'viewer' : 'admin';
       try {
-        db.prepare('INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)').run(req.body.username, hashPass(req.body.password), role);
+        db.prepare('INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)').run(body.username, hashPass(body.password), role);
       } catch {
         return reply.code(400).send({ error: '用户名已存在' });
       }
-      audit(whoami(req), 'user:create', `${req.body.username}(${role})`);
+      audit(whoami(req), 'user:create', `${body.username}(${role})`);
       return { ok: true };
     });
     api.patch<{ Params: { id: string }; Body: { role?: string; password?: string } }>('/api/users/:id', async (req, reply) => {
       if (forbid(req, reply)) return;
       const u = db.prepare('SELECT * FROM users WHERE id=?').get(Number(req.params.id)) as any;
       if (!u) return reply.code(404).send({ error: '用户不存在' });
-      if (req.body.role) {
+      const body = req.body ?? {};
+      if (body.role) {
         if (u.username === whoami(req)) return reply.code(400).send({ error: '不能修改自己的角色' });
-        db.prepare('UPDATE users SET role=? WHERE id=?').run(req.body.role === 'viewer' ? 'viewer' : 'admin', u.id);
+        db.prepare('UPDATE users SET role=? WHERE id=?').run(body.role === 'viewer' ? 'viewer' : 'admin', u.id);
       }
-      if (req.body.password) {
-        if (req.body.password.length < 8) return reply.code(400).send({ error: '密码至少 8 位' });
-        db.prepare('UPDATE users SET pass_hash=? WHERE id=?').run(hashPass(req.body.password), u.id);
+      if (body.password) {
+        if (body.password.length < 8) return reply.code(400).send({ error: '密码至少 8 位' });
+        db.prepare('UPDATE users SET pass_hash=? WHERE id=?').run(hashPass(body.password), u.id);
       }
       audit(whoami(req), 'user:update', u.username);
       return { ok: true };
@@ -472,7 +502,7 @@ app.register(
     });
     api.post<{ Body: Record<string, string> }>('/api/settings/alerts', async (req, reply) => {
       if (forbid(req, reply)) return;
-      for (const [k, v] of Object.entries(req.body)) {
+      for (const [k, v] of Object.entries(req.body ?? {})) {
         if (/^alert_(telegram_bot|telegram_chat|webhook_url|disk_pct|ssl_days)$/.test(k)) setSetting(k, String(v ?? ''));
       }
       audit(whoami(req), 'settings:alerts', Object.keys(req.body).join(','));
@@ -567,8 +597,32 @@ if (existsSync(dist)) {
     if (req.url.startsWith('/api')) return reply.code(404).send({ error: 'not found' });
     return reply.sendFile('index.html');
   });
+} else {
+  app.setNotFoundHandler((req, reply) => {
+    reply.code(404).send({ error: req.url.startsWith('/api') ? 'not found' : '前端未构建，请先在 web/ 执行 npm run build' });
+  });
 }
 
-await app.listen({ port: PORT, host: HOST });
+const shutdown = async (signal: string) => {
+  console.log(`[${signal}] shutting down choyeon-panel...`);
+  try {
+    await app.close();
+    db.close();
+  } catch (e) {
+    console.error('shutdown error', e);
+    process.exitCode = 1;
+  }
+  process.exit();
+};
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('unhandledRejection', (err) => console.error('unhandledRejection', err));
+
+await app.listen({ port: PORT, host: HOST }, (err) => {
+  if (err) {
+    console.error('failed to start choyeon-panel:', err.message);
+    process.exit(1);
+  }
+  console.log(`choyeon-panel listening on http://${HOST}:${PORT}`);
+});
 startChecker();
-console.log(`choyeon-panel listening on http://${HOST}:${PORT}`);

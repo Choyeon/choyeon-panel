@@ -45,7 +45,11 @@ function chartOpts(times: string[], series: any[], yfmt: (v: number) => string) 
 }
 
 async function tick() {
-  stat.value = await api.stats();
+  try {
+    stat.value = await api.stats();
+  } catch {
+    return; // 401 时 api.req 已跳转登录；网络抖动等下个周期自动恢复
+  }
   const hist: any[] = (stat.value.history || []).slice(-60);
   const times = hist.map((x) => new Date(x.t).toLocaleTimeString());
   cpuChart?.setOption(
@@ -57,9 +61,11 @@ async function tick() {
 }
 
 async function loadSide() {
-  apps.value = await api.apps();
-  const svc = await api.services();
-  failedUnits.value = svc.filter((s: any) => s.active === 'failed').map((s: any) => s.unit);
+  try {
+    apps.value = await api.apps();
+    const svc = await api.services();
+    failedUnits.value = svc.filter((s: any) => s.active === 'failed').map((s: any) => s.unit);
+  } catch {}
 }
 
 const quickOpts = [
@@ -69,7 +75,9 @@ const quickOpts = [
 ];
 
 onMounted(async () => {
-  info.value = await api.info();
+  try {
+    info.value = await api.info();
+  } catch {}
   await nextTick();
   if (cpuEl.value) cpuChart = echarts.init(cpuEl.value);
   if (memEl.value) memChart = echarts.init(memEl.value);
@@ -96,7 +104,7 @@ onBeforeUnmount(() => {
         <div class="hero-greet">{{ greet }}，欢迎回到 <b>choyeon panel</b></div>
         <div class="hero-host">
           <NIcon :component="icons.ServerOutline" :size="15" color="#8fa8ff" />
-          {{ info.hostname }} · {{ info.platform }}
+          {{ info.hostname }} · {{ info.prettyName || info.platform }}
         </div>
       </div>
       <NSpace align="center" :size="10">

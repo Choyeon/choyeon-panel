@@ -3,9 +3,9 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 
-export async function run(cmd: string, args: string[], opts: { cwd?: string; timeout?: number } = {}) {
+export async function run(cmd: string, args: string[], opts: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv } = {}) {
   try {
-    const { stdout, stderr } = await exec(cmd, args, { cwd: opts.cwd, timeout: opts.timeout ?? 120000, maxBuffer: 20 * 1024 * 1024 });
+    const { stdout, stderr } = await exec(cmd, args, { cwd: opts.cwd, timeout: opts.timeout ?? 120000, maxBuffer: 20 * 1024 * 1024, env: opts.env });
     return { code: 0, out: `${stdout}\n${stderr}`.trim() };
   } catch (e: any) {
     return { code: e.code ?? 1, out: `${e.stdout ?? ''}\n${e.stderr ?? ''}\n${e.message ?? ''}`.trim() };

@@ -113,15 +113,16 @@ export function redisPassword(): string | null {
 
 export async function redisInfo() {
   const pass = redisPassword();
-  const args = pass ? ['--no-auth-warning', '-a', pass, 'INFO'] : ['INFO'];
-  const r = await run('redis-cli', args);
+  // REDISCLI_AUTH avoids exposing the password in the process list (argv of -a)
+  const env = pass ? { ...process.env, REDISCLI_AUTH: pass } : process.env;
+  const r = await run('redis-cli', ['INFO'], { env });
   if (r.code !== 0 || r.out.includes('NOAUTH')) throw new Error(r.out.includes('NOAUTH') ? 'Redis 需要密码，请在下方设置' : r.out);
   const info: Record<string, string> = {};
   for (const line of r.out.split('\n')) {
     const i = line.indexOf(':');
     if (i > 0 && !line.startsWith('#')) info[line.slice(0, i)] = line.slice(i + 1).trim();
   }
-  const keys = await run('redis-cli', [...(pass ? ['--no-auth-warning', '-a', pass] : []), 'DBSIZE']);
+  const keys = await run('redis-cli', ['DBSIZE'], { env });
   return { info, dbsize: keys.out, authed: !!pass };
 }
 

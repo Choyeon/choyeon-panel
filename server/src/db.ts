@@ -1,8 +1,9 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
-const dir = process.env.CP_DATA_DIR || new URL('../../data', import.meta.url).pathname;
+const dir = process.env.CP_DATA_DIR || fileURLToPath(new URL('../../data', import.meta.url));
 mkdirSync(dir, { recursive: true });
 
 export const db = new Database(`${dir}/panel.db`);

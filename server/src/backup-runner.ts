@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { db, audit } from './db.js';
 import { BACKUP_DIR } from './backups.js';
+import { shEscape } from './util.js';
 
 const id = Number(process.argv[2]);
 if (!id) {
@@ -31,11 +32,11 @@ async function main() {
   if (bk.kind === 'pg') {
     if (bk.target === 'all') {
       const file = `${BACKUP_DIR}/bk${bk.id}-${ts}.sql.gz`;
-      await sh(`su -s /bin/sh postgres -c 'pg_dumpall' | gzip > '${file}'`);
+      await sh(`su -s /bin/sh postgres -c 'pg_dumpall' | gzip > ${shEscape(file)}`);
     } else {
       if (!/^[a-z_][a-z0-9_]{0,62}$/.test(bk.target)) throw new Error('库名不合法');
       const file = `${BACKUP_DIR}/bk${bk.id}-${ts}.dump.gz`;
-      await sh(`su -s /bin/sh postgres -c 'pg_dump -Fc ${bk.target}' | gzip > '${file}'`);
+      await sh(`su -s /bin/sh postgres -c 'pg_dump -Fc ${bk.target}' | gzip > ${shEscape(file)}`);
     }
     audit('system', 'backup:pg', bk.target);
   } else if (bk.kind === 'app') {
@@ -43,7 +44,7 @@ async function main() {
     if (!app) throw new Error(`应用 ${bk.target} 不存在`);
     const file = `${BACKUP_DIR}/bk${bk.id}-${ts}.tar.gz`;
     await sh(
-      `tar czf '${file}' --exclude=node_modules --exclude=.venv --exclude=.next --exclude=.output -C '${app.path}' .`,
+      `tar czf ${shEscape(file)} --exclude=node_modules --exclude=.venv --exclude=.next --exclude=.output -C ${shEscape(app.path)} .`,
     );
     audit('system', 'backup:app', bk.target);
   }

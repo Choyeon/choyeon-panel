@@ -1,0 +1,25 @@
+[Unit]
+Description=choyeon-panel (native server management panel)
+Documentation=https://github.com/Choyeon/choyeon-panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/choyeon-panel/server
+Environment=NODE_ENV=production
+Environment=CP_HOST=127.0.0.1
+Environment=CP_PORT=3210
+Environment=CP_TRUST_PROXY=1
+Environment=CP_DATA_DIR=/root/choyeon-panel/data
+Environment=CP_FILE_ROOTS=/root/www,/etc/nginx,/root/backups/panel
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=3
+# 资源与安全加固
+LimitNOFILE=65536
+NoNewPrivileges=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
