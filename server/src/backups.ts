@@ -92,10 +92,18 @@ export interface CreateBackupInput {
   enabled?: boolean;
 }
 
+function validateBackupFields(i: Partial<CreateBackupInput>) {
+  if (i.schedule !== undefined && !['manual', 'daily', 'weekly'].includes(i.schedule)) throw new Error('schedule 必须是 manual/daily/weekly');
+  if (i.hour !== undefined && (!Number.isInteger(i.hour) || i.hour < 0 || i.hour > 23)) throw new Error('hour 必须在 0-23');
+  if (i.minute !== undefined && (!Number.isInteger(i.minute) || i.minute < 0 || i.minute > 59)) throw new Error('minute 必须在 0-59');
+  if (i.keep !== undefined && (!Number.isInteger(i.keep) || i.keep < 1 || i.keep > 365)) throw new Error('keep 必须在 1-365');
+}
+
 export async function createBackup(i: CreateBackupInput) {
   if (!['pg', 'app'].includes(i.kind)) throw new Error('kind 必须是 pg 或 app');
   if (i.kind === 'pg' && i.target !== 'all' && !isIdent(i.target)) throw new Error('PG 库名不合法');
   if (i.kind === 'app' && !isName(i.target)) throw new Error('应用名不合法');
+  validateBackupFields(i);
   const res = db
     .prepare('INSERT INTO backups(kind,target,schedule,hour,minute,keep,enabled) VALUES(?,?,?,?,?,?,?)')
     .run(i.kind, i.target, i.schedule || 'daily', i.hour ?? 3, i.minute ?? 30, i.keep ?? 7, i.enabled === false ? 0 : 1);
@@ -107,6 +115,7 @@ export async function createBackup(i: CreateBackupInput) {
 export async function updateBackup(id: number, i: Partial<CreateBackupInput>) {
   const cur = db.prepare('SELECT * FROM backups WHERE id=?').get(id) as BackupRow | undefined;
   if (!cur) throw new Error('备份任务不存在');
+  validateBackupFields(i);
   db.prepare(
     `UPDATE backups SET kind=?,target=?,schedule=?,hour=?,minute=?,keep=?,enabled=? WHERE id=?`,
   ).run(
