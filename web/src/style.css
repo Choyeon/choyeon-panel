@@ -1,0 +1,103 @@
+:root {
+  --brand: #4f7cff;
+  --ok: #34c77b;
+  --warn: #f5a623;
+  --err: #f5616c;
+  --line: rgba(255, 255, 255, 0.07);
+}
+body {
+  margin: 0;
+  background: #101014;
+  font-family: 'Inter', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+::selection {
+  background: rgba(79, 124, 255, 0.35);
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+.log-view {
+  background: #0c0d10;
+  color: #d4d4d4;
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.stat-num {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+.page-fade-enter-active,
+.page-fade-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.page-fade-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.page-fade-leave-to {
+  opacity: 0;
+}
+.mono {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: 1px;
+}
+.dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 6px rgba(52, 199, 123, 0.6);
+}
+.dot.err {
+  background: var(--err);
+}
+.dot.idle {
+  background: #666;
+}
+.dot.warn {
+  background: var(--warn);
+}
+
+/* shared render-cell styles (used by DataTable h() renderers, non-scoped) */
+.cell-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.cell-ico { flex-shrink: 0; display: flex; align-items: center; }
+.cell-txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cell-name { font-size: 13px; font-weight: 550; color: #dcdce4; text-align: left; padding: 0 !important; }
+.cell-sub { font-size: 11.5px; color: #66666e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vchip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border-radius: 20px; font-size: 12px; line-height: 18px;
+  background: rgba(255, 255, 255, 0.05); color: #9d9da8;
+}
+.vchip.node { background: rgba(143, 212, 96, 0.12); color: #a5d97a; }
+.vchip.python { background: rgba(79, 124, 255, 0.13); color: #8fa8ff; }
+.st { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; }
+.st.ok { color: #6fdba4; }
+.st.err { color: #f58a92; }
+.st.warn { color: #f5c26f; }
+.st.idle { color: #80808c; }
+.mono-dim { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; color: #9d9da8; }
