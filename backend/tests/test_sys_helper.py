@@ -1,6 +1,10 @@
-"""Unit tests for sys_helper parsers (run: python -m unittest test_sys_helper)."""
+"""Unit tests for sys_helper parsers (run: uv run python -m unittest discover -s tests)."""
 
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from sys_helper import (
     parse_loadavg,

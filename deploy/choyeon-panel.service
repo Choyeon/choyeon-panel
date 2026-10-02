@@ -6,14 +6,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/choyeon-panel/server
-Environment=NODE_ENV=production
+WorkingDirectory=/root/choyeon-panel/backend
 Environment=CP_HOST=127.0.0.1
 Environment=CP_PORT=3210
 Environment=CP_TRUST_PROXY=1
 Environment=CP_DATA_DIR=/root/choyeon-panel/data
 Environment=CP_FILE_ROOTS=/root/www,/etc/nginx,/root/backups/panel
-ExecStart=/usr/bin/node dist/index.js
+Environment=CP_PYTHON=/root/choyeon-panel/backend/.venv/bin/python
+ExecStart=/root/choyeon-panel/backend/.venv/bin/python -m app.main
 Restart=always
 RestartSec=3
 # 资源与安全加固

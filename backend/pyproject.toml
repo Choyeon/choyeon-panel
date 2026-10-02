@@ -1,0 +1,14 @@
+[project]
+name = "choyeon-panel-backend"
+version = "1.0.0"
+description = "choyeon 面板后端：FastAPI + SQLite，管理本机应用/服务/备份"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "websockets>=12",
+    "PyJWT>=2.9",
+]
+
+[tool.uv]
+package = false

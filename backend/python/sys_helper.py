@@ -6,7 +6,7 @@ Subcommands:
   snapshot  raw counters for one sampling tick (cpu jiffies, mem, net, disk, load)
   info      static host information (hostname, distro, kernel, cpu)
 
-Stdlib only; no third-party dependencies. Called by the panel (server/src/system.ts)
+Stdlib only; no third-party dependencies. Called by the panel (app/services/system_metrics.py)
 via `python3 sys_helper.py <cmd>`; the panel falls back to its own /proc parsing
 if this script is unavailable.
 """
