@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { computed, h, ref } from 'vue';
+import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NLayout, NLayoutSider, NLayoutHeader, NLayoutContent, NMenu, NSpace, NText, NButton,
-  NModal, NInput, NDropdown, useMessage,
+  NModal, NInput, NDropdown, NDrawer, NDrawerContent, NIcon, useMessage,
 } from 'naive-ui';
-import { setToken, getRole, api } from './api';
-import { icon } from './icons';
+import { setToken, getRole, clearSession, api } from './api';
+import { icons } from './icons';
 import { TITLES } from './router';
+
+type ThemeMode = 'dark' | 'light' | 'auto';
+const props = defineProps<{ themeMode?: ThemeMode }>();
+const emit = defineEmits<{ 'update:themeMode': [ThemeMode] }>();
 
 const route = useRoute();
 const router = useRouter();
@@ -16,11 +20,31 @@ const collapsed = ref(false);
 const showPwd = ref(false);
 const oldPwd = ref('');
 const newPwd = ref('');
+const renewing = ref(false);
 
+const isMobile = ref(false);
+const drawer = ref(false);
 const isLogin = computed(() => route.path === '/login');
 const isAdmin = computed(() => getRole() === 'admin');
-const pageTitle = computed(() => (route.path.startsWith('/apps/') ? '应用详情' : TITLES[route.path] || 'choyeon panel'));
-const renewing = ref(false);
+const pageTitle = computed(() =>
+  route.path.startsWith('/apps/') ? '应用详情' : TITLES[route.path] || 'choyeon panel',
+);
+const active = computed(() => (route.path.startsWith('/apps') ? '/apps' : route.path));
+
+function ico(name: string, size = 18) {
+  return () => h(NIcon, { size }, { default: () => h(icons[name] || icons.SettingsOutline) });
+}
+
+function onResize() {
+  isMobile.value = window.innerWidth < 900;
+  if (!isMobile.value) drawer.value = false;
+}
+onMounted(() => {
+  onResize();
+  window.addEventListener('resize', onResize);
+});
+onBeforeUnmount(() => window.removeEventListener('resize', onResize));
+
 async function renewNow() {
   renewing.value = true;
   try {
@@ -33,33 +57,40 @@ async function renewNow() {
   }
 }
 
-const menu = computed(() => {
-  const base = [
-    { label: '总览', key: '/dashboard', icon: icon('SpeedometerOutline') },
-    { label: '应用', key: '/apps', icon: icon('ApplicationsOutline') },
-    { label: '系统服务', key: '/services', icon: icon('ServerOutline') },
-    { label: '数据库', key: '/db', icon: icon('CloudOutline') },
-    { label: '备份', key: '/backups', icon: icon('TimeOutline') },
-    { label: '文件', key: '/files', icon: icon('FolderOpenOutline') },
-  ];
-  if (isAdmin.value) base.push({ label: '终端', key: '/terminal', icon: icon('TerminalOutline') });
-  base.push({ label: '设置', key: '/settings', icon: icon('SettingsOutline') });
-  return base;
+const MENU_ICON: Record<string, string> = {
+  '/dashboard': 'SpeedometerOutline',
+  '/apps': 'ApplicationsOutline',
+  '/services': 'ServerOutline',
+  '/db': 'CloudOutline',
+  '/backups': 'TimeOutline',
+  '/files': 'FolderOpenOutline',
+  '/terminal': 'TerminalOutline',
+  '/doctor': 'ShieldCheckmarkOutline',
+  '/settings': 'SettingsOutline',
+};
+
+const menuOptions = computed(() => {
+  const keys = ['/dashboard', '/apps', '/services', '/db', '/backups', '/files'];
+  if (isAdmin.value) keys.push('/terminal');
+  keys.push('/doctor');
+  keys.push('/settings');
+  return keys.map((k) => ({ label: TITLES[k], key: k, icon: ico(MENU_ICON[k], 18) }));
 });
 
-const active = computed(() => {
-  if (route.path.startsWith('/apps')) return '/apps';
-  return route.path;
-});
+function go(key: string) {
+  drawer.value = false;
+  router.push(key);
+}
 
-async function doLogout() {
-  setToken('');
-  router.push('/login');
+function doLogout() {
+  clearSession();
+  router.replace('/login');
 }
 
 async function doChangePwd() {
   try {
-    await api.changePassword(oldPwd.value, newPwd.value);
+    const r = await api.changePassword(oldPwd.value, newPwd.value);
+    if (r?.token) setToken(r.token); // 改密后旧 token 失效，服务端会签发新 token
     oldPwd.value = newPwd.value = '';
     showPwd.value = false;
     msg.success('密码已修改');
@@ -68,83 +99,148 @@ async function doChangePwd() {
   }
 }
 
-const userOpts = computed(() => [
-  { label: '修改密码', key: 'pwd', icon: icon('KeyOutline', 16), onClick: () => (showPwd.value = true) },
-  { label: '退出登录', key: 'out', icon: icon('ArrowForwardOutline', 16), onClick: doLogout },
-]);
+const themeIcon = computed(() =>
+  props.themeMode === 'light' ? 'SunnyOutline' : props.themeMode === 'dark' ? 'MoonOutline' : 'ColorPaletteOutline',
+);
+const themeOpts = [
+  { label: '跟随系统', key: 'auto' },
+  { label: '浅色', key: 'light' },
+  { label: '深色', key: 'dark' },
+];
+
+const userOpts = [
+  { label: '修改密码', key: 'pwd', icon: ico('KeyOutline', 16), onClick: () => (showPwd.value = true) },
+  { label: '退出登录', key: 'out', icon: ico('ArrowForwardOutline', 16), onClick: doLogout },
+];
 </script>
 
 <template>
   <router-view v-if="isLogin" />
-  <NLayout v-else class="h-screen" has-sider>
+
+  <NLayout v-else class="cp-shell" has-sider>
     <NLayoutSider
+      v-if="!isMobile"
       collapse-mode="width"
-      :collapsed-width="60"
+      :collapsed-width="64"
       :width="208"
       :collapsed="collapsed"
       bordered
       show-trigger="bar"
       :native-scrollbar="false"
+      class="cp-sider"
       @collapse="collapsed = true"
       @expand="collapsed = false"
-      style="background: #14141a"
     >
       <div class="logo" :class="{ mini: collapsed }">
-        <div class="logo-mark">C</div>
-        <transition name="fade">
-          <span v-if="!collapsed" class="logo-text">choyeon <b>panel</b></span>
-        </transition>
+        <div class="logo-mark" aria-hidden="true">C</div>
+        <span v-if="!collapsed" class="logo-text">choyeon <b>panel</b></span>
       </div>
       <NMenu
         :indent="18"
         :collapsed-icon-size="19"
         :collapsed="collapsed"
-        :collapsed-width="60"
+        :collapsed-width="64"
         :value="active"
-        :options="menu"
-        @update:value="(k: string) => router.push(k)"
+        :options="menuOptions"
+        @update:value="(k: string) => go(k)"
       />
     </NLayoutSider>
-    <NLayout :content-style="`display:flex;flex-direction:column;height:100vh;overflow:hidden;background:#101014`">
-      <NLayoutHeader bordered style="height: 54px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px">
-        <NText depth="3" style="font-size: 12.5px; letter-spacing: 0.02em">
-          {{ pageTitle }} · {{ route.path }}
-        </NText>
-        <NSpace align="center" :size="10">
-          <NButton v-if="isAdmin" size="small" tertiary :loading="renewing" @click="renewNow">续期证书</NButton>
+
+    <NDrawer v-else v-model:show="drawer" :width="240" placement="left">
+      <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0 12px">
+        <template #header>
+          <div class="logo">
+            <div class="logo-mark" aria-hidden="true">C</div>
+            <span class="logo-text">choyeon <b>panel</b></span>
+          </div>
+        </template>
+        <NMenu :indent="14" :value="active" :options="menuOptions" @update:value="(k: string) => go(k)" />
+      </NDrawerContent>
+    </NDrawer>
+
+    <NLayout :content-style="'display:flex;flex-direction:column;height:100vh;overflow:hidden'">
+      <NLayoutHeader bordered class="cp-header">
+        <NSpace align="center" :size="8" :wrap="false">
+          <NButton
+            v-if="isMobile"
+            quaternary
+            size="small"
+            title="打开导航菜单"
+            aria-label="打开导航菜单"
+            :icon="ico('MenuOutline')"
+            @click="drawer = true"
+          />
+          <NText depth="3" class="cp-title">{{ pageTitle }}</NText>
+        </NSpace>
+
+        <NSpace align="center" :size="8" :wrap="false">
+          <NButton v-if="isAdmin && !isMobile" size="small" tertiary :loading="renewing" @click="renewNow">
+            续期证书
+          </NButton>
+
+          <NDropdown
+            :options="themeOpts"
+            trigger="click"
+            placement="bottom-end"
+            @select="(k: string) => emit('update:themeMode', k as ThemeMode)"
+          >
+            <NButton quaternary circle size="small" title="外观主题" aria-label="切换外观主题" :icon="ico(themeIcon)" />
+          </NDropdown>
+
           <NDropdown :options="userOpts" trigger="click" placement="bottom-end">
-            <div class="user-chip">
+            <button class="user-chip" type="button" :aria-label="`账号菜单，当前：${isAdmin ? '管理员' : '只读'}`">
               <span class="avatar">{{ isAdmin ? 'A' : 'V' }}</span>
-              <span style="font-size: 13px">{{ isAdmin ? '管理员' : '只读' }}</span>
-            </div>
+              <span v-if="!isMobile" class="user-role">{{ isAdmin ? '管理员' : '只读' }}</span>
+            </button>
           </NDropdown>
         </NSpace>
       </NLayoutHeader>
-      <NLayoutContent content-style="padding: 20px 22px; overflow: auto; flex: 1" :native-scrollbar="false">
+
+      <NLayoutContent
+        content-style="padding: 20px 22px; overflow: auto; flex: 1"
+        :native-scrollbar="false"
+        class="cp-content"
+      >
         <router-view v-slot="{ Component }">
           <transition name="page" mode="out-in"><component :is="Component" /></transition>
         </router-view>
       </NLayoutContent>
     </NLayout>
-    <NModal v-model:show="showPwd" preset="card" title="修改密码" style="width: 360px">
-      <NSpace vertical>
-        <NInput v-model:value="oldPwd" type="password" placeholder="原密码" />
-        <NInput v-model:value="newPwd" type="password" placeholder="新密码（至少 8 位）" />
-        <NButton type="primary" block @click="doChangePwd">确认修改</NButton>
+
+    <NModal v-model:show="showPwd" preset="card" title="修改密码" style="width: 360px; max-width: 94vw">
+      <NSpace vertical :size="12">
+        <NInput
+          v-model:value="oldPwd"
+          type="password"
+          placeholder="原密码"
+          autocomplete="current-password"
+          @keyup.enter="doChangePwd"
+        />
+        <NInput
+          v-model:value="newPwd"
+          type="password"
+          placeholder="新密码（至少 8 位）"
+          autocomplete="new-password"
+          @keyup.enter="doChangePwd"
+        />
+        <NButton type="primary" block :disabled="!oldPwd || newPwd.length < 8" @click="doChangePwd">
+          确认修改
+        </NButton>
       </NSpace>
     </NModal>
   </NLayout>
 </template>
 
 <style scoped>
-.h-screen { height: 100vh; }
+.cp-shell { height: 100vh; }
+.cp-sider { background: var(--cp-bg-1); }
 .logo {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 16px 16px 12px;
+  min-height: var(--header-h);
 }
-.logo.mini { justify-content: center; padding: 16px 0 12px; }
 .logo-mark {
   width: 28px;
   height: 28px;
@@ -161,22 +257,33 @@ const userOpts = computed(() => [
 }
 .logo-text {
   font-size: 14.5px;
-  color: #d8d8e2;
+  color: var(--cp-text);
   letter-spacing: 0.01em;
   white-space: nowrap;
 }
-.logo-text b { color: #86a8ff; }
+.logo-text b { color: var(--brand-soft); }
+.cp-header {
+  height: var(--header-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  gap: 10px;
+}
+.cp-title { font-size: 12.5px; letter-spacing: 0.02em; }
 .user-chip {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 4px 10px 4px 4px;
   border-radius: 20px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--cp-text-dim);
   cursor: pointer;
-  color: #c9c9d2;
-  transition: background 0.15s;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
-.user-chip:hover { background: rgba(255, 255, 255, 0.06); }
+.user-chip:hover { background: var(--cp-hover); border-color: var(--cp-border); }
 .avatar {
   width: 26px;
   height: 26px;
@@ -189,6 +296,8 @@ const userOpts = computed(() => [
   align-items: center;
   justify-content: center;
 }
-.fade-enter-active, .fade-leave-active { transition: opacity 0.12s; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
+.user-role { font-size: 13px; }
+@media (max-width: 640px) {
+  .cp-title { font-size: 13px; font-weight: 600; }
+}
 </style>

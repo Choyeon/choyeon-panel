@@ -2,7 +2,7 @@
 import { onMounted, ref, h, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import {
-  NButton, NSpace, NDataTable, NModal, NForm, NFormItem, NInput, NInputNumber,
+  NButton, NSpace, NDataTable, NModal, NForm, NFormItem, NInput, NInputNumber, NSelect,
   NRadioGroup, NRadioButton, NPopconfirm, NIcon, NAlert, NTag, NCollapse, NCollapseItem,
   useMessage,
 } from 'naive-ui';
@@ -19,7 +19,7 @@ const showCreate = ref(false);
 const creating = ref(false);
 const form = ref<any>({
   name: '', type: 'node', repo_url: '', branch: 'main', domain: '', port: null,
-  install_cmd: '', start_cmd: 'npm start', unit_override: '', path: '', unit_template: '',
+  install_cmd: '', start_cmd: 'npm start', unit_override: '', path: '', unit_template: '', template: '',
 });
 
 const runningCount = computed(() => rows.value.filter((r) => r.running).length);
@@ -57,7 +57,7 @@ const columns: any[] = [
       r.port
         ? h('span', { class: 'mono-dim' }, [
             String(r.port),
-            ...(r.portAuto ? [h('span', { style: 'color:#606068;font-size:10.5px;margin-left:5px' }, '自动')] : []),
+            ...(r.portAuto ? [h('span', { style: 'color:var(--cp-text-mute);font-size:10.5px;margin-left:5px' }, '自动')] : []),
           ])
         : h('span', { class: 'cell-sub' }, '—'),
   },
@@ -71,7 +71,7 @@ const columns: any[] = [
           h(NTag, { size: 'small', bordered: false, type: r.domain ? 'default' : 'info' }, { default: () => d }),
         ),
         ...(ds.length > 2 ? [h('span', { class: 'cell-sub' }, `+${ds.length - 2}`)] : []),
-        ...(!r.domain ? [h('span', { style: 'color:#606068;font-size:10.5px' }, 'nginx 检测')] : []),
+        ...(!r.domain ? [h('span', { style: 'color:var(--cp-text-mute);font-size:10.5px' }, 'nginx 检测')] : []),
       ]);
     },
   },
@@ -88,36 +88,80 @@ const columns: any[] = [
     title: '操作', key: 'ops', width: 292,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, type: 'primary', icon: ico('CloudUploadOutline'), onClick: () => act(r.id, 'deploy') }, () => '部署'),
+        h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busyId.value === r.id, icon: ico('CloudUploadOutline'), onClick: () => act(r.id, 'deploy') }, () => '部署'),
         h(NButton, {
           size: 'tiny', tertiary: true, type: r.running ? 'warning' : 'success',
           icon: ico(r.running ? 'StopOutline' : 'PlayOutline'), onClick: () => act(r.id, r.running ? 'stop' : 'start'),
         }, () => (r.running ? '停止' : '启动')),
         h(NButton, { size: 'tiny', tertiary: true, disabled: !r.running, icon: ico('SyncOutline'), onClick: () => act(r.id, 'restart') }, () => '重启'),
+        h(NButton, { size: 'tiny', quaternary: true, title: '回滚到上一次成功部署', 'aria-label': '回滚', icon: ico('ArrowBackOutline'), onClick: () => rollback(r) }),
         h(NPopconfirm, { onPositiveClick: () => del(r) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline') }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除应用 ${r.name}`, 'aria-label': `删除应用 ${r.name}` }, { default: () => '' }),
           default: () => '仅删除面板配置，服务器文件保留。彻底清理请到应用详情页操作。',
         }),
       ]),
   },
 ];
 
+const loading = ref(false);
+const busyId = ref<number | null>(null);
+
 async function load() {
+  loading.value = true;
   try {
     rows.value = await api.apps();
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    loading.value = false;
+  }
+}
+async function rollback(r: any) {
+  try {
+    const res = await api.appAction(r.id, 'rollback');
+    msg.success(`已回滚到 ${res.commit || '上一版本'}`);
   } catch (e: any) {
     msg.error(e.message);
   }
 }
 async function act(id: number, verb: string) {
+  busyId.value = id;
   try {
     if (verb === 'deploy') await api.deploy(id);
     else await api.appAction(id, verb);
+    msg.success(verb === 'deploy' ? '部署任务已启动' : '操作已下发');
     setTimeout(load, 800);
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    busyId.value = null;
   }
 }
+const templates = ref<any[]>([]);
+const templateOptions = computed(() => [
+  { label: '自定义（手动填写启动命令）', value: '' },
+  ...templates.value.map((t: any) => ({ label: `${t.name} — ${t.desc}`, value: t.key })),
+]);
+
+async function loadTemplates() {
+  try {
+    templates.value = (await api.templates()) as any[];
+  } catch {
+    templates.value = []; // 模板加载失败不阻塞建应用，用户可手动填
+  }
+}
+
+// 选模板即填默认值，但用户已手改的字段不覆盖
+function pickTemplate(key: string) {
+  if (!key) return;
+  const t = templates.value.find((x: any) => x.key === key);
+  if (!t) return;
+  form.value.type = t.type;
+  form.value.install_cmd = t.install_cmd || '';
+  form.value.start_cmd = t.start_cmd || '';
+  form.value.port = t.port || null;
+}
+
 async function del(r: any) {
   try {
     await api.deleteApp(r.id, false);
@@ -143,6 +187,7 @@ async function create() {
       unit_override: form.value.unit_override || null,
       path: form.value.path || null,
       unit_template: form.value.unit_template || null,
+      template: form.value.template || undefined,
     });
     msg.success('创建成功');
     showCreate.value = false;
@@ -154,22 +199,25 @@ async function create() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  loadTemplates();
+  load();
+});
 </script>
 
 <template>
   <div>
     <PageHeader title="应用" :sub="`共 ${rows.length} 个应用 · ${runningCount} 个运行中。部署、启停、日志与域名反代集中在此管理`">
       <template #actions>
-        <NInput :value="kw" @update:value="(v: string) => (kw = v)" placeholder="搜索名称/域名/端口" size="small" clearable style="width: 200px">
+        <NInput :value="kw" @update:value="(v: string) => (kw = v)" placeholder="搜索名称/域名/端口" size="small" clearable style="width: 200px; max-width: 100%">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
-        <NButton size="small" tertiary :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
+        <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
         <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="showCreate = true">新建应用</NButton>
       </template>
     </PageHeader>
 
-    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :max-height="'calc(100vh - 260px)'">
+    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :scroll-x="1020" :max-height="'calc(100vh - 260px)'">
       <template #empty>
         <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
       </template>
@@ -184,6 +232,15 @@ onMounted(load);
           <NSpace vertical :size="12">
             <NFormItem label="名称" required>
               <NInput v-model:value="form.name" placeholder="小写字母/数字/连字符，如 my-site" />
+            </NFormItem>
+            <NFormItem label="一键模板">
+              <NSelect
+                v-model:value="form.template"
+                :options="templateOptions"
+                size="small"
+                placeholder="选一个预设，自动填入运行时/命令/端口（可再手动改）"
+                @update:value="pickTemplate"
+              />
             </NFormItem>
             <NFormItem label="运行时">
               <NRadioGroup v-model:value="form.type" size="small">
@@ -227,7 +284,7 @@ onMounted(load);
                   class="mono-dim"
                   placeholder="留空则使用面板默认模板。支持占位符：{{name}} {{path}} {{start_cmd}} {{port}}，部署时自动渲染写入 /etc/systemd/system/panel-<名称>.service"
                 />
-                <div style="color:#8a8a93;font-size:12px;margin-top:6px">
+                <div style="color:var(--cp-text-mute);font-size:12px;margin-top:6px">
                   创建后也可在应用详情「systemd 单元」页签随时修改，保存前自动 systemd-analyze verify 校验，失败即回滚。
                 </div>
               </NCollapseItem>

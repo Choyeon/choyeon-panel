@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# choyeonctl 入口：无论从哪里调用，都定位到仓库内的 backend/cli.py
+# 安装后由 scripts/install.sh 软链到 /usr/local/bin/choyeonctl
+set -euo pipefail
+
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLI="$SRC/../backend/cli.py"
+
+if [ ! -f "$CLI" ]; then
+  echo "[fail] 未找到 $CLI（仓库结构不完整）" >&2
+  exit 1
+fi
+
+PY="${CP_CLI_PYTHON:-python3}"
+exec "$PY" "$CLI" "$@"

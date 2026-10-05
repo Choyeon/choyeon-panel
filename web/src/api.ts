@@ -1,34 +1,78 @@
 const base = '/api';
+const TOKEN_KEY = 'cp_token';
+const ROLE_KEY = 'cp_role';
+
 export function getToken() {
-  return localStorage.getItem('cp_token') || '';
+  return localStorage.getItem(TOKEN_KEY) || '';
 }
 export function setToken(t: string) {
-  t ? localStorage.setItem('cp_token', t) : localStorage.removeItem('cp_token');
+  t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY);
 }
+/** 未登录时按最小权限处理（只读），避免本地存储缺失时误判为管理员 */
 export function getRole() {
-  return localStorage.getItem('cp_role') || 'admin';
+  return localStorage.getItem(ROLE_KEY) || 'viewer';
 }
 export function setRole(r: string) {
-  localStorage.setItem('cp_role', r);
+  localStorage.setItem(ROLE_KEY, r);
+}
+export function clearSession() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(ROLE_KEY);
 }
 
-export async function req(path: string, opts: { method?: string; body?: any } = {}) {
-  const res = await fetch(base + path, {
-    method: opts.method || (opts.body !== undefined ? 'POST' : 'GET'),
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && !path.startsWith('/auth/')) {
-    setToken('');
-    location.hash = '#/login';
+export const onUnauthorized: Array<() => void> = [];
+let redirecting = false;
+
+function notifyUnauthorized() {
+  clearSession();
+  if (redirecting) return;
+  redirecting = true;
+  onUnauthorized.forEach((fn) => fn());
+  setTimeout(() => (redirecting = false), 500);
+}
+
+async function request(path: string, init: RequestInit, timeoutMs = 15000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(base + path, { ...init, signal: ctrl.signal });
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw new Error('请求超时，请稍后重试');
+    throw new Error('网络错误，无法连接面板');
+  } finally {
+    clearTimeout(timer);
   }
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
+}
+
+function authHeaders(extra: Record<string, string> = {}) {
+  return { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}`, ...extra };
+}
+
+async function parse(res: Response) {
+  const data = await res.json().catch(() => ({}) as any);
+  if (res.status === 401 && !String(res.url).includes('/auth/')) notifyUnauthorized();
+  if (!res.ok) throw new Error((data as any).error || `HTTP ${res.status}`);
+  return data as any;
+}
+
+export async function req(path: string, opts: { method?: string; body?: any; timeout?: number } = {}) {
+  const res = await request(
+    path,
+    {
+      method: opts.method || (opts.body !== undefined ? 'POST' : 'GET'),
+      headers: authHeaders(),
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    },
+    opts.timeout,
+  );
+  return parse(res);
 }
 
 export const api = {
   status: () => req('/auth/status'),
+  ready: () => req('/ready'),
+  doctor: () => req('/doctor'),
+  templates: () => req('/templates'),
   setup: (username: string, password: string) => req('/auth/setup', { body: { username, password } }),
   login: (username: string, password: string) => req('/auth/login', { body: { username, password } }),
   changePassword: (oldp: string, newp: string) => req('/auth/password', { body: { old: oldp, new: newp } }),
@@ -54,7 +98,6 @@ export const api = {
   saveUnit: (id: number, content: string) => req(`/apps/${id}/unit`, { method: 'PUT', body: { content } }),
   appProc: (id: number) => req(`/apps/${id}/proc`),
   audit: (limit = 100) => req(`/audit?limit=${limit}`),
-  // phase 4
   users: () => req('/users'),
   createUser: (username: string, password: string, role: string) => req('/users', { body: { username, password, role } }),
   updateUser: (id: number, body: any) => req(`/users/${id}`, { method: 'PATCH', body }),
@@ -64,7 +107,6 @@ export const api = {
   alertTest: () => req('/settings/alerts/test', { body: {} }),
   alertRunChecks: () => req('/settings/alerts/run-checks', { body: {} }),
   firewall: () => req('/firewall'),
-  // phase 3
   pgDbs: () => req('/db/pg/databases'),
   pgRoles: () => req('/db/pg/roles'),
   pgManage: (body: any) => req('/db/pg/manage', { body }),
@@ -75,21 +117,25 @@ export const api = {
   createBackup: (b: any) => req('/backups', { body: b }),
   updateBackup: (id: number, b: any) => req(`/backups/${id}`, { method: 'PATCH', body: b }),
   deleteBackup: (id: number) => req(`/backups/${id}`, { method: 'DELETE' }),
-  runBackup: (id: number) => req(`/backups/${id}/run`, { body: {} }),
+  runBackup: (id: number) => req(`/backups/${id}/run`, { body: {}, timeout: 600000 }),
   files: (path: string) => req(`/files?path=${encodeURIComponent(path)}`),
   fileContent: (path: string) => req(`/files/content?path=${encodeURIComponent(path)}`),
   saveFile: (path: string, content: string) =>
-    fetch(`/api/files/content?path=${encodeURIComponent(path)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/octet-stream', Authorization: `Bearer ${getToken()}` },
-      body: content,
-    }).then(async (r) => {
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error((d as any).error || '保存失败');
-      return d;
-    }),
+    request(
+      `/files/content?path=${encodeURIComponent(path)}`,
+      {
+        method: 'PUT',
+        headers: authHeaders({ 'Content-Type': 'application/octet-stream' }),
+        body: content,
+      },
+      60000,
+    ).then(parse),
   fileAction: (action: string, path: string, path2?: string) => req('/files/action', { body: { action, path, path2 } }),
 };
+
+export function apiUrl(path: string) {
+  return `${base}${path}`;
+}
 
 export function logUrl(path: string, lines = 200) {
   return `${base}${path}?token=${encodeURIComponent(getToken())}&lines=${lines}`;
