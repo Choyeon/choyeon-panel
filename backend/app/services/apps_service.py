@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .. import config
 from .. import database as dbm
-from ..util import is_branch, is_domain, is_git_url, is_name, is_port, run, run_shell
+from ..util import is_branch, is_domain, is_git_url, is_name, is_port, run, run_shell_async
 from . import nginx_ops, systemd_ops
 from .systemd_ops import service_action
 
@@ -65,7 +65,13 @@ def write_env_file(app: dict):
         for x in vars_
         if isinstance(x, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", x.get("k") or "")
     )
-    Path(f"{app['path']}/.panel.env").write_text(body + "\n")
+    target = Path(app["path"]) / ".panel.env"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body + "\n", encoding="utf-8")
+        os.chmod(target, 0o600)  # 环境变量常含密钥，禁止同机其他用户读取
+    except OSError as e:
+        raise RuntimeError(f"写入 .panel.env 失败：{e}") from e
 
 
 async def ensure_unit(app: dict):
@@ -90,14 +96,12 @@ async def remove_unit(app: dict):
 _ss_cache: tuple[float, list[str]] | None = None
 
 
-def _listen_lines() -> list[str]:
+async def _listen_lines() -> list[str]:
+    """读取监听端口表（5 秒内复用），异步执行避免阻塞事件循环。"""
     global _ss_cache
     if _ss_cache and time.time() - _ss_cache[0] < 5:
         return _ss_cache[1]
-    try:
-        out = run_shell("ss -tlnp", timeout=4).stdout
-    except Exception:
-        out = ""
+    out = await run_shell_async("ss -tlnp", timeout=4)
     _ss_cache = (time.time(), out.split("\n"))
     return _ss_cache[1]
 
@@ -124,19 +128,19 @@ async def detect_port(unit: str):
                         continue
                     for k in kids:
                         try:
-                            k = int(k)
+                            kid = int(k)
                         except ValueError:
                             continue
-                        if k and k not in pids:
-                            pids.add(k)
-                            queue.append(k)
+                        if kid and kid not in pids:
+                            pids.add(kid)
+                            queue.append(kid)
             except OSError:
                 pass
         return pids
 
     pids = await asyncio.to_thread(_tree)
     ports = set()
-    for line in _listen_lines():
+    for line in await _listen_lines():
         pm = re.search(r"pid=(\d+)", line)
         if not pm or int(pm.group(1)) not in pids:
             continue
@@ -208,8 +212,9 @@ def _validate(i: dict, ignore_id: int = -1):
                 raise RuntimeError(f"关联数据库名不合法: {d}")
     path = i.get("path") or f"{APP_ROOT}/{i['name']}"
     dup = dbm.query_one(
-        "SELECT id FROM apps WHERE (name=? OR path=? OR (domain IS NOT NULL AND domain=? AND domain!='')) AND id IS NOT ?",
-        (i["name"], path, i.get("domain") or "", ignore_id),
+        "SELECT id FROM apps WHERE id IS NOT ?"
+        " AND (name=? OR path=? OR (domain IS NOT NULL AND domain=? AND domain!=''))",
+        (ignore_id, i["name"], path, i.get("domain") or ""),
     )
     if dup:
         raise RuntimeError("名称/路径/域名已被其他应用占用")
@@ -223,7 +228,8 @@ def create_app(i: dict) -> dict:
     _validate(i)
     path = i.get("path") or f"{APP_ROOT}/{i['name']}"
     res = dbm.execute(
-        "INSERT INTO apps(name,type,repo_url,branch,path,port,domain,install_cmd,start_cmd,env,unit_override,db_names,unit_template)"
+        "INSERT INTO apps(name,type,repo_url,branch,path,port,domain,install_cmd,"
+        "start_cmd,env,unit_override,db_names,unit_template)"
         " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             i["name"],
@@ -279,11 +285,8 @@ async def delete_app(app_id: int, purge: bool):
     app = get_app(app_id)
     if not app:
         raise RuntimeError("应用不存在")
-    running = dbm.query_one("SELECT id FROM deployments WHERE app_id=? AND status='running'", (app_id,))
-    if running:
+    if dbm.query_one("SELECT id FROM deployments WHERE app_id=? AND status='running'", (app_id,)):
         raise RuntimeError("部署进行中，不能删除")
-    if not app.get("unit_override"):
-        await run("systemctl", ["disable", "--now", unit_name(app)], timeout=30)
     await remove_unit(app)
     if app.get("domain"):
         await nginx_ops.remove_vhost(app["name"])
@@ -294,16 +297,18 @@ async def delete_app(app_id: int, purge: bool):
         shutil.rmtree(app["path"], ignore_errors=True)
 
 
-async def app_action(app_id: int, verb: str) -> bool:
+async def app_action(app_id: int, verb: str):
     app = get_app(app_id)
     if not app:
         raise RuntimeError("应用不存在")
+    if verb == "rollback":
+        return await rollback_app(app_id)
     await service_action(unit_name(app), verb)
     return await systemd_ops.is_active(unit_name(app))
 
 
 def _append_log(dep_id: int, text: str):
-    dbm.execute("UPDATE deployments SET log = log || ? WHERE id=?", (f"\n{text}\n", dep_id))
+    dbm.append_deploy_log(dep_id, text)
 
 
 async def deploy_app(app_id: int) -> int:
@@ -318,6 +323,32 @@ async def deploy_app(app_id: int) -> int:
     _DEPLOY_TASKS.add(task)
     task.add_done_callback(_DEPLOY_TASKS.discard)
     return dep_id
+
+
+async def _current_sha(path: str) -> str | None:
+    r = await run("git", ["rev-parse", "--short", "HEAD"], cwd=path, timeout=30)
+    return r["out"] if r["code"] == 0 else None
+
+
+async def rollback_app(app_id: int) -> dict:
+    """回滚到上一个成功部署记录的 commit，并重启服务。"""
+    app = get_app(app_id)
+    if not app:
+        raise RuntimeError("应用不存在")
+    if not os.path.isdir(f"{app['path']}/.git"):
+        raise RuntimeError("应用目录不是 Git 仓库，无法回滚")
+    last = dbm.query_one(
+        "SELECT id,commit_sha FROM deployments WHERE app_id=? AND status='success' AND commit_sha IS NOT NULL"
+        " ORDER BY id DESC LIMIT 1",
+        (app_id,),
+    )
+    if not last:
+        raise RuntimeError("没有可回滚的成功部署记录")
+    r = await run("git", ["reset", "--hard", last["commit_sha"]], cwd=app["path"], timeout=120)
+    if r["code"] != 0:
+        raise RuntimeError(f"回滚失败：{r['out']}")
+    await service_action(unit_name(app), "restart")
+    return {"ok": True, "commit": last["commit_sha"], "deployment": last["id"]}
 
 
 async def _run_deployment(app: dict, dep_id: int):
@@ -356,9 +387,12 @@ async def _run_deployment(app: dict, dep_id: int):
             raise RuntimeError(f"目录不存在: {app['path']}")
 
         _append_log(dep_id, f"==> 安装依赖 ({app['type']})")
-        install = app["install_cmd"] or (
-            "npm install" if app["type"] == "node" else "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+        default_install = (
+            "npm install"
+            if app["type"] == "node"
+            else "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
         )
+        install = app["install_cmd"] or default_install
         ir = await run("/bin/bash", ["-lc", install], cwd=app["path"], timeout=1800)
         _append_log(dep_id, ir["out"] or "(no output)")
         if ir["code"] != 0:
@@ -374,6 +408,10 @@ async def _run_deployment(app: dict, dep_id: int):
 
         _append_log(dep_id, f"==> 重启服务 {unit_name(app)}")
         await service_action(unit_name(app), "restart")
+        sha = await _current_sha(app["path"])
+        if sha:
+            dbm.execute("UPDATE deployments SET commit_sha=? WHERE id=?", (sha, dep_id))
+            _append_log(dep_id, f"==> 当前 commit {sha}（可在部署记录中回滚到此版本）")
         _append_log(dep_id, "==> 部署完成")
         finish(True)
     except Exception as e:  # noqa: BLE001

@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: 后端（Python ${{ matrix.py }}）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q ruff mypy
+
+      - name: 语法编译
+        run: python -m compileall -q app tests
+
+      - name: Ruff 静态检查
+        run: ruff check --output-format=github .
+
+      - name: Mypy 类型检查（提示性，不阻断）
+        continue-on-error: true
+        run: mypy app || true
+
+      - name: 单元测试
+        env:
+          CP_DATA_DIR: ${{ runner.temp }}/cp-data
+        run: python -m unittest discover -s tests -v
+
+      - name: CLI 冒烟（choyeonctl）
+        env:
+          CP_DATA_DIR: ${{ runner.temp }}/cp-cli
+        run: |
+          python cli.py schema --json > /dev/null
+          python cli.py app templates
+          python cli.py user create ci-admin --password 'CiSmoke12345' --json
+          python cli.py status --json || true
+          python cli.py doctor || true
+
+      - name: 启动冒烟测试
+        env:
+          CP_PORT: '3999'
+          CP_HOST: 127.0.0.1
+          CP_DATA_DIR: ${{ runner.temp }}/cp-smoke
+        run: |
+          python -m app.main &
+          PID=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3999/api/health | grep -q '"ok":true'; then
+              echo "health ok"; break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3999/api/health
+          curl -fsS -D - -o /dev/null http://127.0.0.1:3999/api/auth/status | grep -i 'x-content-type-options'
+          kill $PID
+
+  frontend:
+    name: 前端（类型检查 + 构建）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci --no-audit --fund=false
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建
+        run: npm run build
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 7
+
+  shell:
+    name: Shell 脚本检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning scripts/*.sh
+      - name: Bash 语法检查
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+
+  systemd:
+    name: systemd unit 校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: systemd-analyze verify
+        run: systemd-analyze verify ./deploy/choyeon-panel.service || true

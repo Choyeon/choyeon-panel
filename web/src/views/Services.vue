@@ -50,7 +50,7 @@ const columns: any[] = [
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: icons.ServerOutline, size: 17, color: r.active === 'active' ? '#6fdba4' : r.active === 'failed' ? '#f58a92' : '#66666e' }),
+          h(NIcon, { component: icons.ServerOutline, size: 17, color: r.active === 'active' ? '#6fdba4' : r.active === 'failed' ? '#f58a92' : 'var(--cp-text-mute)' }),
         ]),
         h('div', { class: 'cell-txt' }, [
           h(NButton, { text: true, type: 'primary', class: 'cell-name', onClick: () => (logUnit.value = r.unit) }, () => r.unit),
@@ -92,11 +92,11 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NInput :value="filter" @update:value="(v: string) => (filter = v)" placeholder="搜索 unit / 描述…" size="small" clearable style="width: 320px; margin-bottom: 12px">
+    <NInput :value="filter" @update:value="(v: string) => (filter = v)" placeholder="搜索 unit / 描述…" size="small" clearable style="width: 320px; max-width: 100%; margin-bottom: 12px">
       <template #prefix><NIcon :component="icons.SearchOutline" /></template>
     </NInput>
 
-    <NDataTable :columns="columns" :data="filtered" size="small" :bordered="false" :max-height="'calc(100vh - 300px)'" :row-key="(r: any) => r.unit">
+    <NDataTable :columns="columns" :data="filtered" size="small" :bordered="false" :scroll-x="900" :max-height="'calc(100vh - 300px)'" :row-key="(r: any) => r.unit">
       <template #empty><EmptyBox text="没有匹配的服务" /></template>
     </NDataTable>
 

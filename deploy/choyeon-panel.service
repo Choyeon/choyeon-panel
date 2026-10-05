@@ -3,6 +3,9 @@ Description=choyeon-panel (native server management panel)
 Documentation=https://github.com/Choyeon/choyeon-panel
 After=network-online.target
 Wants=network-online.target
+# 5 分钟内崩溃重启超过 5 次即停止重试，避免启动失败时的重启风暴掩盖真实错误
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -16,10 +19,39 @@ Environment=CP_PYTHON=/root/choyeon-panel/backend/.venv/bin/python
 ExecStart=/root/choyeon-panel/backend/.venv/bin/python -m app.main
 Restart=always
 RestartSec=3
-# 资源与安全加固
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# ---------- 资源上限 ----------
+# 面板本身很轻，限制内存可避免部署日志/终端失控拖垮宿主机
+MemoryHigh=384M
+MemoryMax=512M
+CPUQuota=80%
+TasksMax=256
 LimitNOFILE=65536
-NoNewPrivileges=false
+# OOM 被杀时不要连带停掉单元，交给 Restart=always 拉起
+OOMPolicy=continue
+
+# ---------- 安全加固 ----------
+# 说明：面板需要 root 才能管理 systemd 单元、写 /etc/nginx、执行 certbot，
+# 因此不能开启 User=/ProtectSystem=/ProtectHome= 这类会切断写入能力的选项。
+# 下面只启用与"必须读写 /etc 与 /root"不冲突的项目。
 PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+NoNewPrivileges=false
+# 说明：未启用 SystemCallFilter=。Python/uvicorn 启动时需要的系统调用面较广，
+# 白名单配错会让进程直接被 SIGSYS 杀死且日志里只有 "Failed at step SECCOMP"，
+# 收益不抵风险；如需 seccomp 请在测试机验证后再加。
+
+# ---------- 日志 ----------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=choyeon-panel
 
 [Install]
 WantedBy=multi-user.target

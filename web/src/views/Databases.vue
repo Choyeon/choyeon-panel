@@ -73,7 +73,7 @@ const roleCols: any[] = [
     title: '角色', key: 'name',
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
-        h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.KeyOutline, size: 16, color: r.super ? '#f5c26f' : '#8b8b96' })]),
+        h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.KeyOutline, size: 16, color: r.super ? '#f5c26f' : 'var(--cp-text-mute)' })]),
         h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name)]),
       ]),
   },
@@ -85,7 +85,7 @@ const roleCols: any[] = [
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('PencilOutline'), onClick: () => openPwd(r.name) }, () => '改密'),
         h(NPopconfirm, { onPositiveClick: () => manage('dropRole', r.name) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline') }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除角色 ${r.name}`, 'aria-label': `删除角色 ${r.name}` }, { default: () => '' }),
           default: () => `删除角色 ${r.name} 及其拥有的所有对象？`,
         }),
       ]),
@@ -174,7 +174,7 @@ onMounted(load);
                 <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="showDb = true">新建数据库</NButton>
               </NSpace>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []">
+            <NDataTable size="small" :bordered="false" :scroll-x="640" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []">
               <template #empty><EmptyBox text="无法读取数据库列表（PostgreSQL 未运行？）" /></template>
             </NDataTable>
 
@@ -182,7 +182,7 @@ onMounted(load);
               <span class="sec-title"><NIcon :component="icons.KeyOutline" :size="15" color="#f5c26f" /> 用户 / 角色</span>
               <NButton size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320" />
+            <NDataTable size="small" :bordered="false" :scroll-x="620" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320" />
           </NSpace>
         </NTabPane>
 
@@ -198,7 +198,7 @@ onMounted(load);
               <NButton type="primary" :loading="sqlBusy" :icon="ico('PlayOutline')" @click="runSql">执行</NButton>
               <NText depth="3" style="font-size: 12px">Ctrl+Enter 快速执行 · 以 postgres 超级用户运行，请谨慎操作</NText>
             </NSpace>
-            <div class="log-view" style="max-height: 380px">{{ sqlOut || '结果将显示在这里…' }}</div>
+            <div class="log-view" style="max-height: 380px" role="region" aria-live="polite" aria-label="SQL 执行结果">{{ sqlOut || '结果将显示在这里…' }}</div>
           </NSpace>
         </NTabPane>
 
@@ -256,8 +256,8 @@ onMounted(load);
 </template>
 
 <style scoped>
-.sec-title { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 600; color: #b9b9c4; }
+.sec-title { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 600; color: var(--cp-text); }
 .rstat :deep(.n-card__content) { padding: 12px 14px; }
-.rk { font-size: 11.5px; color: #70707a; margin-bottom: 5px; }
-.rv { font-size: 16px; font-weight: 600; color: #d6d6e0; }
+.rk { font-size: 11.5px; color: var(--cp-text-mute); margin-bottom: 5px; }
+.rv { font-size: 16px; font-weight: 600; color: var(--cp-text); }
 </style>

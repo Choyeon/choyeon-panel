@@ -31,9 +31,9 @@ function ico(name: string, size = 14) {
 }
 
 function fmt(n: number) {
-  const u = ['B', 'KB', 'MB', 'GB'];
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
-  while (n >= 1024 && i < 2) { n /= 1024; i++; }
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
 }
 
@@ -70,7 +70,7 @@ const columns: any[] = [
             r.files.slice(0, 5).map((f: any) =>
               h(
                 NButton,
-                { size: 'tiny', tertiary: true, tag: 'a', href: `/api/files/download?path=${encodeURIComponent('/root/backups/panel/' + f.name)}&token=${getToken()}`, target: '_blank' },
+                { size: 'tiny', tertiary: true, tag: 'a', href: `/api/files/download?path=${encodeURIComponent((r.dir || '/root/backups/panel') + '/' + f.name)}&token=${getToken()}`, target: '_blank' },
                 { icon: ico('DownloadOutline', 12), default: () => `${f.name.replace(`bk${r.id}-`, '').replace('.dump.gz', '').replace('.tar.gz', '')} · ${fmt(f.size)}` },
               ),
             ))
@@ -82,7 +82,7 @@ const columns: any[] = [
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busy.value === r.id, icon: ico('PlayOutline'), onClick: () => run(r.id) }, () => '立即备份'),
         h(NPopconfirm, { onPositiveClick: () => del(r.id) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline') }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: '删除备份任务', 'aria-label': '删除备份任务' }, { default: () => '' }),
           default: () => '删除任务及其 systemd timer（已生成的备份文件保留）',
         }),
       ]),
@@ -90,7 +90,11 @@ const columns: any[] = [
 ];
 
 async function load() {
-  rows.value = await api.backups();
+  try {
+    rows.value = await api.backups();
+  } catch (e: any) {
+    msg.error(e.message);
+  }
 }
 async function run(id: number) {
   busy.value = id;
@@ -127,7 +131,9 @@ async function create() {
 
 onMounted(async () => {
   await load();
-  apps.value = (await api.apps()).map((a: any) => ({ label: a.name, value: a.name }));
+  try {
+    apps.value = (await api.apps()).map((a: any) => ({ label: a.name, value: a.name }));
+  } catch { /* 应用列表仅用于下拉建议 */ }
 });
 </script>
 
@@ -144,7 +150,7 @@ onMounted(async () => {
       调度由 systemd timer 独立完成，面板进程停止不影响备份执行。PG 使用 pg_dump 自定义格式（pg_restore 可恢复）；应用打包自动排除 node_modules / .venv / .next / .output。
     </NAlert>
 
-    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :row-key="(r: any) => r.id">
+    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :scroll-x="980" :row-key="(r: any) => r.id">
       <template #empty><EmptyBox text="还没有备份任务，点击右上角新建" /></template>
     </NDataTable>
 
@@ -167,7 +173,7 @@ onMounted(async () => {
             </NSpace>
           </NFormItem>
           <NSpace justify="space-between" align="center" style="width: 100%">
-            <span style="font-size: 13px; color: #9d9da8">启用定时计划</span>
+            <span style="font-size: 13px; color: var(--cp-text-dim)">启用定时计划</span>
             <NSwitch v-model:value="form.enabled" size="small" />
           </NSpace>
           <NFormItem label="保留份数"><NInputNumber v-model:value="form.keep" :min="1" :max="60" style="width: 130px" /></NFormItem>

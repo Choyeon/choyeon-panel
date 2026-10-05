@@ -2,6 +2,8 @@ import os
 import tempfile
 import unittest
 
+import jwt
+
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_ut_"))
 
 from app import security  # noqa: E402
@@ -138,7 +140,8 @@ class TestAuth(unittest.TestCase):
         payload = security.verify_token(tok)
         self.assertEqual(payload["sub"], "alice")
         self.assertEqual(payload["role"], "viewer")
-        with self.assertRaises(Exception):
+        # 签名被篡改必须抛具体的 JWT 异常，而不是任意 Exception
+        with self.assertRaises(jwt.InvalidTokenError):
             security.verify_token(tok + "x")
 
 

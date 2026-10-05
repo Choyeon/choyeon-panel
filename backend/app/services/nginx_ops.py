@@ -3,9 +3,9 @@ import re
 from pathlib import Path
 
 from .. import config
-from ..util import is_domain, run, run_shell
+from ..util import is_domain, run
 
-CONF_DIR = "/etc/nginx/conf.d"
+CONF_DIR = config.NGINX_CONF_DIRS[0]
 TLS_DIR = config.TLS_DIR
 
 RE_SERVER_NAME = re.compile(r"server_name\s+([^;]+);")
@@ -49,16 +49,23 @@ def render_vhost(spec: dict) -> str:
         f"server {{\n    listen 80;\n    listen [::]:80;\n    server_name {domain};\n"
         "    return 301 https://$host$request_uri;\n}\n\n"
     ) if ssl else ""
+    security_headers = (
+        "        add_header X-Content-Type-Options nosniff always;\n"
+        "        add_header Referrer-Policy strict-origin-when-cross-origin always;\n"
+        + ("        add_header Strict-Transport-Security \"max-age=31536000\" always;\n" if ssl else "")
+    )
     return (
         f"# managed by choyeon-panel ({spec['name']}) — do not edit by hand\n"
         f"{redirect}server {{\n"
         f"    listen {'443 ssl' if ssl else '80'};\n"
         f"    listen {'[::]:443 ssl' if ssl else '[::]:80'};\n"
+        f"    http2 on;\n"
         f"{ssl_lines}    server_name {domain};\n"
         "    client_max_body_size 100m;\n"
         "\n"
         "    location / {\n"
         f"{proxy_headers}\n"
+        f"{security_headers}"
         "    }\n"
         "}\n"
     )
@@ -71,10 +78,15 @@ def vhost_path(name: str) -> str:
 async def apply_vhost(spec: dict):
     Path(CONF_DIR).mkdir(parents=True, exist_ok=True)
     path = vhost_path(spec["name"])
+    old = Path(path).read_text(errors="replace") if os.path.exists(path) else None
     Path(path).write_text(render_vhost(spec))
     check = await run("nginx", ["-t"])
     if check["code"] != 0:
-        os.unlink(path)
+        # 回滚到原文件（新建的则删除），并恢复 nginx 配置状态
+        if old is not None:
+            Path(path).write_text(old)
+        else:
+            os.unlink(path)
         raise RuntimeError(f"nginx config test failed, rolled back: {check['out']}")
     reload = await run("systemctl", ["reload", "nginx"])
     if reload["code"] != 0:
@@ -123,8 +135,12 @@ def analyze_config(content: str) -> dict:
         ups = upstreams.get(m.group(1))
         if ups:
             proxy_ports.extend(ups)
-    seen = set()
-    uniq_ports = [p for p in proxy_ports if not (p in seen or seen.add(p))]
+    uniq_ports: list[int] = []
+    seen: set[int] = set()
+    for p in proxy_ports:
+        if p not in seen:
+            seen.add(p)
+            uniq_ports.append(p)
     body = re.search(r"client_max_body_size\s+([^;]+);", content)
     return {
         "serverNames": names,
@@ -214,10 +230,11 @@ async def quick_edit_config(path: str, kind: str, value: str | None = None) -> d
         if not m:
             raise RuntimeError("未找到 proxy_pass，无法插入")
         indent = m.group(1)
-        c = c.replace(
-            m.group(0),
-            f"{m.group(0)}\n{indent}proxy_set_header Upgrade $http_upgrade;\n{indent}proxy_set_header Connection \"upgrade\";",
+        upgrade_headers = (
+            f"{indent}proxy_set_header Upgrade $http_upgrade;"
+            f"\n{indent}proxy_set_header Connection \"upgrade\";"
         )
+        c = c.replace(m.group(0), f"{m.group(0)}\n{upgrade_headers}")
     elif kind == "body":
         if not re.match(r"^\d{1,4}[km]?$", value or "", re.I):
             raise RuntimeError("大小格式应如 50m / 1g")

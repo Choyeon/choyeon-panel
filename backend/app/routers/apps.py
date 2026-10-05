@@ -3,16 +3,18 @@ from fastapi.responses import JSONResponse
 
 from .. import database as dbm
 from ..services import apps_service, nginx_ops, systemd_ops
+from ..templates import apply_template
 from .system import log_stream_response
 
 router = APIRouter()
 
 
-def _app_id(raw: str):
+async def _body(req: Request) -> dict:
     try:
-        return int(raw)
-    except ValueError:
-        return None
+        b = await req.json()
+    except Exception:  # noqa: BLE001
+        return {}
+    return b if isinstance(b, dict) else {}
 
 
 @router.get("/api/apps")
@@ -21,8 +23,8 @@ async def apps_list():
 
 
 @router.get("/api/apps/{app_id}")
-async def app_get(app_id: str):
-    a = apps_service.get_app(_app_id(app_id) or -1)
+async def app_get(app_id: int):
+    a = apps_service.get_app(app_id)
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
     unit = apps_service.unit_name(a)
@@ -33,89 +35,89 @@ async def app_get(app_id: str):
 
 @router.post("/api/apps")
 async def app_create(req: Request):
-    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
     try:
-        a = apps_service.create_app(body)
+        # 先套用一键部署模板默认值，再走统一的 create_app 校验
+        a = apps_service.create_app(apply_template(await _body(req)))
         dbm.audit(req.state.cp_sub, "app:create", a["name"])
         return a
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.patch("/api/apps/{app_id}")
-async def app_update(app_id: str, req: Request):
-    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
+async def app_update(app_id: int, req: Request):
     try:
-        a = apps_service.update_app(_app_id(app_id) or -1, body)
+        a = apps_service.update_app(app_id, await _body(req))
         dbm.audit(req.state.cp_sub, "app:update", a["name"])
         return a
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.delete("/api/apps/{app_id}")
-async def app_delete(app_id: str, req: Request):
+async def app_delete(app_id: int, req: Request):
     try:
-        await apps_service.delete_app(_app_id(app_id) or -1, req.query_params.get("purge") == "1")
-        dbm.audit(req.state.cp_sub, "app:delete", app_id)
+        await apps_service.delete_app(app_id, req.query_params.get("purge") == "1")
+        dbm.audit(req.state.cp_sub, "app:delete", str(app_id))
         return {"ok": True}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.post("/api/apps/{app_id}/action")
-async def app_action(app_id: str, req: Request):
-    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
-    verb = (body or {}).get("verb", "")
+async def app_action(app_id: int, req: Request):
+    verb = (await _body(req)).get("verb", "")
     try:
-        ok = await apps_service.app_action(_app_id(app_id) or -1, verb)
-        dbm.audit(req.state.cp_sub, f"app:{verb}", app_id)
-        return {"ok": ok, "active": ok}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        result = await apps_service.app_action(app_id, verb)
+        dbm.audit(req.state.cp_sub, f"app:{verb}", str(app_id))
+        if verb == "rollback":
+            return {"ok": True, **result}
+        return {"ok": result, "active": result}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.post("/api/apps/{app_id}/deploy")
-async def app_deploy(app_id: str, req: Request):
+async def app_deploy(app_id: int, req: Request):
     try:
-        dep_id = await apps_service.deploy_app(_app_id(app_id) or -1)
-        dbm.audit(req.state.cp_sub, "app:deploy", app_id)
+        dep_id = await apps_service.deploy_app(app_id)
+        dbm.audit(req.state.cp_sub, "app:deploy", str(app_id))
         return {"deployment": dep_id}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.get("/api/apps/{app_id}/deployments")
-async def app_deployments(app_id: str):
+async def app_deployments(app_id: int):
     return dbm.query(
-        "SELECT id,app_id,status,started_at,finished_at,length(log) log_len FROM deployments WHERE app_id=?"
+        "SELECT id,app_id,status,commit_sha,started_at,finished_at,length(log) log_len FROM deployments WHERE app_id=?"
         " ORDER BY id DESC LIMIT 20",
-        (_app_id(app_id) or -1,),
+        (app_id,),
     )
 
 
 @router.get("/api/apps/{app_id}/deployments/{dep_id}")
-async def app_deployment(app_id: str, dep_id: str):
-    return dbm.query_one(
-        "SELECT id,status,started_at,finished_at,log FROM deployments WHERE id=? AND app_id=?",
-        (_app_id(dep_id) or -1, _app_id(app_id) or -1),
+async def app_deployment(app_id: int, dep_id: int):
+    row = dbm.query_one(
+        "SELECT id,status,commit_sha,started_at,finished_at,log FROM deployments WHERE id=? AND app_id=?",
+        (dep_id, app_id),
     )
+    return row or JSONResponse(status_code=404, content={"error": "部署记录不存在"})
 
 
 @router.post("/api/apps/{app_id}/ssl")
-async def app_ssl(app_id: str, req: Request):
-    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
+async def app_ssl(app_id: int, req: Request):
     try:
-        out = await apps_service.attach_ssl(_app_id(app_id) or -1, (body or {}).get("email"))
-        dbm.audit(req.state.cp_sub, "app:ssl", app_id)
+        out = await apps_service.attach_ssl(app_id, (await _body(req)).get("email"))
+        dbm.audit(req.state.cp_sub, "app:ssl", str(app_id))
         return {"ok": True, "log": out}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.get("/api/apps/{app_id}/nginx")
-async def app_nginx(app_id: str):
-    a = apps_service.get_app(_app_id(app_id) or -1)
+async def app_nginx(app_id: int):
+    a = apps_service.get_app(app_id)
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
     unit = apps_service.unit_name(a)
@@ -125,57 +127,56 @@ async def app_nginx(app_id: str):
 
 
 @router.put("/api/apps/{app_id}/nginx")
-async def app_nginx_save(app_id: str, req: Request):
-    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
+async def app_nginx_save(app_id: int, req: Request):
+    body = await _body(req)
     try:
-        r = await nginx_ops.save_app_config((body or {}).get("file", ""), (body or {}).get("content", ""))
-        dbm.audit(req.state.cp_sub, "app:nginx-save", body["file"])
+        r = await nginx_ops.save_app_config(body.get("file", ""), body.get("content", ""))
+        dbm.audit(req.state.cp_sub, "app:nginx-save", body.get("file"))
         return r
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.post("/api/apps/{app_id}/nginx/quick")
-async def app_nginx_quick(app_id: str, req: Request):
-    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
+async def app_nginx_quick(app_id: int, req: Request):
+    body = await _body(req)
     try:
         r = await nginx_ops.quick_edit_config(body["file"], body["kind"], body.get("value"))
         dbm.audit(req.state.cp_sub, f"app:nginx-{body['kind']}", body["file"])
         return r
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.get("/api/apps/{app_id}/unit")
-async def app_unit_read(app_id: str):
+async def app_unit_read(app_id: int):
     try:
-        return apps_service.read_unit(_app_id(app_id) or -1)
-    except Exception as e:
+        return apps_service.read_unit(app_id)
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=404, content={"error": str(e)})
 
 
 @router.put("/api/apps/{app_id}/unit")
-async def app_unit_save(app_id: str, req: Request):
-    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
+async def app_unit_save(app_id: int, req: Request):
     try:
-        r = await apps_service.save_unit(_app_id(app_id) or -1, (body or {}).get("content", ""))
-        dbm.audit(req.state.cp_sub, "app:unit", app_id)
+        r = await apps_service.save_unit(app_id, (await _body(req)).get("content", ""))
+        dbm.audit(req.state.cp_sub, "app:unit", str(app_id))
         return r
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.get("/api/apps/{app_id}/proc")
-async def app_proc(app_id: str):
+async def app_proc(app_id: int):
     try:
-        return await apps_service.app_proc(_app_id(app_id) or -1)
-    except Exception as e:
+        return await apps_service.app_proc(app_id)
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.get("/api/apps/{app_id}/logs")
-async def app_logs(app_id: str, request: Request):
-    a = apps_service.get_app(_app_id(app_id) or -1)
+async def app_logs(app_id: int, request: Request):
+    a = apps_service.get_app(app_id)
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
     lines = int(request.query_params.get("lines") or 200)

@@ -1,8 +1,8 @@
 import asyncio
 import os
 import re
+from contextlib import suppress
 
-from .. import config
 from .. import database as dbm
 
 IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
@@ -47,12 +47,11 @@ async def psql(sql: str) -> str:
 
     try:
         out, err = await asyncio.wait_for(_collect(), timeout=30)
-    except asyncio.TimeoutError:
-        try:
+    except TimeoutError:
+        with suppress(ProcessLookupError):
             proc.kill()
-        except ProcessLookupError:
-            pass
-        raise RuntimeError("psql 超时")
+        # from None：超时原因已经明确，不需要把 TimeoutError 的上下文再叠加上去
+        raise RuntimeError("psql 超时") from None
     if proc.returncode == 0:
         return out.decode(errors="replace").strip()
     raise RuntimeError(err.decode(errors="replace").strip() or f"psql exit {proc.returncode}")

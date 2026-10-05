@@ -1,42 +1,129 @@
+/* ===========================================================
+   choyeon panel — 全局设计令牌与基础样式
+   主题通过 <html data-theme="dark|light"> 切换（由 App.vue 控制）
+   =========================================================== */
+
 :root {
+  /* 品牌与语义色（明暗共用） */
   --brand: #4f7cff;
+  --brand-strong: #6b92ff;
+  --brand-soft: #8fa8ff;
   --ok: #34c77b;
   --warn: #f5a623;
   --err: #f5616c;
-  --line: rgba(255, 255, 255, 0.07);
+
+  /* 圆角与阴影 */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
+
+  /* 动效 */
+  --dur-fast: 0.12s;
+  --dur: 0.2s;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 布局 */
+  --sidebar-w: 208px;
+  --header-h: 54px;
 }
+
+/* 暗色（默认） */
+html[data-theme='dark'] {
+  --cp-bg: #101014;
+  --cp-bg-1: #141419;
+  --cp-bg-2: #16161c;
+  --cp-elevated: #18181f;
+  --cp-text: #dcdce4;
+  --cp-text-strong: #ececf2;
+  --cp-text-dim: #9d9da8;
+  --cp-text-mute: #70707a;
+  --cp-border: rgba(255, 255, 255, 0.07);
+  --cp-border-strong: rgba(255, 255, 255, 0.14);
+  --cp-hover: rgba(255, 255, 255, 0.05);
+  --cp-line: rgba(255, 255, 255, 0.07);
+  --cp-scroll-thumb: rgba(255, 255, 255, 0.14);
+  --cp-scroll-thumb-hover: rgba(255, 255, 255, 0.24);
+  --cp-code-bg: #0c0d10;
+  --cp-code-text: #d4d4d4;
+  color-scheme: dark;
+}
+
+/* 亮色 */
+html[data-theme='light'] {
+  --cp-bg: #f5f6fa;
+  --cp-bg-1: #ffffff;
+  --cp-bg-2: #ffffff;
+  --cp-elevated: #ffffff;
+  --cp-text: #1f2430;
+  --cp-text-strong: #0f172a;
+  --cp-text-dim: #5a6478;
+  --cp-text-mute: #7c869c;
+  --cp-border: #e3e6ef;
+  --cp-border-strong: #cfd5e4;
+  --cp-hover: rgba(79, 124, 255, 0.08);
+  --cp-line: #e6e9f2;
+  --cp-scroll-thumb: rgba(15, 23, 42, 0.18);
+  --cp-scroll-thumb-hover: rgba(15, 23, 42, 0.3);
+  --cp-code-bg: #f3f5fb;
+  --cp-code-text: #242b3a;
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.06);
+  color-scheme: light;
+}
+
 body {
   margin: 0;
-  background: #101014;
-  font-family: 'Inter', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif;
+  background: var(--cp-bg);
+  color: var(--cp-text);
+  font-family: 'Inter', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
+
 ::selection {
   background: rgba(79, 124, 255, 0.35);
 }
+
+/* 键盘可见焦点：统一焦点环，不影响鼠标点击观感 */
+:focus-visible {
+  outline: 2px solid var(--brand-strong);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+button:focus-visible,
+a:focus-visible,
+[role='button']:focus-visible {
+  outline-offset: 3px;
+}
+
+/* 滚动条 */
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--cp-scroll-thumb);
   border-radius: 4px;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.24);
+  background: var(--cp-scroll-thumb-hover);
 }
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---------- 通用块 ---------- */
 .log-view {
-  background: #0c0d10;
-  color: #d4d4d4;
-  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  background: var(--cp-code-bg);
+  color: var(--cp-code-text);
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', ui-monospace, monospace;
   font-size: 12px;
   line-height: 1.55;
   padding: 12px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  border: 1px solid var(--cp-border);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
@@ -46,20 +133,11 @@ body {
   font-weight: 650;
   letter-spacing: -0.02em;
 }
-.page-fade-enter-active,
-.page-fade-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-.page-fade-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-.page-fade-leave-to {
-  opacity: 0;
-}
 .mono {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 }
+
+/* 状态点 */
 .dot {
   display: inline-block;
   width: 7px;
@@ -76,28 +154,101 @@ body {
   background: var(--err);
 }
 .dot.idle {
-  background: #666;
+  background: #888;
 }
 .dot.warn {
   background: var(--warn);
 }
 
-/* shared render-cell styles (used by DataTable h() renderers, non-scoped) */
+/* shared render-cell styles（DataTable h() 渲染器复用，非 scoped） */
 .cell-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .cell-ico { flex-shrink: 0; display: flex; align-items: center; }
 .cell-txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.cell-name { font-size: 13px; font-weight: 550; color: #dcdce4; text-align: left; padding: 0 !important; }
-.cell-sub { font-size: 11.5px; color: #66666e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cell-name { font-size: 13px; font-weight: 550; color: var(--cp-text); text-align: left; padding: 0 !important; }
+.cell-sub { font-size: 11.5px; color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vchip {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px 9px; border-radius: 20px; font-size: 12px; line-height: 18px;
-  background: rgba(255, 255, 255, 0.05); color: #9d9da8;
+  background: var(--cp-hover); color: var(--cp-text-dim);
 }
-.vchip.node { background: rgba(143, 212, 96, 0.12); color: #a5d97a; }
-.vchip.python { background: rgba(79, 124, 255, 0.13); color: #8fa8ff; }
+.vchip.node { background: rgba(143, 212, 96, 0.14); color: #7cb342; }
+.vchip.python { background: rgba(79, 124, 255, 0.14); color: var(--brand-soft); }
+html[data-theme='light'] .vchip.node { color: #4f7a1f; }
+html[data-theme='light'] .vchip.python { color: #3a5fd0; }
 .st { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; }
-.st.ok { color: #6fdba4; }
-.st.err { color: #f58a92; }
-.st.warn { color: #f5c26f; }
-.st.idle { color: #80808c; }
-.mono-dim { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; color: #9d9da8; }
+.st.ok { color: #4bbd84; }
+.st.err { color: #e05a65; }
+.st.warn { color: #d99833; }
+.st.idle { color: var(--cp-text-mute); }
+html[data-theme='dark'] .st.ok { color: #6fdba4; }
+html[data-theme='dark'] .st.err { color: #f58a92; }
+html[data-theme='dark'] .st.warn { color: #f5c26f; }
+.mono-dim { font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; font-size: 12.5px; color: var(--cp-text-dim); }
+
+/* 页面切换动效（Shell 中 transition name="page"） */
+.page-enter-active,
+.page-leave-active {
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.page-leave-to {
+  opacity: 0;
+}
+
+/* ---------- 入场与骨架动效 ---------- */
+/* 列表/卡片逐个上浮：用 --i 传序号形成 stagger，避免整屏一起闪 */
+@keyframes cp-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.cp-rise {
+  animation: cp-rise var(--dur) var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 40ms);
+}
+
+/* 骨架微光：用于自检/统计等首次加载占位 */
+@keyframes cp-shimmer {
+  from { background-position: -180% 0; }
+  to { background-position: 180% 0; }
+}
+.cp-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--cp-bg-2) 25%,
+    var(--cp-hover) 37%,
+    var(--cp-bg-2) 63%
+  );
+  background-size: 300% 100%;
+  animation: cp-shimmer 1.4s linear infinite;
+}
+
+/* 数值变化时的轻微强调（配合 key 变更触发） */
+@keyframes cp-pop {
+  0% { transform: scale(0.96); opacity: 0.4; }
+  100% { transform: none; opacity: 1; }
+}
+.cp-pop { animation: cp-pop var(--dur) var(--ease); }
+
+/* 交互反馈：可点击元素统一压缩反馈，不做位移以免触发布局抖动 */
+.cp-press:active { transform: scale(0.98); }
+.cp-press { transition: transform var(--dur-fast) var(--ease); }
+
+/* 小屏适配：内容区减少内边距 */
+@media (max-width: 640px) {
+  body { font-size: 13.5px; }
+}
+
+/* 尊重系统「减少动效」设置 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

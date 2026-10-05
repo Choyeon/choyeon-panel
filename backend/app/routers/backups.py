@@ -10,7 +10,7 @@ router = APIRouter()
 async def _body(req: Request) -> dict:
     try:
         b = await req.json()
-    except Exception:
+    except Exception:  # noqa: BLE001
         b = None
     return b if isinstance(b, dict) else {}
 
@@ -27,7 +27,7 @@ async def backups_create(req: Request):
         b = await backup_service.create_backup(body)
         dbm.audit(req.state.cp_sub, "backup:create", f"{body.get('kind')}:{body.get('target')}")
         return b
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
@@ -36,7 +36,7 @@ async def backups_update(bid: str, req: Request):
     body = await _body(req)
     try:
         return await backup_service.update_backup(int(bid), body)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
@@ -46,7 +46,7 @@ async def backups_delete(bid: str, req: Request):
         await backup_service.delete_backup(int(bid))
         dbm.audit(req.state.cp_sub, "backup:delete", bid)
         return {"ok": True}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
@@ -55,5 +55,5 @@ async def backups_run(bid: str):
     try:
         r = await backup_service.run_backup_now(int(bid))
         return {"code": r["code"], "log": r["out"]}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"error": str(e)})

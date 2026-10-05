@@ -3,6 +3,7 @@ import os
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from .. import config
 from .. import database as dbm
 from ..services import files_service
 
@@ -13,7 +14,7 @@ router = APIRouter()
 async def files_list(request: Request):
     try:
         return files_service.list_dir(request.query_params.get("path") or "/root/www")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
@@ -21,16 +22,27 @@ async def files_list(request: Request):
 async def files_read(request: Request):
     try:
         return files_service.read_text(request.query_params.get("path") or "")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.put("/api/files/content")
 async def files_write(request: Request):
     try:
+        declared = request.headers.get("content-length")
+        if declared and int(declared) > config.MAX_UPLOAD_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
+            )
         raw = await request.body()
-        return files_service.write_text(request.query_params.get("path") or "", raw.decode("utf8"))
-    except Exception as e:
+        if len(raw) > config.MAX_UPLOAD_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
+            )
+        return files_service.write_text(request.query_params.get("path") or "", raw.decode("utf8", errors="replace"))
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
@@ -45,7 +57,7 @@ async def files_download(request: Request):
             media_type="application/octet-stream",
             filename=os.path.basename(abs_) or "file",
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
@@ -54,11 +66,11 @@ async def files_action(request: Request):
     try:
         try:
             body = await request.json()
-        except Exception:
+        except Exception:  # noqa: BLE001
             body = {}
         body = body if isinstance(body, dict) else {}
         r = files_service.fs_action(body.get("action", ""), body.get("path", ""), body.get("path2"))
         dbm.audit(request.state.cp_sub, f"file:{body.get('action')}", body.get("path"))
         return r
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})

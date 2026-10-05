@@ -1,9 +1,11 @@
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 from .. import config
 from .. import database as dbm
+from ..log import warn
 from ..util import is_name, run
 from .files_service import iso_ms
 from .pg_service import is_ident
@@ -22,6 +24,7 @@ def list_backups() -> list:
     rows = dbm.query("SELECT * FROM backups ORDER BY id")
     out = []
     for b in rows:
+        b["dir"] = BACKUP_DIR
         if os.path.isdir(BACKUP_DIR):
             files = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith(f"bk{b['id']}-"))
             files = list(reversed(files))[:30]
@@ -57,10 +60,9 @@ async def _sync_timer(b: dict):
         await run("systemctl", ["daemon-reload"])
         return
     tz = None
-    try:
+    # /etc/timezone 在 RHEL 系与容器里常不存在，读不到属于正常情况
+    with suppress(OSError):
         tz = Path("/etc/timezone").read_text().strip() or None
-    except OSError:
-        pass
     if not tz:
         link = os.path.realpath("/etc/localtime")
         if "/zoneinfo/" in link:
@@ -118,6 +120,8 @@ async def create_backup(i: dict) -> dict:
         ),
     )
     row = dbm.query_one("SELECT * FROM backups WHERE id=?", (res,))
+    if not row:
+        raise RuntimeError("备份任务创建后未能读回，请检查数据库")
     await _sync_timer(row)
     return row
 
@@ -141,6 +145,8 @@ async def update_backup(bid: int, i: dict) -> dict:
         ),
     )
     row = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
+    if not row:
+        raise RuntimeError("备份任务更新后未能读回，请检查数据库")
     await _sync_timer(row)
     return row
 
@@ -165,4 +171,4 @@ async def sync_all_timers():
         try:
             await _sync_timer(b)
         except Exception as e:  # noqa: BLE001
-            print(f"backup timer #{b['id']} sync failed: {e}")
+            warn(f"backup timer #{b['id']} sync failed: {e}")

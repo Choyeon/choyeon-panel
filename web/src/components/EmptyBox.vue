@@ -4,7 +4,7 @@ defineProps<{ text?: string }>();
 
 <template>
   <div class="eb">
-    <svg width="44" height="44" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" opacity="0.35">
+    <svg width="44" height="44" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" opacity="0.35" aria-hidden="true">
       <rect x="6" y="10" width="36" height="28" rx="3" />
       <path d="M6 18h36M14 27h10" />
     </svg>
@@ -19,11 +19,14 @@ defineProps<{ text?: string }>();
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  padding: 36px 0;
-  color: #55555c;
+  padding: 36px 16px;
+  color: var(--cp-text-mute);
   font-size: 13px;
+  text-align: center;
 }
 .eb p {
   margin: 0;
+  max-width: 42em;
+  line-height: 1.6;
 }
 </style>

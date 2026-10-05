@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# choyeon-panel 一键安装脚本（原生部署，不使用 Docker）
+#
+#   curl -fsSL https://raw.githubusercontent.com/Choyeon/choyeon-panel/main/scripts/install.sh | bash
+#   或：CP_PREFIX=/opt/choyeon-panel bash scripts/install.sh
+#
+# 可注入环境变量：CP_PREFIX / CP_REPO / CP_BRANCH / CP_PORT / CP_HOST /
+#                 CP_DATA_DIR / CP_BACKUP_DIR / CP_SKIP_NGINX=1 / CP_SKIP_DEPS=1
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+trap 'err "安装中断（第 $LINENO 行）"' ERR
+
+log "choyeon-panel 安装开始"
+log "安装目录：$PREFIX"
+
+require_root
+detect_os
+[ "${CP_SKIP_DEPS:-0}" = "1" ] || pkg_update
+
+# ---------- 1. 系统依赖 ----------
+if [ "${CP_SKIP_DEPS:-0}" = "1" ]; then
+  warn "已设置 CP_SKIP_DEPS=1，跳过系统依赖安装"
+else
+  step "安装系统依赖"
+  case "$OS_FAMILY" in
+    debian) pkg_install ca-certificates curl git sqlite3 nginx rsync ;;
+    rhel)   pkg_install ca-certificates curl git sqlite nginx rsync ;;
+    *)      warn "未识别发行版，请自行确认已安装：git / nginx / sqlite3" ;;
+  esac
+fi
+
+ensure_python
+ensure_node
+
+# ---------- 2. 代码 ----------
+clone_or_die
+cd "$PREFIX"
+
+# ---------- 3. 配置文件 ----------
+if [ ! -f "$PREFIX/.env" ]; then
+  step "生成 .env（从 .env.example）"
+  sed -e "s#^CP_DATA_DIR=.*#CP_DATA_DIR=$DATA_DIR#" \
+      -e "s#^CP_PORT=.*#CP_PORT=$PORT#" \
+      -e "s#^CP_HOST=.*#CP_HOST=$HOST#" \
+      "$PREFIX/.env.example" > "$PREFIX/.env"
+  chmod 0600 "$PREFIX/.env"
+  ok "已生成 $PREFIX/.env（权限 0600）"
+else
+  log ".env 已存在，保留原配置"
+fi
+
+mkdir -p "$DATA_DIR" "$BACKUP_DIR"
+chmod 0700 "$DATA_DIR"
+
+# ---------- 4. 构建 ----------
+venv_create
+web_build
+
+# ---------- 5. systemd ----------
+if have_systemd; then
+  unit_install
+  if [ -f "$UNIT_FILE" ] && command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify "$UNIT_FILE" >/dev/null 2>&1 || warn "systemd-analyze 给出告警（不影响运行）：systemd-analyze verify $UNIT_FILE"
+  fi
+  unit_restart
+  if wait_health 30; then
+    ok "服务已启动并通过健康检查"
+  else
+    err "健康检查失败，查看日志：journalctl -u $SERVICE_NAME -n 50 --no-pager"
+    exit 1
+  fi
+else
+  warn "无 systemd：请手动启动 -> $VENV/bin/python -m app.main（工作目录 $BACKEND_DIR）"
+fi
+
+# ---------- 5.5 CLI ----------
+ln -sf "$PREFIX/bin/choyeonctl" /usr/local/bin/choyeonctl
+ok "CLI 已安装：choyeonctl（先跑 choyeonctl doctor 看自检结果）"
+
+# ---------- 6. nginx（可选） ----------
+PANEL_URL="http://127.0.0.1:$PORT"
+if [ "${CP_SKIP_NGINX:-0}" = "1" ] || ! have_cmd nginx; then
+  log "跳过 nginx 配置（CP_SKIP_NGINX=1 或系统无 nginx）"
+else
+  read_value "是否为面板配置 nginx 反代？需要已解析到本机的域名（留空跳过）" ""
+  DOMAIN="${REPLY:-}"
+  if [ -n "$DOMAIN" ]; then
+    step "写入 /etc/nginx/conf.d/choyeon-panel.conf"
+    sed -e "s#panel.example.com#$DOMAIN#g" \
+        -e "s#127.0.0.1:3210#127.0.0.1:$PORT#g" \
+        "$PREFIX/deploy/nginx-panel.conf.example" > /etc/nginx/conf.d/choyeon-panel.conf
+    nginx -t && systemctl reload nginx
+    ok "nginx 配置已生效"
+    if have_cmd certbot; then
+      read_value "是否为 $DOMAIN 申请 Let's Encrypt 证书？(y/N)" "N"
+      if [ "${REPLY:-N}" = "y" ] || [ "${REPLY:-N}" = "Y" ]; then
+        certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "admin@$DOMAIN" || warn "证书申请失败，请手动执行 certbot --nginx -d $DOMAIN"
+      fi
+    fi
+    PANEL_URL="https://$DOMAIN"
+  else
+    log "跳过 nginx（面板仅监听 $HOST:$PORT，可后续用 scripts/ 下的示例配置接入）"
+  fi
+fi
+
+# ---------- 7. 收尾提示 ----------
+ADMIN_HINT="请打开 $PANEL_URL 完成管理员注册（首次访问会引导创建）"
+if [ -f "$DATA_DIR/panel.db" ] && have_cmd sqlite3; then
+  if [ "$(sqlite3 "$DATA_DIR/panel.db" 'SELECT COUNT(*) FROM users;' 2>/dev/null || echo 0)" != "0" ]; then
+    ADMIN_HINT="管理员已存在，直接登录即可"
+  fi
+fi
+
+cat <<EOF
+
+${C_GREEN}安装完成${C_RESET}
+  目录：   $PREFIX
+  数据：   $DATA_DIR
+  备份：   $BACKUP_DIR
+  服务：   systemctl status $SERVICE_NAME
+  日志：   journalctl -u $SERVICE_NAME -f
+  访问：   $PANEL_URL
+  $ADMIN_HINT
+
+后续建议：
+  1) 若未配置 HTTPS，务必执行 scripts/install.sh 的 nginx 步骤或手动接入 TLS；
+  2) 用 ufw/firewalld 只放行 80/443，不要直接暴露 $PORT；
+  3) 更新版本执行：$PREFIX/scripts/update.sh
+EOF

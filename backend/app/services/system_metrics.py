@@ -61,8 +61,8 @@ def _node_snapshot() -> dict:
         tx += f[8]
     du = shutil.disk_usage("/")
     load = [round(x, 2) for x in os.getloadavg()]
-    with open("/proc/uptime") as f:
-        uptime = float(f.read().split()[0])
+    with open("/proc/uptime") as uptime_file:
+        uptime = float(uptime_file.read().split()[0])
     return {
         "idle": idle_total, "total": total,
         "memTotal": mem.get("MemTotal", 0), "memAvailable": mem.get("MemAvailable", 0),
@@ -77,7 +77,7 @@ async def _raw() -> dict:
     if _python_healthy:
         try:
             return await _python_snapshot()
-        except Exception:
+        except Exception:  # noqa: BLE001
             _python_healthy = False
     return _node_snapshot()
 
@@ -105,7 +105,14 @@ async def snapshot() -> dict:
     _prev_at = now_ms
 
     mem_used = raw["memTotal"] - raw["memAvailable"]
-    _history.append({"t": now_ms, "cpu": cpu, "memUsed": mem_used, "memTotal": raw["memTotal"], "netRx": net_rx, "netTx": net_tx})
+    _history.append({
+        "t": now_ms,
+        "cpu": cpu,
+        "memUsed": mem_used,
+        "memTotal": raw["memTotal"],
+        "netRx": net_rx,
+        "netTx": net_tx,
+    })
 
     return {
         "cpu": cpu,
@@ -152,7 +159,7 @@ async def info() -> dict:
             if not j.get("error"):
                 base.update(j)
                 base["prettyName"] = j.get("prettyName")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
     return base
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import suppress
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -36,7 +37,7 @@ async def service_action(unit: str, req: Request):
         await systemd_ops.service_action(unit, verb)
         dbm.audit(req.state.cp_sub, f"service:{verb}", unit)
         return {"ok": True, "active": await systemd_ops.is_active(unit)}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
@@ -47,20 +48,22 @@ async def _sse_journal(unit: str, lines: int):
         stderr=asyncio.subprocess.STDOUT,
     )
     try:
+        stdout = proc.stdout
+        if stdout is None:  # stdout 未接管时直接结束，避免 AttributeError 打断 SSE 流
+            return
         while True:
             try:
-                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=25)
-            except asyncio.TimeoutError:
+                raw = await asyncio.wait_for(stdout.readline(), timeout=25)
+            except TimeoutError:
                 yield ": ping\n\n"
                 continue
             if not raw:
                 break
             yield f"data: {json.dumps(raw.decode(errors='replace').rstrip(chr(10)))}\n\n"
     finally:
-        try:
+        # 客户端断开时进程可能已退出，kill 报 ProcessLookupError 属正常
+        with suppress(ProcessLookupError):
             proc.kill()
-        except ProcessLookupError:
-            pass
 
 
 def log_stream_response(unit: str, lines: int) -> StreamingResponse:

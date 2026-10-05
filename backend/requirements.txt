@@ -1,0 +1,6 @@
+# choyeon-panel 后端运行时依赖
+# 与 pyproject.toml 的 [project].dependencies 保持一致（供 pip/venv 直接安装）
+fastapi>=0.115
+uvicorn>=0.30
+websockets>=12
+PyJWT>=2.9

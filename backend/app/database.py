@@ -1,16 +1,22 @@
 import os
-import re
 import secrets
 import sqlite3
 import threading
+import time
+from pathlib import Path
 
 from . import config
 
 os.makedirs(config.DATA_DIR, exist_ok=True)
+
 _lock = threading.RLock()
-conn = sqlite3.connect(f"{config.DATA_DIR}/panel.db", check_same_thread=False)
+conn = sqlite3.connect(f"{config.DATA_DIR}/panel.db", check_same_thread=False, timeout=15)
 conn.row_factory = sqlite3.Row
+# WAL + busy_timeout：面板进程与 backup_runner（独立进程）可安全并发读写
 conn.execute("PRAGMA journal_mode = WAL")
+conn.execute("PRAGMA synchronous = NORMAL")
+conn.execute("PRAGMA busy_timeout = 15000")
+conn.execute("PRAGMA foreign_keys = ON")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -64,12 +70,14 @@ CREATE TABLE IF NOT EXISTS backups(
 );
 """
 
+MAX_DEPLOY_LOG = 256 * 1024  # 单条部署日志上限，防止失控增长
 
-def _columns(table: str):
+
+def _columns(table: str) -> list[str]:
     return [r["name"] for r in query(f"PRAGMA table_info({table})")]
 
 
-def migrate():
+def migrate() -> None:
     with _lock:
         conn.executescript(SCHEMA)
         cols = _columns("users")
@@ -80,16 +88,20 @@ def migrate():
             conn.execute("ALTER TABLE apps ADD COLUMN db_names TEXT")
         if "unit_template" not in acols:
             conn.execute("ALTER TABLE apps ADD COLUMN unit_template TEXT")
+        dcols = _columns("deployments")
+        if "commit_sha" not in dcols:
+            conn.execute("ALTER TABLE deployments ADD COLUMN commit_sha TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_deployments_app ON deployments(app_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit(id)")
         conn.commit()
 
 
-def query(sql: str, params=()):
+def query(sql: str, params=()) -> list[dict]:
     with _lock:
-        cur = conn.execute(sql, params)
-        return [dict(r) for r in cur.fetchall()]
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
-def query_one(sql: str, params=()):
+def query_one(sql: str, params=()) -> dict | None:
     rows = query(sql, params)
     return rows[0] if rows else None
 
@@ -101,15 +113,15 @@ def execute(sql: str, params=()):
         return cur.lastrowid
 
 
-def get_setting(key: str):
+def get_setting(key: str) -> str | None:
     row = query_one("SELECT value FROM settings WHERE key=?", (key,))
     return row["value"] if row and row["value"] is not None else None
 
 
-def set_setting(key: str, value: str):
+def set_setting(key: str, value) -> None:
     execute(
         "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, str(value)),
+        (key, "" if value is None else str(value)),
     )
 
 
@@ -121,8 +133,65 @@ def jwt_secret() -> str:
     return s
 
 
-def audit(username, action: str, detail=None):
+def token_epoch() -> str:
+    """密码版本号：改密 / 删除用户后自增，使已签发 token 立即失效。"""
+    v = get_setting("token_epoch")
+    if not v:
+        v = str(int(time.time()))
+        set_setting("token_epoch", v)
+    return v
+
+
+def bump_token_epoch() -> str:
+    v = str(int(time.time()))
+    set_setting("token_epoch", v)
+    return v
+
+
+def audit(username, action: str, detail=None) -> None:
+    if detail is not None and len(str(detail)) > 500:
+        detail = str(detail)[:500]
     execute("INSERT INTO audit(username,action,detail) VALUES(?,?,?)", (username, action, detail))
+
+
+def append_deploy_log(dep_id: int, text: str) -> None:
+    """追加部署日志并裁剪到上限，避免大输出撑爆数据库。"""
+    with _lock:
+        row = conn.execute("SELECT log FROM deployments WHERE id=?", (dep_id,)).fetchone()
+        current = row["log"] if row else ""
+        merged = f"{current}\n{text}\n"
+        if len(merged) > MAX_DEPLOY_LOG:
+            merged = "...(已截断)...\n" + merged[-MAX_DEPLOY_LOG:]
+        conn.execute("UPDATE deployments SET log=? WHERE id=?", (merged, dep_id))
+        conn.commit()
+
+
+def prune_audit(keep: int | None = None) -> int:
+    """保留最近 N 条审计记录，返回清理条数。"""
+    keep = keep or config.AUDIT_KEEP
+    with _lock:
+        cur = conn.execute(
+            "DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT ?)",
+            (keep,),
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_deployments(keep_per_app: int = 20) -> int:
+    with _lock:
+        cur = conn.execute(
+            "DELETE FROM deployments WHERE id NOT IN ("
+            "  SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY app_id ORDER BY id DESC) rn FROM deployments)"
+            "  WHERE rn <= ?)",
+            (keep_per_app,),
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def db_path() -> str:
+    return str(Path(config.DATA_DIR) / "panel.db")
 
 
 migrate()

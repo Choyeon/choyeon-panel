@@ -10,19 +10,29 @@ import termios
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from .. import config
 from .. import database as dbm
+from ..log import warn
 
 router = APIRouter()
+
+_SESSIONS = 0  # 当前终端会话数，避免并发 pty 拖垮机器
 
 
 @router.websocket("/api/terminal")
 async def terminal(ws: WebSocket):
+    global _SESSIONS
     state = ws.scope.get("state", {})
     if state.get("cp_role") != "admin":
         await ws.close(code=4403)
         return
+    if _SESSIONS >= config.TERMINAL_MAX_SESSIONS:
+        await ws.close(code=4503, reason="too many sessions")
+        return
+
     await ws.accept()
-    dbm.audit(state.get("cp_sub") or ws.query_params.get("user") or (ws.client.host if ws.client else "?"), "terminal:open")
+    user = state.get("cp_sub") or "?"
+    dbm.audit(user, "terminal:open")
 
     master, slave = pty.openpty()
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 100, 0, 0))
@@ -33,6 +43,7 @@ async def terminal(ws: WebSocket):
         cwd="/root", env=env, start_new_session=True, close_fds=True,
     )
     os.close(slave)
+    _SESSIONS += 1
     loop = asyncio.get_running_loop()
     out_q: asyncio.Queue = asyncio.Queue()
 
@@ -68,7 +79,8 @@ async def terminal(ws: WebSocket):
                 continue
             kind = msg.get("d")
             if kind == "input":
-                os.write(master, str(msg.get("data", ""))[:65536].encode())
+                with contextlib.suppress(OSError):
+                    os.write(master, str(msg.get("data", ""))[:65536].encode())
             elif kind == "resize":
                 cols = min(int(msg.get("cols") or 100), 400)
                 rows = min(int(msg.get("rows") or 28), 200)
@@ -77,10 +89,23 @@ async def terminal(ws: WebSocket):
             elif kind == "ping":
                 await ws.send_json({"d": "pong"})
     finally:
+        _SESSIONS -= 1
         pump.cancel()
         with contextlib.suppress(Exception):
             loop.remove_reader(master)
+        # 终止整个会话进程组，避免 bash 子进程残留
         with contextlib.suppress(Exception):
-            proc.terminate()
+            os.killpg(os.getpgid(proc.pid), 15)
+        try:
+            await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=3)
+        except Exception:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                os.killpg(os.getpgid(proc.pid), 9)
+            with contextlib.suppress(Exception):
+                proc.wait()
         with contextlib.suppress(Exception):
             os.close(master)
+        try:
+            dbm.audit(user, "terminal:close")
+        except Exception as e:  # noqa: BLE001
+            warn("terminal audit failed:", e)

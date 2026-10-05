@@ -15,7 +15,7 @@ ALLOWED_ALERT_KEYS = re.compile(r"^alert_(telegram_bot|telegram_chat|webhook_url
 async def _body(req: Request) -> dict:
     try:
         b = await req.json()
-    except Exception:
+    except Exception:  # noqa: BLE001
         b = None
     return b if isinstance(b, dict) else {}
 
@@ -46,8 +46,11 @@ async def users_create(req: Request):
         return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
     role = "viewer" if body.get("role") == "viewer" else "admin"
     try:
-        dbm.execute("INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)", (username, security.hash_pass(password), role))
-    except Exception:
+        dbm.execute(
+            "INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)",
+            (username, security.hash_pass(password), role),
+        )
+    except Exception:  # noqa: BLE001 唯一约束冲突即"用户名已存在"
         return JSONResponse(status_code=400, content={"error": "用户名已存在"})
     dbm.audit(req.state.cp_sub, "user:create", f"{username}({role})")
     return {"ok": True}
@@ -72,6 +75,8 @@ async def users_update(uid: str, req: Request):
         if len(body["password"]) < 8:
             return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
         dbm.execute("UPDATE users SET pass_hash=? WHERE id=?", (security.hash_pass(body["password"]), u["id"]))
+        # 使该用户已签发的 token 立即失效
+        security.bump_user_epoch(u["username"])
     dbm.audit(req.state.cp_sub, "user:update", u["username"])
     return {"ok": True}
 
@@ -89,14 +94,21 @@ async def users_delete(uid: str, req: Request):
     if u["username"] == req.state.cp_sub:
         return JSONResponse(status_code=400, content={"error": "不能删除自己"})
     dbm.execute("DELETE FROM users WHERE id=?", (u["id"],))
+    security.bump_user_epoch(u["username"])
     dbm.audit(req.state.cp_sub, "user:delete", u["username"])
     return {"ok": True}
 
 
+ALERT_KEYS = ["alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url", "alert_disk_pct", "alert_ssl_days"]
+
+
 @router.get("/api/settings/alerts")
-async def alerts_get():
-    keys = ["alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url", "alert_disk_pct", "alert_ssl_days"]
-    return {k: dbm.get_setting(k) or "" for k in keys}
+async def alerts_get(req: Request):
+    # 通知通道含密钥，仅管理员可读；只读账号返回空值以免泄露
+    secret_keys = ("alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url")
+    if req.state.cp_role != "admin":
+        return {k: ("" if k in secret_keys else (dbm.get_setting(k) or "")) for k in ALERT_KEYS}
+    return {k: dbm.get_setting(k) or "" for k in ALERT_KEYS}
 
 
 @router.post("/api/settings/alerts")

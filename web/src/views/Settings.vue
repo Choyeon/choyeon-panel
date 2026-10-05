@@ -30,12 +30,16 @@ function ico(name: string, size = 14) {
 }
 
 async function load() {
-  auditLog.value = await api.audit(100);
-  if (isAdmin) {
-    users.value = await api.users();
-    alerts.value = await api.alertSettings();
+  try {
+    auditLog.value = await api.audit(100);
+    if (isAdmin) {
+      users.value = await api.users();
+      alerts.value = await api.alertSettings();
+    }
+    fw.value = await api.firewall();
+  } catch (e: any) {
+    msg.error(e.message);
   }
-  fw.value = await api.firewall();
 }
 async function renew() {
   renewing.value = true;
@@ -100,6 +104,15 @@ async function saveAlerts() {
     msg.error(e.message);
   }
 }
+async function runChecks() {
+  try {
+    await api.alertRunChecks();
+    msg.success('巡检已执行，若触发阈值会立即推送');
+  } catch (e: any) {
+    msg.error(e.message);
+  }
+}
+
 async function testAlert() {
   try {
     await api.saveAlerts(alerts.value);
@@ -116,7 +129,7 @@ const userCols: any[] = [
     render: (u: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: u.role === 'admin' ? icons.ShieldCheckmarkOutline : icons.OptionsOutline, size: 17, color: u.role === 'admin' ? '#f5c26f' : '#8b8b96' }),
+          h(NIcon, { component: u.role === 'admin' ? icons.ShieldCheckmarkOutline : icons.OptionsOutline, size: 17, color: u.role === 'admin' ? '#f5c26f' : 'var(--cp-text-mute)' }),
         ]),
         h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, u.username), h('div', { class: 'cell-sub' }, u.created_at || '')]),
       ]),
@@ -160,7 +173,7 @@ onMounted(load);
           <template #header><span class="card-title"><NIcon :component="icons.OptionsOutline" :size="15" color="#8fa8ff" /> 用户管理</span></template>
           <template #header-extra><NButton size="tiny" type="primary" :icon="ico('AddOutline', 12)" @click="showUser = true">新建用户</NButton></template>
           <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 8px">只读账号可查看全部监控/日志/数据，但不能执行启停、部署、删除、终端等任何写操作。</NText>
-          <NDataTable size="small" :bordered="false" :columns="userCols" :data="users">
+          <NDataTable size="small" :bordered="false" :scroll-x="620" :columns="userCols" :data="users">
             <template #empty><EmptyBox text="暂无用户" /></template>
           </NDataTable>
         </NCard>
@@ -182,7 +195,7 @@ onMounted(load);
           <NSpace style="margin-top: 12px">
             <NButton type="primary" size="small" :icon="ico('SaveOutline')" @click="saveAlerts">保存配置</NButton>
             <NButton tertiary size="small" :icon="ico('CloudUploadOutline')" @click="testAlert">发送测试通知</NButton>
-            <NButton tertiary size="small" :icon="ico('PulseOutline')" @click="api.alertRunChecks()">立即巡检</NButton>
+            <NButton tertiary size="small" :icon="ico('PulseOutline')" @click="runChecks">立即巡检</NButton>
           </NSpace>
         </NCard>
       </NGridItem>
@@ -213,9 +226,9 @@ onMounted(load);
 
       <NGridItem span="2">
         <NCard size="small">
-          <template #header><span class="card-title"><NIcon :component="icons.DocumentTextOutline" :size="15" color="#8b8b96" /> 操作审计</span></template>
+          <template #header><span class="card-title"><NIcon :component="icons.DocumentTextOutline" :size="15" color="var(--cp-text-mute)" /> 操作审计</span></template>
           <template #header-extra><NButton size="tiny" tertiary :icon="ico('RefreshOutline', 12)" @click="load">刷新</NButton></template>
-          <NDataTable size="small" :bordered="false" :max-height="380" :columns="auditCols" :data="auditLog">
+          <NDataTable size="small" :bordered="false" :scroll-x="760" :max-height="380" :columns="auditCols" :data="auditLog">
             <template #empty><EmptyBox text="暂无操作记录" /></template>
           </NDataTable>
         </NCard>
@@ -248,5 +261,5 @@ onMounted(load);
 </template>
 
 <style scoped>
-.card-title { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: #d6d6e0; }
+.card-title { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--cp-text); }
 </style>

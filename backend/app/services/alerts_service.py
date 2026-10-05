@@ -6,6 +6,7 @@ import re
 import urllib.request
 
 from .. import database as dbm
+from ..log import warn
 from ..util import run
 
 
@@ -30,12 +31,12 @@ async def notify(text: str):
             await asyncio.to_thread(_post, f"https://api.telegram.org/bot{bot}/sendMessage",
                                     {"chat_id": chat, "text": f"[choyeon-panel] {text}"})
         except Exception as e:  # noqa: BLE001
-            print("telegram notify failed:", e)
+            warn("telegram notify failed:", e)
     if hook:
         try:
             await asyncio.to_thread(_post, hook, {"text": text})
         except Exception as e:  # noqa: BLE001
-            print("webhook notify failed:", e)
+            warn("webhook notify failed:", e)
 
 
 async def _check(key: str, trigger: bool, message: str):
@@ -62,8 +63,8 @@ async def run_checks():
     ssl_days = int(dbm.get_setting("alert_ssl_days") or 14)
     if ssl_days > 0:
         certs = await run("certbot", ["certificates"])
-        blocks = [b for b in certs["out"].split(
-            "-------------------------------------------------------------------------------") if "Certificate Name" in b]
+        separator = "-" * 79  # certbot 输出里用于分隔每张证书的分隔线
+        blocks = [b for b in certs["out"].split(separator) if "Certificate Name" in b]
         for b in blocks:
             name = re.search(r"Certificate Name: (\S+)", b)
             days = re.search(r"Days Left: (\d+)", b)
@@ -92,7 +93,7 @@ async def _checker_loop():
         try:
             await run_checks()
         except Exception as e:  # noqa: BLE001
-            print("alert check failed:", e)
+            warn("alert check failed:", e)
         await asyncio.sleep(30 * 60)
 
 
@@ -101,6 +102,14 @@ _checker_task = None
 
 def start_checker():
     global _checker_task
-    if _checker_task is None:
+    if _checker_task is None or _checker_task.done():
         _checker_task = asyncio.create_task(_checker_loop())
     return _checker_task
+
+
+def stop_checker():
+    """停止巡检协程（应用关闭时调用），避免遗留 pending task。"""
+    global _checker_task
+    if _checker_task is not None and not _checker_task.done():
+        _checker_task.cancel()
+    _checker_task = None

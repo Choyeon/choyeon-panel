@@ -4,7 +4,7 @@ import {
   NDataTable, NButton, NSpace, NInput, NText, NBreadcrumb, NBreadcrumbItem, NModal,
   NPopconfirm, useMessage, NIcon, NCard,
 } from 'naive-ui';
-import { api, getToken } from '../api';
+import { api, getToken, apiUrl } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
@@ -119,15 +119,7 @@ async function mkdir() {
 async function upload(file: File) {
   uploading.value = true;
   try {
-    const buf = await file.arrayBuffer();
-    await fetch(`/api/files/content?path=${encodeURIComponent(join(file.name))}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/octet-stream', Authorization: `Bearer ${getToken()}` },
-      body: buf,
-    }).then(async (r) => {
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || '上传失败');
-    });
+    await api.saveFile(join(file.name), await file.text());
     msg.success('上传完成');
     load();
   } catch (e: any) {
@@ -149,11 +141,11 @@ const columns: any[] = [
     render: (e: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: e.isDir ? icons.FolderOutline : icons.DocumentOutline, size: 17, color: e.isDir ? '#f5c26f' : '#8b8b96' }),
+          h(NIcon, { component: e.isDir ? icons.FolderOutline : icons.DocumentOutline, size: 17, color: e.isDir ? '#f5c26f' : 'var(--cp-text-mute)' }),
         ]),
         h(NButton, {
           text: true, type: e.isDir ? 'info' : 'default', class: 'cell-name',
-          style: e.isDir ? '' : 'color:#cfcfd8', onClick: () => open(e),
+          style: e.isDir ? '' : 'color:var(--cp-text)', onClick: () => open(e),
         }, () => e.name),
       ]),
   },
@@ -163,11 +155,11 @@ const columns: any[] = [
     title: '操作', key: 'ops', width: 210,
     render: (e: any) =>
       h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, tag: 'a', href: `/api/files/download?path=${encodeURIComponent(join(e.name))}&token=${getToken()}`, target: '_blank', icon: ico('DownloadOutline', 12) }, () => '下载'),
+        h(NButton, { size: 'tiny', tertiary: true, tag: 'a', href: `${apiUrl('/files/download')}?path=${encodeURIComponent(join(e.name))}&token=${getToken()}`, target: '_blank', icon: ico('DownloadOutline', 12) }, () => '下载'),
         ...(e.isDir ? [] : [h(NButton, { size: 'tiny', tertiary: true, icon: ico('PencilOutline', 12), onClick: () => open(e) }, () => '编辑')]),
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('OptionsOutline', 12), onClick: () => openRename(e) }, () => '改名'),
         h(NPopconfirm, { onPositiveClick: () => del(e) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline', 12) }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline', 12), title: `删除 ${e.name}`, 'aria-label': `删除 ${e.name}` }, { default: () => '' }),
           default: () => `删除 ${e.name}${e.isDir ? '（含全部子文件）' : ''}？`,
         }),
       ]),
@@ -195,7 +187,7 @@ onMounted(() => load());
               <NButton text type="primary" size="tiny" @click="load('/root/www')">{{ crumbs[0] || 'root' }}</NButton>
             </NBreadcrumbItem>
             <NBreadcrumbItem v-for="(c, i) in crumbs.slice(1)" :key="i">
-              <NButton text size="tiny" style="color: #9d9da8" @click="load('/' + crumbs.slice(0, i + 1).join('/'))">{{ c }}</NButton>
+              <NButton text size="tiny" style="color: var(--cp-text-dim)" @click="load('/' + crumbs.slice(0, i + 1).join('/'))">{{ c }}</NButton>
             </NBreadcrumbItem>
           </NBreadcrumb>
           <NSpace :size="6">
@@ -203,7 +195,7 @@ onMounted(() => load());
           </NSpace>
         </NSpace>
         <NSpace :size="8">
-          <NInput v-model:value="newFolder" placeholder="新文件夹名称" style="width: 220px" size="small" @keyup.enter="mkdir">
+          <NInput v-model:value="newFolder" placeholder="新文件夹名称" style="width: 220px; max-width: 100%" size="small" @keyup.enter="mkdir">
             <template #prefix><NIcon :component="icons.FolderOutline" /></template>
           </NInput>
           <NButton size="small" :icon="ico('AddOutline')" @click="mkdir">新建目录</NButton>
@@ -213,7 +205,7 @@ onMounted(() => load());
 
     <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">可访问范围：/root/www（项目）、/etc/nginx（配置）、/root/backups/panel（备份）。点击文件名直接在线编辑。</NText>
 
-    <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :max-height="'calc(100vh - 360px)'" :row-key="(e: any) => e.name">
+    <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :scroll-x="760" :max-height="'calc(100vh - 360px)'" :row-key="(e: any) => e.name">
       <template #empty><EmptyBox text="空目录" /></template>
     </NDataTable>
 

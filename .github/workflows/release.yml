@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要发布的目标 tag（须已存在）
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建发布包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端
+        working-directory: web
+        run: |
+          npm ci --no-audit --fund=false
+          npm run build
+
+      - name: 打包（不含 node_modules / .venv / data）
+        run: |
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          tar --exclude='.git' --exclude='node_modules' --exclude='.venv' \
+              --exclude='data' --exclude='web/dist' \
+              -czf "choyeon-panel-${VERSION}.tar.gz" \
+              --transform "s#^#choyeon-panel/#" .
+          # 前端构建产物单独打包，供只需替换静态资源的场景使用
+          tar -czf "choyeon-panel-web-${VERSION}.tar.gz" -C web dist
+          sha256sum choyeon-panel-*.tar.gz > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: |
+            choyeon-panel-*.tar.gz
+            SHA256SUMS.txt
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            choyeon-panel-*.tar.gz
+            SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            ## 安装 / 升级
+
+            ```bash
+            # 全新安装
+            bash scripts/install.sh
+
+            # 已安装实例升级（会自动备份并在健康检查失败时回滚）
+            /root/choyeon-panel/scripts/update.sh
+            ```
+
+            校验：`sha256sum -c SHA256SUMS.txt`

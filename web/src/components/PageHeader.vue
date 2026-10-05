@@ -4,7 +4,7 @@ defineProps<{ title: string; sub?: string }>();
 
 <template>
   <div class="ph">
-    <div>
+    <div class="ph-main">
       <h2 class="ph-title">{{ title }}</h2>
       <p v-if="sub" class="ph-sub">{{ sub }}</p>
     </div>
@@ -19,22 +19,31 @@ defineProps<{ title: string; sub?: string }>();
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 16px;
+  flex-wrap: wrap;
 }
+.ph-main { min-width: 0; flex: 1 1 220px; }
 .ph-title {
   margin: 0;
   font-size: 19px;
   font-weight: 650;
   letter-spacing: -0.01em;
-  color: #e8e8ec;
+  color: var(--cp-text-strong);
+  overflow-wrap: anywhere;
 }
 .ph-sub {
   margin: 4px 0 0;
   font-size: 12.5px;
-  color: #77777f;
+  color: var(--cp-text-mute);
+  overflow-wrap: anywhere;
 }
 .ph-actions {
   display: flex;
   gap: 8px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+@media (max-width: 640px) {
+  .ph { gap: 10px; }
+  .ph-actions { justify-content: flex-start; width: 100%; }
 }
 </style>

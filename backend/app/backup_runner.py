@@ -18,7 +18,7 @@ def sh(cmd: str):
 
 def main(bk: dict):
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d-%H-%M")
+    ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d-%H-%M")
     ts = ts.replace(":", "-")
     if bk["kind"] == "pg":
         if bk["target"] == "all":

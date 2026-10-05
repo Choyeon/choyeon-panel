@@ -7,11 +7,12 @@ from pathlib import Path
 from .. import config
 
 ROOTS = config.FILE_ROOTS
+MAX_FILE_BYTES = config.MAX_UPLOAD_BYTES
 
 
 def iso_ms(epoch: float) -> str:
     ms = round(epoch * 1000)
-    dt = _dt.datetime.fromtimestamp(ms / 1000, tz=_dt.timezone.utc)
+    dt = _dt.datetime.fromtimestamp(ms / 1000, tz=_dt.UTC)
     return f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{ms % 1000:03d}Z"
 
 
@@ -52,23 +53,26 @@ def list_dir(p: str) -> dict:
         except OSError:
             pass
         entries.append({"name": name, "isDir": is_dir, "size": size, "mtime": mtime})
-    entries.sort(key=lambda e: (0 if e["isDir"] else 1, e["name"].lower()))
+    entries.sort(key=lambda e: (0 if e["isDir"] else 1, str(e["name"]).lower()))
     return {"path": abs_, "entries": entries}
 
 
 def read_text(p: str) -> dict:
     abs_ = safe_path(p)
     st = os.stat(abs_)
-    if st.st_size > 1024 * 1024:
-        raise RuntimeError("文件超过 1MB，请用下载")
+    if st.st_size > MAX_FILE_BYTES:
+        raise RuntimeError(f"文件超过 {MAX_FILE_BYTES // 1024 // 1024}MB，请用下载")
     return {"path": abs_, "content": Path(abs_).read_text(encoding="utf8", errors="replace")}
 
 
 def write_text(p: str, content: str) -> dict:
     abs_ = safe_path(p)
+    data = content.encode("utf8")
+    if len(data) > MAX_FILE_BYTES:
+        raise RuntimeError(f"内容超过 {MAX_FILE_BYTES // 1024 // 1024}MB，拒绝写入")
     Path(os.path.dirname(abs_)).mkdir(parents=True, exist_ok=True)
-    Path(abs_).write_text(content, encoding="utf8")
-    return {"path": abs_, "size": len(content.encode("utf8"))}
+    Path(abs_).write_bytes(data)
+    return {"path": abs_, "size": len(data)}
 
 
 def fs_action(action: str, p: str, p2: str | None = None) -> dict:
@@ -86,6 +90,8 @@ def fs_action(action: str, p: str, p2: str | None = None) -> dict:
         to = safe_path(p2 or "")
         if os.path.exists(to):
             raise RuntimeError("目标已存在")
+        if os.path.dirname(abs_) != os.path.dirname(to):
+            raise RuntimeError("暂不支持跨目录移动")
         os.rename(abs_, to)
     else:
         raise RuntimeError("未知操作")

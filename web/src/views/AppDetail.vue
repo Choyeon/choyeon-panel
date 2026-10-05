@@ -334,7 +334,7 @@ onMounted(load);
               <div
                 v-for="c in ngx.configs" :key="c.file" class="ngx-item" :class="{ active: ngxFile?.file === c.file }" @click="selConfig(c)"
               >
-                <NIcon :component="icons.GlobeOutline" :size="15" :color="c.analysis.ssl ? '#6fdba4' : '#8b8b96'" />
+                <NIcon :component="icons.GlobeOutline" :size="15" :color="c.analysis.ssl ? '#6fdba4' : 'var(--cp-text-mute)'" />
                 <div style="min-width: 0">
                   <div class="ngx-name">{{ c.name }}</div>
                   <div class="ngx-dom">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}</div>
@@ -411,19 +411,19 @@ onMounted(load);
 
 <style scoped>
 .info-card :deep(.n-card__content) { padding: 12px 16px; }
-.info-k { font-size: 11.5px; color: #70707a; margin-bottom: 6px; }
-.info-v { color: #d6d6e0; font-weight: 500; }
-.dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--line); padding-right: 12px; }
+.info-k { font-size: 11.5px; color: var(--cp-text-mute); margin-bottom: 6px; }
+.info-v { color: var(--cp-text); font-weight: 500; }
+.dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: 12px; }
 .dep-item { padding: 10px 10px; border-radius: 8px; cursor: pointer; transition: background 0.12s; }
 .dep-item:hover { background: rgba(255, 255, 255, 0.045); }
 .dep-item.active { background: rgba(79, 124, 255, 0.12); }
-.ngx-list { width: 260px; flex-shrink: 0; border-right: 1px solid var(--line); padding-right: 12px; }
+.ngx-list { width: 260px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: 12px; }
 .ngx-item { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 8px; cursor: pointer; transition: background 0.12s; }
 .ngx-item:hover { background: rgba(255, 255, 255, 0.045); }
 .ngx-item.active { background: rgba(79, 124, 255, 0.12); }
-.ngx-name { font-size: 12.5px; color: #d6d6e0; font-weight: 550; }
-.ngx-dom { font-size: 11px; color: #70707a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ngx-name { font-size: 12.5px; color: var(--cp-text); font-weight: 550; }
+.ngx-dom { font-size: 11px; color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .res-bar :deep(.n-card__content) { padding: 12px 16px; }
-.res-item { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: #d6d6e0; }
-.res-k { font-size: 11.5px; color: #70707a; }
+.res-item { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--cp-text); }
+.res-k { font-size: 11.5px; color: var(--cp-text-mute); }
 </style>

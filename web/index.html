@@ -1,12 +1,30 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="description" content="choyeon panel — 原生 Linux 服务器管理面板（systemd / nginx / certbot / PostgreSQL）" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#101014" />
     <title>choyeon panel</title>
+    <script>
+      // 首屏防闪：在样式与框架加载前先落地主题，避免暗/亮切换时的白屏闪烁
+      (function () {
+        try {
+          var m = localStorage.getItem('cp_theme') || 'auto';
+          var dark = m === 'auto'
+            ? window.matchMedia('(prefers-color-scheme: dark)').matches
+            : m === 'dark';
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+          document.querySelector('meta[name="theme-color"]')
+            .setAttribute('content', dark ? '#101014' : '#f5f6fa');
+        } catch (e) { /* 隐私模式下 localStorage 不可用时忽略 */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>
+    <noscript>需要启用 JavaScript 才能使用 choyeon panel。</noscript>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

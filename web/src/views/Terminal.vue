@@ -2,12 +2,13 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { NButton, NTag, NIcon, NSpace } from 'naive-ui';
+import { NButton, NTag, NIcon, NSpace, useMessage } from 'naive-ui';
 import '@xterm/xterm/css/xterm.css';
 import { getToken } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 
+const msg = useMessage();
 const host = ref<HTMLElement | null>(null);
 const connected = ref(false);
 const disconnected = ref(false);
@@ -15,7 +16,19 @@ let term: Terminal | null = null;
 let fit: FitAddon | null = null;
 let ws: WebSocket | null = null;
 let pingTimer: number | null = null;
-let onWinResize: (() => void) | null = null;
+let ro: ResizeObserver | null = null;
+let mo: MutationObserver | null = null;
+
+function termTheme() {
+  const dark = document.documentElement.dataset.theme !== 'light';
+  return dark
+    ? { background: '#0c0c10', foreground: '#d4d4d4', cursor: '#4f7cff' }
+    : { background: '#fbfcfe', foreground: '#242b3a', cursor: '#3d66e8' };
+}
+
+function applyTheme() {
+  if (term) term.options.theme = termTheme();
+}
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -30,14 +43,17 @@ function connect() {
     try {
       const m = JSON.parse(e.data);
       if (m.d === 'out') term!.write(m.data);
-    } catch {}
+    } catch { /* 忽略非 JSON 帧 */ }
   };
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     connected.value = false;
     disconnected.value = true;
+    if (e.code === 4403) msg.error('当前账号无终端权限（仅管理员可用）');
+    else if (e.code === 4503) msg.error('终端会话数已达上限，请稍后再试');
     term?.writeln('\r\n\x1b[31m连接已断开。点击右上角「重新连接」恢复终端。\x1b[0m');
   };
 }
+
 function reconnect() {
   ws?.close();
   term?.clear();
@@ -49,21 +65,32 @@ onMounted(() => {
     cursorBlink: true,
     fontSize: 13,
     fontFamily: "'JetBrains Mono','Fira Code',monospace",
-    theme: { background: '#0c0c10', foreground: '#d4d4d4', cursor: '#4f7cff' },
+    theme: termTheme(),
   });
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(host.value!);
-  fit.fit();
+  try {
+    fit.fit();
+  } catch { /* 容器尺寸为 0 时忽略 */ }
   term.onData((d) => {
     if (ws?.readyState === 1) ws.send(JSON.stringify({ d: 'input', data: d }));
   });
   term.onResize(({ cols, rows }) => {
     if (ws?.readyState === 1) ws.send(JSON.stringify({ d: 'resize', cols, rows }));
   });
+  term.focus();
   connect();
-  onWinResize = () => fit?.fit();
-  window.addEventListener('resize', onWinResize);
+
+  if (window.ResizeObserver && host.value) {
+    ro = new ResizeObserver(() => {
+      try { fit?.fit(); } catch { /* ignore */ }
+    });
+    ro.observe(host.value);
+  }
+  mo = new MutationObserver(applyTheme);
+  mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
   pingTimer = window.setInterval(() => {
     if (ws?.readyState === 1) ws.send(JSON.stringify({ d: 'ping' }));
   }, 25000);
@@ -71,7 +98,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (pingTimer) clearInterval(pingTimer);
-  if (onWinResize) window.removeEventListener('resize', onWinResize);
+  ro?.disconnect();
+  mo?.disconnect();
   ws?.close();
   term?.dispose();
 });
@@ -85,7 +113,7 @@ onBeforeUnmount(() => {
           <template #icon><span class="dot" :class="connected ? 'ok' : 'err'"></span></template>
           {{ connected ? '已连接' : disconnected ? '已断开' : '连接中' }}
         </NTag>
-        <NButton size="small" tertiary @click="reconnect">
+        <NButton size="small" tertiary aria-label="重新连接终端" @click="reconnect">
           <template #icon><NIcon :component="icons.SyncOutline" /></template>
           重新连接
         </NButton>
@@ -97,30 +125,37 @@ onBeforeUnmount(() => {
         <span class="tdot" style="background: #f5616c"></span>
         <span class="tdot" style="background: #f5a623"></span>
         <span class="tdot" style="background: #34c77b"></span>
-        <NSpace align="center" :size="6" style="margin-left: 10px; color: #80808c; font-size: 12px">
+        <NSpace align="center" :size="6" style="margin-left: 10px; color: var(--cp-text-dim); font-size: 12px">
           <NIcon :component="icons.TerminalOutline" :size="13" /> root@choyeon — 面板终端
         </NSpace>
       </div>
-      <div ref="host" class="term-host"></div>
+      <div ref="host" class="term-host" aria-label="终端输出区" role="region"></div>
     </div>
   </div>
 </template>
 
 <style scoped>
 .term-wrap {
-  border: 1px solid var(--line);
+  border: 1px solid var(--cp-border);
   border-radius: 12px;
   overflow: hidden;
-  background: #0c0c10;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  background: var(--cp-code-bg);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
 }
 .term-bar {
   display: flex;
   align-items: center;
   padding: 9px 14px;
-  background: rgba(255, 255, 255, 0.04);
-  border-bottom: 1px solid var(--line);
+  background: var(--cp-hover);
+  border-bottom: 1px solid var(--cp-border);
 }
 .tdot { width: 11px; height: 11px; border-radius: 50%; margin-right: 6px; display: inline-block; }
-.term-host { height: calc(100vh - 260px); min-height: 380px; padding: 10px 6px 10px 12px; }
+.term-host {
+  height: calc(100vh - 260px);
+  min-height: 320px;
+  padding: 10px 6px 10px 12px;
+}
+@media (max-width: 640px) {
+  .term-host { height: calc(100vh - 300px); min-height: 260px; }
+}
 </style>
