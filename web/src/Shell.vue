@@ -120,7 +120,7 @@ const userOpts = [
   { label: '修改密码', key: 'pwd', icon: ico('KeyOutline', 16) },
   { label: '退出登录', key: 'out', icon: ico('ArrowForwardOutline', 16) },
 ];
-// DropdownOption 上没有 onClick，多出来的键会被 naive-ui 静默丢掉，动作只能走 @select。
+// DropdownOption 上没有 onClick，多出来的键会被 naive-ui 静默丢掉，动作只能走 :on-select。
 function onUserSelect(key: string) {
   if (key === 'pwd') showPwd.value = true;
   else doLogout();
@@ -195,12 +195,12 @@ function onUserSelect(key: string) {
             :options="themeOpts"
             trigger="click"
             placement="bottom-end"
-            @select="(k: string) => emit('update:themeMode', k as ThemeMode)"
+            :on-select="(k: string) => emit('update:themeMode', k as ThemeMode)"
           >
             <NButton quaternary circle size="small" title="外观主题" aria-label="切换外观主题" :icon="ico(themeIcon)" />
           </NDropdown>
 
-          <NDropdown :options="userOpts" trigger="click" placement="bottom-end" @select="onUserSelect">
+          <NDropdown :options="userOpts" trigger="click" placement="bottom-end" :on-select="onUserSelect">
             <button class="user-chip" type="button" :aria-label="`账号菜单，当前：${isAdmin ? '管理员' : '只读'}`">
               <span class="avatar">{{ isAdmin ? 'A' : 'V' }}</span>
               <span v-if="!isMobile" class="user-role">{{ isAdmin ? '管理员' : '只读' }}</span>
@@ -259,9 +259,9 @@ function onUserSelect(key: string) {
   padding: var(--space-4) var(--space-4) var(--space-3);
   min-height: var(--header-h);
 }
-.cp-content :deep(.n-layout-scroll-container) { padding: var(--space-5) var(--space-5) var(--space-6); }
+.cp-content :deep(.n-layout-scroll-container) { padding: var(--space-4) var(--space-5) var(--space-5); }
 @media (max-width: 900px) {
-  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-4) var(--space-4) var(--space-5); }
+  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-3) var(--space-4) var(--space-4); }
 }
 @media (max-width: 640px) {
   .cp-title { font-size: var(--fs-sm); font-weight: 600; }
@@ -294,6 +294,8 @@ function onUserSelect(key: string) {
   justify-content: space-between;
   padding: 0 var(--space-5);
   gap: var(--space-3);
+  backdrop-filter: blur(8px);
+  background: color-mix(in srgb, var(--cp-bg-1) 85%, transparent);
 }
 @media (max-width: 900px) {
   .cp-header { padding: 0 var(--space-4); }
@@ -303,26 +305,34 @@ function onUserSelect(key: string) {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1);
+  padding: 4px var(--space-3) 4px 4px;
   border-radius: var(--radius-pill);
-  border: 1px solid transparent;
-  background: transparent;
+  border: 1px solid var(--cp-border);
+  background: var(--cp-hover);
   color: var(--cp-text-dim);
   cursor: pointer;
-  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  transition: all var(--dur) var(--ease);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1;
 }
-.user-chip:hover { background: var(--cp-hover); border-color: var(--cp-border); }
+.user-chip:hover {
+  background: var(--cp-selected);
+  border-color: var(--cp-brand);
+  color: var(--cp-brand);
+}
 .avatar {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: var(--gradient-brand);
   color: #fff;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-2xs);
   font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
-.user-role { font-size: var(--fs-sm); }
+.user-role { font-size: var(--fs-sm); font-weight: 500; }
 </style>
