@@ -32,12 +32,18 @@ jobs:
         with:
           python-version: ${{ matrix.py }}
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
       - name: 安装依赖
         run: |
           python -m pip install -q --upgrade pip
           python -m pip install -q -r requirements.txt
+          # 测试依赖与生产依赖分开：starlette 1.x 的 TestClient 硬依赖 httpx2，
+          # 干净环境缺它会 RuntimeError（本地 venv 有旧 httpx 只报 warning，
+          # 所以本地绿不代表 CI 绿）
+          python -m pip install -q -r requirements-dev.txt
           python -m pip install -q ruff mypy
 
       - name: 语法编译

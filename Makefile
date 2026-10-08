@@ -51,8 +51,8 @@ build: build-web ## 构建前端产物
 build-web: ## 仅构建前端
 	cd web && npm run build
 
-test: ## 后端单元测试
-	cd backend && python3 -m unittest discover -s tests -v
+test: ## 后端单元测试（用 .venv；测试依赖见 backend/requirements-dev.txt）
+	cd backend && .venv/bin/python -m unittest discover -s tests -v
 
 lint: ## 静态检查（ruff + mypy + vue-tsc）
 	cd backend && (ruff check . || true) && (mypy app || true)

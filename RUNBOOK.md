@@ -124,6 +124,7 @@ journalctl -u choyeon-panel -n 100 --no-pager   # 看真实报错
 | `No such file or directory: .../backend/app/main.py` | `WorkingDirectory` 与实际安装路径不符 | 重新渲染 unit：`/root/choyeon-panel/scripts/update.sh --no-pull` |
 | `Permission denied` 写 `/etc/nginx` | 服务不是 root 运行 | unit 必须保持 root（面板要管理 nginx/systemd） |
 | `ModuleNotFoundError` | `.venv` 依赖缺失 | `cd backend && .venv/bin/pip install -r requirements.txt` |
+| `starlette.testclient ... requires the httpx2 package`（只在 CI 红、本地绿） | 测试依赖没装：starlette 1.x 的 `TestClient` 硬依赖 `httpx2`，本地 venv 里躺着旧 `httpx` 只会降级成 deprecation warning | `cd backend && .venv/bin/pip install -r requirements-dev.txt`（CI 已自动装，见 `ci.yml`） |
 | 启动 5 次后停止重试 | 触发了 `StartLimitBurst=5` | 先修根因，再 `systemctl reset-failed choyeon-panel && systemctl start choyeon-panel` |
 | `Failed at step SECCOMP spawning` | unit 里加了 `SystemCallFilter=` | 删除该行（本项目 unit 刻意不启用 seccomp） |
 

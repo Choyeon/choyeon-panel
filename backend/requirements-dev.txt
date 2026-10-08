@@ -1,0 +1,11 @@
+# choyeon-panel 后端「测试/开发」依赖（生产环境不需要，别写进 requirements.txt）
+#
+# 为什么单独一个文件：
+# - requirements.txt 与 pyproject.toml 的 [project].dependencies 一致，
+#   被 scripts/common.sh 的 venv_create() 用于生产安装，装测试包会污染线上环境。
+# - starlette>=1.2（本作装到 1.7.0）的 TestClient 硬依赖 httpx2：
+#   干净环境里 `from starlette.testclient import TestClient` 直接
+#   RuntimeError（"requires the httpx2 package"），只有本地 venv 恰好带着
+#   旧 httpx 时才退化成 deprecation warning。所以本地绿 ≠ CI 绿，
+#   CI 必须显式安装本文件（见 .github/workflows/ci.yml 的「安装依赖」步骤）。
+httpx2>=2.0

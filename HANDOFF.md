@@ -89,7 +89,7 @@
 cd /workspace/choyeon-panel
 git status --short                 # 看本轮改动清单
 make help                          # 全部常用命令
-cd backend && python3 -m unittest discover -s tests   # 52 项测试
+cd backend && .venv/bin/python -m unittest discover -s tests   # 后端测试（测试依赖见 requirements-dev.txt）
 ./bin/choyeonctl doctor                                # 命令行自检
 ./bin/choyeonctl schema --json                         # AI 可读的命令契约
 cd backend && ruff check . && mypy app                # 静态检查（均应为 0 问题）

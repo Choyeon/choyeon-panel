@@ -99,7 +99,8 @@ backend/
   cli.py               choyeonctl：命令行部署/账号/应用/备份/自检，全命令支持 --json
   backup_runner.py     备份 CLI（systemd timer 调用）
   python/sys_helper.py 系统指标采集（仅标准库）
-  tests/               unittest 套件
+  tests/               unittest 套件（依赖见 requirements-dev.txt，测试专用）
+  requirements-dev.txt 测试/开发依赖（不进生产 requirements.txt，别用 venv_create 装）
 bin/choyeonctl         命令行入口（安装后软链到 /usr/local/bin）
 web/                   Vue 3 + Naive UI 前端
   src/style.css        设计令牌（design tokens）、双主题变量与动效令牌
@@ -153,9 +154,12 @@ Windows 本机也可开发：systemd/journalctl/nginx 等 Linux 专属能力会�
 ## 测试与质量
 
 ```bash
-cd backend && python3 -m unittest discover -s tests   # 校验器、unit 渲染与转义、nginx 解析、
-                                                      # 路径守卫、令牌吊销、限速、日志裁剪、超时清理
-                                                      # 部署模板、就绪探针
+cd backend
+.venv/bin/pip install -r requirements-dev.txt       # 测试依赖（httpx2 是 TestClient 硬需求）
+                                                    # 或 uv pip install --python .venv/bin/python -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s tests      # 校验器、unit 渲染与转义、nginx 解析、
+                                                    # 路径守卫、令牌吊销、限速、日志裁剪、超时清理
+                                                    # 部署模板、就绪探针
 cd web && npm run build                               # vue-tsc 类型检查 + vite 构建
 bash scripts/healthcheck.sh                           # 线上健康检查
 ```
