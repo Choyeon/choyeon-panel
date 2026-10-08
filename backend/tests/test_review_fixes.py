@@ -5,13 +5,15 @@
 改名后旧 unit/站点被拆除并按新名重建、仓库地址里的凭据不外泄、备份目标应用被删后要在列表里露出来、
 公开状态接口不回显管理员用户名、CLI 的 --json 契约与部署等待、
 文件接口对 viewer 全面关闭、写入不跟随符号链接、审计字段长度受约束、
-终端会话计数不漏、psql 管道不互等，以及接口错误不留半成品变更。
+终端会话计数不漏、psql 管道不互等，接口错误不留半成品变更，
+以及下拉菜单的动作确实挂在能被触发的那个钩子上。
 """
 
 import asyncio
 import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -769,6 +771,34 @@ class TestDoctorCoversGlobalCli(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(meta.config, "BASE", d):
             res = await meta._check_cli()
         self.assertEqual(res["status"], "pass", "普通开发者机器不该因为没装全局 CLI 被报错")
+
+
+class TestDropdownActionsWired(unittest.TestCase):
+    """回归：naive-ui 的 DropdownOption 上没有 onClick，多写的键会被静默丢掉，
+    菜单项点开什么也不发生（顶栏「修改密码/退出登录」曾整组失效），
+    而 vue-tsc 也不会报错——TreeOption 带索引签名。动作只能挂在 NDropdown 的 @select 上。
+    """
+
+    WEB_SRC = BACKEND.parent / "web" / "src"
+
+    def test_every_dropdown_listens_for_select(self):
+        missing = []
+        for f in sorted(self.WEB_SRC.rglob("*.vue")):
+            text = f.read_text(encoding="utf-8")
+            for tag in re.finditer(r"<NDropdown\b[^>]*>", text, re.S):
+                if "@select" not in tag.group(0):
+                    line = text[: tag.start()].count("\n") + 1
+                    missing.append(f"{f.relative_to(self.WEB_SRC.parent)}:{line}")
+        self.assertEqual(missing, [], f"以下 NDropdown 没有 @select，菜单项点了不会有任何动作：{missing}")
+
+    def test_option_lists_do_not_carry_onClick(self):
+        # 只查传给 NDropdown 的那类选项字面量：`{ label: '…', key: '…', onClick: … }`
+        bad = []
+        for f in sorted(self.WEB_SRC.rglob("*.vue")):
+            for m in re.finditer(r"\{\s*label:\s*[^{}]*onClick:", f.read_text(encoding="utf-8")):
+                line = m.string[: m.start()].count("\n") + 1
+                bad.append(f"{f.relative_to(self.WEB_SRC.parent)}:{line}")
+        self.assertEqual(bad, [], f"下拉选项上的 onClick 不生效，请改用 NDropdown @select：{bad}")
 
 
 if __name__ == "__main__":

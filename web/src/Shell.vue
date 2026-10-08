@@ -117,9 +117,14 @@ const themeOpts = [
 ];
 
 const userOpts = [
-  { label: '修改密码', key: 'pwd', icon: ico('KeyOutline', 16), onClick: () => (showPwd.value = true) },
-  { label: '退出登录', key: 'out', icon: ico('ArrowForwardOutline', 16), onClick: doLogout },
+  { label: '修改密码', key: 'pwd', icon: ico('KeyOutline', 16) },
+  { label: '退出登录', key: 'out', icon: ico('ArrowForwardOutline', 16) },
 ];
+// DropdownOption 上没有 onClick，多出来的键会被 naive-ui 静默丢掉，动作只能走 @select。
+function onUserSelect(key: string) {
+  if (key === 'pwd') showPwd.value = true;
+  else doLogout();
+}
 </script>
 
 <template>
@@ -195,7 +200,7 @@ const userOpts = [
             <NButton quaternary circle size="small" title="外观主题" aria-label="切换外观主题" :icon="ico(themeIcon)" />
           </NDropdown>
 
-          <NDropdown :options="userOpts" trigger="click" placement="bottom-end">
+          <NDropdown :options="userOpts" trigger="click" placement="bottom-end" @select="onUserSelect">
             <button class="user-chip" type="button" :aria-label="`账号菜单，当前：${isAdmin ? '管理员' : '只读'}`">
               <span class="avatar">{{ isAdmin ? 'A' : 'V' }}</span>
               <span v-if="!isMobile" class="user-role">{{ isAdmin ? '管理员' : '只读' }}</span>

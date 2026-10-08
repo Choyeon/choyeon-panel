@@ -151,8 +151,12 @@ const quickMenu = quickOpts.map((o) => ({
   key: o.key,
   disabled: o.disabled,
   icon: () => h(NIcon, { component: icons[o.icon], size: 16 }),
-  onClick: () => router.push(o.to),
 }));
+// 选项级 onClick 不在 DropdownOption 上，naive-ui 只认 NDropdown 的 @select。
+function quickGo(key: string) {
+  const to = quickOpts.find((o) => o.key === key)?.to;
+  if (to) router.push(to);
+}
 
 onMounted(async () => {
   try {
@@ -213,7 +217,7 @@ window.addEventListener('resize', onResize);
         <span v-if="sideError" class="st warn"><span class="dot warn"></span>服务状态未知</span>
         <span v-else-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
         <span v-else class="st err"><span class="dot err"></span>{{ failedUnits.length }} 个服务异常</span>
-        <NDropdown trigger="click" :options="quickMenu">
+        <NDropdown trigger="click" :options="quickMenu" @select="quickGo">
           <NButton type="primary" round size="small" class="cp-press">快捷操作</NButton>
         </NDropdown>
       </NSpace>
