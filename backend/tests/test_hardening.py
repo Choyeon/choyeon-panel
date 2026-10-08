@@ -514,6 +514,77 @@ class TestUserCreateErrorHonesty(unittest.TestCase):
         self.assertEqual(r.status_code, 500, r.text)
 
 
+class TestDeletedUserNameReuse(unittest.TestCase):
+    """删号 → 同名重建，旧 token 必须永久失效。
+
+    users_delete 里那句 `security.bump_user_epoch(u["username"])` 看着多余
+    （用户都删了，吊销谁的 token？），实际是唯一挡住这件事的东西：
+    从没改过密的用户，token 里带的是**全局** epoch；删号时若不写一条
+    `token_epoch:<name>`，把这个名字发给下一个人时，旧 token 的 ver 又会
+    和 _user_epoch(name) 相等（双双回落全局 epoch）——离职管理员的 admin
+    权限原地复活。实测（手工 DELETE FROM settings WHERE key LIKE 'token_epoch:%'
+    模拟一次「清理孤儿配置」）旧 token 直接 verify 成功且 role=admin。
+
+    所以这里锁两件事：删号必须留下 per-user epoch；epoch 行不得被当垃圾清掉。
+    """
+
+    def setUp(self):
+        self.admin = _uid("durn_admin_")
+        self.target = _uid("durn_target_")
+        dbm.execute(
+            "INSERT OR REPLACE INTO users(username,pass_hash,role) VALUES(?,?,?)",
+            (self.admin, security.hash_pass("Password123"), "admin"),
+        )
+        self.addCleanup(dbm.execute, "DELETE FROM users WHERE username=?", (self.admin,))
+        self.addCleanup(dbm.execute, "DELETE FROM users WHERE username=?", (self.target,))
+        self.headers = {"Authorization": f"Bearer {security.sign_token(self.admin, 'admin')}"}
+
+    def _client(self):
+        from starlette.testclient import TestClient
+
+        from app import main as _main
+
+        return TestClient(_main.app, raise_server_exceptions=False)
+
+    def test_delete_bumps_epoch_then_recreate_rejects_old_token(self):
+        client = self._client()
+        dbm.execute(
+            "INSERT OR REPLACE INTO users(username,pass_hash,role) VALUES(?,?,?)",
+            (self.target, security.hash_pass("Password123"), "admin"),
+        )
+        uid = dbm.query_one("SELECT id FROM users WHERE username=?", (self.target,))["id"]
+        # 不经过改密，直接签发 —— token 带的是全局 epoch（最危险的那种）
+        old_token = security.sign_token(self.target, "admin")
+        self.assertEqual(security.verify_token(old_token)["role"], "admin", "基线：旧 token 是 admin")
+
+        r = client.delete(f"/api/users/{uid}", headers=self.headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNotNone(
+            dbm.get_setting(f"token_epoch:{self.target}"),
+            "删号必须留下 per-user epoch，否则同名重建后旧 token 会重新有效",
+        )
+        with self.assertRaises(jwt.InvalidTokenError):
+            security.verify_token(old_token)
+
+        # 同名重建，交给下一个人
+        dbm.execute(
+            "INSERT OR REPLACE INTO users(username,pass_hash,role) VALUES(?,?,?)",
+            (self.target, security.hash_pass("AnotherPass9"), "viewer"),
+        )
+        with self.assertRaises(jwt.InvalidTokenError, msg="同名重建后，前一个人的 token 必须仍然失效"):
+            security.verify_token(old_token)
+
+    def test_epoch_row_survives_a_settings_sweep(self):
+        """守卫「别把 token_epoch:* 当孤儿配置清掉」这条不变量：
+        产品代码里没有任何删 settings 的路径，将来若有人加，这条要红。"""
+        joined = "\n".join(p.read_text(encoding="utf-8") for p in (config.BASE / "backend" / "app").rglob("*.py"))
+        self.assertNotIn(
+            "DELETE FROM settings",
+            joined,
+            "app/ 里出现了删除 settings 的语句：token_epoch:<user> 被清掉会让同名重建复活旧 token",
+        )
+
+
 # ---------------------------------------------------------------- 登录限速
 class TestLoginRateLimit(unittest.TestCase):
     def setUp(self):
