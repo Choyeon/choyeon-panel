@@ -54,7 +54,7 @@ class TestProtectedInstallPath(unittest.TestCase):
     def test_validate_calls_the_guard(self):
         with mock.patch.object(apps_service, "_check_not_protected") as guard:
             apps_service._validate(
-                {"name": "guard-probe", "start_cmd": "node s.js", "path": f"{config.BASE}/x"},
+                {"name": "guard-probe", "type": "node", "start_cmd": "node s.js", "path": f"{config.BASE}/x"},
                 ignore_id=-1,
             )
         guard.assert_called_once_with(f"{config.BASE}/x")
