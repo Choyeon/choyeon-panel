@@ -214,5 +214,23 @@ class TestCliJsonContract(unittest.TestCase):
         self.assertIn("healthy", json.loads(p.stdout))
 
 
+class TestAuthStatusPrivacy(unittest.IsolatedAsyncioTestCase):
+    """回归：/api/auth/status 未登录即可访问，回显账号名等于把管理员用户名公开。"""
+
+    async def test_public_status_has_no_username(self):
+        from app import main
+
+        with mock.patch.object(main.dbm, "query_one", return_value={"username": "admin"}):
+            res = await main.auth_status()
+        self.assertFalse(res["needsSetup"])
+        self.assertNotIn("admin", json.dumps(res))
+
+    async def test_empty_database_still_reports_setup(self):
+        from app import main
+
+        with mock.patch.object(main.dbm, "query_one", return_value=None):
+            self.assertTrue((await main.auth_status())["needsSetup"])
+
+
 if __name__ == "__main__":
     unittest.main()

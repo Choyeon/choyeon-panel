@@ -13,13 +13,22 @@ const password2 = ref('');
 const err = ref('');
 const loading = ref(false);
 
+// 用户名由本机记忆提供：/auth/status 不再回显账号名，避免未登录就泄露管理员用户名
+const LAST_USER = 'cp_last_user';
+
 onMounted(async () => {
   try {
     const s = await api.status();
     needsSetup.value = s.needsSetup;
-    if (!s.needsSetup && s.username) username.value = s.username;
   } catch {
     err.value = '无法连接面板后端，请确认服务已启动';
+  }
+  if (!needsSetup.value) {
+    try {
+      username.value = localStorage.getItem(LAST_USER) || '';
+    } catch {
+      /* 隐私模式下 localStorage 不可用，留空即可 */
+    }
   }
 });
 
@@ -47,6 +56,11 @@ async function submit() {
       : await api.login(username.value, password.value);
     setToken(r.token);
     setRole(r.role || 'admin');
+    try {
+      localStorage.setItem(LAST_USER, username.value);
+    } catch {
+      /* 存不下不影响登录 */
+    }
     router.replace('/dashboard');
   } catch (e: any) {
     err.value = e.message || '请求失败';
@@ -99,37 +113,40 @@ async function submit() {
             <div class="field">
               <label for="cp-username">用户名</label>
               <NInput
-                id="cp-username"
                 v-model:value="username"
-                placeholder="admin"
+                :placeholder="needsSetup ? '3-32 位字母、数字、下划线' : '请输入用户名'"
                 size="large"
-                autocomplete="username"
                 :autofocus="true"
-                :input-props="{ autocomplete: 'username' }"
+                :input-props="{ id: 'cp-username', name: 'username', autocomplete: 'username' }"
               />
             </div>
             <div class="field">
               <label for="cp-password">密码</label>
               <NInput
-                id="cp-password"
                 v-model:value="password"
                 type="password"
                 size="large"
                 show-password-on="click"
                 placeholder="至少 8 位"
-                autocomplete="current-password"
-                :input-props="{ autocomplete: needsSetup ? 'new-password' : 'current-password' }"
+                :input-props="{
+                  id: 'cp-password',
+                  name: 'password',
+                  autocomplete: needsSetup ? 'new-password' : 'current-password',
+                }"
               />
             </div>
             <div v-if="needsSetup" class="field">
               <label for="cp-password2">确认密码</label>
               <NInput
-                id="cp-password2"
                 v-model:value="password2"
                 type="password"
                 size="large"
                 placeholder="再输入一次"
-                :input-props="{ autocomplete: 'new-password' }"
+                :input-props="{
+                  id: 'cp-password2',
+                  name: 'password2',
+                  autocomplete: 'new-password',
+                }"
               />
             </div>
             <NButton

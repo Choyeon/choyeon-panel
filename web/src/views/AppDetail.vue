@@ -21,6 +21,7 @@ const edit = ref<any>({});
 const deps = ref<any[]>([]);
 const depLog = ref<any>(null);
 const saving = ref(false);
+const loadErr = ref('');
 const sslEmail = ref('');
 
 const ngx = ref<any>(null);
@@ -116,12 +117,22 @@ function ico(name: string, size = 14) {
 }
 
 async function load() {
-  app.value = await api.app(id);
-  if (!app.value) return;
-  edit.value = { ...app.value, port: app.value.port ? String(app.value.port) : '' };
-  env.value = JSON.parse(app.value.env || '[]');
-  dbSel.value = (app.value.db_names || '').split(',').filter(Boolean);
-  deps.value = await api.deployments(id);
+  loadErr.value = '';
+  try {
+    const data = await api.app(id);
+    if (!data) {
+      loadErr.value = '未找到该应用，可能已被删除';
+      return;
+    }
+    app.value = data;
+    edit.value = { ...app.value, port: app.value.port ? String(app.value.port) : '' };
+    env.value = JSON.parse(app.value.env || '[]');
+    dbSel.value = (app.value.db_names || '').split(',').filter(Boolean);
+    deps.value = await api.deployments(id);
+  } catch (e: any) {
+    loadErr.value = e.message || '加载应用详情失败';
+    return;
+  }
   loadNginx();
   loadPg();
   loadUnit();
@@ -199,7 +210,14 @@ onMounted(load);
 </script>
 
 <template>
-  <div v-if="!app" class="page-loading">
+  <div v-if="loadErr" class="page-loading">
+    <NAlert type="error" :bordered="false" role="alert">{{ loadErr }}</NAlert>
+    <NSpace justify="center">
+      <NButton size="small" class="cp-press" @click="load">重新加载</NButton>
+      <NButton size="small" quaternary @click="router.push('/apps')">返回列表</NButton>
+    </NSpace>
+  </div>
+  <div v-else-if="!app" class="page-loading">
     <NSkeleton height="52px" class="cp-shimmer" style="border-radius: var(--radius-lg)" />
     <NSkeleton v-for="i in 3" :key="i" height="88px" class="cp-shimmer" style="border-radius: var(--radius-lg)" />
   </div>

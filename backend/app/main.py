@@ -79,8 +79,8 @@ async def health():
 
 @app.get("/api/auth/status")
 async def auth_status():
-    u = dbm.query_one("SELECT username FROM users LIMIT 1")
-    return {"needsSetup": not u, "username": u["username"] if u else None}
+    # 未登录可访问：只告知是否需要初始化，不回显已有账号名
+    return {"needsSetup": not dbm.query_one("SELECT 1 FROM users LIMIT 1")}
 
 
 def _user_token(username: str, role: str) -> dict:
