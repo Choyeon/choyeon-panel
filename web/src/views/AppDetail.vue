@@ -175,10 +175,20 @@ async function deploy() {
   }
 }
 async function pollDeps() {
-  deps.value = await api.deployments(id);
+  // 轮询是 setTimeout 里跑的，失败若不在这里吞掉就变成未处理的 promise rejection：
+  // 界面上部署记录停在旧数据、也没有任何提示。
+  try {
+    deps.value = await api.deployments(id);
+  } catch (e: any) {
+    msg.error(`部署记录获取失败：${e.message}`);
+  }
 }
 async function viewDep(depId: number) {
-  depLog.value = await api.deployment(id, depId);
+  try {
+    depLog.value = await api.deployment(id, depId);
+  } catch (e: any) {
+    msg.error(`部署日志获取失败：${e.message}`);
+  }
 }
 async function act(verb: string) {
   try {
