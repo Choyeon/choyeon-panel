@@ -15,6 +15,7 @@ const rows = ref<any[]>([]);
 const apps = ref<any[]>([]);
 const show = ref(false);
 const busy = ref<number | null>(null);
+const submitting = ref(false);
 const form = ref<any>({ kind: 'pg', target: 'rosetta', schedule: 'daily', hour: 3, minute: 30, keep: 7, enabled: true });
 
 const kindOpts = [
@@ -97,11 +98,16 @@ const columns: any[] = [
   },
 ];
 
+const loading = ref(false);
+
 async function load() {
+  loading.value = true;
   try {
     rows.value = await api.backups();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    loading.value = false;
   }
 }
 async function run(id: number) {
@@ -127,6 +133,8 @@ async function del(id: number) {
   }
 }
 async function create() {
+  // 连点两次就会建出两条同名计划，两个 timer 往同一目录反复备份。
+  submitting.value = true;
   try {
     await api.createBackup(form.value);
     msg.success('已创建');
@@ -134,6 +142,8 @@ async function create() {
     load();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    submitting.value = false;
   }
 }
 
@@ -158,7 +168,7 @@ onMounted(async () => {
       调度由 systemd timer 独立完成，面板进程停止不影响备份执行。PG 使用 pg_dump 自定义格式（pg_restore 可恢复）；应用打包自动排除 node_modules / .venv / .next / .output。
     </NAlert>
 
-    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :scroll-x="980" :row-key="(r: any) => r.id">
+    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading" :scroll-x="980" :row-key="(r: any) => r.id">
       <template #empty><EmptyBox text="还没有备份任务，点击右上角新建" /></template>
     </NDataTable>
 
@@ -185,7 +195,7 @@ onMounted(async () => {
             <NSwitch v-model:value="form.enabled" size="small" aria-labelledby="bk-schedule-enabled" />
           </NSpace>
           <NFormItem label="保留份数"><NInputNumber v-model:value="form.keep" :min="1" :max="60" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px" /></NFormItem>
-          <NButton type="primary" block class="cp-press" :icon="ico('AddOutline')" @click="create">创建任务</NButton>
+          <NButton type="primary" block class="cp-press" :loading="submitting" :icon="ico('AddOutline')" @click="create">创建任务</NButton>
         </NSpace>
       </NForm>
     </NModal>

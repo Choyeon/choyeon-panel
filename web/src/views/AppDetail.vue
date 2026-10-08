@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, h } from 'vue';
+import { onBeforeUnmount, onMounted, ref, h } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NCard, NTabs, NTabPane, NSpace, NButton, NText, NTag, NInput, NDynamicInput,
@@ -20,7 +20,14 @@ const env = ref<{ k: string; v: string }[]>([]);
 const edit = ref<any>({});
 const deps = ref<any[]>([]);
 const depLog = ref<any>(null);
+// 延迟刷新不能拖过页面卸载：那是一次没人看的请求，失败还会把错误 toast 打到新页面上。
+const timers: number[] = [];
+function later(fn: () => void, ms: number) {
+  timers.push(window.setTimeout(fn, ms));
+}
+onBeforeUnmount(() => timers.forEach(clearTimeout));
 const saving = ref(false);
+const acting = ref('');
 const loadErr = ref('');
 const sslEmail = ref('');
 
@@ -166,12 +173,15 @@ async function save() {
 }
 
 async function deploy() {
+  acting.value = 'deploy';
   try {
     await api.deploy(id);
     msg.success('部署已开始');
-    setTimeout(pollDeps, 1000);
+    later(pollDeps, 1000);
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    acting.value = '';
   }
 }
 async function pollDeps() {
@@ -191,11 +201,14 @@ async function viewDep(depId: number) {
   }
 }
 async function act(verb: string) {
+  acting.value = verb;
   try {
     await api.appAction(id, verb);
-    setTimeout(load, 600);
+    later(load, 600);
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    acting.value = '';
   }
 }
 async function ssl() {
@@ -242,11 +255,11 @@ onMounted(load);
           <span class="dot" :class="app.running ? 'ok' : 'idle'"></span>{{ app.running ? '运行中' : '已停止' }}
         </span>
         <span v-if="app.deploying" class="st warn"><span class="dot warn"></span>部署中</span>
-        <NButton size="small" type="primary" class="cp-press" :icon="ico('CloudUploadOutline')" @click="deploy">立即部署</NButton>
-        <NButton size="small" :tertiary="!app.running" :type="app.running ? 'warning' : 'success'" :icon="ico(app.running ? 'StopOutline' : 'PlayOutline')" @click="act(app.running ? 'stop' : 'start')">
+        <NButton size="small" type="primary" class="cp-press" :loading="acting === 'deploy'" :disabled="!!acting" :icon="ico('CloudUploadOutline')" @click="deploy">立即部署</NButton>
+        <NButton size="small" :tertiary="!app.running" :type="app.running ? 'warning' : 'success'" :loading="acting === (app.running ? 'stop' : 'start')" :disabled="!!acting" :icon="ico(app.running ? 'StopOutline' : 'PlayOutline')" @click="act(app.running ? 'stop' : 'start')">
           {{ app.running ? '停止' : '启动' }}
         </NButton>
-        <NButton size="small" tertiary :disabled="!app.running" :icon="ico('SyncOutline')" @click="act('restart')">重启</NButton>
+        <NButton size="small" tertiary :disabled="!app.running || !!acting" :loading="acting === 'restart'" :icon="ico('SyncOutline')" @click="act('restart')">重启</NButton>
         <NPopconfirm @positive-click="purge">
           <template #trigger>
             <NButton size="small" quaternary type="error" :icon="ico('TrashOutline')" title="彻底删除应用与文件" aria-label="彻底删除应用与文件" />

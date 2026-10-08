@@ -20,6 +20,7 @@ const collapsed = ref(false);
 const showPwd = ref(false);
 const oldPwd = ref('');
 const newPwd = ref('');
+const pwdBusy = ref(false);
 const renewing = ref(false);
 
 const isMobile = ref(false);
@@ -90,6 +91,9 @@ function doLogout() {
 }
 
 async function doChangePwd() {
+  // 第一次改密成功后旧口令就不再匹配，连点第二下只会报"原密码错误"，
+  // 让人误以为没改成功又试一遍。
+  pwdBusy.value = true;
   try {
     const r = await api.changePassword(oldPwd.value, newPwd.value);
     if (r?.token) setToken(r.token); // 改密后旧 token 失效，服务端会签发新 token
@@ -98,6 +102,8 @@ async function doChangePwd() {
     msg.success('密码已修改');
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    pwdBusy.value = false;
   }
 }
 
@@ -229,7 +235,7 @@ const userOpts = [
         />
         <NSpace justify="end" :size="8">
           <NButton tertiary @click="showPwd = false">取消</NButton>
-          <NButton type="primary" class="cp-press" :disabled="!oldPwd || newPwd.length < 8" @click="doChangePwd">
+          <NButton type="primary" class="cp-press" :loading="pwdBusy" :disabled="!oldPwd || newPwd.length < 8" @click="doChangePwd">
             确认修改
           </NButton>
         </NSpace>

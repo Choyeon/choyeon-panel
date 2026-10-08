@@ -39,13 +39,17 @@ async function grab(fn: () => Promise<any>, set: (v: any) => void) {
   }
 }
 
+const loading = ref(false);
+
 async function load() {
+  loading.value = true;
   if (isAdmin.value) {
     await grab(() => api.audit(100), (v) => (auditLog.value = v));
     await grab(() => api.users(), (v) => (users.value = v));
     await grab(() => api.alertSettings(), (v) => (alerts.value = v));
   }
   await grab(() => api.firewall(), (v) => (fw.value = v));
+  loading.value = false;
 }
 async function renew() {
   renewing.value = true;
@@ -179,7 +183,7 @@ onMounted(load);
           <template #header><span class="section-title"><NIcon :component="icons.OptionsOutline" :size="15" color="var(--cp-brand-soft)" /> 用户管理</span></template>
           <template #header-extra><NButton size="tiny" type="primary" :icon="ico('AddOutline', 12)" @click="showUser = true">新建用户</NButton></template>
           <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-2)">只读账号可查看全部监控/日志/数据，但不能执行启停、部署、删除、终端等任何写操作。</NText>
-          <NDataTable size="small" :bordered="false" :scroll-x="620" :columns="userCols" :data="users">
+          <NDataTable size="small" :bordered="false" :loading="loading" :scroll-x="620" :columns="userCols" :data="users">
             <template #empty><EmptyBox text="暂无用户" /></template>
           </NDataTable>
         </NCard>

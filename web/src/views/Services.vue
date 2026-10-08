@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, h, computed } from 'vue';
+import { onBeforeUnmount, onMounted, ref, h, computed } from 'vue';
 import { NDataTable, NButton, NSpace, NInput, NCard, useMessage, NIcon } from 'naive-ui';
 import { api } from '../api';
 import { icons } from '../icons';
@@ -12,6 +12,16 @@ const rows = ref<any[]>([]);
 const filter = ref('');
 const showAll = ref(false);
 const logUnit = ref<string | null>(null);
+const loading = ref(false);
+const busy = ref<{ unit: string; verb: string } | null>(null);
+const busyOn = (unit: string, verb: string) => busy.value?.unit === unit && busy.value?.verb === verb;
+const unitBusy = (unit: string) => busy.value?.unit === unit;
+// 延迟刷新不能拖过页面卸载：那是一次没人看的请求，失败还会把错误 toast 打到新页面上。
+const timers: number[] = [];
+function later(fn: () => void, ms: number) {
+  timers.push(window.setTimeout(fn, ms));
+}
+onBeforeUnmount(() => timers.forEach(clearTimeout));
 
 const important = ['nginx', 'postgresql', 'redis', 'rosetta', 'choyeon', 'ssh', 'panel-'];
 const services = computed(() => rows.value.filter((r) => r.unit.endsWith('.service')));
@@ -29,18 +39,24 @@ function ico(name: string, size = 14) {
 }
 
 async function load() {
+  loading.value = true;
   try {
     rows.value = await api.services();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    loading.value = false;
   }
 }
 async function act(unit: string, verb: string) {
+  busy.value = { unit, verb };
   try {
     await api.serviceAction(unit, verb);
-    setTimeout(load, 400);
+    later(load, 400);
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    busy.value = null;
   }
 }
 
@@ -70,10 +86,10 @@ const columns: any[] = [
     title: '操作', key: 'ops', width: 300,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, type: 'success', disabled: r.active === 'active', icon: ico('PlayOutline'), onClick: () => act(r.unit, 'start') }, () => '启动'),
-        h(NButton, { size: 'tiny', tertiary: true, type: 'warning', disabled: r.active !== 'active', icon: ico('StopOutline'), onClick: () => act(r.unit, 'stop') }, () => '停止'),
-        h(NButton, { size: 'tiny', tertiary: true, disabled: r.active !== 'active', icon: ico('SyncOutline'), onClick: () => act(r.unit, 'restart') }, () => '重启'),
-        h(NButton, { size: 'tiny', quaternary: true, icon: ico('KeyOutline'), onClick: () => act(r.unit, 'enable') }, () => '自启'),
+        h(NButton, { size: 'tiny', tertiary: true, type: 'success', disabled: r.active === 'active' || unitBusy(r.unit), loading: busyOn(r.unit, 'start'), icon: ico('PlayOutline'), onClick: () => act(r.unit, 'start') }, () => '启动'),
+        h(NButton, { size: 'tiny', tertiary: true, type: 'warning', disabled: r.active !== 'active' || unitBusy(r.unit), loading: busyOn(r.unit, 'stop'), icon: ico('StopOutline'), onClick: () => act(r.unit, 'stop') }, () => '停止'),
+        h(NButton, { size: 'tiny', tertiary: true, disabled: r.active !== 'active' || unitBusy(r.unit), loading: busyOn(r.unit, 'restart'), icon: ico('SyncOutline'), onClick: () => act(r.unit, 'restart') }, () => '重启'),
+        h(NButton, { size: 'tiny', quaternary: true, disabled: unitBusy(r.unit), loading: busyOn(r.unit, 'enable'), icon: ico('KeyOutline'), onClick: () => act(r.unit, 'enable') }, () => '自启'),
       ]),
   },
 ];
@@ -96,7 +112,7 @@ onMounted(load);
       <template #prefix><NIcon :component="icons.SearchOutline" /></template>
     </NInput>
 
-    <NDataTable :columns="columns" :data="filtered" size="small" :bordered="false" :scroll-x="900" :max-height="'calc(100vh - 308px)'" :row-key="(r: any) => r.unit">
+    <NDataTable :columns="columns" :data="filtered" size="small" :bordered="false" :loading="loading" :scroll-x="900" :max-height="'calc(100vh - 308px)'" :row-key="(r: any) => r.unit">
       <template #empty><EmptyBox text="没有匹配的服务" /></template>
     </NDataTable>
 

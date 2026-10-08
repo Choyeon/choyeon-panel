@@ -44,7 +44,10 @@ function splitPath(p: string) {
   return p.split('/').filter(Boolean);
 }
 
+const listing = ref(false);
+
 async function load(p = path.value) {
+  listing.value = true;
   try {
     const r = await api.files(p);
     path.value = r.path;
@@ -53,6 +56,8 @@ async function load(p = path.value) {
     crumbs.value = splitPath(r.path);
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    listing.value = false;
   }
 }
 function join(name: string) {
@@ -216,7 +221,7 @@ onMounted(() => load());
       可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑。
     </NText>
 
-    <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :scroll-x="760" :max-height="'calc(100vh - 368px)'" :row-key="(e: any) => e.name">
+    <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :loading="listing" :scroll-x="760" :max-height="'calc(100vh - 368px)'" :row-key="(e: any) => e.name">
       <template #empty><EmptyBox text="空目录" /></template>
     </NDataTable>
 

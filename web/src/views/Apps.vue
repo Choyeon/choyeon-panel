@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, h, computed } from 'vue';
+import { onBeforeUnmount, onMounted, ref, h, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   NButton, NSpace, NDataTable, NModal, NForm, NFormItem, NInput, NInputNumber, NSelect,
@@ -88,13 +88,14 @@ const columns: any[] = [
     title: '操作', key: 'ops', width: 292,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busyId.value === r.id, icon: ico('CloudUploadOutline'), onClick: () => act(r.id, 'deploy') }, () => '部署'),
+        h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busyOn(r.id, 'deploy'), disabled: rowBusy(r.id), icon: ico('CloudUploadOutline'), onClick: () => act(r.id, 'deploy') }, () => '部署'),
         h(NButton, {
           size: 'tiny', tertiary: true, type: r.running ? 'warning' : 'success',
+          loading: busyOn(r.id, r.running ? 'stop' : 'start'), disabled: rowBusy(r.id),
           icon: ico(r.running ? 'StopOutline' : 'PlayOutline'), onClick: () => act(r.id, r.running ? 'stop' : 'start'),
         }, () => (r.running ? '停止' : '启动')),
-        h(NButton, { size: 'tiny', tertiary: true, disabled: !r.running, icon: ico('SyncOutline'), onClick: () => act(r.id, 'restart') }, () => '重启'),
-        h(NButton, { size: 'tiny', quaternary: true, title: '回滚到上一次成功部署', 'aria-label': '回滚', icon: ico('ArrowBackOutline'), onClick: () => rollback(r) }),
+        h(NButton, { size: 'tiny', tertiary: true, disabled: !r.running || rowBusy(r.id), loading: busyOn(r.id, 'restart'), icon: ico('SyncOutline'), onClick: () => act(r.id, 'restart') }, () => '重启'),
+        h(NButton, { size: 'tiny', quaternary: true, title: '回滚到上一次成功部署', 'aria-label': '回滚', loading: busyOn(r.id, 'rollback'), disabled: rowBusy(r.id), icon: ico('ArrowBackOutline'), onClick: () => rollback(r) }),
         h(NPopconfirm, { onPositiveClick: () => del(r) }, {
           trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除应用 ${r.name}`, 'aria-label': `删除应用 ${r.name}` }, { default: () => '' }),
           default: () => '仅删除面板配置，服务器文件保留。彻底清理请到应用详情页操作。',
@@ -104,7 +105,17 @@ const columns: any[] = [
 ];
 
 const loading = ref(false);
-const busyId = ref<number | null>(null);
+// 行内按钮要知道"是哪个动作在跑"：只记 id 会让部署按钮替启停转圈，
+// 同一行连点两次也拦不住。
+const busy = ref<{ id: number; verb: string } | null>(null);
+const busyOn = (id: number, verb: string) => busy.value?.id === id && busy.value?.verb === verb;
+const rowBusy = (id: number) => busy.value?.id === id;
+// 延迟刷新不能拖过页面卸载：那是一次没人看的请求，失败还会把错误 toast 打到新页面上。
+const timers: number[] = [];
+function later(fn: () => void, ms: number) {
+  timers.push(window.setTimeout(fn, ms));
+}
+onBeforeUnmount(() => timers.forEach(clearTimeout));
 
 async function load() {
   loading.value = true;
@@ -117,24 +128,27 @@ async function load() {
   }
 }
 async function rollback(r: any) {
+  busy.value = { id: r.id, verb: 'rollback' };
   try {
     const res = await api.appAction(r.id, 'rollback');
     msg.success(`已回滚到 ${res.commit || '上一版本'}`);
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    busy.value = null;
   }
 }
 async function act(id: number, verb: string) {
-  busyId.value = id;
+  busy.value = { id, verb };
   try {
     if (verb === 'deploy') await api.deploy(id);
     else await api.appAction(id, verb);
     msg.success(verb === 'deploy' ? '部署任务已启动' : '操作已下发');
-    setTimeout(load, 800);
+    later(load, 800);
   } catch (e: any) {
     msg.error(e.message);
   } finally {
-    busyId.value = null;
+    busy.value = null;
   }
 }
 const templates = ref<any[]>([]);
@@ -217,7 +231,7 @@ onMounted(() => {
       </template>
     </PageHeader>
 
-    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :scroll-x="1020" :max-height="'calc(100vh - 268px)'">
+    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1020" :max-height="'calc(100vh - 268px)'">
       <template #empty>
         <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
       </template>
