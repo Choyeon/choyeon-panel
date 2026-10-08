@@ -315,6 +315,51 @@ class TestBackupPlanCompensation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((row["hour"], row["enabled"]), (3, 0), "校验不过不能留半个变更")
 
 
+class TestStaticCacheHeaders(unittest.IsolatedAsyncioTestCase):
+    """回归：静态产物不发 Cache-Control，浏览器按 Last-Modified 启发式缓存 index.html，
+    发版后旧标签页继续请求已被新构建删掉的 /assets/*.js，表现为 404 + 动态 import 失败 + 白屏。
+    """
+
+    def setUp(self):
+        from app.main import DistFiles
+
+        self.root = tempfile.mkdtemp(prefix="cp_dist_")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(f"{self.root}/assets")
+        Path(f"{self.root}/index.html").write_text("<html>ok</html>")
+        Path(f"{self.root}/assets/Apps-abc123.js").write_text("console.log(1)")
+        Path(f"{self.root}/favicon.svg").write_text("<svg/>")
+        self.app = DistFiles(directory=self.root, html=True)
+
+    async def _get(self, path: str):
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+            "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"",
+            "root_path": "", "headers": [], "client": ("127.0.0.1", 50000), "server": ("test", 80),
+        }
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(msg):
+            sent.append(msg)
+
+        await self.app(scope, receive, send)
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+        return start["status"], headers
+
+    async def test_html_revalidates_and_assets_are_immutable(self):
+        status, html = await self._get("/")
+        self.assertEqual(status, 200)
+        self.assertEqual(html["cache-control"], "no-cache", "入口 HTML 不能启发式缓存")
+        _, asset = await self._get("/assets/Apps-abc123.js")
+        self.assertEqual(asset["cache-control"], "public, max-age=31536000, immutable")
+        _, icon = await self._get("/favicon.svg")
+        self.assertEqual(icon["cache-control"], "public, max-age=3600")
+
+
 class TestSslNeedsPort(unittest.TestCase):
     async def _call(self):
         app = {"id": 9, "name": "noport", "domain": "c.example.com", "port": None}

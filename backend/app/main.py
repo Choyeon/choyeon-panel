@@ -198,8 +198,28 @@ async def _housekeeping():
 
 
 # ---------- static frontend ----------
+class DistFiles(StaticFiles):
+    """哈希产物长缓存、HTML 每次回源。
+
+    StaticFiles 不发 Cache-Control，浏览器就按 Last-Modified 做启发式缓存（约"年龄的 10%"），
+    发版后旧标签页仍拿到旧 index.html：里面引用的 chunk 已被新构建删掉，
+    线上表现是一串 /assets/Apps-xxxx.js 404、动态 import 失败、页面白屏只剩控制台报错。
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        resp = super().file_response(full_path, stat_result, scope, status_code=status_code)
+        name = str(full_path).replace("\\", "/")
+        if name.endswith(".html"):
+            resp.headers["Cache-Control"] = "no-cache"
+        elif "/assets/" in name:
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
+
+
 if config.WEB_DIST.exists():
-    app.mount("/", StaticFiles(directory=str(config.WEB_DIST), html=True), name="static")
+    app.mount("/", DistFiles(directory=str(config.WEB_DIST), html=True), name="static")
 else:
 
     @app.get("/")

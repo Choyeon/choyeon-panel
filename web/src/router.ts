@@ -44,3 +44,14 @@ router.afterEach((to) => {
 onUnauthorized.push(() => {
   if (router.currentRoute.value.path !== '/login') router.replace('/login');
 });
+
+// 发版后旧标签页里引用的 chunk 已被删除，动态 import 会失败（404 / 拿到 JSON）。
+// 认出来就整页重载一次拿新的 index.html；sessionStorage 记住这条错误，
+// 避免真·故障（比如断网）时陷入重载死循环。
+router.onError((err) => {
+  const msg = String((err as Error)?.message || err);
+  if (!/dynamically imported module|Unable to preload CSS|Importing a module script failed/i.test(msg)) return;
+  if (sessionStorage.getItem('cp-chunk-reload') === msg) return;
+  sessionStorage.setItem('cp-chunk-reload', msg);
+  location.reload();
+});
