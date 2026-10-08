@@ -3,7 +3,14 @@
 # 安装后由 scripts/install.sh 软链到 /usr/local/bin/choyeonctl
 set -euo pipefail
 
-SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="${BASH_SOURCE[0]}"
+# 必须先解开软链接再取目录：install.sh 建的就是符号链接，直接 dirname 得到的是
+# /usr/local/bin，于是去读 /usr/local/bin/../backend/cli.py —— 文档里推荐的
+# `choyeonctl ...` 入口 100% 报"仓库结构不完整"，只有 ./bin/choyeonctl 能用（实测）。
+if command -v readlink >/dev/null 2>&1; then
+  SELF="$(readlink -f "$SELF" 2>/dev/null || echo "$SELF")"
+fi
+SRC="$(cd "$(dirname "$SELF")" && pwd)"
 CLI="$SRC/../backend/cli.py"
 
 if [ ! -f "$CLI" ]; then

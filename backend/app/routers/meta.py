@@ -24,6 +24,7 @@ from ..util import disk_usage_pct, run
 router = APIRouter()
 
 SERVICE_NAME = "choyeon-panel"
+CLI_LINK = Path("/usr/local/bin/choyeonctl")
 
 
 @router.get("/api/ready")
@@ -182,6 +183,24 @@ async def _check_permissions() -> dict:
     return {"status": "pass", "detail": ".env 权限正常（或不存在）", "fix": ""}
 
 
+async def _check_cli() -> dict:
+    """AGENTS.md 的每条命令都以 `choyeonctl` 开头，但这个入口只有 install.sh 会建。
+
+    只走过升级流程的实例会停在 "choyeonctl: command not found"（实测本机就是这样），
+    自动化按文档执行就会卡在第一步；悬空软链接更糟，报的是 "No such file or directory"，
+    看起来像是脚本本身坏了。
+    """
+    target = Path(config.BASE) / "bin" / "choyeonctl"
+    if os.geteuid() != 0 or not target.exists():
+        return {"status": "pass", "detail": "非安装环境，跳过全局 CLI 检查", "fix": ""}
+    fix = f"ln -sf {target} {CLI_LINK}"
+    if CLI_LINK.is_symlink() and not CLI_LINK.exists():
+        return {"status": "fail", "detail": f"{CLI_LINK} 是悬空软链接，choyeonctl 直接报错", "fix": fix}
+    if not CLI_LINK.exists():
+        return {"status": "warn", "detail": "choyeonctl 不在 PATH 上，只能用 ./bin/choyeonctl", "fix": fix}
+    return {"status": "pass", "detail": "choyeonctl 已链接到 PATH", "fix": ""}
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -192,6 +211,7 @@ _CHECKS = [
     ("backup", "备份状态", _check_backup),
     ("disk", "磁盘余量", _check_disk),
     ("permissions", "文件权限", _check_permissions),
+    ("cli", "全局 CLI", _check_cli),
 ]
 
 

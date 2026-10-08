@@ -120,7 +120,7 @@ choyeonctl deploy --port 3210 --json        # 已部署则跳过本行
 | `deploy` | `--prefix --port --branch --skip-nginx --no-deps` | 一键部署（依赖→venv→前端构建→systemd→健康检查） |
 | `upgrade` | — | 拉代码→备份→重建→重启，健康检查失败自动回滚 |
 | `status` | — | 版本/监听/服务/健康/自检汇总 |
-| `doctor` | — | 9 项只读自检，每项带修复命令 |
+| `doctor` | — | 10 项只读自检，每项带修复命令 |
 | `user list\|create\|reset\|delete` | `<name> --password --role --yes` | 改密会吊销该用户旧 token；`delete` 必须加 `--yes` |
 | `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --repo --path --port --domain --lines` | 应用全生命周期 |
 | `backup run\|list` | — | 面板数据备份（SQLite 在线备份 API） |
@@ -166,6 +166,7 @@ choyeonctl status --json
 | 页面 404 | `ls web/dist/index.html` | 前端未构建：`cd web && npm run build` |
 | `user create` 报「已存在」 | `choyeonctl user list` | 改走 `user reset <name> --password` |
 | nginx 项 fail | `nginx -t` | 修正配置后再 `systemctl reload nginx`；不要 restart（会断 WebSocket） |
+| `choyeonctl: command not found` | `ls -l /usr/local/bin/choyeonctl` | 补软链接：`ln -sf <仓库目录>/bin/choyeonctl /usr/local/bin/choyeonctl`（只有 install.sh 会建这个链接） |
 | 服务反复重启 | `systemctl status choyeon-panel` | 触发了 `StartLimitBurst=5`：先修根因，再 `systemctl reset-failed choyeon-panel` |
 | 数据库锁 | `choyeonctl status` | 已开 WAL + busy_timeout；仍有错则停服务检查长事务 |
 

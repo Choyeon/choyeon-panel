@@ -52,7 +52,7 @@
 
 ```bash
 choyeonctl schema --json    # 输出完整命令契约（参数 + 退出码），脚本/AI 读这一份就够
-choyeonctl doctor           # 9 项只读自检：监听地址/管理员/服务/前端产物/nginx/防火墙/备份/磁盘/权限
+choyeonctl doctor           # 只读自检：监听地址/管理员/服务/前端产物/nginx/防火墙/备份/磁盘/权限/全局 CLI
 choyeonctl status --json    # 版本、监听、服务状态、健康、自检汇总
 choyeonctl user create|reset|list|delete
 choyeonctl app templates|list|create|deploy|rollback|logs

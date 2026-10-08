@@ -11,6 +11,7 @@
 """
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -291,6 +292,59 @@ class TestUnitNameDetection(unittest.TestCase):
 
     def test_exact_name_still_matches(self):
         self.assertTrue(self._detect("choyeon-panel", "choyeon-panel.service enabled -"))
+
+
+class TestCliEntryThroughSymlink(unittest.TestCase):
+    """回归：install.sh 把 bin/choyeonctl 软链到 /usr/local/bin，入口却按 dirname 找仓库。
+
+    旧写法解析到 /usr/local/bin/../backend/cli.py，报"仓库结构不完整"退出，
+    于是 AGENTS.md 里每条 `choyeonctl ...` 都用不了，只有 ./bin/choyeonctl 能跑。
+    """
+
+    def _invoke_via_link(self, link_dir: str, link_name: str):
+        entry = os.path.join(REPO, "bin", "choyeonctl")
+        link = os.path.join(link_dir, link_name)
+        os.symlink(entry, link)
+        # 用一个只回显参数的解释器桩：这里要验证的是"入口找到了哪个 cli.py"，
+        # 不需要真的跑 CLI（那会连带依赖 fastapi 与数据库）。
+        stub = os.path.join(link_dir, "py-stub.sh")
+        with open(stub, "w", encoding="utf8") as fh:
+            fh.write('#!/bin/sh\necho "CLI=[$1]"\n')
+        os.chmod(stub, 0o755)
+        env = dict(os.environ)
+        env["CP_CLI_PYTHON"] = stub
+        env["NO_COLOR"] = "1"
+        return subprocess.run([link, "doctor"], capture_output=True, text=True,
+                              env=env, timeout=60, stdin=subprocess.DEVNULL)
+
+    def test_symlinked_entry_resolves_repo_cli(self):
+        d = tempfile.mkdtemp(prefix="cp_cli_link_")
+        self.addCleanup(shutil.rmtree, d, True)
+        r = self._invoke_via_link(d, "choyeonctl")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # 入口打印的是拼接出来的路径（含 ../），比较前先规范化
+        m = re.search(r"CLI=\[(.*)\]", r.stdout)
+        self.assertTrue(m, r.stdout)
+        self.assertEqual(
+            os.path.realpath(m.group(1)),
+            os.path.realpath(os.path.join(REPO, "backend", "cli.py")),
+            "软链接调用必须解析回仓库里的 cli.py",
+        )
+
+    def test_direct_invocation_still_works(self):
+        d = tempfile.mkdtemp(prefix="cp_cli_direct_")
+        self.addCleanup(shutil.rmtree, d, True)
+        stub = os.path.join(d, "py-stub.sh")
+        with open(stub, "w", encoding="utf8") as fh:
+            fh.write('#!/bin/sh\necho "CLI=[$1]"\n')
+        os.chmod(stub, 0o755)
+        env = dict(os.environ)
+        env.update({"CP_CLI_PYTHON": stub, "NO_COLOR": "1"})
+        r = subprocess.run([os.path.join(REPO, "bin", "choyeonctl"), "doctor"],
+                           capture_output=True, text=True, env=env, timeout=60,
+                           stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("cli.py", r.stdout, "./bin/choyeonctl 这条原有路径不能被改坏")
 
 
 if __name__ == "__main__":

@@ -553,5 +553,60 @@ class TestPsqlPipesDoNotDeadlock(unittest.TestCase):
         )
 
 
+class TestDoctorCoversGlobalCli(unittest.IsolatedAsyncioTestCase):
+    """回归：AGENTS.md 每条命令都写 choyeonctl，但入口缺失/悬空时自检仍然全绿。"""
+
+    def _setup(self, d: str):
+        Path(d, "bin").mkdir(parents=True, exist_ok=True)
+        Path(d, "bin", "choyeonctl").write_text("#!/usr/bin/env bash\n")
+        return Path(d, "bin", "choyeonctl")
+
+    async def _check(self, link: Path, root: str):
+        from app.routers import meta
+
+        target = self._setup(root)
+        with mock.patch.object(meta, "CLI_LINK", link), \
+             mock.patch.object(meta.os, "geteuid", return_value=0), \
+             mock.patch.object(meta.config, "BASE", root):
+            res = await meta._check_cli()
+        self.assertTrue(res["detail"])
+        self.assertTrue(target.exists())
+        return res
+
+    async def test_missing_link_warns(self):
+        d = tempfile.mkdtemp(prefix="cp_doc_cli_")
+        self.addCleanup(shutil.rmtree, d, True)
+        res = await self._check(Path(d, "choyeonctl"), d)
+        self.assertEqual(res["status"], "warn", "文档入口不存在时不能报 pass")
+        self.assertIn("ln -sf", res["fix"])
+
+    async def test_dangling_link_fails(self):
+        d = tempfile.mkdtemp(prefix="cp_doc_cli2_")
+        self.addCleanup(shutil.rmtree, d, True)
+        link = Path(d, "choyeonctl")
+        link.symlink_to(Path(d, "removed-target"))
+        res = await self._check(link, d)
+        self.assertEqual(res["status"], "fail", "悬空软链接比缺失更误导，必须报 fail")
+
+    async def test_good_link_passes(self):
+        d = tempfile.mkdtemp(prefix="cp_doc_cli3_")
+        self.addCleanup(shutil.rmtree, d, True)
+        link = Path(d, "choyeonctl")
+        link.symlink_to(Path(d, "bin", "choyeonctl"))
+        res = await self._check(link, d)
+        self.assertEqual(res["status"], "pass")
+
+    async def test_dev_environment_skipped(self):
+        d = tempfile.mkdtemp(prefix="cp_doc_cli4_")
+        self.addCleanup(shutil.rmtree, d, True)
+        from app.routers import meta
+
+        with mock.patch.object(meta, "CLI_LINK", Path(d, "choyeonctl")), \
+             mock.patch.object(meta.os, "geteuid", return_value=1000), \
+             mock.patch.object(meta.config, "BASE", d):
+            res = await meta._check_cli()
+        self.assertEqual(res["status"], "pass", "普通开发者机器不该因为没装全局 CLI 被报错")
+
+
 if __name__ == "__main__":
     unittest.main()

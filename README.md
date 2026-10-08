@@ -33,7 +33,7 @@ choyeonctl deploy                    # 与 scripts/install.sh 等价的一键部
 choyeonctl user create admin --password '<口令>'
 choyeonctl app create my-api --template python-fastapi --repo <git-url> --port 8000
 choyeonctl app deploy --id 1 && choyeonctl app logs --id 1
-choyeonctl doctor                    # 9 项只读自检，每项带修复命令
+choyeonctl doctor                    # 只读自检，每项带修复命令
 choyeonctl status --json             # 供脚本/AI 解析
 ```
 
@@ -71,7 +71,7 @@ systemctl daemon-reload && systemctl enable --now choyeon-panel
 | --- | --- |
 | 应用管理 | Git 拉取 → 安装依赖 → systemd 托管部署 Node/Python 应用；环境变量、自定义启动命令、unit 模板、**一键回滚到上一次成功部署** |
 | 一键模板 | 建应用时选预设（`node-service` / `node-next` / `python-fastapi` / `static-site`），自动填运行时、安装与启动命令、端口 |
-| **安全自检** | 网页「安全自检」页与 `choyeonctl doctor`：监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限 9 项只读检查，每项给可复制的修复命令 |
+| **安全自检** | 网页「安全自检」页与 `choyeonctl doctor`：监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI 等只读检查，每项给可复制的修复命令 |
 | Nginx 集成 | 按域名/端口生成反代配置，开关 WebSocket 升级、请求体大小、重定向；`nginx -t` 校验后热加载，**校验失败自动回滚原文件** |
 | SSL | certbot 签发/续期，到期天数告警 |
 | 系统监控 | CPU/内存/磁盘/网速实时曲线；systemd 服务启停；journalctl 实时日志（SSE） |
