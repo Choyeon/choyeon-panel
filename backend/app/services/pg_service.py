@@ -1,9 +1,10 @@
 import asyncio
+import json
 import os
 import re
-from contextlib import suppress
 
 from .. import database as dbm
+from ..util import kill_group, run
 
 IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
@@ -18,12 +19,25 @@ def _quote_pass(p: str) -> str:
     return "'" + p.replace("'", "''") + "'"
 
 
+PSQL_BASE = "psql -X -A -t -v ON_ERROR_STOP=1"
+
+
 async def psql(sql: str) -> str:
+    """执行 SQL，返回 stdout。
+
+    ON_ERROR_STOP=1 是这里的关键：psql 默认对每条语句独立报错但整体退出码仍是 0，
+    实测 `SELECT 1; SELECT * FROM nope; SELECT 2` 在不加该参数时
+    返回码 0、stdout 只有 "1\\n2"、ERROR 只在 stderr——面板因此把
+    "drop_role 目标不存在""SQL 控制台中途报错"一律显示为成功（假成功）。
+    加上之后出错语句之后的内容不再执行，退出码 3，错误能真正上抛。
+    """
     proc = await asyncio.create_subprocess_exec(
-        "su", "-s", "/bin/sh", "postgres", "-c", 'psql -X -A -t -F "|"',
+        "su", "-s", "/bin/sh", "postgres", "-c", PSQL_BASE,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        # 与 util.run 一致：独立进程组，超时时能连 psql/postgres 后端一起收掉
+        start_new_session=True,
     )
 
     async def _collect():
@@ -38,7 +52,7 @@ async def psql(sql: str) -> str:
                 break
             size += len(part)
             if size > 512 * 1024:
-                proc.kill()
+                kill_group(proc)
                 raise RuntimeError("输出过大（>512KB），请加 LIMIT")
             chunks.append(part)
         err = await proc.stderr.read()
@@ -48,44 +62,67 @@ async def psql(sql: str) -> str:
     try:
         out, err = await asyncio.wait_for(_collect(), timeout=30)
     except TimeoutError:
-        with suppress(ProcessLookupError):
-            proc.kill()
+        kill_group(proc)
         # from None：超时原因已经明确，不需要把 TimeoutError 的上下文再叠加上去
         raise RuntimeError("psql 超时") from None
     if proc.returncode == 0:
         return out.decode(errors="replace").strip()
-    raise RuntimeError(err.decode(errors="replace").strip() or f"psql exit {proc.returncode}")
+    text = err.decode(errors="replace").strip()
+    if proc.returncode == 3:
+        # ON_ERROR_STOP 触发：把出错那条语句说清楚，别只甩一段 SQLSTATE
+        raise RuntimeError(text.split("\n")[0] or "SQL 执行出错，后续语句已中止")
+    raise RuntimeError(text or f"psql exit {proc.returncode}")
+
+
+async def psql_json(sql: str) -> list:
+    """sql 必须是 `SELECT json_agg(...)::text`，返回解析后的数组。"""
+    out = await psql(sql)
+    if not out:
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"无法解析数据库返回内容：{e}") from None
+    return data if isinstance(data, list) else []
+
+
+def _json_agg(inner: str, order: str) -> str:
+    """把内层查询包成"单行 JSON 数组"，空结果集也返回 '[]'。
+
+    ORDER BY 写在 json_agg(...) 里而不是内层子查询上：子查询的 ORDER BY
+    不保证传递到聚合的输入顺序，显式排序才是可靠写法。
+    """
+    return f"SELECT coalesce(json_agg(t ORDER BY {order}), '[]'::json)::text FROM ({inner}) t"
 
 
 async def list_dbs() -> list:
-    out = await psql(
-        "SELECT d.datname, pg_get_userbyid(d.datdba) owner, pg_size_pretty(pg_database_size(d.datname)) size,\n"
-        "        (SELECT count(*) FROM pg_stat_activity a WHERE a.datname=d.datname) conns\n"
-        "     FROM pg_database d WHERE d.datistemplate=false AND d.datallowconn=true ORDER BY datname;"
-    )
-    rows = []
-    for line in out.split("\n"):
-        f = line.split("|")
-        rows.append({"name": f[0], "owner": f[1], "size": f[2], "conns": f[3]})
-    return rows
+    rows = await psql_json(_json_agg(
+        "SELECT d.datname AS name, pg_get_userbyid(d.datdba) AS owner,\n"
+        "        pg_size_pretty(pg_database_size(d.datname)) AS size,\n"
+        "        (SELECT count(*) FROM pg_stat_activity a WHERE a.datname=d.datname) AS conns\n"
+        "   FROM pg_database d WHERE d.datistemplate=false AND d.datallowconn=true",
+        "t.name",
+    ))
+    return [
+        {"name": r.get("name"), "owner": r.get("owner"), "size": r.get("size"),
+         "conns": r.get("conns") or 0}
+        for r in rows if isinstance(r, dict)
+    ]
 
 
 async def list_roles() -> list:
-    out = await psql(
-        "SELECT r.rolname, r.rolsuper, r.rolcanlogin, r.rolcreaterole, r.rolcreatedb\n"
-        "     FROM pg_roles r WHERE r.rolname NOT LIKE 'pg\\_%' ORDER BY rolname;"
-    )
-    rows = []
-    for line in out.split("\n"):
-        f = line.split("|")
-        rows.append({
-            "name": f[0],
-            "super": f[1] == "t",
-            "login": f[2] == "t",
-            "createrole": f[3] == "t",
-            "createdb": f[4] == "t",
-        })
-    return rows
+    rows = await psql_json(_json_agg(
+        "SELECT rolname AS name, rolsuper AS super, rolcanlogin AS login,\n"
+        "        rolcreaterole AS createrole, rolcreatedb AS createdb\n"
+        "   FROM pg_roles WHERE rolname NOT LIKE 'pg\\_%'",
+        "t.name",
+    ))
+    return [
+        {"name": r.get("name"), "super": bool(r.get("super")), "login": bool(r.get("login")),
+         "createrole": bool(r.get("createrole")), "createdb": bool(r.get("createdb"))}
+        for r in rows if isinstance(r, dict)
+    ]
+
 
 
 async def create_db(name: str, owner: str | None = None):
@@ -152,22 +189,28 @@ def redis_password():
 
 
 async def redis_info() -> dict:
-    from ..util import run
-
     pass_ = redis_password()
     env = dict(os.environ)
     if pass_:
         env["REDISCLI_AUTH"] = pass_
     r = await run("redis-cli", ["INFO"], env=env)
     if r["code"] != 0 or r["out"].startswith("NOAUTH"):
-        raise RuntimeError("Redis 需要密码，请在下方设置" if r["out"].startswith("NOAUTH") else r["out"])
+        if r["out"].startswith("NOAUTH"):
+            raise RuntimeError("Redis 需要密码，请在下方设置")
+        # redis-cli 不存在时 util.run 返回 code=127，正文是 Python 的 FileNotFoundError 文本；
+        # 连接被拒时正文里有 "Connection refused"。两者都不能空着抛——空字符串会让前端
+        # 显示一个没有任何原因的红色错误框。
+        raise RuntimeError(r["out"] or "无法执行 redis-cli（未安装或 Redis 未运行）")
     info: dict[str, str] = {}
     for line in r["out"].split("\n"):
         i = line.find(":")
         if i > 0 and not line.startswith("#"):
             info[line[:i]] = line[i + 1:].strip()
     keys = await run("redis-cli", ["DBSIZE"], env=env)
-    return {"info": info, "dbsize": keys["out"], "authed": bool(pass_)}
+    # DBSIZE 失败时不能把错误正文当"Key 总数"显示：前端是 {{ redis.dbsize ?? '—' }}，
+    # 任何非空字符串都会被原样渲染成数字位置。失败就返回 None，让它显示成占位符。
+    return {"info": info, "dbsize": keys["out"] if keys["code"] == 0 else None,
+            "authed": bool(pass_)}
 
 
 def set_redis_password(p: str):

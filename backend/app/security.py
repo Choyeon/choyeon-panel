@@ -40,7 +40,7 @@ def _user_epoch(username: str) -> str:
 def bump_user_epoch(username: str) -> str:
     from . import database as dbm
 
-    v = str(int(time.time()))
+    v = dbm.new_epoch()
     dbm.set_setting(f"token_epoch:{username}", v)
     return v
 

@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from .. import database as dbm
 from ..services import apps_service, nginx_ops, systemd_ops
 from ..templates import apply_template
+from ..util import parse_lines
 from .system import log_stream_response
 
 router = APIRouter()
@@ -70,9 +71,9 @@ async def app_action(app_id: int, req: Request):
     try:
         result = await apps_service.app_action(app_id, verb)
         dbm.audit(req.state.cp_sub, f"app:{verb}", str(app_id))
-        if verb == "rollback":
-            return {"ok": True, **result}
-        return {"ok": result, "active": result}
+        # 服务层已经统一返回 {"ok": true, ...}：rollback 带 commit/deployment/from，
+        # start/stop/restart 带 active。这里不再重复包装，避免出现 ok 语义两套算法。
+        return result
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
@@ -179,5 +180,5 @@ async def app_logs(app_id: int, request: Request):
     a = apps_service.get_app(app_id)
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
-    lines = int(request.query_params.get("lines") or 200)
+    lines = parse_lines(request.query_params.get("lines"))
     return log_stream_response(apps_service.unit_name(a), lines)

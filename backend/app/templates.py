@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 # type 受 apps 表 CHECK 约束限制，只能是 node / python
+# env 条目结构必须与 apps_service.write_env_file 一致：{"k": ..., "v": ...}。
+# 用 {"key","value"} 的话 write_env_file 会静默过滤掉整条，
+# 部署出来的应用拿不到 PORT/NODE_ENV，网页上却显示"部署成功"（实测 .panel.env 为空文件）。
 TEMPLATES: list[dict] = [
     {
         "key": "node-service",
@@ -16,7 +19,7 @@ TEMPLATES: list[dict] = [
         "install_cmd": "npm install --omit=dev",
         "start_cmd": "npm start",
         "port": 3000,
-        "env": [{"key": "PORT", "value": "3000"}, {"key": "NODE_ENV", "value": "production"}],
+        "env": [{"k": "PORT", "v": "3000"}, {"k": "NODE_ENV", "v": "production"}],
     },
     {
         "key": "node-next",
@@ -26,7 +29,7 @@ TEMPLATES: list[dict] = [
         "install_cmd": "npm install && npm run build",
         "start_cmd": "npm start",
         "port": 3000,
-        "env": [{"key": "PORT", "value": "3000"}, {"key": "NODE_ENV", "value": "production"}],
+        "env": [{"k": "PORT", "v": "3000"}, {"k": "NODE_ENV", "v": "production"}],
     },
     {
         "key": "python-fastapi",

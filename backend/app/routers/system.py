@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import database as dbm
 from ..services import system_metrics, systemd_ops
-from ..util import is_unit, run
+from ..util import is_unit, parse_lines, run
 
 router = APIRouter()
 
@@ -78,7 +78,7 @@ def log_stream_response(unit: str, lines: int) -> StreamingResponse:
 async def service_logs(unit: str, request: Request):
     if not is_unit(unit):
         return JSONResponse(status_code=400, content={"error": "unit 名不合法"})
-    lines = int(request.query_params.get("lines") or 200)
+    lines = parse_lines(request.query_params.get("lines"))
     return log_stream_response(unit, lines)
 
 

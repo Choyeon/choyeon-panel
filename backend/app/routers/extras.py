@@ -6,10 +6,18 @@ from fastapi.responses import JSONResponse
 from .. import database as dbm
 from .. import security
 from ..services import alerts_service, nginx_ops
+from ..util import is_http_url
 
 router = APIRouter()
 
 ALLOWED_ALERT_KEYS = re.compile(r"^alert_(telegram_bot|telegram_chat|webhook_url|disk_pct|ssl_days)$")
+
+# 各 key 的取值约束：None 表示只做长度限制。
+# 必须在保存时就校验——`int(dbm.get_setting("alert_disk_pct") or 85)` 在巡检里，
+# 存进 "abc" 之后每次巡检都抛 ValueError，被循环吞掉，表现为「告警从此不再触发」，
+# 而网页端一切正常，最难查的那种坏法。
+ALERT_INT_RANGE = {"alert_disk_pct": (50, 99), "alert_ssl_days": (0, 60)}
+ALERT_MAX_LEN = {"alert_telegram_bot": 128, "alert_telegram_chat": 64, "alert_webhook_url": 512}
 
 
 async def _body(req: Request) -> dict:
@@ -111,15 +119,47 @@ async def alerts_get(req: Request):
     return {k: dbm.get_setting(k) or "" for k in ALERT_KEYS}
 
 
+def _validate_alert(k: str, val: str) -> str | None:
+    """返回错误信息；None 表示通过。空值等于关闭该项，直接放行。"""
+    if val == "":
+        return None
+    if (maxlen := ALERT_MAX_LEN.get(k)) and len(val) > maxlen:
+        return f"{k} 超过 {maxlen} 字符"
+    if (rng := ALERT_INT_RANGE.get(k)):
+        try:
+            n = int(val)
+        except ValueError:
+            return f"{k} 必须是整数，收到 {val[:20]!r}"
+        lo, hi = rng
+        if not lo <= n <= hi:
+            return f"{k} 必须在 {lo}-{hi} 之间，收到 {n}"
+    if k == "alert_webhook_url" and not is_http_url(val):
+        return "Webhook URL 必须以 http:// 或 https:// 开头"
+    return None
+
+
 @router.post("/api/settings/alerts")
 async def alerts_save(req: Request):
     if r := _need_admin(req):
         return r
     body = await _body(req)
+    accepted: dict[str, str] = {}
+    errors: list[str] = []
     for k, v in body.items():
-        if ALLOWED_ALERT_KEYS.match(k):
-            dbm.set_setting(k, "" if v is None else str(v))
-    dbm.audit(req.state.cp_sub, "settings:alerts", ",".join(body.keys()))
+        if not ALLOWED_ALERT_KEYS.match(k):
+            continue
+        val = "" if v is None else str(v).strip()
+        if err := _validate_alert(k, val):
+            errors.append(err)
+            continue
+        accepted[k] = val
+    # 先全部校验再落库：部分写入会让通道配置变成"一半新一半旧"的不可解释状态
+    if not errors:
+        for k, val in accepted.items():
+            dbm.set_setting(k, val)
+    dbm.audit(req.state.cp_sub, "settings:alerts", ",".join(accepted.keys()) or "-")
+    if errors:
+        return JSONResponse(status_code=400, content={"error": "；".join(errors)})
     return {"ok": True}
 
 
@@ -127,7 +167,9 @@ async def alerts_save(req: Request):
 async def alerts_test(req: Request):
     if r := _need_admin(req):
         return r
-    await alerts_service.notify_test()
+    delivered = await alerts_service.notify_test()
+    if not delivered:
+        return JSONResponse(status_code=400, content={"error": "没有可用通道，或全部投递失败（详见面板日志）"})
     return {"ok": True}
 
 
@@ -145,7 +187,9 @@ async def audit_list(req: Request):
         limit = int(req.query_params.get("limit") or 100)
     except ValueError:
         limit = 100
-    return dbm.query("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (min(limit, 500),))
+    # 必须 clamp 下界：SQLite 里 LIMIT 负数表示"不限制"，
+    # 只写 min(limit, 500) 的话 ?limit=-1 会把整张审计表吐出来（实测 601 条全返回）。
+    return dbm.query("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (max(1, min(limit, 500)),))
 
 
 @router.post("/api/system/certbot-renew")

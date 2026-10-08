@@ -133,17 +133,22 @@ def jwt_secret() -> str:
     return s
 
 
+def new_epoch() -> str:
+    """单调且唯一的版本号。用 time_ns + 随机后缀，避免同一次调用内多次 bump 产生相同值。"""
+    return f"{time.time_ns():x}.{secrets.token_hex(4)}"
+
+
 def token_epoch() -> str:
     """密码版本号：改密 / 删除用户后自增，使已签发 token 立即失效。"""
     v = get_setting("token_epoch")
     if not v:
-        v = str(int(time.time()))
+        v = new_epoch()
         set_setting("token_epoch", v)
     return v
 
 
 def bump_token_epoch() -> str:
-    v = str(int(time.time()))
+    v = new_epoch()
     set_setting("token_epoch", v)
     return v
 

@@ -138,10 +138,22 @@ async def _json_body(req: Request) -> dict:
 
 
 def client_ip(req: Request) -> str:
+    """取用于限速的客户端 IP。
+
+    反向代理场景必须解析 XFF，否则所有登录请求都记在 127.0.0.1 这一个桶里。
+    但**最左**值是客户端自带的、可任意伪造（`X-Forwarded-For: 1.2.3.4` 每次换一个，
+    限速就形同虚设）。nginx 的 `$proxy_add_x_forwarded_for` 会把真实对端追加到**最右**，
+    所以只信最右一段；同时优先用本面板 nginx 模板里显式设置、客户端无法覆盖的 X-Real-IP。
+    """
     if config.TRUST_PROXY:
+        real = req.headers.get("x-real-ip")
+        if real and (ip := real.strip()):
+            return ip
         fwd = req.headers.get("x-forwarded-for")
         if fwd:
-            return fwd.split(",")[0].strip()
+            for chunk in reversed(fwd.split(",")):
+                if (ip := chunk.strip()):
+                    return ip
     return req.client.host if req.client else "?"
 
 

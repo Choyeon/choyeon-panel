@@ -1,5 +1,6 @@
 import os
 import re
+from contextlib import suppress
 from pathlib import Path
 
 from .. import config
@@ -191,10 +192,22 @@ def domains_by_port() -> dict:
 
 
 def _safe_conf_path(p: str) -> str:
-    real = os.path.realpath(p) if os.path.exists(p) else p
-    if not real.startswith("/etc/nginx/"):
-        raise RuntimeError("只能编辑 /etc/nginx 下的配置文件")
-    if not re.match(r"^/etc/nginx/(conf\.d|sites-available)/", real):
+    """把配置路径收进已配置的 nginx conf 目录，且必须先归一化再判断。
+
+    旧实现只在"文件已存在"时 realpath，并对**未归一化**的原始串做前缀与正则匹配，
+    于是 `/etc/nginx/conf.d/../../../../tmp/x.conf` 既以 /etc/nginx/ 开头、
+    又能匹配 conf.d 那条前缀规则，守卫全部放行，
+    实际写入却被内核解析到 /tmp（实测越界创建成功）。
+    新建文件本来就不存在，不能依赖 realpath 的存在性分支，所以统一先
+    abspath 归一化 `..`；已存在时再 realpath 一次，防符号链接逃到目录外。
+    """
+    if not p or not p.startswith("/"):
+        raise RuntimeError("只能使用绝对路径")
+    real = os.path.abspath(p)
+    if os.path.exists(real):
+        real = os.path.realpath(real)
+    # 允许目录取自 CP_NGINX_CONF_DIRS，避免这里再硬编码一份与 config 不同步的路径
+    if not any(real == d or real.startswith(d + "/") for d in config.NGINX_CONF_DIRS):
         raise RuntimeError("仅支持 conf.d / sites-available 下的文件")
     if re.search(r"(\.sw.|~)$", real):
         raise RuntimeError("非法文件名")
@@ -211,8 +224,14 @@ async def save_app_config(path: str, content: str) -> dict:
     Path(real).write_text(content)
     check = await run("nginx", ["-t"])
     if check["code"] != 0:
+        # 有原文件就恢复；没有原文件（本次是新建）必须删掉，
+        # 否则坏配置会留在 conf.d/ 里，之后每次 nginx -t / reload 都连带失败，
+        # 面板上其它应用的域名与 SSL 操作也会全部不可用。
         if old is not None:
             Path(real).write_text(old)
+        else:
+            with suppress(OSError):
+                os.unlink(real)
         raise RuntimeError(f"nginx -t 校验失败，已回滚：\n{check['out']}")
     reload = await run("systemctl", ["reload", "nginx"])
     if reload["code"] != 0:

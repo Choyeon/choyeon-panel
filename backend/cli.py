@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import shutil
-import subprocess
+import signal
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 BACKEND_DIR = Path(__file__).resolve().parent
 ROOT = BACKEND_DIR.parent
@@ -39,6 +41,8 @@ from app.routers.meta import run_checks  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
+# 部署超时：AGENTS.md 写"全新机器约 3-8 分钟，前端构建较慢，超时给到 15 分钟"。
+DEPLOY_TIMEOUT_SEC = 15 * 60
 
 
 class Out:
@@ -59,7 +63,7 @@ class Out:
             print(msg)
 
     @classmethod
-    def error(cls, msg: str, code: int = EXIT_FAIL):
+    def error(cls, msg: str, code: int = EXIT_FAIL) -> NoReturn:
         if cls.json_mode:
             print(json.dumps({"ok": False, "error": msg}, ensure_ascii=False, indent=2))
         else:
@@ -71,19 +75,29 @@ def have_systemd() -> bool:
     return bool(shutil.which("systemctl")) and os.path.isdir("/run/systemd/system")
 
 
-async def sh(cmd: list[str], timeout: int = 60) -> dict:
-    """执行外部命令并回传 code/out/err；命令不存在时 code=127。"""
+async def sh(cmd: list[str], timeout: int = 60, env: dict | None = None,
+             stdin_devnull: bool = False) -> dict:
+    """执行外部命令并回传 code/out/err；命令不存在时 code=127，超时 code=124。
+
+    start_new_session + killpg：安装/升级脚本会派生 apt、npm、node 子进程，
+    只 kill 直接子进程会留下一堆孤儿继续跑，超时后现场更难判断。
+    """
     try:
         p = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL if stdin_devnull else None,
+            env=env, start_new_session=True,
         )
     except FileNotFoundError:
         return {"code": 127, "out": "", "err": f"命令不存在: {cmd[0]}"}
     try:
         out, err = await asyncio.wait_for(p.communicate(), timeout=timeout)
     except TimeoutError:
-        p.kill()
-        return {"code": 124, "out": "", "err": f"超时 {timeout}s"}
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            await p.wait()
+        return {"code": 124, "out": "", "err": f"超时 {timeout}s（已终止整个进程组）"}
     return {
         "code": p.returncode,
         "out": out.decode(errors="replace").strip(),
@@ -130,15 +144,23 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
     if a.branch:
         env["CP_BRANCH"] = a.branch
 
-    Out.info(f"==> 执行 {script}")
-    p = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, check=False)
+    Out.info(f"==> 执行 {script}（可能要几分钟，前端构建较慢）")
+    # 走统一的 sh() 而不是 subprocess.run(capture_output=True)：
+    # 后者无 timeout，apt 等 dpkg 锁、npm ci 卡网络时会**永久挂住**且不返回任何 JSON，
+    # 而 AGENTS.md 承诺 choyonctl 面向自动化、以 JSON + 退出码判断，挂死等于毁掉这个契约。
+    # stdin 关成 /dev/null：install.sh 的 read_value 本已按 `[ -t 0 ]` 判交互，
+    # 显式断开更稳（父 stdin 是终端时子脚本不会读到东西停在那等输入）。
+    r = await sh(["bash", str(script)], env=env, stdin_devnull=True, timeout=DEPLOY_TIMEOUT_SEC)
     if not Out.json_mode:
-        print(p.stdout)
-        if p.stderr.strip():
-            print(p.stderr, file=sys.stderr)
-
-    if p.returncode != 0:
-        Out.error(f"安装脚本退出码 {p.returncode}", EXIT_FAIL)
+        if r["out"]:
+            print(r["out"])
+        if r["err"]:
+            print(r["err"], file=sys.stderr)
+    if r["code"] == 124:
+        Out.error(f"安装脚本超时（>{DEPLOY_TIMEOUT_SEC}s），已终止整个进程组；"
+                  f"可手工执行 bash {script} 看卡在哪一步", EXIT_FAIL)
+    if r["code"] != 0:
+        Out.error(f"安装脚本退出码 {r['code']}", EXIT_FAIL)
 
     ok_health = await wait_health(30)
     admins = dbm.query_one("SELECT COUNT(*) c FROM users")
@@ -341,7 +363,9 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         script = ROOT / "scripts" / "backup.sh"
         if not script.exists():
             Out.error(f"缺少 {script}", EXIT_PRECONDITION)
-        r = await sh(["bash", str(script)], timeout=300)
+        r = await sh(["bash", str(script)], timeout=300, stdin_devnull=True)
+        if r["code"] == 124:
+            Out.error("备份脚本超时（>300s），已终止", EXIT_FAIL)
         if r["code"] != 0:
             Out.error(r["err"] or "备份失败", EXIT_FAIL)
         files = sorted(Path(config.BACKUP_DIR).glob("manual/panel-*.tar.gz"), key=os.path.getmtime)
@@ -350,7 +374,15 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         return {"ok": True, "file": latest}
 
     if a.backup_cmd == "list":
-        files = sorted(Path(config.BACKUP_DIR).glob("**/*.tar.gz"), key=os.path.getmtime, reverse=True)
+        # 与 doctor 的 _recent_backups 保持同一套后缀，
+        # 否则 `backup list` 只列 tar 包，定时跑出来的 PG 备份在 CLI 里像不存在一样。
+        suffixes = (".tar.gz", ".sql.gz", ".dump.gz", ".sql", ".dump", ".gz")
+        files = [
+            f
+            for f in Path(config.BACKUP_DIR).glob("**/*")
+            if f.is_file() and f.name.endswith(suffixes)
+        ]
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
         rows = [{"file": str(f), "size": f.stat().st_size, "mtime": int(f.stat().st_mtime)} for f in files[:50]]
         Out.result(rows, "\n".join(f"{r['size']:>10}  {r['file']}" for r in rows) or "(无备份)")
         return {"backups": rows}
@@ -385,7 +417,10 @@ async def cmd_upgrade(_a: argparse.Namespace) -> dict:
     script = ROOT / "scripts" / "update.sh"
     if not script.exists():
         Out.error(f"缺少 {script}", EXIT_PRECONDITION)
-    r = await sh(["bash", str(script)], timeout=900)
+    r = await sh(["bash", str(script)], timeout=DEPLOY_TIMEOUT_SEC, stdin_devnull=True)
+    if r["code"] == 124:
+        Out.error(f"升级脚本超时（>{DEPLOY_TIMEOUT_SEC}s），已终止整个进程组；"
+                  "升级失败时脚本本应自动回滚，请先 choyeonctl status 确认现场", EXIT_FAIL)
     if r["code"] != 0:
         Out.error(r["err"] or "升级失败（脚本已尝试自动回滚）", EXIT_FAIL)
     ok = await wait_health(30)

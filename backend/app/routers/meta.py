@@ -19,7 +19,7 @@ from .. import config
 from .. import database as dbm
 from ..services import systemd_ops
 from ..templates import list_templates
-from ..util import run
+from ..util import disk_usage_pct, run
 
 router = APIRouter()
 
@@ -45,24 +45,20 @@ async def templates_list():
     return list_templates()
 
 
-def _disk_usage_pct(path: str) -> int | None:
-    try:
-        st = os.statvfs(path)
-        total = st.f_blocks * st.f_frsize
-        free = st.f_bavail * st.f_frsize
-        if total <= 0:
-            return None
-        return round((total - free) * 100 / total)
-    except OSError:
-        return None
-
-
 def _recent_backups() -> tuple[int, float | None]:
-    """返回（备份份数，最近一份的 mtime）；目录不存在时返回 (0, None)。"""
-    patterns = [f"{config.BACKUP_DIR}/**/*.tar.gz", f"{config.BACKUP_DIR}/**/*.sql"]
+    """返回（备份份数，最近一份的 mtime）；目录不存在时返回 (0, None)。
+
+    模式必须覆盖 backup_runner 真正写出的三类文件：
+    `.sql.gz`（pg_dumpall）、`.dump.gz`（pg_dump -Fc）、`.tar.gz`（应用目录）。
+    旧写法只匹配 `*.tar.gz` 与 `*.sql`，PG 备份一种都命中不了——只跑数据库备份的机器
+    会被判成"还没有备份"，而且"最近一次备份是几天前"是按 tar 包算的，
+    刚跑完的 PG 备份不算数，容易误报陈旧。
+    """
+    suffixes = (".tar.gz", ".sql.gz", ".dump.gz", ".sql", ".dump", ".gz")
     files: list[str] = []
-    for p in patterns:
-        files.extend(glob.glob(p, recursive=True))
+    for p in glob.iglob(f"{config.BACKUP_DIR}/**/*", recursive=True):
+        if p.endswith(suffixes) and os.path.isfile(p):
+            files.append(p)
     if not files:
         return 0, None
     return len(files), max(os.path.getmtime(f) for f in files)
@@ -155,7 +151,7 @@ async def _check_backup() -> dict:
 
 
 async def _check_disk() -> dict:
-    pct = _disk_usage_pct(config.DATA_DIR)
+    pct = disk_usage_pct(config.DATA_DIR)
     if pct is None:
         return {"status": "warn", "detail": f"无法读取 {config.DATA_DIR} 所在分区", "fix": ""}
     if pct >= 90:
