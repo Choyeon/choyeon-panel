@@ -1,4 +1,5 @@
 import re
+import sqlite3
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -58,7 +59,11 @@ async def users_create(req: Request):
             "INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)",
             (username, security.hash_pass(password), role),
         )
-    except Exception:  # noqa: BLE001 唯一约束冲突即"用户名已存在"
+    except sqlite3.IntegrityError:
+        # 只把「唯一约束冲突」解释成用户名已存在。
+        # 旧写法是 except Exception：磁盘满、库被锁、WAL 写不进都会显示
+        # 「用户名已存在」（实测），管理员反复换个名字还是这句，日志里也查不到，
+        # 属于最难排查的一类误报。其余异常交给全局处理器变 500。
         return JSONResponse(status_code=400, content={"error": "用户名已存在"})
     dbm.audit(req.state.cp_sub, "user:create", f"{username}({role})")
     return {"ok": True}
@@ -75,16 +80,38 @@ async def users_update(uid: str, req: Request):
     if not u:
         return JSONResponse(status_code=404, content={"error": "用户不存在"})
     body = await _body(req)
+
+    # 先把所有变更校验完、再一次性落库。
+    # 旧写法是「改 role → 落库 → 校验 password → 落库」，于是
+    # {"role":"viewer","password":"short"} 会返回 400「密码至少 8 位」，
+    # 但 role 已经真的改成 viewer 了（实测）：调用方以为整笔请求没生效，
+    # 用户权限却已经掉了一级，而且这条分支连审计都不写，事后无从排查。
+    new_role = None
     if body.get("role"):
-        if u["username"] == req.state.cp_sub:
+        new_role = "viewer" if body["role"] == "viewer" else "admin"
+        if new_role != u["role"] and u["username"] == req.state.cp_sub:
             return JSONResponse(status_code=400, content={"error": "不能修改自己的角色"})
-        dbm.execute("UPDATE users SET role=? WHERE id=?", ("viewer" if body["role"] == "viewer" else "admin", u["id"]))
+        if new_role == u["role"]:
+            new_role = None  # 传了等于没传：不算变更，免得一次空保存把人踢下线
+    new_hash = None
     if body.get("password"):
         if len(body["password"]) < 8:
             return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
-        dbm.execute("UPDATE users SET pass_hash=? WHERE id=?", (security.hash_pass(body["password"]), u["id"]))
-        # 使该用户已签发的 token 立即失效
-        security.bump_user_epoch(u["username"])
+        new_hash = security.hash_pass(body["password"])
+
+    if new_role is None and new_hash is None:
+        dbm.audit(req.state.cp_sub, "user:update", f"{u['username']}(无变更)")
+        return {"ok": True}
+
+    if new_role is not None:
+        dbm.execute("UPDATE users SET role=? WHERE id=?", (new_role, u["id"]))
+    if new_hash is not None:
+        dbm.execute("UPDATE users SET pass_hash=? WHERE id=?", (new_hash, u["id"]))
+    # role 与 password 都只存在于已签发的 token 里（中间件读的是 token 的 role，
+    # 不是库里的），改完必须吊销旧 token，否则把 admin 降成 viewer 后
+    # 对方手上的旧 token 在 TTL 内（最长 72h）依旧是 admin——连写操作都拦不住（实测）。
+    # 改密本来就要吊销；这里合并成「任何一次实际变更都吊销」。
+    security.bump_user_epoch(u["username"])
     dbm.audit(req.state.cp_sub, "user:update", u["username"])
     return {"ok": True}
 

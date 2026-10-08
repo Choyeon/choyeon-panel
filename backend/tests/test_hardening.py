@@ -5,9 +5,11 @@
 """
 
 import asyncio
+import itertools
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -28,6 +30,18 @@ from app.util import parse_lines, run, run_shell_async  # noqa: E402
 
 def _rmtree(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
+
+
+_seq = itertools.count()
+
+
+def _uid(prefix: str) -> str:
+    """测试用户名：唯一、只含 [A-Za-z0-9_-]（注册/改用户接口都按这个正则校验）。
+
+    必须短：用户名正则是 3-32 位，`f"{os.getpid()}_{id(self)}"` 那种写法在
+    长前缀下会超限，这里用自增序号控制长度。
+    """
+    return f"{prefix}{os.getpid() % 100000}{next(_seq)}"
 
 
 # ---------------------------------------------------------------- 终端资源回收
@@ -294,6 +308,210 @@ class TestTokenRevocation(unittest.TestCase):
         security.bump_user_epoch(self.user)
         with self.assertRaises(jwt.InvalidTokenError, msg="bump 之后旧 token 必须立即失效"):
             security.verify_token(tok)
+
+
+# ---------------------------------------------------- 用户改角色/改密（HTTP 层）
+class TestUserUpdateRevocation(unittest.TestCase):
+    """PATCH /api/users/{uid} 的两条实测缺陷。
+
+    1. 中间件读的是 **token 里的 role**（app/deps.py），不是库里的 role。旧实现
+       改 role 后不吊销旧 token，于是把 admin 降成 viewer，对方手上的旧 token
+       在 TTL 内（最长 72h）依然是 admin —— 降权完全无效，写操作照旧放行。
+    2. 旧实现「先落库 role，再校验 password」：{"role":"viewer","password":"short"}
+       返回 400，但 role 已经真的改了（部分写入），且这条分支不写审计。
+    """
+
+    BASE_PW = "Password123"      # setUp 里建用户用的初始密码
+    NEW_PW = "Rotated99Pass"     # 通过接口改成的新密码
+
+    def setUp(self):
+        from starlette.testclient import TestClient
+
+        from app import main as _main
+
+        self.client = TestClient(_main.app)
+        self.admin = _uid("uupd_admin_")
+        self.target = _uid("uupd_target_")
+        for name in (self.admin, self.target):
+            dbm.execute(
+                "INSERT OR REPLACE INTO users(username,pass_hash,role) VALUES(?,?,?)",
+                (name, security.hash_pass(self.BASE_PW), "admin"),
+            )
+        self.addCleanup(dbm.execute, "DELETE FROM users WHERE username=?", (self.admin,))
+        self.addCleanup(dbm.execute, "DELETE FROM users WHERE username=?", (self.target,))
+        self.admin_headers = {"Authorization": f"Bearer {security.sign_token(self.admin, 'admin')}"}
+        self.tid = dbm.query_one("SELECT id FROM users WHERE username=?", (self.target,))["id"]
+
+    def _role(self):
+        return dbm.query_one("SELECT role FROM users WHERE id=?", (self.tid,))["role"]
+
+    def test_demotion_revokes_old_admin_token(self):
+        """核心回归：降权后旧 token 必须立刻不能再当 admin 用。"""
+        victim_token = security.sign_token(self.target, "admin")
+        # 基线：旧 token 能过中间件的写操作闸门（用一个非法 verb 的 4xx，
+        # 只要不是 403「只读账号」就说明它仍被当成 admin）
+        base = self.client.post(
+            "/api/apps/999999/action", json={"verb": "stop"},
+            headers={"Authorization": f"Bearer {victim_token}"},
+        )
+        self.assertNotIn("只读账号", base.text, "基线：未降权前该 token 应享有 admin 权限")
+
+        r = self.client.patch(f"/api/users/{self.tid}", json={"role": "viewer"}, headers=self.admin_headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self._role(), "viewer")
+
+        with self.assertRaises(jwt.InvalidTokenError, msg="改 role 后旧 token 必须失效"):
+            security.verify_token(victim_token)
+
+        after = self.client.post(
+            "/api/apps/999999/action", json={"verb": "stop"},
+            headers={"Authorization": f"Bearer {victim_token}"},
+        )
+        self.assertIn("登录已过期", after.text, "降权后拿旧 token 必须被 401 拦下，而不是继续当 admin")
+
+    def test_reissued_token_carries_new_role(self):
+        """非空断言：降权后重新签发的 viewer token 确实被写操作闸门拦住
+        （证明上一条不是因为 token 恰好不可用而“看起来”安全）。"""
+        self.client.patch(f"/api/users/{self.tid}", json={"role": "viewer"}, headers=self.admin_headers)
+        fresh = {"Authorization": f"Bearer {security.sign_token(self.target, 'viewer')}"}
+        r = self.client.post("/api/apps/999999/action", json={"verb": "stop"}, headers=fresh)
+        self.assertIn("只读账号", r.text)
+
+    def test_invalid_password_does_not_change_role(self):
+        """部分写入回归：整笔请求失败时，role 必须保持原值。"""
+        before = self._role()
+        r = self.client.patch(
+            f"/api/users/{self.tid}", json={"role": "viewer", "password": "short"}, headers=self.admin_headers
+        )
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("密码", r.text)
+        self.assertEqual(self._role(), before, "400 的请求不能留下半个变更")
+
+    def test_self_role_change_rejected_without_touching_db(self):
+        """不能改自己角色；且被拒绝时不得写库、不得吊销自己的 token（否则管理员自锁）。"""
+        aid = dbm.query_one("SELECT id FROM users WHERE username=?", (self.admin,))["id"]
+        r = self.client.patch(f"/api/users/{aid}", json={"role": "viewer"}, headers=self.admin_headers)
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertEqual(
+            dbm.query_one("SELECT role FROM users WHERE id=?", (aid,))["role"], "admin", "拒绝后不能改库"
+        )
+        # 自己的 token 仍可用（没有被误吊销）
+        self.assertEqual(security.verify_token(self.admin_headers["Authorization"][7:])["sub"], self.admin)
+
+    def test_equal_role_does_not_lock_user_out(self):
+        """幂等：role 传成当前值不算变更，不该吊销对方 token。"""
+        tok = security.sign_token(self.target, "admin")
+        r = self.client.patch(f"/api/users/{self.tid}", json={"role": "admin"}, headers=self.admin_headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(security.verify_token(tok)["sub"], self.target, "无实际变更时不应吊销 token")
+
+    def test_password_change_still_revokes(self):
+        """原有能力不回退：改密仍要吊销旧 token。"""
+        tok = security.sign_token(self.target, "admin")
+        r = self.client.patch(
+            f"/api/users/{self.tid}", json={"password": "NewPassw0rd"}, headers=self.admin_headers
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        with self.assertRaises(jwt.InvalidTokenError):
+            security.verify_token(tok)
+
+    def test_password_change_actually_sets_the_new_password(self):
+        """非空断言：改密不是「只 bump epoch」——落库的必须是提交的那个密码。
+
+        只验证吊销的话，把 pass_hash 写成任何别的值（甚至写死）都能过，
+        而这个接口真正的用途是让用户能用新密码登录。
+        """
+        stored_old = dbm.query_one("SELECT pass_hash FROM users WHERE id=?", (self.tid,))["pass_hash"]
+        r = self.client.patch(f"/api/users/{self.tid}", json={"password": self.NEW_PW}, headers=self.admin_headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        stored_new = dbm.query_one("SELECT pass_hash FROM users WHERE id=?", (self.tid,))["pass_hash"]
+        self.assertNotEqual(stored_new, stored_old, "pass_hash 必须被更新")
+        self.assertTrue(security.check_pass(self.NEW_PW, stored_new), "新密码必须能校验通过")
+        self.assertFalse(security.check_pass(self.BASE_PW, stored_new), "旧密码必须失效")
+        # 走真实登录接口确认端到端可用（而不只是哈希比对）
+        login = self.client.post("/api/auth/login", json={"username": self.target, "password": self.NEW_PW})
+        self.assertEqual(login.status_code, 200, login.text)
+        self.assertIn("token", login.json())
+        dead = self.client.post("/api/auth/login", json={"username": self.target, "password": self.BASE_PW})
+        self.assertEqual(dead.status_code, 401)
+
+    def test_self_noop_role_patch_is_allowed(self):
+        """自己传回当前角色（例如客户端把整个用户对象 PATCH 回来）不该被拒，
+        也不该把自己踢下线 —— 只有「真的变更」才需要守卫与吊销。"""
+        aid = dbm.query_one("SELECT id FROM users WHERE username=?", (self.admin,))["id"]
+        tok = security.sign_token(self.admin, "admin")
+        r = self.client.patch(f"/api/users/{aid}", json={"role": "admin"}, headers=self.admin_headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(dbm.query_one("SELECT role FROM users WHERE id=?", (aid,))["role"], "admin")
+        self.assertEqual(security.verify_token(tok)["sub"], self.admin, "无变更不得吊销自己的 token")
+
+    def test_empty_body_makes_no_change(self):
+        """非空断言：空 body 不改 role/密码，也不吊销 —— 避免误伤在线会话。"""
+        tok = security.sign_token(self.target, "admin")
+        before = dbm.query_one("SELECT role,pass_hash FROM users WHERE id=?", (self.tid,))
+        r = self.client.patch(f"/api/users/{self.tid}", json={}, headers=self.admin_headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(dbm.query_one("SELECT role,pass_hash FROM users WHERE id=?", (self.tid,)), before)
+        self.assertEqual(security.verify_token(tok)["sub"], self.target)
+
+    def test_missing_user_is_404(self):
+        r = self.client.patch("/api/users/999999", json={"role": "viewer"}, headers=self.admin_headers)
+        self.assertEqual(r.status_code, 404, r.text)
+
+
+class TestUserCreateErrorHonesty(unittest.TestCase):
+    """POST /api/users 只能把「唯一约束冲突」说成用户名已存在。
+
+    旧写法 `except Exception`：磁盘满 / 库被锁 / WAL 写不进都返回
+    {"error":"用户名已存在"}（实测），管理员换个名字重试仍然是这句，
+    面板日志里也没有任何线索。
+    """
+
+    PW = "CreatePassw0rd"  # 建用户用的口令（≥8 位，过接口校验）
+
+    def setUp(self):
+        from starlette.testclient import TestClient
+
+        from app import main as _main
+
+        # raise_server_exceptions=False：我们要的是「应用把异常兜成 500 响应」这件事，
+        # 默认 True 会让 TestClient 直接把异常抛回测试里，反而看不到状态码。
+        self.client = TestClient(_main.app, raise_server_exceptions=False)
+        self.admin = _uid("uce_admin_")
+        dbm.execute(
+            "INSERT OR REPLACE INTO users(username,pass_hash,role) VALUES(?,?,?)",
+            (self.admin, security.hash_pass("Password123"), "admin"),
+        )
+        self.addCleanup(dbm.execute, "DELETE FROM users WHERE username=?", (self.admin,))
+        self.headers = {"Authorization": f"Bearer {security.sign_token(self.admin, 'admin')}"}
+
+    def test_duplicate_name_still_reports_conflict(self):
+        """非空断言（正向）：真冲突仍然是 400 + 用户名已存在，能力不回退。"""
+        name = _uid("uce_dup_")
+        self.addCleanup(dbm.execute, "DELETE FROM users WHERE username=?", (name,))
+        body = {"username": name, "password": self.PW}
+        self.assertEqual(self.client.post("/api/users", json=body, headers=self.headers).status_code, 200)
+        r = self.client.post("/api/users", json=body, headers=self.headers)
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("已存在", r.text)
+
+    def test_disk_full_is_not_reported_as_duplicate_name(self):
+        def boom(sql, params=()):
+            if "INSERT INTO users" in sql:
+                raise sqlite3.OperationalError("database or disk is full")
+            return None
+
+        name = _uid("uce_disk_")
+        with mock.patch.object(dbm, "execute", boom):
+            r = self.client.post("/api/users", json={"username": name, "password": self.PW}, headers=self.headers)
+        self.assertNotIn("已存在", r.text, f"存储故障不得伪装成用户名冲突，实到：{r.status_code} {r.text}")
+        self.assertEqual(r.status_code, 500, r.text)
+
+    def test_unrelated_crash_is_not_swallowed(self):
+        name = _uid("uce_crash_")
+        with mock.patch.object(dbm, "execute", side_effect=RuntimeError("boom")):
+            r = self.client.post("/api/users", json={"username": name, "password": self.PW}, headers=self.headers)
+        self.assertEqual(r.status_code, 500, r.text)
 
 
 # ---------------------------------------------------------------- 登录限速
