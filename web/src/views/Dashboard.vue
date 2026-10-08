@@ -218,7 +218,7 @@ window.addEventListener('resize', onResize);
             <div class="sicon" :style="`--c:${c.color}`"><NIcon :component="icons[c.icon]" :size="19" /></div>
             <div style="flex: 1; min-width: 0">
               <div class="slabel">{{ c.label }}</div>
-              <div class="stat-num" :class="{ small: c.key === 'net' }">{{ c.value }}<span v-if="c.unit" class="unit">{{ c.unit }}</span></div>
+              <div class="stat-num cp-pop" :class="{ small: c.key === 'net' }" :key="c.value">{{ c.value }}<span v-if="c.unit" class="unit">{{ c.unit }}</span></div>
             </div>
           </div>
           <template v-if="c.key !== 'net'">
