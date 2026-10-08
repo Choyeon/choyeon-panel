@@ -256,7 +256,7 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
+    <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
       <NGridItem span="4 2:1">
         <NCard size="small" class="info-card cp-rise" style="--i: 0">
           <div class="info-k">运行时</div>
@@ -290,7 +290,7 @@ onMounted(load);
     </NGrid>
 
     <NCard v-if="proc" size="small" class="res-bar" style="margin-bottom: var(--space-4)">
-      <NSpace :size="26" align="center" wrap>
+      <NSpace :size="24" align="center" wrap>
         <span class="res-item"><span class="res-k">进程</span><b class="mono-dim">{{ proc.running ? 'PID ' + proc.pid : '未运行' }}</b></span>
         <span class="res-item"><span class="res-k">内存</span><b class="mono-dim">{{ fmtMem(proc.memoryBytes) }}</b></span>
         <span class="res-item"><span class="res-k">CPU 累计</span><b class="mono-dim">{{ proc.cpuSeconds != null ? proc.cpuSeconds + 's' : '—' }}</b></span>
@@ -305,7 +305,7 @@ onMounted(load);
       <NTabs type="line" animated pane-style="padding: var(--space-4); padding-top: var(--space-2)">
         <NTabPane name="config" tab="基本配置">
           <NForm label-placement="left" label-width="100" style="max-width: 660px; margin-top: var(--space-3)">
-            <NSpace vertical :size="10">
+            <NSpace vertical :size="12">
               <NFormItem label="名称"><NInput v-model:value="edit.name" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
               <NFormItem label="安装目录"><NInput v-model:value="edit.path" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
               <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" :input-props="{ 'aria-label': 'Git 仓库地址' }" /></NFormItem>
@@ -427,8 +427,8 @@ onMounted(load);
         </NTabPane>
 
         <NTabPane name="ssl" tab="SSL 证书">
-          <NSpace vertical :size="14">
-            <NSpace align="center" :size="10">
+          <NSpace vertical :size="16">
+            <NSpace align="center" :size="8">
               <NIcon :component="icons.ShieldCheckmarkOutline" :size="20" color="var(--cp-brand-soft)" />
               <NText style="font-size: var(--fs-sm)">{{ app.domain || '（未配置域名）' }}</NText>
               <NTag v-if="app.domain" size="tiny" :bordered="false" type="info">Let's Encrypt</NTag>

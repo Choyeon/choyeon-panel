@@ -73,7 +73,7 @@ onBeforeUnmount(close);
 
 <template>
   <div>
-    <NSpace align="center" :size="10" wrap style="margin-bottom: var(--space-2)">
+    <NSpace align="center" :size="8" wrap style="margin-bottom: var(--space-2)">
       <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" @click="refresh">刷新</NButton>
       <NButton
         size="tiny"

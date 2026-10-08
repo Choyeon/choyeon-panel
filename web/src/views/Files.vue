@@ -189,7 +189,7 @@ onMounted(() => load());
     </PageHeader>
 
     <NCard size="small" style="margin-bottom: var(--space-4)" :content-style="{ padding: 'var(--space-3) var(--space-4)' }">
-      <NSpace vertical :size="10">
+      <NSpace vertical :size="12">
         <NSpace align="center" justify="space-between" style="width: 100%">
           <NBreadcrumb>
             <NBreadcrumbItem>
@@ -216,7 +216,7 @@ onMounted(() => load());
       可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑。
     </NText>
 
-    <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :scroll-x="760" :max-height="'calc(100vh - 360px)'" :row-key="(e: any) => e.name">
+    <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :scroll-x="760" :max-height="'calc(100vh - 368px)'" :row-key="(e: any) => e.name">
       <template #empty><EmptyBox text="空目录" /></template>
     </NDataTable>
 

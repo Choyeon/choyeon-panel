@@ -198,7 +198,7 @@ window.addEventListener('resize', onResize);
 </script>
 
 <template>
-  <NSpace vertical :size="18">
+  <NSpace vertical :size="16">
     <!-- hero -->
     <div class="hero">
       <div style="min-width: 0">
@@ -208,7 +208,7 @@ window.addEventListener('resize', onResize);
           <span class="hero-host-text">{{ info.hostname || '本机' }} · {{ info.prettyName || info.platform || '加载中' }}</span>
         </div>
       </div>
-      <NSpace align="center" :size="10" :wrap="false">
+      <NSpace align="center" :size="8" :wrap="false">
         <NTag v-if="info.node" round size="small" :bordered="false" type="info">{{ info.node }}</NTag>
         <span v-if="sideError" class="st warn"><span class="dot warn"></span>服务状态未知</span>
         <span v-else-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
@@ -220,7 +220,7 @@ window.addEventListener('resize', onResize);
     </div>
 
     <!-- stat cards -->
-    <NGrid :cols="4" :x-gap="14" :y-gap="14" responsive="screen" item-responsive>
+    <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGridItem v-for="(c, ci) in [
         { key: 'cpu', label: 'CPU', icon: 'PulseOutline', color: 'var(--cp-brand)', value: `${stat.cpu ?? '-'}`, unit: '%', pct: stat.cpu || 0, foot: `${info.cpuCores || '?'} 核 · 负载 ${(stat.load || []).map((x: number) => x.toFixed(1)).join(' / ') || '-'}` },
         { key: 'mem', label: '内存', icon: 'CubeOutline', color: 'var(--cp-ok)', value: fmtBytes(stat.memUsed), unit: ` / ${fmtBytes(stat.memTotal)}`, pct: Math.round(((stat.memUsed || 0) / (stat.memTotal || 1)) * 100), foot: `可用 ${fmtBytes((stat.memTotal || 0) - (stat.memUsed || 0))}` },
@@ -248,7 +248,7 @@ window.addEventListener('resize', onResize);
     </NGrid>
 
     <!-- charts -->
-    <NGrid :cols="2" :x-gap="14" :y-gap="14" responsive="screen" item-responsive>
+    <NGrid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGridItem span="2 1:2">
         <NCard size="small">
           <template #header><span class="section-title">CPU 趋势</span></template>
@@ -266,7 +266,7 @@ window.addEventListener('resize', onResize);
     </NGrid>
 
     <!-- apps + services overview -->
-    <NGrid :cols="2" :x-gap="14" :y-gap="14" responsive="screen" item-responsive>
+    <NGrid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGridItem span="2 1:2">
         <NCard size="small">
           <template #header><span class="section-title">应用（{{ runningApps }}/{{ apps.length }} 运行中）</span></template>

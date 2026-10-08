@@ -96,7 +96,7 @@ onMounted(load);
       <template #prefix><NIcon :component="icons.SearchOutline" /></template>
     </NInput>
 
-    <NDataTable :columns="columns" :data="filtered" size="small" :bordered="false" :scroll-x="900" :max-height="'calc(100vh - 300px)'" :row-key="(r: any) => r.unit">
+    <NDataTable :columns="columns" :data="filtered" size="small" :bordered="false" :scroll-x="900" :max-height="'calc(100vh - 308px)'" :row-key="(r: any) => r.unit">
       <template #empty><EmptyBox text="没有匹配的服务" /></template>
     </NDataTable>
 

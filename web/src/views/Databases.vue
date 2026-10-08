@@ -218,7 +218,7 @@ onMounted(load);
         <NTabPane name="redis" tab="Redis">
           <NText v-if="redis?.error" depth="3">{{ redis.error }}</NText>
           <template v-else-if="redis">
-            <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+            <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">版本</div><div class="rv">{{ redis.info?.redis_version || '—' }}</div></NCard></NGridItem>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">运行模式</div><div class="rv">{{ redis.info?.redis_mode || '—' }} / {{ redis.authed ? '面板密码' : 'redis.conf' }}</div></NCard></NGridItem>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">连接客户端</div><div class="rv">{{ redis.info?.connected_clients ?? '—' }}</div></NCard></NGridItem>

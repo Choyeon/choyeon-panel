@@ -109,7 +109,7 @@ async function submit() {
         </NAlert>
 
         <form @submit.prevent="submit">
-          <NSpace vertical :size="14">
+          <NSpace vertical :size="16">
             <div class="field">
               <label for="cp-username">用户名</label>
               <NInput

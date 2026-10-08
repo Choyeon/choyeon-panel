@@ -113,7 +113,7 @@ onMounted(load);
         </NSpace>
       </NCard>
 
-      <NSpace vertical :size="10">
+      <NSpace vertical :size="12">
         <NCard
           v-for="(it, idx) in report.items"
           :key="it.id"
@@ -122,7 +122,7 @@ onMounted(load);
           :style="`--i:${idx}`"
         >
           <NSpace align="center" justify="space-between" style="gap: var(--space-3)">
-            <NSpace align="center" :size="10" style="min-width: 0">
+            <NSpace align="center" :size="8" style="min-width: 0">
               <NIcon
                 :size="18"
                 :component="icons[TYPE[it.status].icon] || icons.InformationCircleOutline"

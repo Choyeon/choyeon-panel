@@ -173,7 +173,7 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NGrid :cols="2" :x-gap="14" :y-gap="14" responsive="screen" item-responsive>
+    <NGrid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGridItem v-if="isAdmin" span="2 1:2">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.OptionsOutline" :size="15" color="var(--cp-brand-soft)" /> 用户管理</span></template>
@@ -209,7 +209,7 @@ onMounted(load);
       <NGridItem span="2 1:1">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.ShieldCheckmarkOutline" :size="15" color="var(--cp-ok)" /> 防火墙</span></template>
-          <NSpace vertical :size="10">
+          <NSpace vertical :size="12">
             <NSpace align="center" :size="8">
               <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? (fw.active ? 'ufw 已启用' : 'ufw 未启用') : '检测中…' }}</span>
               <NText depth="3" style="font-size: var(--fs-xs)">面板对防火墙只读；开启/改规则请 SSH 手动操作，以免误锁 SSH。</NText>
@@ -222,7 +222,7 @@ onMounted(load);
       <NGridItem v-if="isAdmin" span="2 1:1">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-brand-soft)" /> 证书维护</span></template>
-          <NSpace vertical :size="10">
+          <NSpace vertical :size="12">
             <NText depth="3" style="font-size: var(--fs-xs)">certbot renew 检查所有已安装证书并自动续期（系统每日定时任务已托管，此处用于手动触发验证）。</NText>
             <NButton type="primary" size="small" :loading="renewing" :icon="ico('SyncOutline')" style="align-self: flex-start" @click="renew">立即续期</NButton>
             <div v-if="renewLog" class="log-view" style="max-height: 220px">{{ renewLog }}</div>
