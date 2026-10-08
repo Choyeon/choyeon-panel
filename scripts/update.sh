@@ -18,7 +18,10 @@ if [ -z "${CP_UPDATE_SNAPSHOT:-}" ]; then
   mkdir -p "$_snap/scripts"
   _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   cp "$_here/update.sh" "$_here/common.sh" "$_snap/scripts/"
-  exec env CP_UPDATE_SNAPSHOT="$_snap" bash "$_snap/scripts/update.sh" "$@"
+  # 副本不在仓库里，common.sh 的 PREFIX 会退回默认值（实测报 "/root/choyeon-panel 不是 git 仓库"），
+  # 所以把脚本自身所在的仓库根显式传下去；用户自己设过 CP_PREFIX 时尊重原值。
+  _repo="$(cd "$_here/.." && pwd)"
+  exec env CP_UPDATE_SNAPSHOT="$_snap" CP_PREFIX="${CP_PREFIX:-$_repo}" bash "$_snap/scripts/update.sh" "$@"
 fi
 trap 'rm -rf "$CP_UPDATE_SNAPSHOT"' EXIT
 
