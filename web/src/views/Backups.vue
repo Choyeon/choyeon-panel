@@ -47,7 +47,9 @@ const columns: any[] = [
         ]),
         h('div', { class: 'cell-txt' }, [
           h('span', { class: 'cell-name' }, r.target),
-          h('div', { class: 'cell-sub' }, r.kind === 'pg' ? 'pg_dump 自定义格式' : '应用目录打包（排除依赖目录）'),
+          r.target_missing
+            ? h(NTag, { size: 'tiny', type: 'warning', bordered: false, class: 'cell-sub' }, () => '目标应用已删除，备份将失败')
+            : h('div', { class: 'cell-sub' }, r.kind === 'pg' ? 'pg_dump 自定义格式' : '应用目录打包（排除依赖目录）'),
         ]),
       ]),
   },

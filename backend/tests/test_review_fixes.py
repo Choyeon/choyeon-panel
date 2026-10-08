@@ -2,10 +2,12 @@
 
 覆盖：应用安装目录不得指向面板自身要害目录、部署模板端口/安装命令自洽、
 证书续期失败必须报错、二进制上传不被毁、viewer 看不到应用密钥与审计、
-改名后旧 unit/站点被拆除、CLI 的 --json 契约与部署等待。
+改名后旧 unit/站点被拆除、备份目标应用被删后要在列表里露出来、
+公开状态接口不回显管理员用户名、CLI 的 --json 契约与部署等待。
 """
 
 import asyncio
+import itertools
 import json
 import os
 import shutil
@@ -27,6 +29,13 @@ from app.routers import extras
 from app.services import apps_service, files_service, nginx_ops  # noqa: E402
 
 BACKEND = Path(__file__).resolve().parent.parent
+
+_seq = itertools.count()
+
+
+def _uid(prefix: str) -> str:
+    """唯一且合法的标识（用户名/应用名/backups.target 都走 3-32 位 [A-Za-z0-9_-]）。"""
+    return f"{prefix}{os.getpid() % 100000}{next(_seq)}"
 
 
 def _req(role: str = "admin", sub: str = "tester", query: dict | None = None):
@@ -212,6 +221,45 @@ class TestCliJsonContract(unittest.TestCase):
         p = self._cli("status")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("healthy", json.loads(p.stdout))
+
+
+class TestBackupStaleTarget(unittest.TestCase):
+    """回归：应用被删掉后备份任务照旧"已启用"，timer 每晚 SystemExit，面板上看不出任何异常。"""
+
+    def test_flags_missing_app_target(self):
+        from app.services import backup_service as B
+
+        name = _uid("bkapp")
+        dbm.execute(
+            "INSERT INTO backups(kind,target,schedule,hour,minute,keep,enabled)"
+            " VALUES('app',?,'daily',3,30,7,1)",
+            (name,),
+        )
+        dbm.execute("INSERT INTO apps(name,type,repo_url,path,start_cmd) VALUES(?,'node','r','/tmp/x','s')", (name,))
+        row = dbm.query_one("SELECT id FROM backups WHERE target=?", (name,))
+        self.addCleanup(dbm.execute, "DELETE FROM backups WHERE id=?", (row["id"],))
+        self.addCleanup(dbm.execute, "DELETE FROM apps WHERE name=?", (name,))
+        listed = {b["id"]: b for b in B.list_backups()}
+        self.assertFalse(listed[row["id"]]["target_missing"], "应用还在时不该报缺失")
+
+        dbm.execute("DELETE FROM apps WHERE name=?", (name,))
+        listed = {b["id"]: b for b in B.list_backups()}
+        self.assertTrue(listed[row["id"]]["target_missing"], "应用被删后必须标记目标缺失")
+
+    def test_pg_target_not_flagged(self):
+        from app.services import backup_service as B
+
+        name = _uid("bkpg")
+        dbm.execute(
+            "INSERT INTO backups(kind,target,schedule,hour,minute,keep,enabled)"
+            " VALUES('pg',?,'daily',3,30,7,1)",
+            (name,),
+        )
+        row = dbm.query_one("SELECT id FROM backups WHERE target=?", (name,))
+        self.addCleanup(dbm.execute, "DELETE FROM backups WHERE id=?", (row["id"],))
+        listed = {b["id"]: b for b in B.list_backups()}
+        # pg 库存在性要连服务器才知道，列表里误报只会制造噪音
+        self.assertFalse(listed[row["id"]]["target_missing"])
 
 
 class TestAuthStatusPrivacy(unittest.IsolatedAsyncioTestCase):

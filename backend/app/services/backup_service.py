@@ -29,11 +29,21 @@ def _unit_dir() -> str:
     return config.UNIT_DIR
 
 
+def _target_missing(b: dict) -> bool:
+    """app 类备份的目标必须还在 apps 表里。
+
+    应用被删除后备份行不会跟着走，timer 每晚跑一次 backup_runner 就 SystemExit 一次，
+    而面板上这条任务依旧显示"已启用"——只有翻 journalctl 才发现备份早就不产出了。
+    """
+    return b["kind"] == "app" and not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (b["target"],))
+
+
 def list_backups() -> list:
     rows = dbm.query("SELECT * FROM backups ORDER BY id")
     out = []
     for b in rows:
         b["dir"] = BACKUP_DIR
+        b["target_missing"] = _target_missing(b)
         if os.path.isdir(BACKUP_DIR):
             files = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith(f"bk{b['id']}-"))
             files = list(reversed(files))[:30]
