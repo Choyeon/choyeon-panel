@@ -117,6 +117,8 @@ async def issue_cert(domain: str, email: str | None = None) -> str:
 
 async def renew_certs() -> str:
     r = await run("certbot", ["renew", "--non-interactive"], timeout=600)
+    if r["code"] != 0:
+        raise RuntimeError(f"证书续期失败 (exit {r['code']}): {r['out'] or r['err']}")
     return r["out"]
 
 
@@ -255,7 +257,7 @@ async def quick_edit_config(path: str, kind: str, value: str | None = None) -> d
         )
         c = c.replace(m.group(0), f"{m.group(0)}\n{upgrade_headers}")
     elif kind == "body":
-        if not re.match(r"^\d{1,4}[km]?$", value or "", re.I):
+        if not re.match(r"^\d{1,4}[kmg]$", value or "", re.I):
             raise RuntimeError("大小格式应如 50m / 1g")
         if re.search(r"client_max_body_size", c):
             c = re.sub(r"client_max_body_size\s+[^;]+;", f"client_max_body_size {value};", c, count=1)

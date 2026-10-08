@@ -164,13 +164,27 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
 
     ok_health = await wait_health(30)
     admins = dbm.query_one("SELECT COUNT(*) c FROM users")
-    return {
+    data = {
         "ok": ok_health,
         "url": f"http://127.0.0.1:{a.port or config.PORT}",
         "healthy": ok_health,
         "adminCreated": bool(admins and admins["c"]),
         "next": "无管理员时打开 URL 注册，或 choyeonctl user create <name> --password <pw>",
     }
+    if not ok_health:
+        data["error"] = f"部署脚本已执行完，但 {health_url()} 在 30s 内没有返回健康状态"
+        data["hint"] = "journalctl -u choyeon-panel -n 50 看启动失败原因；端口占用换 --port 重试"
+    # 这两个命令过去只 return、从不 Out.result，而 amain 又丢弃返回值：
+    # `choyeonctl deploy --json` 实际输出 0 字节且 exit 0，AGENTS.md 承诺的
+    # "以 JSON 字段 + 退出码做判断"在这条主路径上完全不成立。
+    Out.result(
+        data,
+        f"部署完成：{data['url']}  健康 {'是' if ok_health else '否'}  "
+        f"已有管理员 {'是' if data['adminCreated'] else '否'}",
+    )
+    if not ok_health:
+        raise SystemExit(EXIT_FAIL)
+    return data
 
 
 async def wait_health(timeout: int = 30) -> bool:
@@ -212,14 +226,16 @@ async def cmd_status(_a: argparse.Namespace) -> dict:
 
 async def cmd_doctor(_a: argparse.Namespace) -> dict:
     res = await run_checks()
-    if not Out.json_mode:
-        icon = {"pass": "✓", "warn": "!", "fail": "✗"}
-        for i in res["items"]:
-            line = f"  {icon.get(i['status'], '?')} {i['title']}: {i['detail']}"
-            print(line)
-            if i["fix"] and i["status"] != "pass":
-                print(f"      修复: {i['fix']}")
-        print(f"结论: {res['status']}")
+    # ✓/✗ 在非 UTF-8 控制台（如 Windows GBK）会抛 UnicodeEncodeError，
+    # 让一条只读自检命令整个崩掉；用 ASCII 标记更稳。
+    icon = {"pass": "[ok]", "warn": "[!]", "fail": "[x]"}
+    lines = []
+    for i in res["items"]:
+        lines.append(f"  {icon.get(i['status'], '[?]')} {i['title']}: {i['detail']}")
+        if i["fix"] and i["status"] != "pass":
+            lines.append(f"      修复: {i['fix']}")
+    lines.append(f"结论: {res['status']}")
+    Out.result(res, "\n".join(lines))
     return res
 
 
@@ -328,8 +344,19 @@ async def cmd_app(a: argparse.Namespace) -> dict:
             Out.error("deploy 需要 --id", EXIT_USAGE)
         dep = await apps_service.deploy_app(a.id)
         dbm.audit("cli", "app:deploy", str(a.id))
-        Out.result({"deployment": dep, "app": a.id}, f"部署已启动：deployment #{dep}（用 app logs --id {a.id} 查看）")
-        return {"deployment": dep}
+        # deploy_app 用 create_task 派发后台任务后立即返回；CLI 的 asyncio.run
+        # 一退出就把这个任务取消掉，部署停在 status='running'，此后该应用无法
+        # 删除/回滚/改配置（_ensure_no_deployment 拦住），直到面板重启才自愈。
+        # 所以 CLI 必须等它真正结束再退。
+        res = await apps_service.wait_deployment(dep, a.id)
+        ok = res["status"] == "success"
+        Out.result(
+            {"deployment": dep, "app": a.id, "status": res["status"], "ok": ok},
+            f"部署 #{dep} 结束：{res['status']}（用 app logs --id {a.id} 查看日志）",
+        )
+        if not ok:
+            raise SystemExit(EXIT_FAIL)
+        return {"deployment": dep, "app": a.id, "status": res["status"], "ok": ok}
 
     if a.app_cmd == "rollback":
         if not a.id:

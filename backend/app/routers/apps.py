@@ -24,14 +24,19 @@ async def apps_list():
 
 
 @router.get("/api/apps/{app_id}")
-async def app_get(app_id: int):
+async def app_get(app_id: int, req: Request):
     a = apps_service.get_app(app_id)
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
     unit = apps_service.unit_name(a)
     running = await systemd_ops.is_active(unit)
     port = a["port"] if a["port"] is not None else (await apps_service.detect_port(unit) if running else None)
-    return {**a, "running": running, "unit": unit, "port": port, "portAuto": a["port"] is None and port is not None}
+    out = {**a, "running": running, "unit": unit, "port": port, "portAuto": a["port"] is None and port is not None}
+    # env 里是应用密钥；列表接口与告警配置都刻意剥离/脱敏，详情接口不能例外。
+    # 保留键名并给空数组，viewer 的前端表单仍能正常解析。
+    if req.state.cp_role != "admin":
+        out["env"] = "[]"
+    return out
 
 
 @router.post("/api/apps")
@@ -48,7 +53,9 @@ async def app_create(req: Request):
 @router.patch("/api/apps/{app_id}")
 async def app_update(app_id: int, req: Request):
     try:
+        old = apps_service.get_app(app_id)
         a = apps_service.update_app(app_id, await _body(req))
+        await apps_service.cleanup_renamed(old, a["name"])
         dbm.audit(req.state.cp_sub, "app:update", a["name"])
         return a
     except Exception as e:  # noqa: BLE001
@@ -113,7 +120,9 @@ async def app_ssl(app_id: int, req: Request):
         dbm.audit(req.state.cp_sub, "app:ssl", str(app_id))
         return {"ok": True, "log": out}
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        # 与其它 app 路由一致返回 400：certbot 未安装、端口未填、nginx -t 不过
+        # 都是用户可修正的配置问题，返 500 时前端只能显示"服务器内部错误"。
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @router.get("/api/apps/{app_id}/nginx")

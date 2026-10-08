@@ -210,6 +210,8 @@ async def alerts_run_checks(req: Request):
 
 @router.get("/api/audit")
 async def audit_list(req: Request):
+    if r := _need_admin(req):
+        return r
     try:
         limit = int(req.query_params.get("limit") or 100)
     except ValueError:
@@ -221,5 +223,12 @@ async def audit_list(req: Request):
 
 @router.post("/api/system/certbot-renew")
 async def certbot_renew(req: Request):
+    if r := _need_admin(req):
+        return r
+    try:
+        log = await nginx_ops.renew_certs()
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    # 审计写在执行之后：续期失败也先记一条"已执行"，事后无法区分成功与失败。
     dbm.audit(req.state.cp_sub, "certbot:renew")
-    return {"log": await nginx_ops.renew_certs()}
+    return {"ok": True, "log": log}

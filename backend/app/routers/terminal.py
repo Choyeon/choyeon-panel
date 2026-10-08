@@ -65,13 +65,15 @@ async def terminal(ws: WebSocket):
         await ws.close(code=4503, reason="too many sessions")
         return
 
+    # 占额度必须紧接检查、中间不引入 await：`await ws.accept()` 与审计写入都会让出事件循环，
+    # 两个并发握手可同时通过上面的上限检查，实际会话数突破 TERMINAL_MAX_SESSIONS 并泄漏 pty。
+    _SESSIONS += 1
     await ws.accept()
     user = state.get("cp_sub") or "?"
     dbm.audit(user, "terminal:open")
 
     master = slave = None
     proc = None
-    _SESSIONS += 1  # 先占额度再分配资源，任何一步失败都能对称释放
     loop = asyncio.get_running_loop()
     reader_added = False
     pump = None

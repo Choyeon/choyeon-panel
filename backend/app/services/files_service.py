@@ -69,9 +69,14 @@ def read_text(p: str) -> dict:
     return {"path": abs_, "content": Path(abs_).read_text(encoding="utf8", errors="replace")}
 
 
-def write_text(p: str, content: str) -> dict:
+def write_text(p: str, content: str | bytes) -> dict:
+    """按字节落盘。
+
+    上传侧原先把整份文件 `file.text()` 转成字符串再 PUT，非 UTF-8 内容（图片、zip、
+    数据库文件）会在解码时被替换成 U+FFFD，接口照样返回 200 —— 文件已被静默毁掉。
+    """
     abs_ = safe_path(p)
-    data = content.encode("utf8")
+    data = content if isinstance(content, bytes) else content.encode("utf8")
     if len(data) > MAX_FILE_BYTES:
         raise RuntimeError(f"内容超过 {MAX_FILE_BYTES // 1024 // 1024}MB，拒绝写入")
     Path(os.path.dirname(abs_)).mkdir(parents=True, exist_ok=True)

@@ -13,7 +13,10 @@ router = APIRouter()
 @router.get("/api/files")
 async def files_list(request: Request):
     try:
-        return files_service.list_dir(request.query_params.get("path") or "/root/www")
+        # 默认目录取 FILE_ROOTS 第一项：写死 /root/www 时，改过 CP_FILE_ROOTS
+        # 的部署一打开文件页就指向一个不在白名单里的目录，直接报错。
+        default = config.FILE_ROOTS[0] if config.FILE_ROOTS else "/"
+        return files_service.list_dir(request.query_params.get("path") or default)
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
@@ -41,7 +44,9 @@ async def files_write(request: Request):
                 status_code=413,
                 content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
             )
-        return files_service.write_text(request.query_params.get("path") or "", raw.decode("utf8", errors="replace"))
+        # 原样按字节写入：解码成字符串再落盘会把二进制文件（图片/zip/db）毁成 U+FFFD，
+        # 而接口仍返回 200，用户以为上传成功。
+        return files_service.write_text(request.query_params.get("path") or "", raw)
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 

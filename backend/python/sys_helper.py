@@ -78,8 +78,11 @@ def parse_uptime(text: str) -> float:
 def disk_usage(path: str = "/") -> dict:
     st = os.statvfs(path)
     total = st.f_blocks * st.f_frsize
-    free = st.f_bfree * st.f_frsize
-    return {"total": total, "used": total - free}
+    # 用 f_bavail（非特权可用）而不是 f_bfree：ext4 默认给 root 保留 5% 块，
+    # 用 f_bfree 时仪表盘显示的占用率会低于告警与 doctor 的口径（util.disk_usage_pct），
+    # 同一块盘出现两个百分比，"88% 使用"和"未触发告警"看起来互相矛盾。
+    avail = st.f_bavail * st.f_frsize
+    return {"total": total, "used": total - avail}
 
 
 def read_os_release() -> dict:

@@ -270,6 +270,7 @@ def _validate(i: dict, ignore_id: int = -1):
     if i.get("path"):
         # 拒绝 `..` 并要求绝对路径；见 clean_abs_path 的说明
         clean_abs_path(i["path"], "安装目录")
+        _check_not_protected(i["path"])
     if i.get("unit_template"):
         if len(i["unit_template"]) > 4000:
             raise RuntimeError("unit 模板过长")
@@ -372,6 +373,43 @@ def update_app(app_id: int, i: dict) -> dict:
     return get_app(app_id)
 
 
+def _check_not_protected(path: str):
+    """安装目录不能指向面板自己或它的要害目录。
+
+    部署流程会对 path 执行 `git fetch` + `git reset --hard origin/<branch>`，
+    purge 还会 rmtree 它。把某个应用的 path 填成面板仓库（通常就在 APP_ROOT 之下，
+    如 /root/www/choyeon-panel）后点部署，等于让面板把自己的代码切走甚至删掉，
+    随后 systemd 重启失败，整台机器失去管理入口。
+    """
+    real = clean_abs_path(path, "安装目录")
+    protected = {
+        "面板程序目录": str(config.BASE),
+        "面板数据目录": str(config.DATA_DIR),
+        "systemd 配置目录": str(config.UNIT_DIR),
+        "nginx 配置目录": "/etc/nginx",
+        "证书目录": "/etc/letsencrypt",
+    }
+    for label, p in protected.items():
+        try:
+            root = clean_abs_path(p, label)
+        except RuntimeError:
+            continue
+        if real == root or real.startswith(root + "/"):
+            raise RuntimeError(f"安装目录不能位于{label}（{root}）之内或与之相同")
+
+
+async def cleanup_renamed(old: dict, new_name: str):
+    """改名后拆掉旧名残留：`panel-<旧名>.service` 带 Restart=always，
+    旧 nginx 站点也还在监听同端口，而面板记录里已经没有这个名字——
+    旧进程继续跑着占端口，界面上再也管不到它。"""
+    if not old or old["name"] == new_name:
+        return
+    stale = dict(old)
+    await remove_unit(stale)
+    if old.get("domain"):
+        await nginx_ops.remove_vhost(old["name"])
+
+
 def _check_purge_target(path: str) -> str:
     """只做校验、不删，返回规范化后的目标目录。
 
@@ -457,6 +495,22 @@ async def deploy_app(app_id: int) -> int:
     _DEPLOY_TASKS.add(task)
     task.add_done_callback(_DEPLOY_TASKS.discard)
     return dep_id
+
+
+async def wait_deployment(dep_id: int, app_id: int, timeout: int = 1800) -> dict:
+    """等一次部署真正结束。
+
+    CLI 与脚本都在自己的事件循环里调用 deploy_app；`asyncio.run` 退出时会取消
+    尚未跑完的后台任务，部署停在 status='running'，而 _ensure_no_deployment
+    会让这个应用此后无法删除/回滚/改配置，直到面板重启才被 main.py 的自愈逻辑纠正。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        row = dbm.query_one("SELECT status FROM deployments WHERE id=?", (dep_id,))
+        if row and row["status"] != "running":
+            return row
+        await asyncio.sleep(1)
+    raise RuntimeError(f"部署 #{dep_id} 超过 {timeout}s 仍未结束（应用 #{app_id}）")
 
 
 async def _current_sha(path: str) -> str | None:
@@ -591,6 +645,8 @@ async def attach_ssl(app_id: int, email: str | None = None) -> str:
     app = get_app(app_id)
     if not app or not app["domain"]:
         raise RuntimeError("应用未配置域名")
+    if app["port"] is None:
+        raise RuntimeError("未填写端口且服务未运行，无法反代；请先在应用配置里填端口")
     out = await nginx_ops.issue_cert(app["domain"], email)
     await nginx_ops.apply_vhost({"name": app["name"], "domain": app["domain"], "port": app["port"]})
     return out

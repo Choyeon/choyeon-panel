@@ -46,7 +46,10 @@ TEMPLATES: list[dict] = [
         "name": "静态站点",
         "desc": "用 Python 自带 http.server 托管纯静态目录，零依赖",
         "type": "python",
-        "install_cmd": "",
+        # 显式写成空操作命令，不能留空串：部署流程把"空 install_cmd"解释成
+        # "按 type 回落默认"，python 的默认是 `pip install -r requirements.txt`，
+        # 纯静态站没有这个文件，必然安装失败。
+        "install_cmd": ":",
         "start_cmd": "python3 -m http.server 8000 --bind 127.0.0.1",
         "port": 8000,
         "env": [],
@@ -82,4 +85,13 @@ def apply_template(i: dict) -> dict:
             merged[field] = tpl[field]
     if not merged.get("env"):
         merged["env"] = tpl["env"]
+    # 模板把端口写死在 start_cmd / env 里（如 `http.server 8000`、PORT=3000）。
+    # 用户显式改了端口而命令里还是模板值时，nginx 反代到 app.port 直接 502，
+    # 而面板显示"部署成功"。这里把模板默认端口同步替换成实际端口。
+    eff = str(merged.get("port") or tpl["port"])
+    if eff != str(tpl["port"]):
+        merged["start_cmd"] = str(merged["start_cmd"]).replace(str(tpl["port"]), eff)
+        merged["env"] = [
+            {**e, "v": str(e.get("v", "")).replace(str(tpl["port"]), eff)} for e in (merged.get("env") or [])
+        ]
     return merged
