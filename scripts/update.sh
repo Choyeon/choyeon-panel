@@ -27,9 +27,22 @@ ok "备份：$BK"
 # ---------- 2. 拉代码 ----------
 if [ "$DO_PULL" = "1" ]; then
   step "拉取 $BRANCH"
-  git -C "$PREFIX" fetch --depth 50 origin "$BRANCH" 2>/dev/null || git -C "$PREFIX" fetch origin "$BRANCH"
-  git -C "$PREFIX" checkout "$BRANCH" >/dev/null 2>&1 || true
-  git -C "$PREFIX" reset --hard "origin/$BRANCH"
+  git -C "$PREFIX" fetch --depth 50 origin "$BRANCH" 2>/dev/null || git -C "$PREFIX" fetch origin "$BRANCH" \
+    || die "无法从 origin 拉取 $BRANCH（检查网络 / 分支名 / CP_REPO）"
+  # 旧写法是 `git checkout "$BRANCH" || true`，吞掉切换失败后紧跟着
+  # `git reset --hard origin/$BRANCH`——reset 动的是**当前所在分支的指针**。
+  # 实测：停在 main 时切 v2 失败，reset 后 main 直接指到 v2 的 commit，
+  # 分支关系被悄悄改写，回滚时的 `reset --hard $OLD_SHA` 又把 main 挪回去，
+  # 现场彻底说不清。所以切换必须成功，失败就停，绝不带着未知 HEAD 继续。
+  if ! git -C "$PREFIX" checkout "$BRANCH" >/dev/null 2>&1; then
+    # 本地分支不存在时，基于刚 fetch 下来的远端 ref 建一个（不留 detached HEAD）
+    git -C "$PREFIX" checkout -B "$BRANCH" "origin/$BRANCH" >/dev/null 2>&1 \
+      || die "无法切换到分支 $BRANCH（工作区可能有未提交改动），升级中止"
+  fi
+  HEAD_BR="$(git -C "$PREFIX" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+  [ "$HEAD_BR" = "$BRANCH" ] || die "HEAD 不在 $BRANCH 上（实际 $HEAD_BR），升级中止以免 reset 改错分支"
+  git -C "$PREFIX" reset --hard "origin/$BRANCH" >/dev/null \
+    || die "reset --hard origin/$BRANCH 失败，升级中止"
 else
   warn "--no-pull：跳过代码拉取"
 fi

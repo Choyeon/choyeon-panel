@@ -40,10 +40,19 @@ cd "$PREFIX"
 # ---------- 3. 配置文件 ----------
 if [ ! -f "$PREFIX/.env" ]; then
   step "生成 .env（从 .env.example）"
-  sed -e "s#^CP_DATA_DIR=.*#CP_DATA_DIR=$DATA_DIR#" \
-      -e "s#^CP_PORT=.*#CP_PORT=$PORT#" \
-      -e "s#^CP_HOST=.*#CP_HOST=$HOST#" \
-      "$PREFIX/.env.example" > "$PREFIX/.env"
+  # 同 render_unit：用 bash 字符串替换而非 sed，避免 $DATA_DIR 里的 sed 元字符改坏内容
+  render_env() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        CP_DATA_DIR=*) line="CP_DATA_DIR=$DATA_DIR" ;;
+        CP_PORT=*) line="CP_PORT=$PORT" ;;
+        CP_HOST=*) line="CP_HOST=$HOST" ;;
+      esac
+      printf '%s\n' "$line"
+    done < "$PREFIX/.env.example"
+  }
+  render_env > "$PREFIX/.env"
   chmod 0600 "$PREFIX/.env"
   ok "已生成 $PREFIX/.env（权限 0600）"
 else
@@ -86,10 +95,22 @@ else
   read_value "是否为面板配置 nginx 反代？需要已解析到本机的域名（留空跳过）" ""
   DOMAIN="${REPLY:-}"
   if [ -n "$DOMAIN" ]; then
+    # 先校验再落地：DOMAIN 直接进 nginx 配置。含 `#`（sed 分隔符）会让 sed 语法错误，
+    # 含 `&` 会被替换成整段匹配、写出错误的 server_name——两种都表现为 "nginx -t 失败"
+    # 却看不出原因。改成 bash 字符串替换后不再有元字符问题，这里只挡非法字符。
+    case "$DOMAIN" in
+      *[!A-Za-z0-9.-]*) die "域名不合法：${DOMAIN}（只允许字母、数字、点与连字符）" ;;
+    esac
     step "写入 /etc/nginx/conf.d/choyeon-panel.conf"
-    sed -e "s#panel.example.com#$DOMAIN#g" \
-        -e "s#127.0.0.1:3210#127.0.0.1:$PORT#g" \
-        "$PREFIX/deploy/nginx-panel.conf.example" > /etc/nginx/conf.d/choyeon-panel.conf
+    render_nginx() {
+      local line
+      while IFS= read -r line || [ -n "$line" ]; do
+        line="${line//panel.example.com/$DOMAIN}"
+        line="${line//127.0.0.1:3210/127.0.0.1:$PORT}"
+        printf '%s\n' "$line"
+      done < "$PREFIX/deploy/nginx-panel.conf.example"
+    }
+    render_nginx > /etc/nginx/conf.d/choyeon-panel.conf
     nginx -t && systemctl reload nginx
     ok "nginx 配置已生效"
     if have_cmd certbot; then

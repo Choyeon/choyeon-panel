@@ -58,6 +58,136 @@ detect_os() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# ---------- 配置校验 ----------
+# PREFIX / DATA_DIR / BACKUP_DIR 会流进 systemd unit 的 Environment=、.env、
+# sqlite3 的 `.backup "..."` 点命令、tar 的 -C 参数等多处文本拼接场合。
+# 与其在每一处小心转义，不如在入口用**白名单**收紧字符集（黑名单容易漏）。
+# 允许字符与后端 app/util.py 的 PATH_RE 保持一致：字母 数字 . _ / -
+# 实测反例：CP_PREFIX=/root/it's-panel 时，healthcheck 旧写法
+# `bash -c "sqlite3 '$DATA_DIR/panel.db' ..."` 的引号被提前闭合，路径后半段变成待执行代码。
+#
+# 为什么用 case 而不是 `grep -qE '^[A-Za-z0-9._/-]+$'`：
+# grep 是**按行**判断的，`/tmp/a\n/root/x;reboot` 里只要有一行合法就整串放行；
+# 实测这种带换行的值 grep 版 PASS、case 版 REJECT。case 的模式匹配作用在整串上，
+# 换行属于 [!A-Za-z0-9._/-] 集合，天然被拒——字符白名单必须整串判断，不能用行工具。
+
+_validate_path() { # _validate_path <变量名> <值>
+  local name="$1" val="$2"
+  [ -n "$val" ] || die "$name 不能为空"
+  case "$val" in
+    /*) ;;
+    *) die "$name 必须是绝对路径，收到：$val" ;;
+  esac
+  case "$val" in
+    *[!A-Za-z0-9._/-]*)
+      die "$name 含不安全字符（只允许字母、数字与 . _ / -），收到：$(printf '%q' "$val")"
+      ;;
+  esac
+  # 字符白名单里有 . 和 /，所以 `..` 能通过上面两关。它在这里必须额外拒绝：
+  # 实测 CP_PREFIX=/root/choyeon-panel/../.. 一路通过校验，最后 rm -rf 由内核解析
+  # 成删除 / 。路径校验必须在入口就把 .. 挡掉，而不是指望每个使用点都规范化。
+  case "/$val/" in
+    */../*) die "$name 含 ..（收到：$val），请使用规范的绝对路径" ;;
+  esac
+}
+
+validate_config() {
+  _validate_path CP_PREFIX "$PREFIX"
+  _validate_path CP_DATA_DIR "$DATA_DIR"
+  _validate_path CP_BACKUP_DIR "$BACKUP_DIR"
+  # 端口/主机名/服务名同样整串白名单，不用 grep -qE（换行绕过同理）
+  case "$PORT" in
+    ''|*[!0-9]*) die "CP_PORT 必须是数字，收到：$(printf '%q' "$PORT")" ;;
+  esac
+  [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "CP_PORT 必须在 1-65535，收到：$PORT"
+  case "$HOST" in
+    ''|*[!A-Za-z0-9:._-]*) die "CP_HOST 不合法（只允许字母数字与 : . _ -），收到：$(printf '%q' "$HOST")" ;;
+  esac
+  case "$SERVICE_NAME" in
+    ''|*[!A-Za-z0-9@:._-]*) die "CP_SERVICE 不合法（只允许字母数字与 @ : . _ -），收到：$(printf '%q' "$SERVICE_NAME")" ;;
+  esac
+}
+
+_norm_path() { # 去掉末尾多余的 /，让深度判断与路径比较稳定
+  local v="$1"
+  while [ "$v" != "/" ] && [ "${v%/}" != "$v" ]; do v="${v%/}"; done
+  printf '%s' "$v"
+}
+
+_path_depth() { # 绝对路径的层级数（/root/choyeon-panel -> 2）
+  local v
+  v="$(_norm_path "$1")"
+  [ "$v" = "/" ] && { printf '0'; return; }
+  printf '%s' "$v" | tr -cd '/' | wc -c | tr -d ' '
+}
+
+# 卸载 --purge 会把这里的路径交给 rm -rf，字符白名单挡不住"路径本身填错"。
+# 实测 CP_PREFIX=/ 时，输入 purge 确认后脚本执行 `rm -rf / /var`（已用 rm shim 验证）。
+#
+# 拦截规则：
+#   1) 拒绝含 .. 的路径。字符白名单允许 `.` 与 `/`，所以
+#      CP_PREFIX=/root/choyeon-panel/../.. 能通过 validate_config，
+#      而 rm -rf 按内核解析后等于删 / —— 危险路径必须先看穿 .. 的把戏。
+#   2) 根目录本身；层级 < 2：/root /etc /var /usr /tmp /opt 全是一次输入错误就能命中的目录。
+#   3) CP_NEVER_INSIDE 里的目录：等于它、包含它、在它之内都拒绝（系统配置与运行时的地盘）。
+#   4) CP_PROTECTED 里的目录：等于它或包含它时拒绝（这些是"可能有人把数据放这儿"的高价值目录，
+#      但 /root/choyeon-panel 这类正常安装路径必须放行，所以不能按"在其内"来拒）。
+CP_NEVER_INSIDE="/bin /boot /dev /etc /lib /lib64 /proc /run /sbin /sys /usr"
+CP_PROTECTED="/opt /root /tmp /var/lib/mysql /var/lib/postgresql /var/www /var/log /srv/www /home"
+
+_assert_deletable() { # _assert_deletable <变量名> <路径>
+  local name="$1" v p
+  case "/$2/" in
+    */../*) die "$name（$2）含 ..，拒绝删除：请给出规范的绝对路径" ;;
+  esac
+  v="$(_norm_path "$2")"
+  [ "$v" != "/" ] || die "$name 为根目录，拒绝删除"
+  [ "$(_path_depth "$v")" -ge 2 ] \
+    || die "$name（$v）层级太浅，不像是独立安装目录，拒绝删除；请把面板装在 /x/choyeon-panel 这类路径下"
+  for p in $CP_NEVER_INSIDE; do
+    # 清单条目全是 1 层目录，所以 v（已保证 >=2 层）既不可能等于它、也不可能成为它的祖先；
+    # 这里只需判断"v 在 p 之内"。多层的受保护路径（如 /var/lib/mysql）由 CP_PROTECTED 负责，
+    # 那边的祖先分支是可达的（/var/lib 就会被拦）。
+    case "$v" in
+      "$p"/*) die "$name（$v）位于系统目录 $p 之内，面板不应安装在 $p 下" ;;
+    esac
+  done
+  for p in $CP_PROTECTED; do
+    [ "$v" != "$p" ] || die "$name 命中受保护目录（$v），拒绝删除"
+    case "$p" in
+      "$v"/*) die "$name（$v）包含受保护目录 $p，拒绝删除" ;;
+    esac
+  done
+  # 挂载点：rm -rf 会在里面报 busy，留下半个被删空的目录；NAS 备份盘尤其常见
+  if [ -r /proc/mounts ] && awk -v p="$v" '$2==p{f=1} END{exit !f}' /proc/mounts; then
+    die "$name（$v）是挂载点，拒绝直接删除，请先卸载或改指向具体子目录"
+  fi
+}
+
+_assert_backup_outside() { # _assert_backup_outside <备份目录> <待删目录...>
+  # "卸载前备份"刚写完就被同一条 rm -rf 删掉，脚本还打印"备份保留在 …"——
+  # 实测确实如此，等于把最后的救命数据删了还不吭声。
+  # 放在 common.sh 而不是就地写在 uninstall.sh 里：那两条断言在 require_root
+  # 之后，非 root 的 CI 只能跳过，逻辑本身（纯路径比较）其实不需要权限。
+  local bk p
+  bk="$(_norm_path "$1")"
+  shift
+  for p in "$@"; do
+    p="$(_norm_path "$p")"
+    case "$bk" in
+      "$p"|"$p"/*)
+        die "CP_BACKUP_DIR（$bk）位于待删除目录之内（$p），purge 会连备份一起删掉；请改指到安装目录外再执行" ;;
+    esac
+  done
+}
+
+_require_tty() { # 危险操作前的交互确认必须有 tty
+  # 定时任务、`curl | bash`、CI 里都可能带着参数跑到这一行；
+  # 无 tty 时 read_value 只会拿到空串然后 die，报错还停在"未确认"，
+  # 看不出真正原因，用户容易误以为脚本坏了而去绕过确认。
+  [ -t 0 ] || die "${1:-该操作} 必须在交互终端执行（当前无 tty），确认无法进行；请手动在终端里运行"
+}
+
 need_cmd() { have_cmd "$1" || die "缺少命令：$1，请先安装"; }
 
 version_ge() { # version_ge 当前 最低
@@ -174,16 +304,26 @@ web_build() {
 }
 
 # ---------- systemd ----------
-# 渲染 unit：把 deploy/choyeon-panel.service 里的占位路径替换为实际安装路径
+# 渲染 unit：把 deploy/choyeon-panel.service 里的占位路径替换为实际安装路径。
+# 用 bash 自己的字符串替换而不是 sed：${var//pat/rep} 的替换段没有任何元字符语义，
+# 路径里出现 `# & \ $ 反引号` 都不会改变结果。旧 sed 写法实测会被 CP_PREFIX 里的
+# `#` 弄成语法错误（安装中断）、被 `&` 静默替换成整段匹配（unit 里写出
+# /opt/panel/root/choyeon-panelv2 这种路径，服务起不来且毫无报错线索）。
 render_unit() {
   local src="$PREFIX/deploy/choyeon-panel.service"
   [ -r "$src" ] || die "缺少 $src"
   step "安装 systemd unit -> $UNIT_FILE"
-  sed -e "s#/root/choyeon-panel#$PREFIX#g" \
-      -e "s#^Environment=CP_PORT=.*#Environment=CP_PORT=$PORT#" \
-      -e "s#^Environment=CP_HOST=.*#Environment=CP_HOST=$HOST#" \
-      -e "s#^Environment=CP_DATA_DIR=.*#Environment=CP_DATA_DIR=$DATA_DIR#" \
-      "$src" > "$UNIT_FILE.tmp"
+  local line
+  : > "$UNIT_FILE.tmp" || die "无法写入 $UNIT_FILE.tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line//\/root\/choyeon-panel/$PREFIX}"
+    case "$line" in
+      Environment=CP_PORT=*) line="Environment=CP_PORT=$PORT" ;;
+      Environment=CP_HOST=*) line="Environment=CP_HOST=$HOST" ;;
+      Environment=CP_DATA_DIR=*) line="Environment=CP_DATA_DIR=$DATA_DIR" ;;
+    esac
+    printf '%s\n' "$line" >> "$UNIT_FILE.tmp"
+  done < "$src"
   mv "$UNIT_FILE.tmp" "$UNIT_FILE"
   chmod 0644 "$UNIT_FILE"
 }
@@ -231,25 +371,47 @@ backup_data() { # backup_data <标签>
   mkdir -p "$dest"
   local out="$dest/panel-${tag}-${ts}.tar.gz"
   local db="$DATA_DIR/panel.db"
+  # 成员先收集到临时目录，最后**一次性**打包。
+  # 旧写法是"先 tar -czf 出包，再 tar -rzf 追加 .env"，而 GNU tar 不能更新已压缩的归档：
+  # 实测报 `tar: Cannot update compressed archives`（退出码 2），又被同一行的 `|| true` 吞掉，
+  # 于是**每一份备份里都没有 .env**（CP_DATA_DIR / CP_PORT / CP_FILE_ROOTS 全丢），
+  # 照 RUNBOOK 还原完才发现配置缺失。归档布局保持扁平（panel-*.db 在包根），
+  # 与 backup.sh / RUNBOOK 里既有的还原命令一致。
+  local stage dbfile
+  stage="$(mktemp -d)" || die "无法创建临时目录（备份中止）"
+  dbfile="panel-${ts}.db"
+  local members=()
   if [ -f "$db" ]; then
     # SQLite 在线备份必须用 backup API，直接 cp 可能拷到写了一半的页。
     # 优先用 Python 内置 sqlite3（后端就是 Python，必然可用），其次 sqlite3 CLI，最后才退化到 cp。
     local py="${PY:-python3}"
     if "$py" -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close()' \
-        "$db" "$dest/panel-${ts}.db" 2>/dev/null; then
+        "$db" "$stage/$dbfile" 2>/dev/null; then
       :
-    elif have_cmd sqlite3 && sqlite3 "$db" ".backup '$dest/panel-${ts}.db'" 2>/dev/null; then
+    elif have_cmd sqlite3 && sqlite3 "$db" ".backup \"$stage/$dbfile\"" 2>/dev/null; then
       :
     else
       warn "无法使用在线备份 API，退化为 cp（请确保此时无写入）"
-      cp "$db" "$dest/panel-${ts}.db"
+      cp "$db" "$stage/$dbfile"
     fi
-    tar -czf "$out" -C "$dest" "panel-${ts}.db" 2>/dev/null || true
-    rm -f "$dest/panel-${ts}.db"
+    members+=("$dbfile")
   fi
-  [ -f "$PREFIX/.env" ] && tar -rzf "$out" -C "$PREFIX" .env 2>/dev/null || true
-  # 既无 db 也无 .env 时 tar 从未被创建，补一个空包，避免下游 du/ls 拿到不存在的路径
-  [ -f "$out" ] || tar -czf "$out" -T /dev/null
+  if [ -f "$PREFIX/.env" ]; then
+    cp "$PREFIX/.env" "$stage/.env"
+    members+=(".env")
+  fi
+  if [ ${#members[@]} -eq 0 ]; then
+    # 既无 db 也无 .env：补一个空包，避免下游 du/ls 拿到不存在的路径
+    tar -czf "$out" -T /dev/null
+  else
+    tar -czf "$out" -C "$stage" "${members[@]}"
+  fi || { rm -rf "$stage"; die "备份打包失败：$out"; }
+  rm -rf "$stage"
+  # 收尾自检：归档必须可读，且 .env 存在时必须真的在里面——不再靠"看起来成功"
+  tar -tzf "$out" >/dev/null 2>&1 || die "备份归档不可读：$out"
+  if [ -f "$PREFIX/.env" ] && ! tar -tzf "$out" | grep -qxF ".env"; then
+    die "备份里缺 .env：$out"
+  fi
   echo "$out"
 }
 
@@ -279,3 +441,8 @@ random_pass() {
   else tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; fi
   printf '\n'
 }
+
+# ---------- 入口校验 ----------
+# 放在 common.sh 末尾：五个脚本都 source 本文件，等于一处校验全部生效，
+# 不必担心以后新增脚本时漏调用（漏掉一次就是静默的注入面）。
+validate_config

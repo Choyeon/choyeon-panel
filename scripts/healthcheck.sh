@@ -55,7 +55,11 @@ fi
 
 # 4. 数据库可写
 if [ -f "$DATA_DIR/panel.db" ] && have_cmd sqlite3; then
-  check "SQLite 完整性" bash -c "sqlite3 '$DATA_DIR/panel.db' 'PRAGMA integrity_check;' | grep -q '^ok$'"
+  # 路径必须走参数传递，不能拼进 bash -c 的字符串：
+  # 旧写法 `bash -c "sqlite3 '$DATA_DIR/panel.db' ..."` 在 CP_PREFIX 含单引号时
+  # （例如 /root/it's-panel）引号被提前闭合，轻则误报 FAIL，重则拼出可执行片段。
+  check "SQLite 完整性" bash -c 'sqlite3 "$1" "PRAGMA integrity_check;" | grep -q "^ok$"' \
+    healthcheck "$DATA_DIR/panel.db"
 else
   say "  ${C_YELLOW}SKIP${C_RESET} 无 sqlite3 或数据库未初始化"
 fi
