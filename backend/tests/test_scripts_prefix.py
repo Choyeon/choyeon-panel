@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent  # choyeon-panel/backend
-SCRIPTS = BACKEND / "scripts"
 REPO = BACKEND.parent  # choyeon-panel/
+SCRIPTS = REPO / "scripts"
 
 
 class TestPrefixDerivation(unittest.TestCase):
