@@ -45,7 +45,7 @@ async def psql(sql: str) -> str:
         await proc.stdin.drain()
         proc.stdin.close()
 
-    async def _drain(stream, limit=None):
+    async def _drain(stream, limit: int) -> bytes:
         chunks = []
         size = 0
         while True:
@@ -53,7 +53,7 @@ async def psql(sql: str) -> str:
             if not part:
                 break
             size += len(part)
-            if limit and size > limit:
+            if size > limit:
                 kill_group(proc)
                 raise RuntimeError("输出过大（>512KB），请加 LIMIT")
             chunks.append(part)
@@ -63,7 +63,7 @@ async def psql(sql: str) -> str:
         # 三个方向必须并发：先写完再读，遇到「SQL 很长 + 输出撑满 64KB 管道」时
         # 双方互等，只会以一句没头没尾的「psql 超时」收场（stderr 同理）。
         _, out, err = await asyncio.gather(
-            _write_stdin(), _drain(proc.stdout, 512 * 1024), _drain(proc.stderr)
+            _write_stdin(), _drain(proc.stdout, 512 * 1024), proc.stderr.read()
         )
         await proc.wait()
         return out, err

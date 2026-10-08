@@ -30,7 +30,7 @@ from app import config, templates  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.routers import apps as apps_router  # noqa: E402
 from app.routers import extras
-from app.services import apps_service, files_service, nginx_ops  # noqa: E402
+from app.services import apps_service, files_service, nginx_ops, pg_service  # noqa: E402
 
 BACKEND = Path(__file__).resolve().parent.parent
 
@@ -491,6 +491,66 @@ class TestTerminalSessionAccounting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal._dim(-5, 28, 200), 28)
         self.assertEqual(terminal._dim(9999, 100, 400), 400)
         self.assertEqual(terminal._dim(120, 100, 400), 120)
+
+
+class TestPsqlPipesDoNotDeadlock(unittest.TestCase):
+    """回归：psql 先写完 stdin 再读 stdout，长 SQL + 大输出时两边互等，只剩一句"psql 超时"。"""
+
+    def test_stdin_write_and_stdout_read_overlap(self):
+        events = []
+
+        class Stdin:
+            def write(self, _data):
+                events.append("write")
+
+            async def drain(self):
+                # 真管道写满就阻塞，直到子进程开始读；这里用同一条件复现
+                while "read" not in events:
+                    await asyncio.sleep(0.01)
+                events.append("drained")
+
+            def close(self):
+                events.append("closed")
+
+        class Stdout:
+            def __init__(self):
+                self.sent = False
+
+            async def read(self, _n):
+                if self.sent:
+                    return b""
+                events.append("read")
+                while "closed" not in events:  # 没拿到完整输入，子进程不会 EOF
+                    await asyncio.sleep(0.01)
+                self.sent = True
+                return b"1 row\n"
+
+        class Stderr:
+            async def read(self):
+                return b""
+
+        class Proc:
+            def __init__(self):
+                self.pid = 4242
+                self.returncode = 0
+                self.stdin = Stdin()
+                self.stdout = Stdout()
+                self.stderr = Stderr()
+
+            async def wait(self):
+                return 0
+
+        async def fake_exec(*_a, **_kw):
+            return Proc()
+
+        with mock.patch("asyncio.create_subprocess_exec", fake_exec):
+            out = asyncio.run(pg_service.psql("SELECT 1"))
+
+        self.assertEqual(out, "1 row")
+        self.assertLess(
+            events.index("read"), events.index("drained"),
+            "读 stdout 必须与写 stdin 并发；旧写法串行时这里根本走不到",
+        )
 
 
 if __name__ == "__main__":
