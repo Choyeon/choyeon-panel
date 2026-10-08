@@ -119,7 +119,7 @@ async function mkdir() {
 async function upload(file: File) {
   uploading.value = true;
   try {
-    await api.saveFile(join(file.name), await file.text());
+    await api.saveFile(join(file.name), await file.arrayBuffer());
     msg.success('上传完成');
     load();
   } catch (e: any) {
@@ -141,7 +141,7 @@ const columns: any[] = [
     render: (e: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: e.isDir ? icons.FolderOutline : icons.DocumentOutline, size: 17, color: e.isDir ? '#f5c26f' : 'var(--cp-text-mute)' }),
+          h(NIcon, { component: e.isDir ? icons.FolderOutline : icons.DocumentOutline, size: 17, color: e.isDir ? 'var(--cp-warn)' : 'var(--cp-text-mute)' }),
         ]),
         h(NButton, {
           text: true, type: e.isDir ? 'info' : 'default', class: 'cell-name',
@@ -212,20 +212,20 @@ onMounted(() => load());
     <NModal v-model:show="editing" preset="card" style="width: 900px; max-width: 94vw" :title="`编辑 ${editPath.split('/').pop()}`">
       <template #header-extra><NText depth="3" style="font-size: 12px">{{ editPath }}</NText></template>
       <NSpace vertical :size="12" style="width: 100%">
-        <NInput v-model:value="editContent" type="textarea" :autosize="{ minRows: 16, maxRows: 28 }" style="font-family: 'JetBrains Mono', monospace; font-size: 13px" />
+        <NInput v-model:value="editContent" type="textarea" :autosize="{ minRows: 16, maxRows: 28 }" :input-props="{ class: 'mono', 'aria-label': '文件内容', style: 'font-size: 13px' }" />
         <NSpace justify="end">
           <NButton tertiary @click="editing = false">取消</NButton>
-          <NButton type="primary" :loading="savingEdit" :icon="ico('SaveOutline')" @click="saveEdit">保存</NButton>
+          <NButton type="primary" class="cp-press" :loading="savingEdit" :icon="ico('SaveOutline')" @click="saveEdit">保存</NButton>
         </NSpace>
       </NSpace>
     </NModal>
 
-    <NModal v-model:show="showRename" preset="card" title="重命名" style="width: 380px">
+    <NModal v-model:show="showRename" preset="card" title="重命名" style="width: 400px; max-width: 94vw">
       <NSpace vertical :size="12">
-        <NInput v-model:value="renameTo" placeholder="新名称" @keyup.enter="confirmRename" />
+        <NInput v-model:value="renameTo" placeholder="新名称" :input-props="{ 'aria-label': '新文件名称' }" @keyup.enter="confirmRename" />
         <NSpace justify="end">
           <NButton tertiary @click="showRename = false">取消</NButton>
-          <NButton type="primary" :icon="ico('SaveOutline')" @click="confirmRename">确定</NButton>
+          <NButton type="primary" class="cp-press" :icon="ico('SaveOutline')" @click="confirmRename">确定</NButton>
         </NSpace>
       </NSpace>
     </NModal>

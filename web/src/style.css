@@ -4,7 +4,7 @@
    =========================================================== */
 
 :root {
-  /* 品牌与语义色（明暗共用） */
+  /* 品牌与语义色（明暗共用基准值） */
   --brand: #4f7cff;
   --brand-strong: #6b92ff;
   --brand-soft: #8fa8ff;
@@ -12,11 +12,35 @@
   --warn: #f5a623;
   --err: #f5616c;
 
+  --gradient-brand: linear-gradient(135deg, #4f7cff, #7f5bff);
+
   /* 圆角与阴影 */
   --radius-sm: 6px;
   --radius: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 20px;
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-glow: 0 4px 18px rgba(79, 124, 255, 0.45);
+  --shadow-pop: 0 20px 60px rgba(0, 0, 0, 0.28);
+
+  /* 间距标度 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* 字号标度 */
+  --fs-2xs: 11.5px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 17px;
+  --fs-xl: 21px;
+  --fs-2xl: 27px;
+  --fs-3xl: 34px;
 
   /* 动效 */
   --dur-fast: 0.12s;
@@ -46,6 +70,18 @@ html[data-theme='dark'] {
   --cp-scroll-thumb-hover: rgba(255, 255, 255, 0.24);
   --cp-code-bg: #0c0d10;
   --cp-code-text: #d4d4d4;
+
+  /* 语义色（暗色：增强亮度保证对比度） */
+  --cp-brand: #6f9bff;
+  --cp-brand-soft: #8fa8ff;
+  --cp-brand-accent: #9b7bff;
+  --cp-ok: #6fdba4;
+  --cp-warn: #f5c26f;
+  --cp-err: #f58a92;
+  --cp-node: #8fd460;
+  --cp-python: #8fa8ff;
+  --cp-idle: #8a8a94;
+  --cp-selected: rgba(111, 155, 255, 0.16);
   color-scheme: dark;
 }
 
@@ -68,6 +104,20 @@ html[data-theme='light'] {
   --cp-code-bg: #f3f5fb;
   --cp-code-text: #242b3a;
   --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-glow: 0 4px 18px rgba(79, 124, 255, 0.22);
+  --shadow-pop: 0 20px 60px rgba(15, 23, 42, 0.12);
+
+  /* 语义色（亮色：加深保证白底对比度，不沿用暗色增强值） */
+  --cp-brand: #3d66e8;
+  --cp-brand-soft: #4f7cff;
+  --cp-brand-accent: #6b4fd0;
+  --cp-ok: #188a52;
+  --cp-warn: #9a6508;
+  --cp-err: #c62f3a;
+  --cp-node: #4f7a1f;
+  --cp-python: #3a5fd0;
+  --cp-idle: #7c869c;
+  --cp-selected: rgba(79, 124, 255, 0.14);
   color-scheme: light;
 }
 
@@ -147,17 +197,17 @@ a:focus-visible,
   vertical-align: 1px;
 }
 .dot.ok {
-  background: var(--ok);
-  box-shadow: 0 0 6px rgba(52, 199, 123, 0.6);
+  background: var(--cp-ok);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--cp-ok) 60%, transparent);
 }
 .dot.err {
-  background: var(--err);
+  background: var(--cp-err);
 }
 .dot.idle {
-  background: #888;
+  background: var(--cp-idle);
 }
 .dot.warn {
-  background: var(--warn);
+  background: var(--cp-warn);
 }
 
 /* shared render-cell styles（DataTable h() 渲染器复用，非 scoped） */
@@ -168,22 +218,27 @@ a:focus-visible,
 .cell-sub { font-size: 11.5px; color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vchip {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 2px 9px; border-radius: 20px; font-size: 12px; line-height: 18px;
+  padding: 2px 9px; border-radius: var(--radius-pill); font-size: var(--fs-xs); line-height: 18px;
   background: var(--cp-hover); color: var(--cp-text-dim);
 }
-.vchip.node { background: rgba(143, 212, 96, 0.14); color: #7cb342; }
-.vchip.python { background: rgba(79, 124, 255, 0.14); color: var(--brand-soft); }
-html[data-theme='light'] .vchip.node { color: #4f7a1f; }
-html[data-theme='light'] .vchip.python { color: #3a5fd0; }
+.vchip.node { background: color-mix(in srgb, var(--cp-node) 14%, transparent); color: var(--cp-node); }
+.vchip.python { background: color-mix(in srgb, var(--cp-python) 14%, transparent); color: var(--cp-python); }
 .st { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; }
-.st.ok { color: #4bbd84; }
-.st.err { color: #e05a65; }
-.st.warn { color: #d99833; }
-.st.idle { color: var(--cp-text-mute); }
-html[data-theme='dark'] .st.ok { color: #6fdba4; }
-html[data-theme='dark'] .st.err { color: #f58a92; }
-html[data-theme='dark'] .st.warn { color: #f5c26f; }
+.st.ok { color: var(--cp-ok); }
+.st.err { color: var(--cp-err); }
+.st.warn { color: var(--cp-warn); }
+.st.idle { color: var(--cp-idle); }
 .mono-dim { font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; font-size: 12.5px; color: var(--cp-text-dim); }
+
+/* 区块标题：全站统一（表格分组、卡片头、设置区块） */
+.section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--cp-text);
+}
 
 /* 页面切换动效（Shell 中 transition name="page"） */
 .page-enter-active,

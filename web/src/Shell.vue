@@ -197,7 +197,7 @@ const userOpts = [
       </NLayoutHeader>
 
       <NLayoutContent
-        content-style="padding: 20px 22px; overflow: auto; flex: 1"
+        content-style="overflow: auto; flex: 1"
         :native-scrollbar="false"
         class="cp-content"
       >
@@ -207,13 +207,14 @@ const userOpts = [
       </NLayoutContent>
     </NLayout>
 
-    <NModal v-model:show="showPwd" preset="card" title="修改密码" style="width: 360px; max-width: 94vw">
+    <NModal v-model:show="showPwd" preset="card" title="修改密码" style="width: 400px; max-width: 94vw">
       <NSpace vertical :size="12">
         <NInput
           v-model:value="oldPwd"
           type="password"
           placeholder="原密码"
           autocomplete="current-password"
+          :input-props="{ 'aria-label': '原密码' }"
           @keyup.enter="doChangePwd"
         />
         <NInput
@@ -221,11 +222,15 @@ const userOpts = [
           type="password"
           placeholder="新密码（至少 8 位）"
           autocomplete="new-password"
+          :input-props="{ 'aria-label': '新密码' }"
           @keyup.enter="doChangePwd"
         />
-        <NButton type="primary" block :disabled="!oldPwd || newPwd.length < 8" @click="doChangePwd">
-          确认修改
-        </NButton>
+        <NSpace justify="end" :size="8">
+          <NButton tertiary @click="showPwd = false">取消</NButton>
+          <NButton type="primary" class="cp-press" :disabled="!oldPwd || newPwd.length < 8" @click="doChangePwd">
+            确认修改
+          </NButton>
+        </NSpace>
       </NSpace>
     </NModal>
   </NLayout>
@@ -241,11 +246,19 @@ const userOpts = [
   padding: 16px 16px 12px;
   min-height: var(--header-h);
 }
+.cp-content :deep(.n-layout-scroll-container) { padding: var(--space-5) var(--space-5) var(--space-6); }
+@media (max-width: 900px) {
+  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-4); }
+}
+@media (max-width: 640px) {
+  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-3); }
+  .cp-title { font-size: var(--fs-sm); font-weight: 600; }
+}
 .logo-mark {
   width: 28px;
   height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #4f7cff, #7f5bff);
+  border-radius: var(--radius);
+  background: var(--gradient-brand);
   color: #fff;
   font-weight: 700;
   display: flex;
@@ -253,7 +266,7 @@ const userOpts = [
   justify-content: center;
   font-size: 15px;
   flex-shrink: 0;
-  box-shadow: 0 2px 10px rgba(79, 124, 255, 0.4);
+  box-shadow: var(--shadow-glow);
 }
 .logo-text {
   font-size: 14.5px;
@@ -261,7 +274,7 @@ const userOpts = [
   letter-spacing: 0.01em;
   white-space: nowrap;
 }
-.logo-text b { color: var(--brand-soft); }
+.logo-text b { color: var(--cp-brand-soft); }
 .cp-header {
   height: var(--header-h);
   display: flex;
@@ -276,7 +289,7 @@ const userOpts = [
   align-items: center;
   gap: 8px;
   padding: 4px 10px 4px 4px;
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   border: 1px solid transparent;
   background: transparent;
   color: var(--cp-text-dim);
@@ -288,7 +301,7 @@ const userOpts = [
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #4f7cff, #7f5bff);
+  background: var(--gradient-brand);
   color: #fff;
   font-size: 12px;
   font-weight: 600;
@@ -296,8 +309,5 @@ const userOpts = [
   align-items: center;
   justify-content: center;
 }
-.user-role { font-size: 13px; }
-@media (max-width: 640px) {
-  .cp-title { font-size: 13px; font-weight: 600; }
-}
+.user-role { font-size: var(--fs-sm); }
 </style>

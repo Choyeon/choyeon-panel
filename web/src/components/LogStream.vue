@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, nextTick, h, computed } from 'vue';
-import { NButton, NSpace, NInputNumber, NSwitch, NText, NIcon } from 'naive-ui';
+import { NButton, NSpace, NInputNumber, NSwitch, NText, NIcon, NTooltip, useMessage } from 'naive-ui';
 import { logUrl } from '../api';
 import { icons } from '../icons';
 
@@ -10,6 +10,7 @@ function ico(name: string, size = 13) {
 
 const props = defineProps<{ urlPath: string; height?: number }>();
 
+const msg = useMessage();
 const lines = ref<string[]>([]);
 const linesCount = ref(200);
 const following = ref(true);
@@ -23,8 +24,9 @@ const text = computed(() => lines.value.join('\n') || '(无日志)');
 async function copyAll() {
   try {
     await navigator.clipboard.writeText(text.value);
+    msg.success('日志已复制');
   } catch {
-    /* 非安全上下文下剪贴板不可用，忽略 */
+    msg.warning('浏览器拒绝了剪贴板访问，请手动复制');
   }
 }
 
@@ -77,11 +79,21 @@ onBeforeUnmount(close);
       >
         {{ following ? '暂停跟踪' : '继续跟踪' }}
       </NButton>
-      <NButton size="tiny" quaternary :icon="ico('CopyOutline')" @click="copyAll">复制</NButton>
-      <NText depth="3" style="font-size: 12px">初始行数</NText>
-      <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="2000" @update:value="refresh" />
-      <NText depth="3" style="font-size: 12px">自动滚动</NText>
-      <NSwitch v-model:value="autoScroll" size="small" />
+      <NTooltip trigger="hover">
+        <template #trigger>
+          <NButton
+            size="tiny" circle quaternary
+            aria-label="复制全部日志" title="复制全部日志"
+            :icon="ico('CopyOutline')"
+            @click="copyAll"
+          />
+        </template>
+        复制全部日志
+      </NTooltip>
+      <NText depth="3" style="font-size: var(--fs-xs)">初始行数</NText>
+      <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="2000" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="refresh" />
+      <NText depth="3" id="ls-autoscroll-label" style="font-size: var(--fs-xs)">自动滚动</NText>
+      <NSwitch v-model:value="autoScroll" size="small" aria-labelledby="ls-autoscroll-label" />
       <span class="st" style="font-size: 12px" :class="streamLive ? 'ok' : 'err'">
         <span class="dot" :class="streamLive ? 'ok' : 'err'"></span>{{ streamLive ? 'SSE 实时' : 'SSE 重连中…' }}
       </span>

@@ -50,7 +50,7 @@ const columns: any[] = [
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: icons.ServerOutline, size: 17, color: r.active === 'active' ? '#6fdba4' : r.active === 'failed' ? '#f58a92' : 'var(--cp-text-mute)' }),
+          h(NIcon, { component: icons.ServerOutline, size: 17, color: r.active === 'active' ? 'var(--cp-ok)' : r.active === 'failed' ? 'var(--cp-err)' : 'var(--cp-text-mute)' }),
         ]),
         h('div', { class: 'cell-txt' }, [
           h(NButton, { text: true, type: 'primary', class: 'cell-name', onClick: () => (logUnit.value = r.unit) }, () => r.unit),

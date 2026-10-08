@@ -39,7 +39,7 @@ const columns: any[] = [
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: r.type === 'node' ? icons.LogoElectron : icons.LogoPython, size: 20, color: r.type === 'node' ? '#8fd460' : '#8fa8ff' }),
+          h(NIcon, { component: r.type === 'node' ? icons.LogoElectron : icons.LogoPython, size: 18, color: r.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)' }),
         ]),
         h('div', { class: 'cell-txt' }, [
           h(NButton, { text: true, type: 'primary', class: 'cell-name', onClick: () => router.push(`/apps/${r.id}`) }, () => r.name),
@@ -57,7 +57,7 @@ const columns: any[] = [
       r.port
         ? h('span', { class: 'mono-dim' }, [
             String(r.port),
-            ...(r.portAuto ? [h('span', { style: 'color:var(--cp-text-mute);font-size:10.5px;margin-left:5px' }, '自动')] : []),
+            ...(r.portAuto ? [h('span', { style: 'color:var(--cp-text-mute);font-size:var(--fs-2xs);margin-left:5px' }, '自动')] : []),
           ])
         : h('span', { class: 'cell-sub' }, '—'),
   },
@@ -71,7 +71,7 @@ const columns: any[] = [
           h(NTag, { size: 'small', bordered: false, type: r.domain ? 'default' : 'info' }, { default: () => d }),
         ),
         ...(ds.length > 2 ? [h('span', { class: 'cell-sub' }, `+${ds.length - 2}`)] : []),
-        ...(!r.domain ? [h('span', { style: 'color:var(--cp-text-mute);font-size:10.5px' }, 'nginx 检测')] : []),
+        ...(!r.domain ? [h('span', { style: 'color:var(--cp-text-mute);font-size:var(--fs-2xs)' }, 'nginx 检测')] : []),
       ]);
     },
   },
@@ -231,7 +231,7 @@ onMounted(() => {
         <NForm label-placement="left" label-width="96">
           <NSpace vertical :size="12">
             <NFormItem label="名称" required>
-              <NInput v-model:value="form.name" placeholder="小写字母/数字/连字符，如 my-site" />
+              <NInput v-model:value="form.name" placeholder="小写字母/数字/连字符，如 my-site" :input-props="{ 'aria-label': '应用名称' }" />
             </NFormItem>
             <NFormItem label="一键模板">
               <NSelect
@@ -239,41 +239,43 @@ onMounted(() => {
                 :options="templateOptions"
                 size="small"
                 placeholder="选一个预设，自动填入运行时/命令/端口（可再手动改）"
+                aria-label="一键模板"
                 @update:value="pickTemplate"
               />
             </NFormItem>
             <NFormItem label="运行时">
-              <NRadioGroup v-model:value="form.type" size="small">
+              <NRadioGroup v-model:value="form.type" size="small" aria-label="运行时类型">
                 <NRadioButton value="node">Node.js</NRadioButton>
                 <NRadioButton value="python">Python</NRadioButton>
               </NRadioGroup>
             </NFormItem>
             <NFormItem label="Git 仓库">
-              <NInput v-model:value="form.repo_url" placeholder="https://… 可留空：纳管服务器上已有目录" />
+              <NInput v-model:value="form.repo_url" placeholder="https://… 可留空：纳管服务器上已有目录" :input-props="{ 'aria-label': 'Git 仓库地址' }" />
             </NFormItem>
             <NFormItem label="分支">
-              <NInput v-model:value="form.branch" placeholder="main" />
+              <NInput v-model:value="form.branch" placeholder="main" :input-props="{ 'aria-label': '分支' }" />
             </NFormItem>
             <NFormItem label="安装目录">
-              <NInput v-model:value="form.path" placeholder="留空默认 /root/www/<名称>；可指定如 /root/www/my-site" />
+              <NInput v-model:value="form.path" placeholder="留空默认 /root/www/<名称>；可指定如 /root/www/my-site" :input-props="{ 'aria-label': '安装目录' }" />
             </NFormItem>
             <NFormItem label="安装命令">
               <NInput
                 v-model:value="form.install_cmd"
                 :placeholder="form.type === 'node' ? '默认 npm install' : '默认 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'"
+                :input-props="{ 'aria-label': '安装命令', class: 'mono' }"
               />
             </NFormItem>
             <NFormItem label="启动命令" required>
-              <NInput v-model:value="form.start_cmd" :placeholder="form.type === 'node' ? '如 npm start 或 node server.js' : '如 .venv/bin/uvicorn main:app --port 8000'" />
+              <NInput v-model:value="form.start_cmd" :placeholder="form.type === 'node' ? '如 npm start 或 node server.js' : '如 .venv/bin/uvicorn main:app --port 8000'" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" />
             </NFormItem>
             <NFormItem label="端口">
-              <NInputNumber v-model:value="form.port" placeholder="监听端口，配域名时必填" style="width: 100%" />
+              <NInputNumber v-model:value="form.port" placeholder="监听端口，配域名时必填" :input-props="{ 'aria-label': '监听端口' }" style="width: 100%" />
             </NFormItem>
             <NFormItem label="域名">
-              <NInput v-model:value="form.domain" placeholder="如 app.choyeon.cc，留空不创建反代" />
+              <NInput v-model:value="form.domain" placeholder="如 app.choyeon.cc，留空不创建反代" :input-props="{ 'aria-label': '域名' }" />
             </NFormItem>
             <NFormItem label="已有 unit">
-              <NInput v-model:value="form.unit_override" placeholder="纳管用：如 rosetta-backend.service，填了则不覆写 unit" />
+              <NInput v-model:value="form.unit_override" placeholder="纳管用：如 rosetta-backend.service，填了则不覆写 unit" :input-props="{ 'aria-label': '已有 systemd unit' }" />
             </NFormItem>
             <NCollapse>
               <NCollapseItem title="高级：自定义 systemd unit 模板" name="tpl">
@@ -281,10 +283,10 @@ onMounted(() => {
                   v-model:value="form.unit_template"
                   type="textarea"
                   :autosize="{ minRows: 6, maxRows: 14 }"
-                  class="mono-dim"
+                  :input-props="{ class: 'mono', 'aria-label': '自定义 systemd unit 模板', style: 'font-size: 12.5px' }"
                   placeholder="留空则使用面板默认模板。支持占位符：{{name}} {{path}} {{start_cmd}} {{port}}，部署时自动渲染写入 /etc/systemd/system/panel-<名称>.service"
                 />
-                <div style="color:var(--cp-text-mute);font-size:12px;margin-top:6px">
+                <div style="color:var(--cp-text-mute);font-size:var(--fs-xs);margin-top:6px">
                   创建后也可在应用详情「systemd 单元」页签随时修改，保存前自动 systemd-analyze verify 校验，失败即回滚。
                 </div>
               </NCollapseItem>

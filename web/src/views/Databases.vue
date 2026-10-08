@@ -2,7 +2,7 @@
 import { onMounted, ref, h } from 'vue';
 import {
   NTabs, NTabPane, NDataTable, NButton, NSpace, NModal, NInput, NForm, NFormItem,
-  NPopconfirm, NCard, NText, NTag, useMessage, NIcon, NGrid, NGridItem,
+  NPopconfirm, NCard, NText, NTag, useMessage, NIcon, NGrid, NGridItem, NSkeleton,
 } from 'naive-ui';
 import { api } from '../api';
 import { icons } from '../icons';
@@ -50,7 +50,7 @@ const dbCols: any[] = [
     title: '数据库', key: 'name',
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
-        h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.CubeOutline, size: 17, color: '#8fa8ff' })]),
+        h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.CubeOutline, size: 17, color: 'var(--cp-brand-soft)' })]),
         h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name), h('div', { class: 'cell-sub' }, `owner: ${r.owner}`)]),
       ]),
   },
@@ -63,7 +63,7 @@ const dbCols: any[] = [
     title: '操作', key: 'ops', width: 80,
     render: (r: any) =>
       h(NPopconfirm, { onPositiveClick: () => manage('dropDb', r.name) }, {
-        trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline') }, { default: () => '' }),
+        trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除数据库 ${r.name}`, 'aria-label': `删除数据库 ${r.name}` }, { default: () => '' }),
         default: () => `确定删除数据库 ${r.name}？数据不可恢复`,
       }),
   },
@@ -73,7 +73,7 @@ const roleCols: any[] = [
     title: '角色', key: 'name',
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
-        h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.KeyOutline, size: 16, color: r.super ? '#f5c26f' : 'var(--cp-text-mute)' })]),
+        h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.KeyOutline, size: 16, color: r.super ? 'var(--cp-warn)' : 'var(--cp-text-mute)' })]),
         h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name)]),
       ]),
   },
@@ -168,7 +168,7 @@ onMounted(load);
         <NTabPane name="pg" tab="PostgreSQL">
           <NSpace vertical size="medium">
             <NSpace justify="space-between" align="center" style="width: 100%">
-              <span class="sec-title"><NIcon :component="icons.ServerOutline" :size="15" color="#8fa8ff" /> 数据库列表</span>
+              <span class="section-title"><NIcon :component="icons.ServerOutline" :size="15" color="var(--cp-brand-soft)" /> 数据库列表</span>
               <NSpace :size="8">
                 <NButton size="small" tertiary @click="load" :icon="ico('RefreshOutline')">刷新</NButton>
                 <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="showDb = true">新建数据库</NButton>
@@ -179,7 +179,7 @@ onMounted(load);
             </NDataTable>
 
             <NSpace justify="space-between" align="center" style="width: 100%; margin-top: 6px">
-              <span class="sec-title"><NIcon :component="icons.KeyOutline" :size="15" color="#f5c26f" /> 用户 / 角色</span>
+              <span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-warn)" /> 用户 / 角色</span>
               <NButton size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
             <NDataTable size="small" :bordered="false" :scroll-x="620" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320" />
@@ -191,12 +191,12 @@ onMounted(load);
             <NInput
               v-model:value="sql" type="textarea" :autosize="{ minRows: 4, maxRows: 9 }"
               placeholder="SELECT * FROM some_table LIMIT 20;"
-              style="font-family: 'JetBrains Mono', monospace; font-size: 13px"
+              :input-props="{ class: 'mono', 'aria-label': 'SQL 语句', style: 'font-size: 13px' }"
               @keydown.ctrl.enter="runSql"
             />
             <NSpace align="center">
-              <NButton type="primary" :loading="sqlBusy" :icon="ico('PlayOutline')" @click="runSql">执行</NButton>
-              <NText depth="3" style="font-size: 12px">Ctrl+Enter 快速执行 · 以 postgres 超级用户运行，请谨慎操作</NText>
+              <NButton type="primary" class="cp-press" :loading="sqlBusy" :icon="ico('PlayOutline')" @click="runSql">执行</NButton>
+              <NText depth="3" style="font-size: var(--fs-xs)">Ctrl+Enter 快速执行 · 以 postgres 超级用户运行，请谨慎操作</NText>
             </NSpace>
             <div class="log-view" style="max-height: 380px" role="region" aria-live="polite" aria-label="SQL 执行结果">{{ sqlOut || '结果将显示在这里…' }}</div>
           </NSpace>
@@ -213,42 +213,44 @@ onMounted(load);
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">内存占用</div><div class="rv">{{ redis.info?.used_memory_human || '—' }}</div></NCard></NGridItem>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">运行时长</div><div class="rv">{{ Math.round((redis.info?.uptime_in_seconds || 0) / 3600) }} 小时</div></NCard></NGridItem>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">累计命令</div><div class="rv">{{ redis.info?.total_commands_processed ?? '—' }}</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: '#6fdba4' }">{{ hitRate() }}</div></NCard></NGridItem>
+              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
             </NGrid>
-            <NSpace align="center" style="margin-top: 16px">
-              <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码（redis.conf 未配 requirepass 可留空）" style="width: 320px" size="small" />
+            <NSpace align="center" style="margin-top: var(--space-4)">
+              <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码（redis.conf 未配 requirepass 可留空）" style="width: 320px" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />
               <NButton size="small" :icon="ico('SaveOutline')" @click="saveRedisPass">保存</NButton>
             </NSpace>
           </template>
-          <NText v-else depth="3">加载中…</NText>
+          <NSpace v-else vertical :size="12" style="width: 100%">
+            <NSkeleton v-for="i in 4" :key="i" height="52px" class="cp-shimmer" style="border-radius: var(--radius-lg)" />
+          </NSpace>
         </NTabPane>
       </NTabs>
     </NCard>
 
-    <NModal v-model:show="showDb" preset="card" title="新建数据库" style="width: 400px">
+    <NModal v-model:show="showDb" preset="card" title="新建数据库" style="width: 400px; max-width: 94vw">
       <NForm label-placement="left" label-width="70">
         <NSpace vertical :size="12">
-          <NFormItem label="名称"><NInput v-model:value="dbForm.name" placeholder="小写/下划线" /></NFormItem>
-          <NFormItem label="Owner"><NInput v-model:value="dbForm.owner" placeholder="可选，已存在的角色" /></NFormItem>
-          <NButton type="primary" block :icon="ico('AddOutline')" @click="createDb">创建</NButton>
+          <NFormItem label="名称"><NInput v-model:value="dbForm.name" placeholder="小写/下划线" :input-props="{ 'aria-label': '数据库名称' }" /></NFormItem>
+          <NFormItem label="Owner"><NInput v-model:value="dbForm.owner" placeholder="可选，已存在的角色" :input-props="{ 'aria-label': '数据库属主角色' }" /></NFormItem>
+          <NButton type="primary" block class="cp-press" :icon="ico('AddOutline')" @click="createDb">创建</NButton>
         </NSpace>
       </NForm>
     </NModal>
-    <NModal v-model:show="showRole" preset="card" title="新建用户" style="width: 400px">
+    <NModal v-model:show="showRole" preset="card" title="新建用户" style="width: 400px; max-width: 94vw">
       <NForm label-placement="left" label-width="70">
         <NSpace vertical :size="12">
-          <NFormItem label="用户名"><NInput v-model:value="roleForm.name" /></NFormItem>
-          <NFormItem label="密码"><NInput v-model:value="roleForm.password" type="password" show-password-on="click" /></NFormItem>
-          <NButton type="primary" block :icon="ico('AddOutline')" @click="createRole">创建</NButton>
+          <NFormItem label="用户名"><NInput v-model:value="roleForm.name" :input-props="{ 'aria-label': '数据库用户名' }" /></NFormItem>
+          <NFormItem label="密码"><NInput v-model:value="roleForm.password" type="password" show-password-on="click" :input-props="{ 'aria-label': '数据库用户密码' }" /></NFormItem>
+          <NButton type="primary" block class="cp-press" :icon="ico('AddOutline')" @click="createRole">创建</NButton>
         </NSpace>
       </NForm>
     </NModal>
-    <NModal v-model:show="showPwd" preset="card" :title="`重置密码 · ${pwdTarget}`" style="width: 400px">
+    <NModal v-model:show="showPwd" preset="card" :title="`重置密码 · ${pwdTarget}`" style="width: 400px; max-width: 94vw">
       <NSpace vertical :size="12">
-        <NInput v-model:value="pwdValue" type="password" show-password-on="click" placeholder="新密码" @keyup.enter="confirmPwd" />
+        <NInput v-model:value="pwdValue" type="password" show-password-on="click" placeholder="新密码" :input-props="{ 'aria-label': '新密码' }" @keyup.enter="confirmPwd" />
         <NSpace justify="end">
           <NButton tertiary @click="showPwd = false">取消</NButton>
-          <NButton type="primary" :icon="ico('SaveOutline')" @click="confirmPwd">确认修改</NButton>
+          <NButton type="primary" class="cp-press" :icon="ico('SaveOutline')" @click="confirmPwd">确认修改</NButton>
         </NSpace>
       </NSpace>
     </NModal>
@@ -256,8 +258,7 @@ onMounted(load);
 </template>
 
 <style scoped>
-.sec-title { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 600; color: var(--cp-text); }
 .rstat :deep(.n-card__content) { padding: 12px 14px; }
-.rk { font-size: 11.5px; color: var(--cp-text-mute); margin-bottom: 5px; }
+.rk { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: 5px; }
 .rv { font-size: 16px; font-weight: 600; color: var(--cp-text); }
 </style>

@@ -8,6 +8,8 @@ import { GridComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import { api, getRole } from '../api';
 import { icons } from '../icons';
+import { cssVar } from '../theme';
+import EmptyBox from '../components/EmptyBox.vue';
 
 echarts.use([LineChart, GridComponent, TooltipComponent, CanvasRenderer]);
 
@@ -44,8 +46,11 @@ const hour = new Date().getHours();
 const greet = hour < 6 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好';
 
 function axisColor() {
-  const dark = document.documentElement.dataset.theme !== 'light';
-  return { label: dark ? '#666' : '#8a90a0', line: dark ? '#2c2c33' : '#e3e6ef', split: dark ? 'rgba(255,255,255,0.05)' : '#eef1f7' };
+  return {
+    label: cssVar('--cp-text-dim', '#8a90a0'),
+    line: cssVar('--cp-border-strong', '#2c2c33'),
+    split: cssVar('--cp-line', '#eef1f7'),
+  };
 }
 
 function chartOpts(times: string[], series: any[], yfmt: (v: number) => string) {
@@ -55,12 +60,12 @@ function chartOpts(times: string[], series: any[], yfmt: (v: number) => string) 
     xAxis: {
       type: 'category', data: times, boundaryGap: false,
       axisLine: { lineStyle: { color: c.line } },
-      axisLabel: { color: c.label, fontSize: 10, showMaxLabel: true, hideOverlap: true },
+      axisLabel: { color: c.label, fontSize: 11.5, showMaxLabel: true, hideOverlap: true },
     },
     yAxis: {
       type: 'value',
       splitLine: { lineStyle: { color: c.split } },
-      axisLabel: { color: c.label, fontSize: 10, formatter: yfmt },
+      axisLabel: { color: c.label, fontSize: 11.5, formatter: yfmt },
     },
     series,
     tooltip: { trigger: 'axis' },
@@ -68,12 +73,21 @@ function chartOpts(times: string[], series: any[], yfmt: (v: number) => string) 
   };
 }
 
-function areaColor(rgb: string) {
+function rgbaFromVar(name: string, fallback: string, alpha: number) {
+  const hex = cssVar(name, fallback).replace('#', '');
+  const full = hex.length === 3 ? hex.split('').map((x) => x + x).join('') : hex;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function areaGradient(varName: string, fallback: string) {
   return {
     type: 'linear' as const, x: 0, y: 0, x2: 0, y2: 1,
     colorStops: [
-      { offset: 0, color: `rgba(${rgb},0.32)` },
-      { offset: 1, color: `rgba(${rgb},0)` },
+      { offset: 0, color: rgbaFromVar(varName, fallback, 0.32) },
+      { offset: 1, color: rgbaFromVar(varName, fallback, 0) },
     ],
   };
 }
@@ -85,8 +99,8 @@ function renderCharts() {
     chartOpts(times, [{
       name: 'CPU', type: 'line', smooth: 0.4, showSymbol: false,
       data: hist.map((x) => x.cpu),
-      lineStyle: { width: 2, color: '#4f7cff' },
-      areaStyle: { color: areaColor('79,124,255') },
+      lineStyle: { width: 2, color: cssVar('--cp-brand', '#4f7cff') },
+      areaStyle: { color: areaGradient('--cp-brand', '#4f7cff') },
     }], (v: number) => v + '%'),
     { notMerge: true },
   );
@@ -94,8 +108,8 @@ function renderCharts() {
     chartOpts(times, [{
       name: '内存', type: 'line', smooth: 0.4, showSymbol: false,
       data: hist.map((x) => (x.memUsed || 0) / 1048576),
-      lineStyle: { width: 2, color: '#34c77b' },
-      areaStyle: { color: areaColor('52,199,123') },
+      lineStyle: { width: 2, color: cssVar('--cp-ok', '#34c77b') },
+      areaStyle: { color: areaGradient('--cp-ok', '#34c77b') },
     }], (v: number) => (v / 1024).toFixed(1) + 'G'),
     { notMerge: true },
   );
@@ -177,32 +191,29 @@ window.addEventListener('resize', onResize);
       <div style="min-width: 0">
         <div class="hero-greet">{{ greet }}，欢迎回到 <b>choyeon panel</b></div>
         <div class="hero-host">
-          <NIcon :component="icons.ServerOutline" :size="15" color="#8fa8ff" />
+          <NIcon :component="icons.ServerOutline" :size="15" color="var(--cp-brand-soft)" />
           <span class="hero-host-text">{{ info.hostname || '本机' }} · {{ info.prettyName || info.platform || '加载中' }}</span>
         </div>
       </div>
       <NSpace align="center" :size="10" :wrap="false">
         <NTag v-if="info.node" round size="small" :bordered="false" type="info">{{ info.node }}</NTag>
-        <NTag v-if="!failedUnits.length" round size="small" type="success" :bordered="false">
-          <template #icon><NIcon :component="icons.CheckmarkCircleOutline" /></template>
-          服务正常
-        </NTag>
-        <NTag v-else round size="small" type="error" :bordered="false">{{ failedUnits.length }} 个服务异常</NTag>
+        <span v-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
+        <span v-else class="st err"><span class="dot err"></span>{{ failedUnits.length }} 个服务异常</span>
         <NDropdown trigger="click" :options="quickMenu">
-          <NButton type="primary" round size="small">快捷操作</NButton>
+          <NButton type="primary" round size="small" class="cp-press">快捷操作</NButton>
         </NDropdown>
       </NSpace>
     </div>
 
     <!-- stat cards -->
     <NGrid :cols="4" :x-gap="14" :y-gap="14" responsive="screen" item-responsive>
-      <NGridItem v-for="c in [
-        { key: 'cpu', label: 'CPU', icon: 'PulseOutline', color: '#4f7cff', value: `${stat.cpu ?? '-'}`, unit: '%', pct: stat.cpu || 0, foot: `${info.cpuCores || '?'} 核 · 负载 ${(stat.load || []).map((x: number) => x.toFixed(1)).join(' / ') || '-'}` },
-        { key: 'mem', label: '内存', icon: 'CubeOutline', color: '#34c77b', value: fmtBytes(stat.memUsed), unit: ` / ${fmtBytes(stat.memTotal)}`, pct: Math.round(((stat.memUsed || 0) / (stat.memTotal || 1)) * 100), foot: `可用 ${fmtBytes((stat.memTotal || 0) - (stat.memUsed || 0))}` },
-        { key: 'disk', label: '磁盘 /', icon: 'DocumentTextOutline', color: '#f5a623', value: fmtBytes(stat.diskUsed), unit: ` / ${fmtBytes(stat.diskTotal)}`, pct: Math.round(((stat.diskUsed || 0) / (stat.diskTotal || 1)) * 100), foot: `剩余 ${fmtBytes((stat.diskTotal || 0) - (stat.diskUsed || 0))}` },
-        { key: 'net', label: '网络', icon: 'WifiOutline', color: '#7f5bff', value: `↓ ${fmtBytes(stat.netRx)}/s  ↑ ${fmtBytes(stat.netTx)}/s`, unit: '', pct: 0, foot: `在线 ${fmtUptime(stat.uptime || 0)}` },
+      <NGridItem v-for="(c, ci) in [
+        { key: 'cpu', label: 'CPU', icon: 'PulseOutline', color: 'var(--cp-brand)', value: `${stat.cpu ?? '-'}`, unit: '%', pct: stat.cpu || 0, foot: `${info.cpuCores || '?'} 核 · 负载 ${(stat.load || []).map((x: number) => x.toFixed(1)).join(' / ') || '-'}` },
+        { key: 'mem', label: '内存', icon: 'CubeOutline', color: 'var(--cp-ok)', value: fmtBytes(stat.memUsed), unit: ` / ${fmtBytes(stat.memTotal)}`, pct: Math.round(((stat.memUsed || 0) / (stat.memTotal || 1)) * 100), foot: `可用 ${fmtBytes((stat.memTotal || 0) - (stat.memUsed || 0))}` },
+        { key: 'disk', label: '磁盘 /', icon: 'DocumentTextOutline', color: 'var(--cp-warn)', value: fmtBytes(stat.diskUsed), unit: ` / ${fmtBytes(stat.diskTotal)}`, pct: Math.round(((stat.diskUsed || 0) / (stat.diskTotal || 1)) * 100), foot: `剩余 ${fmtBytes((stat.diskTotal || 0) - (stat.diskUsed || 0))}` },
+        { key: 'net', label: '网络', icon: 'WifiOutline', color: 'var(--cp-brand-accent)', value: `↓ ${fmtBytes(stat.netRx)}/s  ↑ ${fmtBytes(stat.netTx)}/s`, unit: '', pct: 0, foot: `在线 ${fmtUptime(stat.uptime || 0)}` },
       ]" :key="c.key" span="4 2:2 1:1">
-        <NCard size="small" class="scard">
+        <NCard size="small" class="scard cp-rise" :style="`--i:${ci}`">
           <div class="srow">
             <div class="sicon" :style="`--c:${c.color}`"><NIcon :component="icons[c.icon]" :size="19" /></div>
             <div style="flex: 1; min-width: 0">
@@ -213,7 +224,7 @@ window.addEventListener('resize', onResize);
           <template v-if="c.key !== 'net'">
             <NProgress
               type="line" :show-indicator="false" :percentage="c.pct" :height="4"
-              :color="c.key === 'cpu' ? (c.pct > 85 ? '#f5616c' : '#4f7cff') : c.key === 'mem' ? (c.pct > 88 ? '#f5a623' : '#34c77b') : '#f5a623'"
+              :color="c.key === 'cpu' ? (c.pct > 85 ? 'var(--cp-err)' : 'var(--cp-brand)') : c.key === 'mem' ? (c.pct > 88 ? 'var(--cp-warn)' : 'var(--cp-ok)') : 'var(--cp-warn)'"
               style="margin-top: 10px"
             />
           </template>
@@ -225,15 +236,17 @@ window.addEventListener('resize', onResize);
     <!-- charts -->
     <NGrid :cols="2" :x-gap="14" :y-gap="14" responsive="screen" item-responsive>
       <NGridItem span="2 1:2">
-        <NCard title="CPU 趋势" size="small" header-text-style="font-size:13px">
-          <NSkeleton v-if="loading" text :repeat="3" />
-          <div ref="cpuEl" style="height: 200px; width: 100%"></div>
+        <NCard size="small">
+          <template #header><span class="section-title">CPU 趋势</span></template>
+          <NSkeleton v-if="loading" height="60px" :repeat="3" class="cp-shimmer" style="border-radius: var(--radius-sm)" />
+          <div ref="cpuEl" style="height: 200px; width: 100%; min-width: 0"></div>
         </NCard>
       </NGridItem>
       <NGridItem span="2 1:2">
-        <NCard title="内存趋势" size="small" header-text-style="font-size:13px">
-          <NSkeleton v-if="loading" text :repeat="3" />
-          <div ref="memEl" style="height: 200px; width: 100%"></div>
+        <NCard size="small">
+          <template #header><span class="section-title">内存趋势</span></template>
+          <NSkeleton v-if="loading" height="60px" :repeat="3" class="cp-shimmer" style="border-radius: var(--radius-sm)" />
+          <div ref="memEl" style="height: 200px; width: 100%; min-width: 0"></div>
         </NCard>
       </NGridItem>
     </NGrid>
@@ -242,36 +255,35 @@ window.addEventListener('resize', onResize);
     <NGrid :cols="2" :x-gap="14" :y-gap="14" responsive="screen" item-responsive>
       <NGridItem span="2 1:2">
         <NCard size="small">
-          <template #header><span style="font-size:13.5px">应用（{{ runningApps }}/{{ apps.length }} 运行中）</span></template>
+          <template #header><span class="section-title">应用（{{ runningApps }}/{{ apps.length }} 运行中）</span></template>
           <template #header-extra>
-            <NButton text type="primary" size="tiny" @click="router.push('/apps')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
+            <NButton text type="primary" size="tiny" aria-label="查看全部应用" @click="router.push('/apps')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
           </template>
-          <div v-for="a in apps.slice(0, 6)" :key="a.id" class="app-row" role="button" tabindex="0"
-               @click="router.push(`/apps/${a.id}`)" @keyup.enter="router.push(`/apps/${a.id}`)">
-            <NIcon :component="a.type === 'node' ? icons.LogoElectron : icons.LogoPython" :size="16" :color="a.type === 'node' ? '#8fd460' : '#4f7cff'" />
+          <div v-for="(a, ai) in apps.slice(0, 6)" :key="a.id" class="app-row cp-rise" :style="`--i:${ai}`" role="button" tabindex="0"
+               :aria-label="`查看应用 ${a.name}`"
+               @click="router.push(`/apps/${a.id}`)" @keyup.enter="router.push(`/apps/${a.id}`)" @keyup.space.prevent="router.push(`/apps/${a.id}`)">
+            <NIcon :component="a.type === 'node' ? icons.LogoElectron : icons.LogoPython" :size="18" :color="a.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)'" />
             <span class="app-name">{{ a.name }}</span>
             <span class="dot" :class="a.running ? 'ok' : 'idle'"></span>
-            <NText depth="3" style="font-size: 12px">{{ a.running ? '运行中' : a.deploying ? '部署中' : '已停止' }}</NText>
+            <NText depth="3" style="font-size: var(--fs-xs)">{{ a.running ? '运行中' : a.deploying ? '部署中' : '已停止' }}</NText>
           </div>
-          <div v-if="!apps.length" class="all-good"><span>暂无应用</span></div>
+          <EmptyBox v-if="!apps.length" text="暂无应用，去应用页创建第一个" />
         </NCard>
       </NGridItem>
       <NGridItem span="2 1:2">
         <NCard size="small">
-          <template #header><span style="font-size:13.5px">服务健康</span></template>
+          <template #header><span class="section-title">服务健康</span></template>
           <template #header-extra>
-            <NButton text type="primary" size="tiny" @click="router.push('/services')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
+            <NButton text type="primary" size="tiny" aria-label="查看全部服务" @click="router.push('/services')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
           </template>
-          <div v-if="!failedUnits.length" class="all-good">
-            <NIcon :component="icons.ShieldCheckmarkOutline" :size="26" color="#34c77b" />
-            <span>所有 systemd 服务运行正常，无 failed 单元</span>
-          </div>
+          <EmptyBox v-if="!failedUnits.length" text="所有 systemd 服务运行正常，无 failed 单元" />
           <div v-else>
             <div v-for="u in failedUnits.slice(0, 6)" :key="u" class="app-row" role="button" tabindex="0"
-                 @click="router.push('/services')" @keyup.enter="router.push('/services')">
-              <NIcon :component="icons.AlertCircleOutline" :size="16" color="#f5616c" />
+                 :aria-label="`查看异常服务 ${u}`"
+                 @click="router.push('/services')" @keyup.enter="router.push('/services')" @keyup.space.prevent="router.push('/services')">
+              <NIcon :component="icons.AlertCircleOutline" :size="18" color="var(--cp-err)" />
               <span class="app-name">{{ u }}</span>
-              <NTag size="tiny" type="error" :bordered="false">failed</NTag>
+              <span class="st err"><span class="dot err"></span>failed</span>
             </div>
           </div>
         </NCard>
@@ -287,13 +299,13 @@ window.addEventListener('resize', onResize);
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  background: linear-gradient(120deg, rgba(79, 124, 255, 0.12), rgba(127, 91, 255, 0.07));
-  border: 1px solid rgba(79, 124, 255, 0.18);
-  border-radius: 12px;
-  padding: 16px 20px;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--cp-brand) 12%, transparent), color-mix(in srgb, var(--cp-brand-accent) 7%, transparent));
+  border: 1px solid color-mix(in srgb, var(--cp-brand) 18%, transparent);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4) var(--space-5);
 }
-.hero-greet { font-size: 15px; color: var(--cp-text); }
-.hero-greet b { color: var(--brand-soft); }
+.hero-greet { font-size: var(--fs-md); color: var(--cp-text); }
+.hero-greet b { color: var(--cp-brand-soft); }
 .hero-host { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--cp-text-mute); margin-top: 5px; }
 .hero-host-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scard { position: relative; }
@@ -304,16 +316,15 @@ window.addEventListener('resize', onResize);
   color: var(--c);
   background: color-mix(in srgb, var(--c) 14%, transparent);
 }
-.slabel { font-size: 12px; color: var(--cp-text-mute); margin-bottom: 2px; }
+.slabel { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-bottom: 2px; }
 .stat-num.small { font-size: 16px; }
 .unit { font-size: 12.5px; color: var(--cp-text-mute); font-weight: 400; }
-.sfoot { font-size: 11.5px; color: var(--cp-text-mute); margin-top: 4px; }
+.sfoot { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-top: 4px; }
 .app-row {
   display: flex; align-items: center; gap: 10px;
-  padding: 9px 6px; border-radius: 8px; cursor: pointer;
+  padding: 9px 6px; border-radius: var(--radius); cursor: pointer;
   transition: background var(--dur) var(--ease);
 }
 .app-row:hover { background: var(--cp-hover); }
-.app-name { font-size: 13px; color: var(--cp-text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.all-good { display: flex; align-items: center; gap: 12px; padding: 22px 8px; color: var(--cp-text-dim); font-size: 13px; }
+.app-name { font-size: var(--fs-sm); color: var(--cp-text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 </style>

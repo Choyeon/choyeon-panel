@@ -2,10 +2,11 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { NButton, NTag, NIcon, NSpace, useMessage } from 'naive-ui';
+import { NButton, NIcon, NSpace, useMessage } from 'naive-ui';
 import '@xterm/xterm/css/xterm.css';
 import { getToken } from '../api';
 import { icons } from '../icons';
+import { cssVar } from '../theme';
 import PageHeader from '../components/PageHeader.vue';
 
 const msg = useMessage();
@@ -20,10 +21,11 @@ let ro: ResizeObserver | null = null;
 let mo: MutationObserver | null = null;
 
 function termTheme() {
-  const dark = document.documentElement.dataset.theme !== 'light';
-  return dark
-    ? { background: '#0c0c10', foreground: '#d4d4d4', cursor: '#4f7cff' }
-    : { background: '#fbfcfe', foreground: '#242b3a', cursor: '#3d66e8' };
+  return {
+    background: cssVar('--cp-code-bg', '#0c0c10'),
+    foreground: cssVar('--cp-code-text', '#d4d4d4'),
+    cursor: cssVar('--cp-brand', '#4f7cff'),
+  };
 }
 
 function applyTheme() {
@@ -109,10 +111,10 @@ onBeforeUnmount(() => {
   <div>
     <PageHeader title="网页终端" sub="root shell · 所有操作即时生效且无二次确认，请谨慎执行">
       <template #actions>
-        <NTag round :bordered="false" size="small" :type="connected ? 'success' : 'error'">
-          <template #icon><span class="dot" :class="connected ? 'ok' : 'err'"></span></template>
+        <span class="st" :class="connected ? 'ok' : disconnected ? 'err' : 'idle'">
+          <span class="dot" :class="connected ? 'ok' : disconnected ? 'err' : 'idle'"></span>
           {{ connected ? '已连接' : disconnected ? '已断开' : '连接中' }}
-        </NTag>
+        </span>
         <NButton size="small" tertiary aria-label="重新连接终端" @click="reconnect">
           <template #icon><NIcon :component="icons.SyncOutline" /></template>
           重新连接
@@ -122,10 +124,10 @@ onBeforeUnmount(() => {
 
     <div class="term-wrap">
       <div class="term-bar">
-        <span class="tdot" style="background: #f5616c"></span>
-        <span class="tdot" style="background: #f5a623"></span>
-        <span class="tdot" style="background: #34c77b"></span>
-        <NSpace align="center" :size="6" style="margin-left: 10px; color: var(--cp-text-dim); font-size: 12px">
+        <span class="tdot" aria-hidden="true" style="background: var(--cp-err)"></span>
+        <span class="tdot" aria-hidden="true" style="background: var(--cp-warn)"></span>
+        <span class="tdot" aria-hidden="true" style="background: var(--cp-ok)"></span>
+        <NSpace align="center" :size="6" style="margin-left: 10px; color: var(--cp-text-dim); font-size: var(--fs-xs)">
           <NIcon :component="icons.TerminalOutline" :size="13" /> root@choyeon — 面板终端
         </NSpace>
       </div>

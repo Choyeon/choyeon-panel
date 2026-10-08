@@ -120,7 +120,7 @@ export const api = {
   runBackup: (id: number) => req(`/backups/${id}/run`, { body: {}, timeout: 600000 }),
   files: (path: string) => req(`/files?path=${encodeURIComponent(path)}`),
   fileContent: (path: string) => req(`/files/content?path=${encodeURIComponent(path)}`),
-  saveFile: (path: string, content: string) =>
+  saveFile: path: string, content: string | ArrayBuffer) =>
     request(
       `/files/content?path=${encodeURIComponent(path)}`,
       {

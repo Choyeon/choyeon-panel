@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, h, onMounted, ref } from 'vue';
 import {
-  NAlert, NButton, NCard, NIcon, NProgress, NResult, NSpace, NSkeleton, NTag, NText, NTooltip,
+  NAlert, NButton, NCard, NIcon, NProgress, NResult, NSpace, NText, NSkeleton, NTooltip,
   useMessage,
 } from 'naive-ui';
 import PageHeader from '../components/PageHeader.vue';
@@ -17,10 +17,14 @@ const error = ref('');
 const report = ref<Report | null>(null);
 
 const TYPE = {
-  pass: { tag: 'success', label: '正常', icon: 'CheckmarkCircleOutline', color: 'var(--cp-ok, #34c77b)' },
-  warn: { tag: 'warning', label: '注意', icon: 'WarningOutline', color: '#f5a623' },
-  fail: { tag: 'error', label: '异常', icon: 'CloseCircleOutline', color: 'var(--cp-err, #f5616c)' },
+  pass: { st: 'ok', label: '正常', icon: 'CheckmarkCircleOutline', color: 'var(--cp-ok)' },
+  warn: { st: 'warn', label: '注意', icon: 'WarningOutline', color: 'var(--cp-warn)' },
+  fail: { st: 'err', label: '异常', icon: 'CloseCircleOutline', color: 'var(--cp-err)' },
 } as const;
+
+function ico(name: string, size = 14) {
+  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
+}
 
 const percent = computed(() => {
   const r = report.value;
@@ -28,6 +32,10 @@ const percent = computed(() => {
   const total = r.counts.pass + r.counts.warn + r.counts.fail;
   return total ? Math.round((r.counts.pass / total) * 100) : 0;
 });
+
+const overallColor = computed(() =>
+  report.value?.status === 'pass' ? 'var(--cp-ok)' : report.value?.status === 'warn' ? 'var(--cp-warn)' : 'var(--cp-err)',
+);
 
 const nextFix = computed(() => report.value?.items.find((i) => i.status !== 'pass' && i.fix) || null);
 
@@ -57,12 +65,9 @@ onMounted(load);
 
 <template>
   <div>
-    <PageHeader title="安全自检" subtitle="只读检查，不改任何配置；每项都给出可复制的修复命令">
+    <PageHeader title="安全自检" sub="只读检查，不改任何配置；每项都给出可复制的修复命令">
       <template #actions>
-        <NButton size="small" secondary :loading="loading" @click="load">
-          <template #icon><NIcon :component="icons.RefreshOutline" /></template>
-          重新检查
-        </NButton>
+        <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">重新检查</NButton>
       </template>
     </PageHeader>
 
@@ -77,23 +82,29 @@ onMounted(load);
             type="circle"
             :percentage="percent"
             :height="80"
-            :color="report.status === 'pass' ? '#34c77b' : report.status === 'warn' ? '#f5a623' : '#f5616c'"
+            :color="overallColor"
           />
           <div>
-            <NText strong style="font-size: 16px">
+            <NText strong class="cp-pop" style="font-size: var(--fs-lg)">
               通过 {{ report.counts.pass }} · 注意 {{ report.counts.warn }} · 异常 {{ report.counts.fail }}
             </NText>
-            <div style="margin-top: 6px; color: var(--cp-text-dim); font-size: 13px">
+            <div style="margin-top: 6px; color: var(--cp-text-dim); font-size: var(--fs-sm)">
               {{ report.status === 'pass' ? '全部检查通过' : '按下方修复建议逐项处理，异常项会直接影响可用性' }}
             </div>
             <NSpace v-if="nextFix" :size="8" style="margin-top: 10px" align="center">
-              <NText depth="3" style="font-size: 12.5px">优先处理：</NText>
+              <NText depth="3" style="font-size: var(--fs-sm)">优先处理：</NText>
               <code class="mono-dim">{{ nextFix.fix }}</code>
               <NTooltip trigger="hover">
                 <template #trigger>
-                  <NButton size="tiny" text @click="copyFix(nextFix.fix)">
-                    <template #icon><NIcon :component="icons.CopyOutline" /></template>
-                  </NButton>
+                  <NButton
+                    size="tiny"
+                    circle
+                    quaternary
+                    aria-label="复制优先修复命令"
+                    title="复制修复命令"
+                    :icon="ico('CopyOutline')"
+                    @click="copyFix(nextFix.fix)"
+                  />
                 </template>
                 复制修复命令
               </NTooltip>
@@ -110,7 +121,7 @@ onMounted(load);
           class="cp-rise"
           :style="`--i:${idx}`"
         >
-          <NSpace align="center" justify="space-between" :wrap="false" style="gap: 12px">
+          <NSpace align="center" justify="space-between" style="gap: 12px">
             <NSpace align="center" :size="10" style="min-width: 0">
               <NIcon
                 :size="18"
@@ -119,15 +130,27 @@ onMounted(load);
               />
               <NText strong>{{ it.title }}</NText>
             </NSpace>
-            <NTag :type="TYPE[it.status].tag" size="small" round>{{ TYPE[it.status].label }}</NTag>
+            <span class="st" :class="TYPE[it.status].st">
+              <span class="dot" :class="TYPE[it.status].st"></span>{{ TYPE[it.status].label }}
+            </span>
           </NSpace>
-          <div style="margin-top: 6px; color: var(--cp-text-mute); font-size: 13px">{{ it.detail }}</div>
+          <div style="margin-top: 6px; color: var(--cp-text-mute); font-size: var(--fs-sm)">{{ it.detail }}</div>
           <NSpace v-if="it.fix && it.status !== 'pass'" :size="8" align="center" style="margin-top: 8px">
             <code class="mono-dim">{{ it.fix }}</code>
-            <NButton size="tiny" text @click="copyFix(it.fix)">
-              <template #icon><NIcon :component="icons.CopyOutline" /></template>
-              复制
-            </NButton>
+            <NTooltip trigger="hover">
+              <template #trigger>
+                <NButton
+                  size="tiny"
+                  circle
+                  quaternary
+                  :aria-label="`复制修复命令：${it.title}`"
+                  :title="`复制修复命令：${it.title}`"
+                  :icon="ico('CopyOutline')"
+                  @click="copyFix(it.fix)"
+                />
+              </template>
+              复制修复命令
+            </NTooltip>
           </NSpace>
         </NCard>
       </NSpace>
@@ -135,7 +158,7 @@ onMounted(load);
 
     <NResult v-if="!loading && !report && !error" status="500" title="暂无自检结果" description="点击「重新检查」重试">
       <template #footer>
-        <NButton size="small" @click="load">重新检查</NButton>
+        <NButton size="small" tertiary :icon="ico('RefreshOutline')" @click="load">重新检查</NButton>
       </template>
     </NResult>
   </div>

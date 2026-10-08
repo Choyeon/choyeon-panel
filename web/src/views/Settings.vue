@@ -129,7 +129,7 @@ const userCols: any[] = [
     render: (u: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: u.role === 'admin' ? icons.ShieldCheckmarkOutline : icons.OptionsOutline, size: 17, color: u.role === 'admin' ? '#f5c26f' : 'var(--cp-text-mute)' }),
+          h(NIcon, { component: u.role === 'admin' ? icons.ShieldCheckmarkOutline : icons.OptionsOutline, size: 17, color: u.role === 'admin' ? 'var(--cp-warn)' : 'var(--cp-text-mute)' }),
         ]),
         h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, u.username), h('div', { class: 'cell-sub' }, u.created_at || '')]),
       ]),
@@ -142,7 +142,7 @@ const userCols: any[] = [
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('SyncOutline', 12), onClick: () => toggleRole(u) }, () => (u.role === 'admin' ? '降为只读' : '升为管理')),
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('KeyOutline', 12), onClick: () => openReset(u) }, () => '重置密码'),
         h(NPopconfirm, { onPositiveClick: () => delUser(u) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline', 12) }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline', 12), title: `删除用户 ${u.username}`, 'aria-label': `删除用户 ${u.username}` }, { default: () => '' }),
           default: () => `删除用户 ${u.username}？`,
         }),
       ]),
@@ -170,7 +170,7 @@ onMounted(load);
     <NGrid :cols="2" :x-gap="14" :y-gap="14" responsive="screen" item-responsive>
       <NGridItem v-if="isAdmin" span="2 1:2">
         <NCard size="small">
-          <template #header><span class="card-title"><NIcon :component="icons.OptionsOutline" :size="15" color="#8fa8ff" /> 用户管理</span></template>
+          <template #header><span class="section-title"><NIcon :component="icons.OptionsOutline" :size="15" color="var(--cp-brand-soft)" /> 用户管理</span></template>
           <template #header-extra><NButton size="tiny" type="primary" :icon="ico('AddOutline', 12)" @click="showUser = true">新建用户</NButton></template>
           <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 8px">只读账号可查看全部监控/日志/数据，但不能执行启停、部署、删除、终端等任何写操作。</NText>
           <NDataTable size="small" :bordered="false" :scroll-x="620" :columns="userCols" :data="users">
@@ -181,15 +181,15 @@ onMounted(load);
 
       <NGridItem v-if="isAdmin" span="2 1:2">
         <NCard size="small">
-          <template #header><span class="card-title"><NIcon :component="icons.AlertCircleOutline" :size="15" color="#f5c26f" /> 告警通知</span></template>
+          <template #header><span class="section-title"><NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-warn)" /> 告警通知</span></template>
           <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">每 30 分钟自动巡检：磁盘使用率、服务 failed、SSL 剩余天数。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次。</NText>
           <NForm label-placement="top" size="small">
-            <NFormItem label="Telegram Bot Token"><NInput v-model:value="alerts.alert_telegram_bot" placeholder="如 123456:ABC-DEF…" /></NFormItem>
-            <NFormItem label="Telegram Chat ID"><NInput v-model:value="alerts.alert_telegram_chat" placeholder="如 987654321" /></NFormItem>
-            <NFormItem label="通用 Webhook URL"><NInput v-model:value="alerts.alert_webhook_url" placeholder="POST {text}，兼容主流机器人网关" /></NFormItem>
+            <NFormItem label="Telegram Bot Token"><NInput v-model:value="alerts.alert_telegram_bot" placeholder="如 123456:ABC-DEF…" :input-props="{ 'aria-label': 'Telegram Bot Token' }" /></NFormItem>
+            <NFormItem label="Telegram Chat ID"><NInput v-model:value="alerts.alert_telegram_chat" placeholder="如 987654321" :input-props="{ 'aria-label': 'Telegram Chat ID' }" /></NFormItem>
+            <NFormItem label="通用 Webhook URL"><NInput v-model:value="alerts.alert_webhook_url" placeholder="POST {text}，兼容主流机器人网关" :input-props="{ 'aria-label': '通用 Webhook URL' }" /></NFormItem>
             <NSpace :size="16">
-              <NFormItem label="磁盘阈值 %" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_disk_pct" :min="50" :max="99" style="width: 130px" /></NFormItem>
-              <NFormItem label="SSL 剩余天数" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_ssl_days" :min="0" :max="60" style="width: 130px" /></NFormItem>
+              <NFormItem label="磁盘阈值 %" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_disk_pct" :min="50" :max="99" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" style="width: 130px" /></NFormItem>
+              <NFormItem label="SSL 剩余天数" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_ssl_days" :min="0" :max="60" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" style="width: 130px" /></NFormItem>
             </NSpace>
           </NForm>
           <NSpace style="margin-top: 12px">
@@ -202,7 +202,7 @@ onMounted(load);
 
       <NGridItem span="2 1:1">
         <NCard size="small">
-          <template #header><span class="card-title"><NIcon :component="icons.ShieldCheckmarkOutline" :size="15" color="#6fdba4" /> 防火墙</span></template>
+          <template #header><span class="section-title"><NIcon :component="icons.ShieldCheckmarkOutline" :size="15" color="var(--cp-ok)" /> 防火墙</span></template>
           <NSpace vertical :size="10">
             <NSpace align="center" :size="8">
               <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? (fw.active ? 'ufw 已启用' : 'ufw 未启用') : '检测中…' }}</span>
@@ -215,7 +215,7 @@ onMounted(load);
 
       <NGridItem span="2 1:1">
         <NCard size="small">
-          <template #header><span class="card-title"><NIcon :component="icons.KeyOutline" :size="15" color="#8fa8ff" /> 证书维护</span></template>
+          <template #header><span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-brand-soft)" /> 证书维护</span></template>
           <NSpace vertical :size="10">
             <NText depth="3" style="font-size: 12px">certbot renew 检查所有已安装证书并自动续期（系统每日定时任务已托管，此处用于手动触发验证）。</NText>
             <NButton type="primary" size="small" :loading="renewing" :icon="ico('SyncOutline')" style="align-self: flex-start" @click="renew">立即续期</NButton>
@@ -226,7 +226,7 @@ onMounted(load);
 
       <NGridItem span="2">
         <NCard size="small">
-          <template #header><span class="card-title"><NIcon :component="icons.DocumentTextOutline" :size="15" color="var(--cp-text-mute)" /> 操作审计</span></template>
+          <template #header><span class="section-title"><NIcon :component="icons.DocumentTextOutline" :size="15" color="var(--cp-text-mute)" /> 操作审计</span></template>
           <template #header-extra><NButton size="tiny" tertiary :icon="ico('RefreshOutline', 12)" @click="load">刷新</NButton></template>
           <NDataTable size="small" :bordered="false" :scroll-x="760" :max-height="380" :columns="auditCols" :data="auditLog">
             <template #empty><EmptyBox text="暂无操作记录" /></template>
@@ -235,31 +235,27 @@ onMounted(load);
       </NGridItem>
     </NGrid>
 
-    <NModal v-model:show="showUser" preset="card" title="新建用户" style="width: 400px">
+    <NModal v-model:show="showUser" preset="card" title="新建用户" style="width: 400px; max-width: 94vw">
       <NForm label-placement="left" label-width="70">
         <NSpace vertical :size="12">
-          <NFormItem label="用户名"><NInput v-model:value="userForm.username" /></NFormItem>
-          <NFormItem label="密码"><NInput v-model:value="userForm.password" type="password" show-password-on="click" placeholder="至少 8 位" /></NFormItem>
+          <NFormItem label="用户名"><NInput v-model:value="userForm.username" :input-props="{ 'aria-label': '用户名' }" /></NFormItem>
+          <NFormItem label="密码"><NInput v-model:value="userForm.password" type="password" show-password-on="click" placeholder="至少 8 位" :input-props="{ 'aria-label': '密码' }" /></NFormItem>
           <NFormItem label="角色">
-            <NSelect v-model:value="userForm.role" :options="[{ label: '只读 viewer', value: 'viewer' }, { label: '管理员 admin', value: 'admin' }]" />
+            <NSelect v-model:value="userForm.role" :options="[{ label: '只读 viewer', value: 'viewer' }, { label: '管理员 admin', value: 'admin' }]" aria-label="用户角色" />
           </NFormItem>
-          <NButton type="primary" block :icon="ico('AddOutline')" @click="createUser">创建</NButton>
+          <NButton type="primary" block class="cp-press" :icon="ico('AddOutline')" @click="createUser">创建</NButton>
         </NSpace>
       </NForm>
     </NModal>
 
-    <NModal v-model:show="showReset" preset="card" :title="`重置密码 · ${resetTarget?.username || ''}`" style="width: 400px">
+    <NModal v-model:show="showReset" preset="card" :title="`重置密码 · ${resetTarget?.username || ''}`" style="width: 400px; max-width: 94vw">
       <NSpace vertical :size="12">
-        <NInput v-model:value="resetPwd" type="password" show-password-on="click" placeholder="新密码（至少 8 位）" @keyup.enter="confirmReset" />
+        <NInput v-model:value="resetPwd" type="password" show-password-on="click" placeholder="新密码（至少 8 位）" :input-props="{ 'aria-label': '新密码' }" @keyup.enter="confirmReset" />
         <NSpace justify="end">
           <NButton tertiary @click="showReset = false">取消</NButton>
-          <NButton type="primary" :icon="ico('SaveOutline')" @click="confirmReset">确认重置</NButton>
+          <NButton type="primary" class="cp-press" :icon="ico('SaveOutline')" @click="confirmReset">确认重置</NButton>
         </NSpace>
       </NSpace>
     </NModal>
   </div>
 </template>
-
-<style scoped>
-.card-title { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--cp-text); }
-</style>

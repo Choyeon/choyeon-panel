@@ -3,7 +3,7 @@ import { onMounted, ref, h } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NCard, NTabs, NTabPane, NSpace, NButton, NText, NTag, NInput, NDynamicInput,
-  useMessage, NPopconfirm, NIcon, NForm, NFormItem, NSpin, NGrid, NGridItem, NSelect, NAlert,
+  useMessage, NPopconfirm, NIcon, NForm, NFormItem, NSkeleton, NGrid, NGridItem, NSelect, NAlert,
 } from 'naive-ui';
 import { api } from '../api';
 import { icons } from '../icons';
@@ -199,7 +199,10 @@ onMounted(load);
 </script>
 
 <template>
-  <div v-if="!app" style="display: flex; justify-content: center; padding: 80px 0"><NSpin size="large" /></div>
+  <div v-if="!app" class="page-loading">
+    <NSkeleton height="52px" class="cp-shimmer" style="border-radius: var(--radius-lg)" />
+    <NSkeleton v-for="i in 3" :key="i" height="88px" class="cp-shimmer" style="border-radius: var(--radius-lg)" />
+  </div>
   <div v-else>
     <PageHeader :title="app.name" :sub="`${app.unit} · ${app.path}`">
       <template #actions>
@@ -207,18 +210,19 @@ onMounted(load);
           <template #icon><NIcon :component="icons.ArrowBackOutline" /></template>
           返回列表
         </NButton>
-        <NTag round :bordered="false" size="small" :type="app.running ? 'success' : 'default'">
-          <template #icon><span class="dot" :class="app.running ? 'ok' : 'idle'"></span></template>
-          {{ app.running ? '运行中' : '已停止' }}
-        </NTag>
-        <NTag v-if="app.deploying" round size="small" type="warning" :bordered="false">部署中</NTag>
-        <NButton size="small" type="primary" :icon="ico('CloudUploadOutline')" @click="deploy">立即部署</NButton>
+        <span class="st" :class="app.running ? 'ok' : 'idle'">
+          <span class="dot" :class="app.running ? 'ok' : 'idle'"></span>{{ app.running ? '运行中' : '已停止' }}
+        </span>
+        <span v-if="app.deploying" class="st warn"><span class="dot warn"></span>部署中</span>
+        <NButton size="small" type="primary" class="cp-press" :icon="ico('CloudUploadOutline')" @click="deploy">立即部署</NButton>
         <NButton size="small" :tertiary="!app.running" :type="app.running ? 'warning' : 'success'" :icon="ico(app.running ? 'StopOutline' : 'PlayOutline')" @click="act(app.running ? 'stop' : 'start')">
           {{ app.running ? '停止' : '启动' }}
         </NButton>
         <NButton size="small" tertiary :disabled="!app.running" :icon="ico('SyncOutline')" @click="act('restart')">重启</NButton>
         <NPopconfirm @positive-click="purge">
-          <template #trigger><NButton size="small" quaternary type="error" :icon="ico('TrashOutline')" /></template>
+          <template #trigger>
+            <NButton size="small" quaternary type="error" :icon="ico('TrashOutline')" title="彻底删除应用与文件" aria-label="彻底删除应用与文件" />
+          </template>
           将同时删除 {{ app.path }} 目录文件与 systemd unit，不可恢复！
         </NPopconfirm>
       </template>
@@ -226,13 +230,13 @@ onMounted(load);
 
     <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive style="margin-bottom: 16px">
       <NGridItem span="4 2:1">
-        <NCard size="small" class="info-card">
+        <NCard size="small" class="info-card cp-rise" style="--i: 0">
           <div class="info-k">运行时</div>
           <div class="info-v"><span :class="app.type === 'node' ? 'vchip node' : 'vchip python'">{{ app.type === 'node' ? 'Node.js' : 'Python' }}</span></div>
         </NCard>
       </NGridItem>
       <NGridItem span="4 2:1">
-        <NCard size="small" class="info-card">
+        <NCard size="small" class="info-card cp-rise" style="--i: 1">
           <div class="info-k">监听端口</div>
           <div class="info-v mono-dim" style="font-size: 15px">
             {{ app.port || '—' }}
@@ -241,7 +245,7 @@ onMounted(load);
         </NCard>
       </NGridItem>
       <NGridItem span="4 2:1">
-        <NCard size="small" class="info-card">
+        <NCard size="small" class="info-card cp-rise" style="--i: 2">
           <div class="info-k">域名</div>
           <div class="info-v" style="font-size: 14px">
             {{ app.domain || ngx?.configs?.[0]?.analysis?.serverNames?.[0] || '—' }}
@@ -250,7 +254,7 @@ onMounted(load);
         </NCard>
       </NGridItem>
       <NGridItem span="4 2:1">
-        <NCard size="small" class="info-card">
+        <NCard size="small" class="info-card cp-rise" style="--i: 3">
           <div class="info-k">仓库 / 分支</div>
           <div class="info-v" style="font-size: 13px">{{ app.repo_url ? (app.repo_url.replace(/^https?:\/\//, '').replace(/\.git$/, '') + ' @ ' + (app.branch || 'main')) : '本地目录' }}</div>
         </NCard>
@@ -262,10 +266,10 @@ onMounted(load);
         <span class="res-item"><span class="res-k">进程</span><b class="mono-dim">{{ proc.running ? 'PID ' + proc.pid : '未运行' }}</b></span>
         <span class="res-item"><span class="res-k">内存</span><b class="mono-dim">{{ fmtMem(proc.memoryBytes) }}</b></span>
         <span class="res-item"><span class="res-k">CPU 累计</span><b class="mono-dim">{{ proc.cpuSeconds != null ? proc.cpuSeconds + 's' : '—' }}</b></span>
-        <span class="res-item"><span class="res-k">重启次数</span><b class="mono-dim" :style="proc.restarts > 3 ? 'color:#f5a623' : ''">{{ proc.restarts }}</b></span>
+        <span class="res-item"><span class="res-k">重启次数</span><b class="mono-dim" :style="proc.restarts > 3 ? 'color:var(--cp-warn)' : ''">{{ proc.restarts }}</b></span>
         <span class="res-item"><span class="res-k">自启动</span><b class="mono-dim">{{ proc.execStartAt || proc.activeSince || '—' }}</b></span>
         <span class="res-item"><span class="res-k">状态</span><b class="mono-dim">{{ proc.subState }}</b></span>
-        <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" @click="loadProc">刷新</NButton>
+        <NButton size="small" tertiary :icon="ico('RefreshOutline')" @click="loadProc">刷新</NButton>
       </NSpace>
     </NCard>
 
@@ -274,16 +278,16 @@ onMounted(load);
         <NTabPane name="config" tab="基本配置">
           <NForm label-placement="left" label-width="100" style="max-width: 660px; margin-top: 10px">
             <NSpace vertical :size="10">
-              <NFormItem label="名称"><NInput v-model:value="edit.name" /></NFormItem>
-              <NFormItem label="安装目录"><NInput v-model:value="edit.path" placeholder="/root/www/<名称>" /></NFormItem>
-              <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" /></NFormItem>
-              <NFormItem label="分支"><NInput v-model:value="edit.branch" /></NFormItem>
-              <NFormItem label="安装命令"><NInput v-model:value="edit.install_cmd" /></NFormItem>
-              <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" style="font-family: 'JetBrains Mono', monospace" /></NFormItem>
-              <NFormItem label="端口"><NInput v-model:value="edit.port" placeholder="留空表示无端口" /></NFormItem>
-              <NFormItem label="域名"><NInput v-model:value="edit.domain" /></NFormItem>
+              <NFormItem label="名称"><NInput v-model:value="edit.name" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
+              <NFormItem label="安装目录"><NInput v-model:value="edit.path" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
+              <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" :input-props="{ 'aria-label': 'Git 仓库地址' }" /></NFormItem>
+              <NFormItem label="分支"><NInput v-model:value="edit.branch" :input-props="{ 'aria-label': '分支' }" /></NFormItem>
+              <NFormItem label="安装命令"><NInput v-model:value="edit.install_cmd" :input-props="{ 'aria-label': '安装命令' }" /></NFormItem>
+              <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" /></NFormItem>
+              <NFormItem label="端口"><NInput v-model:value="edit.port" placeholder="留空表示无端口" :input-props="{ 'aria-label': '监听端口' }" /></NFormItem>
+              <NFormItem label="域名"><NInput v-model:value="edit.domain" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
               <NFormItem label="关联数据库">
-                <NSelect v-model:value="dbSel" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" style="width: 100%" />
+                <NSelect v-model:value="dbSel" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" aria-label="关联数据库" style="width: 100%" />
               </NFormItem>
               <NButton type="primary" :loading="saving" :icon="ico('SaveOutline')" @click="save">保存配置</NButton>
             </NSpace>
@@ -295,8 +299,8 @@ onMounted(load);
             <NText depth="3" style="font-size: 12.5px">写入应用目录的 .env 并由 systemd EnvironmentFile 加载；保存后重启应用生效。</NText>
             <NDynamicInput v-model:value="env" :on-create="() => ({ k: '', v: '' })">
               <template #default="{ value }">
-                <NInput v-model:value="value.k" placeholder="KEY" style="width: 220px; margin-right: 8px; font-family: 'JetBrains Mono', monospace" />
-                <NInput v-model:value="value.v" placeholder="value" style="flex: 1; font-family: 'JetBrains Mono', monospace" />
+                <NInput v-model:value="value.k" placeholder="KEY" style="width: 220px; margin-right: 8px" :input-props="{ class: 'mono', 'aria-label': '环境变量名' }" />
+                <NInput v-model:value="value.v" placeholder="value" style="flex: 1" :input-props="{ class: 'mono', 'aria-label': '环境变量值' }" />
               </template>
             </NDynamicInput>
             <NButton size="small" type="primary" :icon="ico('SaveOutline')" style="align-self: flex-start" @click="save">保存环境变量</NButton>
@@ -304,21 +308,23 @@ onMounted(load);
         </NTabPane>
 
         <NTabPane name="deploy" tab="部署记录">
-          <NSpace align="start" :wrap="false" style="width: 100%">
+          <div class="split-view">
             <div class="dep-list">
-              <div v-for="d in deps" :key="d.id" class="dep-item" :class="{ active: depLog?.id === d.id }" @click="viewDep(d.id)">
+              <div v-for="d in deps" :key="d.id" class="dep-item" :class="{ active: depLog?.id === d.id }"
+                   role="button" tabindex="0" :aria-label="`查看部署记录 #${d.id}`"
+                   @click="viewDep(d.id)" @keyup.enter="viewDep(d.id)" @keyup.space.prevent="viewDep(d.id)">
                 <NSpace align="center" justify="space-between" style="width: 100%">
-                  <NText depth="3" style="font-size: 12px">#{{ d.id }} · {{ d.started_at }}</NText>
-                  <span class="st" :class="d.status === 'success' ? 'ok' : d.status === 'running' ? 'warn' : 'err'" style="font-size: 11px">
+                  <NText depth="3" style="font-size: var(--fs-xs)">#{{ d.id }} · {{ d.started_at }}</NText>
+                  <span class="st" :class="d.status === 'success' ? 'ok' : d.status === 'running' ? 'warn' : 'err'" style="font-size: var(--fs-2xs)">
                     <span class="dot" :class="d.status === 'success' ? 'ok' : d.status === 'running' ? 'warn' : 'err'"></span>{{ d.status }}
                   </span>
                 </NSpace>
               </div>
               <EmptyBox v-if="!deps.length" text="暂无部署记录" />
-              <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" style="margin-top: 8px" @click="pollDeps">刷新</NButton>
+              <NButton size="small" tertiary :icon="ico('RefreshOutline')" style="margin-top: 8px" @click="pollDeps">刷新</NButton>
             </div>
-            <div class="log-view" style="flex: 1; max-height: 460px">{{ depLog?.log || '点击左侧记录查看部署日志' }}</div>
-          </NSpace>
+            <div class="log-view" style="flex: 1; min-width: 0; max-height: 460px">{{ depLog?.log || '点击左侧记录查看部署日志' }}</div>
+          </div>
         </NTabPane>
 
         <NTabPane name="logs" tab="运行日志">
@@ -329,12 +335,14 @@ onMounted(load);
           <div v-if="!ngx?.configs?.length" style="padding: 20px 0">
             <EmptyBox text="未找到与该应用关联的 nginx 配置（按域名或反代端口匹配）。配置域名并创建反代后，这里可直接快捷编辑" />
           </div>
-          <NSpace v-else align="start" :wrap="false" :size="14">
+          <div v-else class="split-view">
             <div class="ngx-list">
               <div
-                v-for="c in ngx.configs" :key="c.file" class="ngx-item" :class="{ active: ngxFile?.file === c.file }" @click="selConfig(c)"
+                v-for="c in ngx.configs" :key="c.file" class="ngx-item" :class="{ active: ngxFile?.file === c.file }"
+                role="button" tabindex="0" :aria-label="`查看 nginx 配置 ${c.name}`"
+                @click="selConfig(c)" @keyup.enter="selConfig(c)" @keyup.space.prevent="selConfig(c)"
               >
-                <NIcon :component="icons.GlobeOutline" :size="15" :color="c.analysis.ssl ? '#6fdba4' : 'var(--cp-text-mute)'" />
+                <NIcon :component="icons.GlobeOutline" :size="15" :color="c.analysis.ssl ? 'var(--cp-ok)' : 'var(--cp-text-mute)'" />
                 <div style="min-width: 0">
                   <div class="ngx-name">{{ c.name }}</div>
                   <div class="ngx-dom">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}</div>
@@ -346,22 +354,22 @@ onMounted(load);
                 <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.websocket ? 'success' : 'default'">WebSocket {{ ngxFile.analysis.websocket ? '✓' : '✗' }}</NTag>
                 <NTag size="tiny" :bordered="false">body {{ ngxFile.analysis.bodySize || '默认 1m' }}</NTag>
               </div>
-              <NText v-if="ngxFile" depth="3" style="font-size: 11px; display: block; margin-top: 8px; word-break: break-all">{{ ngxFile.file }}</NText>
+              <NText v-if="ngxFile" depth="3" style="font-size: var(--fs-2xs); display: block; margin-top: 8px; word-break: break-all">{{ ngxFile.file }}</NText>
             </div>
             <div style="flex: 1; min-width: 0">
               <NSpace size="small" style="margin-bottom: 10px" wrap>
                 <NButton size="small" tertiary :disabled="!ngxFile || ngxFile.analysis.websocket" :icon="ico('PulseOutline')" @click="quick('ws')">添加 WebSocket 支持</NButton>
-                <NInput v-model:value="bodySizeVal" size="small" style="width: 80px" placeholder="50m" />
+                <NInput v-model:value="bodySizeVal" size="small" style="width: 80px" placeholder="50m" :input-props="{ 'aria-label': '上传大小限制' }" />
                 <NButton size="small" tertiary :disabled="!ngxFile" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
                 <NButton size="small" tertiary :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
               </NSpace>
-              <NInput v-model:value="ngxContent" type="textarea" :autosize="{ minRows: 14, maxRows: 26 }" style="font-family: 'JetBrains Mono', monospace; font-size: 12.5px" />
+              <NInput v-model:value="ngxContent" type="textarea" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: 12.5px' }" />
               <NSpace justify="space-between" align="center" style="margin-top: 10px">
-                <NText depth="3" style="font-size: 12px">保存将执行 nginx -t 校验，失败自动回滚并 reload 生效</NText>
-                <NButton type="primary" size="small" :loading="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
+                <NText depth="3" style="font-size: var(--fs-xs)">保存将执行 nginx -t 校验，失败自动回滚并 reload 生效</NText>
+                <NButton type="primary" size="small" class="cp-press" :loading="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
               </NSpace>
             </div>
-          </NSpace>
+          </div>
         </NTabPane>
 
         <NTabPane name="unit" tab="systemd 单元">
@@ -369,7 +377,7 @@ onMounted(load);
             <NAlert v-if="unitInfo && !unitInfo.managed" type="warning" :bordered="false" size="small">
               该应用为纳管模式（unit {{ app.unit }} 由外部管理），面板只读展示，不会写入该文件。
             </NAlert>
-            <NText depth="3" style="font-size: 12.5px">
+            <NText depth="3" style="font-size: var(--fs-2xs)">
               文件：<span class="mono-dim">{{ unitInfo?.path }}</span>。保存流程：写入 → systemd-analyze verify 校验 → daemon-reload，任一步失败自动回滚。修改后需重启服务才生效；面板生成模式下保存会同步更新部署模板，后续部署按此模板渲染。占位符 <code v-pre>{{name}} {{path}} {{start_cmd}} {{port}}</code> 可在模板中使用。
             </NText>
             <NInput
@@ -377,7 +385,7 @@ onMounted(load);
               type="textarea"
               :autosize="{ minRows: 14, maxRows: 26 }"
               :read-only="!!unitInfo && !unitInfo.managed"
-              style="font-family: 'JetBrains Mono', monospace; font-size: 12.5px"
+              :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: 12.5px' }"
             />
             <NSpace justify="space-between" align="center">
               <NSpace size="small">
@@ -393,13 +401,13 @@ onMounted(load);
         <NTabPane name="ssl" tab="SSL 证书">
           <NSpace vertical :size="14">
             <NSpace align="center" :size="10">
-              <NIcon :component="icons.ShieldCheckmarkOutline" :size="20" color="#8fa8ff" />
+              <NIcon :component="icons.ShieldCheckmarkOutline" :size="20" color="var(--cp-brand-soft)" />
               <NText style="font-size: 13.5px">{{ app.domain || '（未配置域名）' }}</NText>
               <NTag v-if="app.domain" size="tiny" :bordered="false" type="info">Let's Encrypt</NTag>
             </NSpace>
-            <NText depth="3" style="font-size: 12.5px">要求该域名 DNS A 记录已指向本机 IP。申请成功后自动切换为 HTTPS 反代并开启 80 → 443 跳转。</NText>
+            <NText depth="3" style="font-size: var(--fs-2xs)">要求该域名 DNS A 记录已指向本机 IP。申请成功后自动切换为 HTTPS 反代并开启 80 → 443 跳转。</NText>
             <NSpace>
-              <NInput v-model:value="sslEmail" placeholder="邮箱（可选，用于到期通知）" style="width: 300px" />
+              <NInput v-model:value="sslEmail" placeholder="邮箱（可选，用于到期通知）" style="width: 300px" :input-props="{ 'aria-label': 'SSL 到期通知邮箱' }" />
               <NButton type="primary" :disabled="!app.domain" :icon="ico('KeyOutline')" @click="ssl">申请 / 配置证书</NButton>
             </NSpace>
           </NSpace>
@@ -410,20 +418,26 @@ onMounted(load);
 </template>
 
 <style scoped>
-.info-card :deep(.n-card__content) { padding: 12px 16px; }
-.info-k { font-size: 11.5px; color: var(--cp-text-mute); margin-bottom: 6px; }
+.page-loading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5) 0; }
+.info-card :deep(.n-card__content) { padding: 12px var(--space-4); }
+.info-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: 6px; }
 .info-v { color: var(--cp-text); font-weight: 500; }
-.dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: 12px; }
-.dep-item { padding: 10px 10px; border-radius: 8px; cursor: pointer; transition: background 0.12s; }
-.dep-item:hover { background: rgba(255, 255, 255, 0.045); }
-.dep-item.active { background: rgba(79, 124, 255, 0.12); }
-.ngx-list { width: 260px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: 12px; }
-.ngx-item { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 8px; cursor: pointer; transition: background 0.12s; }
-.ngx-item:hover { background: rgba(255, 255, 255, 0.045); }
-.ngx-item.active { background: rgba(79, 124, 255, 0.12); }
+.split-view { display: flex; align-items: flex-start; gap: var(--space-3); }
+.dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
+.dep-item { padding: 10px; border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
+.dep-item:hover { background: var(--cp-hover); }
+.dep-item.active { background: var(--cp-selected); }
+.ngx-list { width: 260px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
+.ngx-item { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
+.ngx-item:hover { background: var(--cp-hover); }
+.ngx-item.active { background: var(--cp-selected); }
 .ngx-name { font-size: 12.5px; color: var(--cp-text); font-weight: 550; }
-.ngx-dom { font-size: 11px; color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.res-bar :deep(.n-card__content) { padding: 12px 16px; }
-.res-item { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--cp-text); }
-.res-k { font-size: 11.5px; color: var(--cp-text-mute); }
+.ngx-dom { font-size: var(--fs-2xs); color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.res-bar :deep(.n-card__content) { padding: 12px var(--space-4); }
+.res-item { display: inline-flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--cp-text); }
+.res-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); }
+@media (max-width: 900px) {
+  .split-view { flex-direction: column; }
+  .dep-list, .ngx-list { width: 100%; border-right: 0; padding-right: 0; margin-bottom: var(--space-2); }
+}
 </style>

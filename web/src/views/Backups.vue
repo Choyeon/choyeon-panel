@@ -43,7 +43,7 @@ const columns: any[] = [
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: r.kind === 'pg' ? icons.CubeOutline : icons.FolderOutline, size: 18, color: r.kind === 'pg' ? '#8fa8ff' : '#8fd460' }),
+          h(NIcon, { component: r.kind === 'pg' ? icons.CubeOutline : icons.FolderOutline, size: 18, color: r.kind === 'pg' ? 'var(--cp-brand-soft)' : 'var(--cp-node)' }),
         ]),
         h('div', { class: 'cell-txt' }, [
           h('span', { class: 'cell-name' }, r.target),
@@ -154,30 +154,30 @@ onMounted(async () => {
       <template #empty><EmptyBox text="还没有备份任务，点击右上角新建" /></template>
     </NDataTable>
 
-    <NModal v-model:show="show" preset="card" title="新建备份任务" style="width: 460px">
+    <NModal v-model:show="show" preset="card" title="新建备份任务" style="width: 400px; max-width: 94vw">
       <NForm label-placement="left" label-width="86">
         <NSpace vertical :size="12">
-          <NFormItem label="类型"><NSelect v-model:value="form.kind" :options="kindOpts" /></NFormItem>
+          <NFormItem label="类型"><NSelect v-model:value="form.kind" :options="kindOpts" aria-label="备份类型" /></NFormItem>
           <NFormItem v-if="form.kind === 'pg'" label="数据库">
             <NSpace :size="8">
-              <NInput v-model:value="form.target" placeholder="如 rosetta，或 all 全库" style="width: 210px" />
+              <NInput v-model:value="form.target" placeholder="如 rosetta，或 all 全库" style="width: 210px" :input-props="{ 'aria-label': '数据库名称' }" />
               <NButton size="small" tertiary @click="form.target = 'all'">全部</NButton>
             </NSpace>
           </NFormItem>
-          <NFormItem v-else label="应用"><NSelect v-model:value="form.target" :options="apps" /></NFormItem>
-          <NFormItem label="计划"><NSelect v-model:value="form.schedule" :options="schedOpts" /></NFormItem>
+          <NFormItem v-else label="应用"><NSelect v-model:value="form.target" :options="apps" aria-label="备份应用" /></NFormItem>
+          <NFormItem label="计划"><NSelect v-model:value="form.schedule" :options="schedOpts" aria-label="备份计划" /></NFormItem>
           <NFormItem v-if="form.schedule !== 'manual'" label="执行时刻">
             <NSpace align="center" :size="8">
-              <NInputNumber v-model:value="form.hour" :min="0" :max="23" style="width: 84px" /> 时
-              <NInputNumber v-model:value="form.minute" :min="0" :max="59" style="width: 84px" /> 分（本地时区）
+              <NInputNumber v-model:value="form.hour" :min="0" :max="23" :input-props="{ 'aria-label': '执行小时' }" style="width: 84px" /> 时
+              <NInputNumber v-model:value="form.minute" :min="0" :max="59" :input-props="{ 'aria-label': '执行分钟' }" style="width: 84px" /> 分（本地时区）
             </NSpace>
           </NFormItem>
           <NSpace justify="space-between" align="center" style="width: 100%">
-            <span style="font-size: 13px; color: var(--cp-text-dim)">启用定时计划</span>
-            <NSwitch v-model:value="form.enabled" size="small" />
+            <span id="bk-schedule-enabled" style="font-size: var(--fs-sm); color: var(--cp-text-dim)">启用定时计划</span>
+            <NSwitch v-model:value="form.enabled" size="small" aria-labelledby="bk-schedule-enabled" />
           </NSpace>
-          <NFormItem label="保留份数"><NInputNumber v-model:value="form.keep" :min="1" :max="60" style="width: 130px" /></NFormItem>
-          <NButton type="primary" block :icon="ico('AddOutline')" @click="create">创建任务</NButton>
+          <NFormItem label="保留份数"><NInputNumber v-model:value="form.keep" :min="1" :max="60" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px" /></NFormItem>
+          <NButton type="primary" block class="cp-press" :icon="ico('AddOutline')" @click="create">创建任务</NButton>
         </NSpace>
       </NForm>
     </NModal>
