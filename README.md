@@ -99,7 +99,7 @@ backend/
   cli.py               choyeonctl：命令行部署/账号/应用/备份/自检，全命令支持 --json
   backup_runner.py     备份 CLI（systemd timer 调用）
   python/sys_helper.py 系统指标采集（仅标准库）
-  tests/               unittest 套件（52 项）
+  tests/               unittest 套件
 bin/choyeonctl         命令行入口（安装后软链到 /usr/local/bin）
 web/                   Vue 3 + Naive UI 前端
   src/style.css        设计令牌（design tokens）、双主题变量与动效令牌
@@ -140,7 +140,7 @@ AGENTS.md              AI 智能体部署规则（确定性步骤 + 验收标准
 ```bash
 make backend-dev     # 后端 127.0.0.1:3210
 make web-dev         # 前端 5173，/api 代理到 3210
-make test            # 后端 unittest（52 项）
+make test            # 后端 unittest
 make lint            # ruff + mypy + vue-tsc
 make build           # 前端生产构建
 make help            # 查看全部命令
@@ -153,7 +153,7 @@ Windows 本机也可开发：systemd/journalctl/nginx 等 Linux 专属能力会�
 ## 测试与质量
 
 ```bash
-cd backend && python3 -m unittest discover -s tests   # 52 项：校验器、unit 渲染、nginx 解析、
+cd backend && python3 -m unittest discover -s tests   # 校验器、unit 渲染与转义、nginx 解析、
                                                       # 路径守卫、令牌吊销、限速、日志裁剪、超时清理
                                                       # 部署模板、就绪探针
 cd web && npm run build                               # vue-tsc 类型检查 + vite 构建
