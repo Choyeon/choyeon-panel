@@ -172,8 +172,22 @@ async def create_backup(i: dict) -> dict:
     row = dbm.query_one("SELECT * FROM backups WHERE id=?", (res,))
     if not row:
         raise RuntimeError("备份任务创建后未能读回，请检查数据库")
-    await _sync_timer(row)
+    try:
+        await _sync_timer(row)
+    except Exception as e:  # noqa: BLE001
+        # timer 没落地却把行留在库里，列表就会显示一条"已启用但永远不会跑"的任务，
+        # 而且用户完全没有线索。撤销这条半成品再报错。
+        await _discard(row["id"])
+        raise RuntimeError(f"备份计划落地失败，任务已撤销：{e}") from e
     return row
+
+
+async def _discard(bid: int):
+    """删掉一条 timer 未成功落地的备份任务（systemd 侧残留一并清）。"""
+    # 清理尽力而为，最终以库里的行被删掉为准
+    with suppress(Exception):
+        await delete_backup(bid)
+    dbm.execute("DELETE FROM backups WHERE id=?", (bid,))
 
 
 async def update_backup(bid: int, i: dict) -> dict:
@@ -205,7 +219,19 @@ async def update_backup(bid: int, i: dict) -> dict:
     row = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
     if not row:
         raise RuntimeError("备份任务更新后未能读回，请检查数据库")
-    await _sync_timer(row)
+    try:
+        await _sync_timer(row)
+    except Exception as e:  # noqa: BLE001
+        # 库里已是新值、systemd 还是旧 timer，两边不一致且界面上看不出来：
+        # 把库还原成改动前那一行，再按同一口径报错。
+        dbm.execute(
+            "UPDATE backups SET kind=?,target=?,schedule=?,hour=?,minute=?,keep=?,enabled=? WHERE id=?",
+            (cur["kind"], cur["target"], cur["schedule"], cur["hour"], cur["minute"], cur["keep"], cur["enabled"], bid),
+        )
+        # 还原时连 timer 也同步不上就是环境问题，别盖掉原始报错
+        with suppress(Exception):
+            await _sync_timer(cur)
+        raise RuntimeError(f"备份计划更新失败，已还原为改动前的配置：{e}") from e
     return row
 
 

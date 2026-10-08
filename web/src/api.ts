@@ -103,7 +103,7 @@ export const api = {
   deploy: (id: number) => req(`/apps/${id}/deploy`, { body: {} }),
   deployments: (id: number) => req(`/apps/${id}/deployments`),
   deployment: (id: number, depId: number) => req(`/apps/${id}/deployments/${depId}`),
-  appSsl: (id: number, email?: string) => req(`/apps/${id}/ssl`, { body: { email } }),
+  appSsl: (id: number, email?: string) => req(`/apps/${id}/ssl`, { body: { email }, timeout: 320000 }),
   appNginx: (id: number) => req(`/apps/${id}/nginx`),
   saveNginx: (id: number, file: string, content: string) => req(`/apps/${id}/nginx`, { method: 'PUT', body: { file, content } }),
   quickNginx: (id: number, file: string, kind: string, value?: string) => req(`/apps/${id}/nginx/quick`, { body: { file, kind, value } }),
@@ -122,7 +122,7 @@ export const api = {
   firewall: () => req('/firewall'),
   pgDbs: () => req('/db/pg/databases'),
   pgRoles: () => req('/db/pg/roles'),
-  pgManage: (body: any) => req('/db/pg/manage', { body }),
+  pgManage: (body: any) => req('/db/pg/manage', { body, timeout: 40000 }),
   // 服务端 psql 自己在 30s 放弃，前端必须比它慢一点：
   // 定成默认 15s 时用户看到的是"请求超时"，而真实结果（错误原因/成功）已经丢了。
   pgQuery: (sql: string) => req('/db/pg/query', { body: { sql }, timeout: 40000 }),
@@ -132,7 +132,10 @@ export const api = {
   createBackup: (b: any) => req('/backups', { body: b }),
   updateBackup: (id: number, b: any) => req(`/backups/${id}`, { method: 'PATCH', body: b }),
   deleteBackup: (id: number) => req(`/backups/${id}`, { method: 'DELETE' }),
-  runBackup: (id: number) => req(`/backups/${id}/run`, { body: {}, timeout: 600000 }),
+  // 前端超时必须 ≥ 服务端子进程上限，否则用户看到"请求超时"时任务其实还在跑，
+  // 重试就会并发（certbot 抢同一张证书、pg_dump 抢同一份磁盘、LE 重复订单限流）。
+  // 对应服务端：certbot 申请 300s / renew 600s，psql 30s，backup_runner 1800s。
+  runBackup: (id: number) => req(`/backups/${id}/run`, { body: {}, timeout: 1860000 }),
   files: (path: string) => req(`/files?path=${encodeURIComponent(path)}`),
   fileContent: (path: string) => req(`/files/content?path=${encodeURIComponent(path)}`),
   saveFile: (path: string, content: string | ArrayBuffer) =>

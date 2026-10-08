@@ -178,7 +178,7 @@ onMounted(load);
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.OptionsOutline" :size="15" color="var(--cp-brand-soft)" /> 用户管理</span></template>
           <template #header-extra><NButton size="tiny" type="primary" :icon="ico('AddOutline', 12)" @click="showUser = true">新建用户</NButton></template>
-          <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 8px">只读账号可查看全部监控/日志/数据，但不能执行启停、部署、删除、终端等任何写操作。</NText>
+          <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: 8px">只读账号可查看全部监控/日志/数据，但不能执行启停、部署、删除、终端等任何写操作。</NText>
           <NDataTable size="small" :bordered="false" :scroll-x="620" :columns="userCols" :data="users">
             <template #empty><EmptyBox text="暂无用户" /></template>
           </NDataTable>
@@ -188,7 +188,7 @@ onMounted(load);
       <NGridItem v-if="isAdmin" span="2 1:2">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-warn)" /> 告警通知</span></template>
-          <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">每 30 分钟自动巡检：磁盘使用率、服务 failed、SSL 剩余天数。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次。</NText>
+          <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: 10px">每 30 分钟自动巡检：磁盘使用率、服务 failed、SSL 剩余天数。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次。</NText>
           <NForm label-placement="top" size="small">
             <NFormItem label="Telegram Bot Token"><NInput v-model:value="alerts.alert_telegram_bot" placeholder="如 123456:ABC-DEF…" :input-props="{ 'aria-label': 'Telegram Bot Token' }" /></NFormItem>
             <NFormItem label="Telegram Chat ID"><NInput v-model:value="alerts.alert_telegram_chat" placeholder="如 987654321" :input-props="{ 'aria-label': 'Telegram Chat ID' }" /></NFormItem>
@@ -212,7 +212,7 @@ onMounted(load);
           <NSpace vertical :size="10">
             <NSpace align="center" :size="8">
               <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? (fw.active ? 'ufw 已启用' : 'ufw 未启用') : '检测中…' }}</span>
-              <NText depth="3" style="font-size: 12px">面板对防火墙只读；开启/改规则请 SSH 手动操作，以免误锁 SSH。</NText>
+              <NText depth="3" style="font-size: var(--fs-xs)">面板对防火墙只读；开启/改规则请 SSH 手动操作，以免误锁 SSH。</NText>
             </NSpace>
             <div v-if="fw?.output" class="log-view" style="max-height: 220px">{{ fw.output }}</div>
           </NSpace>
@@ -223,7 +223,7 @@ onMounted(load);
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-brand-soft)" /> 证书维护</span></template>
           <NSpace vertical :size="10">
-            <NText depth="3" style="font-size: 12px">certbot renew 检查所有已安装证书并自动续期（系统每日定时任务已托管，此处用于手动触发验证）。</NText>
+            <NText depth="3" style="font-size: var(--fs-xs)">certbot renew 检查所有已安装证书并自动续期（系统每日定时任务已托管，此处用于手动触发验证）。</NText>
             <NButton type="primary" size="small" :loading="renewing" :icon="ico('SyncOutline')" style="align-self: flex-start" @click="renew">立即续期</NButton>
             <div v-if="renewLog" class="log-view" style="max-height: 220px">{{ renewLog }}</div>
           </NSpace>

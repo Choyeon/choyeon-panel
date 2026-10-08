@@ -434,9 +434,14 @@ async def cmd_service(a: argparse.Namespace) -> dict:
     r = await sh(["systemctl", verb, SERVICE], timeout=60)
     if r["code"] != 0:
         Out.error(r["err"] or f"systemctl {verb} 失败", EXIT_FAIL)
-    ok = await wait_health(30) if verb in ("start", "restart") else True
-    Out.result({"ok": True, "action": verb, "healthy": ok}, f"{verb} 完成")
-    return {"ok": True, "action": verb, "healthy": ok}
+    healthy = await wait_health(30) if verb in ("start", "restart") else True
+    data = {"ok": healthy, "action": verb, "healthy": healthy}
+    Out.result(data, f"{verb} 完成" if healthy else f"{verb} 已执行，但健康检查未通过")
+    # AGENTS.md 承诺"以 JSON 字段 + 退出码做判断"：服务没起来却回 ok:true/exit 0，
+    # 自动化就会在挂掉的实例上继续往下跑下一步。
+    if not healthy:
+        raise SystemExit(EXIT_FAIL)
+    return data
 
 
 async def cmd_logs(a: argparse.Namespace) -> dict:
@@ -459,9 +464,12 @@ async def cmd_upgrade(_a: argparse.Namespace) -> dict:
                   "升级失败时脚本本应自动回滚，请先 choyeonctl status 确认现场", EXIT_FAIL)
     if r["code"] != 0:
         Out.error(r["err"] or "升级失败（脚本已尝试自动回滚）", EXIT_FAIL)
-    ok = await wait_health(30)
-    Out.result({"ok": ok, "healthy": ok}, "升级完成" if ok else "升级后健康检查未通过")
-    return {"ok": ok}
+    healthy = await wait_health(30)
+    data = {"ok": healthy, "healthy": healthy}
+    Out.result(data, "升级完成" if healthy else "升级后健康检查未通过")
+    if not healthy:
+        raise SystemExit(EXIT_FAIL)
+    return data
 
 
 async def cmd_schema(_a: argparse.Namespace) -> dict:

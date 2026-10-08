@@ -99,7 +99,7 @@ onBeforeUnmount(close);
       <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="2000" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="refresh" />
       <NText depth="3" id="ls-autoscroll-label" style="font-size: var(--fs-xs)">自动滚动</NText>
       <NSwitch v-model:value="autoScroll" size="small" aria-labelledby="ls-autoscroll-label" />
-      <span class="st" style="font-size: 12px" :class="streamState === 'live' ? 'ok' : streamState === 'retry' ? 'warn' : 'err'">
+      <span class="st" style="font-size: var(--fs-xs)" :class="streamState === 'live' ? 'ok' : streamState === 'retry' ? 'warn' : 'err'">
         <span class="dot" :class="streamState === 'live' ? 'ok' : streamState === 'retry' ? 'warn' : 'err'"></span>
         {{ streamState === 'live' ? 'SSE 实时' : streamState === 'retry' ? 'SSE 重连中…' : 'SSE 已断开，点刷新重试' }}
       </span>

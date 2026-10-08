@@ -283,7 +283,7 @@ onMounted(() => {
                   v-model:value="form.unit_template"
                   type="textarea"
                   :autosize="{ minRows: 6, maxRows: 14 }"
-                  :input-props="{ class: 'mono', 'aria-label': '自定义 systemd unit 模板', style: 'font-size: 12.5px' }"
+                  :input-props="{ class: 'mono', 'aria-label': '自定义 systemd unit 模板', style: 'font-size: var(--fs-xs)' }"
                   placeholder="留空则使用面板默认模板。支持占位符：{{name}} {{path}} {{start_cmd}} {{port}}，部署时自动渲染写入 /etc/systemd/system/panel-<名称>.service"
                 />
                 <div style="color:var(--cp-text-mute);font-size:var(--fs-xs);margin-top:6px">

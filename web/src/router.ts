@@ -27,7 +27,7 @@ export const router = createRouter({
 
 // 只有管理员能看到/用得上的页面：菜单里已隐藏，但地址栏直达同样要拦，
 // 否则只读账号会停在一个只会报 403 的空页面上。
-const ADMIN_ONLY = ['/files', '/terminal'];
+const ADMIN_ONLY = ['/files', '/terminal', '/doctor'];
 
 router.beforeEach((to) => {
   if (to.path !== '/login' && !getToken()) return '/login';

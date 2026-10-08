@@ -19,6 +19,7 @@ const info = ref<any>({});
 const stat = ref<any>({});
 const apps = ref<any[]>([]);
 const failedUnits = ref<string[]>([]);
+const sideError = ref('');
 const loading = ref(true);
 const cpuEl = ref<HTMLElement | null>(null);
 const memEl = ref<HTMLElement | null>(null);
@@ -131,7 +132,13 @@ async function loadSide() {
     apps.value = await api.apps();
     const svc = await api.services();
     failedUnits.value = svc.filter((s: any) => s.active === 'failed').map((s: any) => s.unit);
-  } catch { /* 单行失败不影响主面板 */ }
+    sideError.value = '';
+  } catch (e: any) {
+    // 拉不到就必须显式说"未知"：failedUnits 留空会被下面渲染成绿色"服务正常"，
+    // 等于把 /system/services 的 500 或超时读成一切正常。
+    failedUnits.value = [];
+    sideError.value = e?.message || '状态获取失败';
+  }
 }
 
 const quickOpts = [
@@ -156,7 +163,13 @@ onMounted(async () => {
   if (memEl.value) memChart = echarts.init(memEl.value);
   await tick();
   loadSide();
-  timer = window.setInterval(tick, 3000);
+  // 应用/服务状态原本只在挂载时取一次，页面开着就越看越旧；
+  // 每 5 个统计周期（15s）随 tick 一起刷，也让 loadSide 失败后的"状态未知"能自动恢复。
+  let sideTicks = 0;
+  timer = window.setInterval(() => {
+    tick();
+    if (++sideTicks % 5 === 0) loadSide();
+  }, 3000);
 
   // 容器尺寸变化（含侧栏折叠）自动重绘
   if (window.ResizeObserver && cpuEl.value) {
@@ -197,7 +210,8 @@ window.addEventListener('resize', onResize);
       </div>
       <NSpace align="center" :size="10" :wrap="false">
         <NTag v-if="info.node" round size="small" :bordered="false" type="info">{{ info.node }}</NTag>
-        <span v-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
+        <span v-if="sideError" class="st warn"><span class="dot warn"></span>服务状态未知</span>
+        <span v-else-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
         <span v-else class="st err"><span class="dot err"></span>{{ failedUnits.length }} 个服务异常</span>
         <NDropdown trigger="click" :options="quickMenu">
           <NButton type="primary" round size="small" class="cp-press">快捷操作</NButton>
@@ -267,7 +281,7 @@ window.addEventListener('resize', onResize);
             <span class="dot" :class="a.running ? 'ok' : 'idle'"></span>
             <NText depth="3" style="font-size: var(--fs-xs)">{{ a.running ? '运行中' : a.deploying ? '部署中' : '已停止' }}</NText>
           </div>
-          <EmptyBox v-if="!apps.length" text="暂无应用，去应用页创建第一个" />
+          <EmptyBox v-if="!apps.length" :text="sideError ? '应用列表获取失败，下个刷新周期自动重试' : '暂无应用，去应用页创建第一个'" />
         </NCard>
       </NGridItem>
       <NGridItem span="2 1:2">
@@ -276,7 +290,8 @@ window.addEventListener('resize', onResize);
           <template #header-extra>
             <NButton text type="primary" size="tiny" aria-label="查看全部服务" @click="router.push('/services')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
           </template>
-          <EmptyBox v-if="!failedUnits.length" text="所有 systemd 服务运行正常，无 failed 单元" />
+          <EmptyBox v-if="sideError" :text="`服务状态获取失败：${sideError}`" />
+          <EmptyBox v-else-if="!failedUnits.length" text="所有 systemd 服务运行正常，无 failed 单元" />
           <div v-else>
             <div v-for="u in failedUnits.slice(0, 6)" :key="u" class="app-row" role="button" tabindex="0"
                  :aria-label="`查看异常服务 ${u}`"
@@ -306,7 +321,7 @@ window.addEventListener('resize', onResize);
 }
 .hero-greet { font-size: var(--fs-md); color: var(--cp-text); }
 .hero-greet b { color: var(--cp-brand-soft); }
-.hero-host { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--cp-text-mute); margin-top: 5px; }
+.hero-host { display: flex; align-items: center; gap: 7px; font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: 5px; }
 .hero-host-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scard { position: relative; }
 .srow { display: flex; align-items: center; gap: 12px; }
@@ -317,8 +332,8 @@ window.addEventListener('resize', onResize);
   background: color-mix(in srgb, var(--c) 14%, transparent);
 }
 .slabel { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-bottom: 2px; }
-.stat-num.small { font-size: 16px; }
-.unit { font-size: 12.5px; color: var(--cp-text-mute); font-weight: 400; }
+.stat-num.small { font-size: var(--fs-lg); }
+.unit { font-size: var(--fs-xs); color: var(--cp-text-mute); font-weight: 400; }
 .sfoot { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-top: 4px; }
 .app-row {
   display: flex; align-items: center; gap: 10px;

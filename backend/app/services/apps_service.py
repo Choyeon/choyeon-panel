@@ -15,12 +15,13 @@ from ..util import (
     is_git_url,
     is_name,
     is_port,
+    redact_creds,
     run,
     run_shell_async,
     unit_exec_arg_escape,
 )
 from . import nginx_ops, systemd_ops
-from .systemd_ops import service_action
+from .systemd_ops import is_active, service_action
 
 APP_ROOT = config.APP_ROOT
 UNIT_DIR = config.UNIT_DIR
@@ -398,16 +399,29 @@ def _check_not_protected(path: str):
             raise RuntimeError(f"安装目录不能位于{label}（{root}）之内或与之相同")
 
 
-async def cleanup_renamed(old: dict, new_name: str):
-    """改名后拆掉旧名残留：`panel-<旧名>.service` 带 Restart=always，
+async def cleanup_renamed(old: dict, new_app: dict):
+    """改名后拆掉旧名残留并**立刻按新名重建**：`panel-<旧名>.service` 带 Restart=always，
     旧 nginx 站点也还在监听同端口，而面板记录里已经没有这个名字——
-    旧进程继续跑着占端口，界面上再也管不到它。"""
-    if not old or old["name"] == new_name:
+    旧进程继续跑着占端口，界面上再也管不到它。
+
+    只拆不建是另一半问题：旧 unit 被 disable --now 停掉、新名字的 unit 还没写，
+    服务当场消失、域名 502，而 PATCH 只回一句"已保存"，用户得再点一次部署才恢复。
+    """
+    if not old or old["name"] == new_app["name"]:
         return
     stale = dict(old)
+    # 改名前没在跑的应用不该被改名"顺手启动"，所以先记下状态再拆
+    was_active = await is_active(unit_name(stale))
     await remove_unit(stale)
     if old.get("domain"):
         await nginx_ops.remove_vhost(old["name"])
+    await ensure_unit(new_app)
+    if new_app.get("domain") and new_app.get("port"):
+        await nginx_ops.apply_vhost(
+            {"name": new_app["name"], "domain": new_app["domain"], "port": new_app["port"]}
+        )
+    if was_active:
+        await service_action(unit_name(new_app), "restart")
 
 
 def _check_purge_target(path: str) -> str:
@@ -480,7 +494,8 @@ async def app_action(app_id: int, verb: str) -> dict:
 
 
 def _append_log(dep_id: int, text: str):
-    dbm.append_deploy_log(dep_id, text)
+    # 单一落库入口，凭据在这里挡掉：git 的命令行与 stderr 都可能回显带 token 的仓库地址
+    dbm.append_deploy_log(dep_id, redact_creds(text))
 
 
 async def deploy_app(app_id: int) -> int:

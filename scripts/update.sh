@@ -62,7 +62,7 @@ if [ "$NEED_DEPS" = "1" ]; then
   ensure_python
   venv_create
   ensure_node
-  (cd "$WEB_DIR" && npm ci --no-audit --fund=false 2>/dev/null || npm install --no-audit --fund=false)
+  # 前端依赖不在此处单独装：web_build 里的 npm ci 已带失败告警，重复一份只会多一份静默回退
 else
   log "依赖清单未变化，跳过依赖安装"
 fi
@@ -90,6 +90,14 @@ if ! restart_and_check; then
   if [ "$DO_PULL" = "1" ] && [ "$NEW_SHA" != "$OLD_SHA" ]; then
     step "回滚代码到 ${OLD_SHA:0:8}"
     git -C "$PREFIX" reset --hard "$OLD_SHA"
+    if [ "$NEED_DEPS" = "1" ]; then
+      # pip 只升不卸：旧代码配上新版依赖包照样起不来，回滚得连依赖一起回，
+      # 否则"自动回滚"只是把仓库指回旧 commit，健康检查仍然失败，只能人工介入。
+      step "回滚后端依赖（按 ${OLD_SHA:0:8} 的 requirements 重装）"
+      venv_create
+      (cd "$WEB_DIR" && npm ci --no-audit --fund=false) \
+        || warn "前端依赖回退失败，dist 可能与旧版本不完全匹配"
+    fi
     web_build
     unit_restart
     if wait_health 40; then ok "已回滚到 ${OLD_SHA:0:8} 且服务恢复正常"; else err "回滚后仍未就绪，请人工介入（数据备份：$BK）"; fi

@@ -35,7 +35,10 @@ fi
 if have_cmd ss; then
   check "端口 $PORT 已监听" ss -ltn "( sport = :$PORT )"
 elif have_cmd netstat; then
-  check "端口 $PORT 已监听" netstat -ltn
+  # 不能写成 check "..." netstat -ltn：那只判断 netstat 能否运行（恒 0），
+  # 端口没监听也会报 PASS，等于在最需要报警的机器上装死。
+  netstat_listening() { netstat -ltn 2>/dev/null | grep -Eq "[:.]$PORT([[:space:]]|\$)"; }
+  check "端口 $PORT 已监听" netstat_listening
 else
   say "  ${C_YELLOW}SKIP${C_RESET} 无 ss/netstat"
 fi

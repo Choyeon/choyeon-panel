@@ -21,7 +21,7 @@ defineProps<{ text?: string }>();
   gap: 10px;
   padding: 36px 16px;
   color: var(--cp-text-mute);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   text-align: center;
 }
 .eb p {

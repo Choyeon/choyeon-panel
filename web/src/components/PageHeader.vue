@@ -24,7 +24,7 @@ defineProps<{ title: string; sub?: string }>();
 .ph-main { min-width: 0; flex: 1 1 220px; }
 .ph-title {
   margin: 0;
-  font-size: 19px;
+  font-size: var(--fs-lg);
   font-weight: 650;
   letter-spacing: -0.01em;
   color: var(--cp-text-strong);
@@ -32,7 +32,7 @@ defineProps<{ title: string; sub?: string }>();
 }
 .ph-sub {
   margin: 4px 0 0;
-  font-size: 12.5px;
+  font-size: var(--fs-xs);
   color: var(--cp-text-mute);
   overflow-wrap: anywhere;
 }

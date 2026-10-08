@@ -212,7 +212,7 @@ onMounted(() => load());
       </NSpace>
     </NCard>
 
-    <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">
+    <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: 10px">
       可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑。
     </NText>
 
@@ -221,9 +221,9 @@ onMounted(() => load());
     </NDataTable>
 
     <NModal v-model:show="editing" preset="card" style="width: 900px; max-width: 94vw" :title="`编辑 ${editPath.split('/').pop()}`">
-      <template #header-extra><NText depth="3" style="font-size: 12px">{{ editPath }}</NText></template>
+      <template #header-extra><NText depth="3" style="font-size: var(--fs-xs)">{{ editPath }}</NText></template>
       <NSpace vertical :size="12" style="width: 100%">
-        <NInput v-model:value="editContent" type="textarea" :autosize="{ minRows: 16, maxRows: 28 }" :input-props="{ class: 'mono', 'aria-label': '文件内容', style: 'font-size: 13px' }" />
+        <NInput v-model:value="editContent" type="textarea" :autosize="{ minRows: 16, maxRows: 28 }" :input-props="{ class: 'mono', 'aria-label': '文件内容', style: 'font-size: var(--fs-sm)' }" />
         <NSpace justify="end">
           <NButton tertiary @click="editing = false">取消</NButton>
           <NButton type="primary" class="cp-press" :loading="savingEdit" :icon="ico('SaveOutline')" @click="saveEdit">保存</NButton>

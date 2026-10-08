@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from .. import database as dbm
 from ..services import apps_service, nginx_ops, systemd_ops
 from ..templates import apply_template
-from ..util import parse_lines
+from ..util import parse_lines, redact_creds
 from .system import log_stream_response
 
 router = APIRouter()
@@ -19,8 +19,13 @@ async def _body(req: Request) -> dict:
 
 
 @router.get("/api/apps")
-async def apps_list():
-    return await apps_service.list_apps()
+async def apps_list(req: Request):
+    rows = await apps_service.list_apps()
+    if req.state.cp_role != "admin":
+        # 仓库地址可能写成 https://user:token@host/x.git，token 不能随列表接口给只读账号
+        for r in rows:
+            r["repo_url"] = redact_creds(r.get("repo_url"))
+    return rows
 
 
 @router.get("/api/apps/{app_id}")
@@ -36,6 +41,7 @@ async def app_get(app_id: int, req: Request):
     # 保留键名并给空数组，viewer 的前端表单仍能正常解析。
     if req.state.cp_role != "admin":
         out["env"] = "[]"
+        out["repo_url"] = redact_creds(out.get("repo_url"))
     return out
 
 
@@ -55,7 +61,7 @@ async def app_update(app_id: int, req: Request):
     try:
         old = apps_service.get_app(app_id)
         a = apps_service.update_app(app_id, await _body(req))
-        await apps_service.cleanup_renamed(old, a["name"])
+        await apps_service.cleanup_renamed(old, a)
         dbm.audit(req.state.cp_sub, "app:update", a["name"])
         return a
     except Exception as e:  # noqa: BLE001
@@ -110,7 +116,10 @@ async def app_deployment(app_id: int, dep_id: int):
         "SELECT id,status,commit_sha,started_at,finished_at,log FROM deployments WHERE id=? AND app_id=?",
         (dep_id, app_id),
     )
-    return row or JSONResponse(status_code=404, content={"error": "部署记录不存在"})
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "部署记录不存在"})
+    # 落库前就打码了，这里再打一次是为了清掉修复之前写进库的历史日志
+    return {**row, "log": redact_creds(row.get("log"))}
 
 
 @router.post("/api/apps/{app_id}/ssl")

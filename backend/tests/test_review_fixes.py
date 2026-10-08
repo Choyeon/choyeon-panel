@@ -2,7 +2,7 @@
 
 覆盖：应用安装目录不得指向面板自身要害目录、部署模板端口/安装命令自洽、
 证书续期失败必须报错、二进制上传不被毁、viewer 看不到应用密钥与审计、
-改名后旧 unit/站点被拆除、备份目标应用被删后要在列表里露出来、
+改名后旧 unit/站点被拆除并按新名重建、仓库地址里的凭据不外泄、备份目标应用被删后要在列表里露出来、
 公开状态接口不回显管理员用户名、CLI 的 --json 契约与部署等待、
 文件接口对 viewer 全面关闭、写入不跟随符号链接、审计字段长度受约束、
 终端会话计数不漏、psql 管道不互等，以及接口错误不留半成品变更。
@@ -30,7 +30,8 @@ from app import config, templates  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.routers import apps as apps_router  # noqa: E402
 from app.routers import extras
-from app.services import apps_service, files_service, nginx_ops, pg_service  # noqa: E402
+from app.services import apps_service, backup_service, files_service, nginx_ops, pg_service  # noqa: E402
+from app.util import redact_creds  # noqa: E402
 
 BACKEND = Path(__file__).resolve().parent.parent
 
@@ -179,22 +180,139 @@ class TestViewerPermission(unittest.TestCase):
 
 
 class TestRenameCleansStaleUnit(unittest.IsolatedAsyncioTestCase):
+    """改名必须"拆旧 + 建新"成对发生。
+
+    只拆不建：旧 unit disable --now 停掉、新名字的 unit 还没写，服务当场消失、
+    域名 502，而 PATCH 只回一句"已保存"。
+    """
+
+    OLD = {"id": 7, "name": "before", "domain": "a.example.com", "path": "/tmp/cp-x", "port": 8124}
+
+    async def _run(self, new_name, active):
+        new = {**self.OLD, "id": 7, "name": new_name, "path": "/tmp/cp-x", "port": 8124,
+               "domain": "a.example.com", "start_cmd": "node x.js", "type": "node"}
+        with mock.patch.object(apps_service, "is_active", lambda *_: asyncio.sleep(0, active)), \
+             mock.patch.object(apps_service, "remove_unit") as rm_unit, \
+             mock.patch.object(apps_service, "ensure_unit") as en_unit, \
+             mock.patch.object(apps_service, "service_action") as act, \
+             mock.patch.object(apps_service.nginx_ops, "remove_vhost") as rm_vhost, \
+             mock.patch.object(apps_service.nginx_ops, "apply_vhost") as ap_vhost:
+            await apps_service.cleanup_renamed(self.OLD, new)
+        return rm_unit, en_unit, rm_vhost, ap_vhost, act
+
     async def test_old_unit_and_vhost_removed(self):
-        old = {"id": 7, "name": "before", "domain": "a.example.com", "path": "/tmp/cp-x", "port": 8124}
-        with mock.patch.object(apps_service, "remove_unit") as rm_unit, \
-             mock.patch.object(apps_service.nginx_ops, "remove_vhost") as rm_vhost:
-            await apps_service.cleanup_renamed(old, "after")
+        rm_unit, _, rm_vhost, _, _ = await self._run("after", True)
         rm_unit.assert_called_once()
         self.assertEqual(rm_unit.call_args.args[0]["name"], "before")
         rm_vhost.assert_called_once_with("before")
 
+    async def test_new_unit_and_vhost_rebuilt(self):
+        _, en_unit, _, ap_vhost, act = await self._run("after", True)
+        en_unit.assert_called_once()
+        self.assertEqual(en_unit.call_args.args[0]["name"], "after")
+        ap_vhost.assert_called_once()
+        self.assertEqual(ap_vhost.call_args.args[0]["name"], "after")
+        # 改名前在跑 → 新名字得接着跑
+        act.assert_called_once_with("panel-after.service", "restart")
+
+    async def test_inactive_app_is_not_started_by_rename(self):
+        _, en_unit, _, _, act = await self._run("after", False)
+        en_unit.assert_called_once()
+        act.assert_not_called()
+
     async def test_same_name_does_nothing(self):
-        old = {"id": 8, "name": "keep", "domain": "b.example.com", "path": "/tmp/cp-y", "port": 8125}
-        with mock.patch.object(apps_service, "remove_unit") as rm_unit, \
-             mock.patch.object(apps_service.nginx_ops, "remove_vhost") as rm_vhost:
-            await apps_service.cleanup_renamed(old, "keep")
+        rm_unit, en_unit, rm_vhost, ap_vhost, act = await self._run(self.OLD["name"], True)
         rm_unit.assert_not_called()
         rm_vhost.assert_not_called()
+        en_unit.assert_not_called()
+        ap_vhost.assert_not_called()
+        act.assert_not_called()
+
+
+class TestCredentialRedaction(unittest.IsolatedAsyncioTestCase):
+    """回归：仓库地址可以写成 https://user:token@host/x.git，token 会随列表接口、
+    部署日志和详情页外泄给只读账号。写入与读取两侧都要打码，历史行也一并清掉。
+    """
+
+    SECRET = "ghp_SUpErSecret123"
+
+    def test_url_with_password_is_masked(self):
+        self.assertEqual(
+            redact_creds(f"git clone https://octo:{self.SECRET}@github.com/a/b.git"),
+            "git clone https://octo:***@github.com/a/b.git",
+        )
+
+    def test_plain_urls_untouched(self):
+        for s in (
+            "https://github.com/a/b.git",
+            "git@github.com:a/b.git",
+            "https://octo@github.com/a/b.git",  # 只有用户名，不是密钥
+            "",
+            None,
+        ):
+            self.assertEqual(redact_creds(s), s)
+
+    def test_deploy_log_never_stores_the_token(self):
+        dep = dbm.execute("INSERT INTO deployments(app_id,status) VALUES(0,'running')", ())
+        self.addCleanup(dbm.execute, "DELETE FROM deployments WHERE id=?", (dep,))
+        apps_service._append_log(dep, f"致命错误：无法访问 'https://x:{self.SECRET}@github.com/a/b.git/'")
+        log = dbm.query_one("SELECT log FROM deployments WHERE id=?", (dep,))["log"]
+        self.assertNotIn(self.SECRET, log)
+        self.assertIn("https://x:***@github.com/a/b.git", log)
+
+    async def test_list_endpoint_masks_for_viewer_only(self):
+        name = _uid("cred")
+        res = dbm.execute(
+            "INSERT INTO apps(name,type,repo_url,branch,path,port,domain,install_cmd,start_cmd,env)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (name, "node", f"https://ci:{self.SECRET}@github.com/a/b.git", "main",
+             f"/tmp/cp-{name}", 8130, None, None, "node x.js", "[]"),
+        )
+        app_id = res if isinstance(res, int) else res.lastrowid
+        self.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (app_id,))
+        with mock.patch.object(apps_service.systemd_ops, "is_active",
+                               lambda *_: asyncio.sleep(0, False)), \
+             mock.patch.object(apps_service.nginx_ops, "domains_by_port", lambda: {}):
+            viewer = await apps_router.apps_list(_req(role="viewer"))
+            admin = await apps_router.apps_list(_req(role="admin"))
+        row_v = next(r for r in viewer if r["id"] == app_id)
+        row_a = next(r for r in admin if r["id"] == app_id)
+        self.assertNotIn(self.SECRET, json.dumps(row_v))
+        self.assertIn("https://ci:***@github.com/a/b.git", row_v["repo_url"])
+        self.assertIn(self.SECRET, row_a["repo_url"], "admin 需要能改回原地址")
+
+
+class TestBackupPlanCompensation(unittest.IsolatedAsyncioTestCase):
+    """回归：systemd 落地失败时不能留半条计划。
+
+    旧写法 INSERT 之后直接 _sync_timer，抛了也把行留在库里：界面显示"已启用"，
+    实际 timer 不存在，用户以为有备份。update 同理，改不过去就还原改前的值。
+    """
+
+    async def test_create_failure_leaves_no_row(self):
+        before = len(dbm.query("SELECT id FROM backups"))
+        with mock.patch.object(backup_service, "_sync_timer",
+                               side_effect=RuntimeError("systemctl 不可用")), \
+             mock.patch.object(backup_service, "delete_backup",
+                               lambda *_: asyncio.sleep(0, None)), \
+             self.assertRaises(RuntimeError) as ctx:
+            await backup_service.create_backup({"kind": "pg", "target": "all", "schedule": "daily"})
+        self.assertIn("已撤销", str(ctx.exception))
+        self.assertEqual(len(dbm.query("SELECT id FROM backups")), before, "失败的备份计划必须整条撤销")
+
+    async def test_update_failure_restores_previous_config(self):
+        res = dbm.execute(
+            "INSERT INTO backups(kind,target,schedule,hour,minute,keep,enabled) VALUES('pg','all','daily',3,30,7,0)",
+            ())
+        bid = res if isinstance(res, int) else res.lastrowid
+        self.addCleanup(dbm.execute, "DELETE FROM backups WHERE id=?", (bid,))
+        with mock.patch.object(backup_service, "_sync_timer",
+                               side_effect=RuntimeError("写入 unit 失败")), \
+             self.assertRaises(RuntimeError) as ctx:
+            await backup_service.update_backup(bid, {"hour": 9, "enabled": True})
+        self.assertIn("已还原", str(ctx.exception))
+        row = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
+        self.assertEqual((row["hour"], row["enabled"]), (3, 0), "校验不过不能留半个变更")
 
 
 class TestSslNeedsPort(unittest.TestCase):

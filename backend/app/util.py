@@ -12,6 +12,7 @@ GIT_URL_RE = re.compile(r"^(https?://\S+|git@[\w.-]+:\S+)$")
 IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{2,200}$")
 UNIT_NAME_FILE_RE = re.compile(r"^[A-Za-z0-9@:._-]{1,64}\.service$")
+CRED_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/@:\s]*)(:[^@/\s]*)?@")
 
 
 def is_name(s): return bool(NAME_RE.match(s or ""))
@@ -23,6 +24,18 @@ def is_branch(s): return bool(BRANCH_RE.match(s or ""))
 def is_ident(s): return bool(IDENT_RE.match(s or ""))
 def is_path(s): return bool(PATH_RE.match(s or ""))
 def is_git_url(s): return bool(s) and (bool(GIT_URL_RE.match(s)) or s.startswith("/"))
+
+
+def redact_creds(s):
+    """打码 URL 里的 `user:password@` 凭据段，只保留用户名。
+
+    仓库地址允许写成 `https://user:token@host/x.git`（GIT_URL_RE 放行），
+    部署日志会把整条 `git clone` 命令原文落库，而日志与列表接口对只读账号开放，
+    所以凭据既不能落库、也不能出接口。仅用户名（无 `:`）不算密钥，原样保留。
+    """
+    if not s:
+        return s
+    return CRED_URL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}:***@" if m.group(3) else m.group(0), s)
 
 
 def clean_abs_path(p, what="路径"):

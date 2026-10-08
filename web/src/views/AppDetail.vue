@@ -256,7 +256,7 @@ onMounted(load);
       <NGridItem span="4 2:1">
         <NCard size="small" class="info-card cp-rise" style="--i: 1">
           <div class="info-k">监听端口</div>
-          <div class="info-v mono-dim" style="font-size: 15px">
+          <div class="info-v mono-dim" style="font-size: var(--fs-md)">
             {{ app.port || '—' }}
             <NTag v-if="app.portAuto" size="tiny" :bordered="false" style="margin-left: 6px">自动检测</NTag>
           </div>
@@ -265,7 +265,7 @@ onMounted(load);
       <NGridItem span="4 2:1">
         <NCard size="small" class="info-card cp-rise" style="--i: 2">
           <div class="info-k">域名</div>
-          <div class="info-v" style="font-size: 14px">
+          <div class="info-v" style="font-size: var(--fs-md)">
             {{ app.domain || ngx?.configs?.[0]?.analysis?.serverNames?.[0] || '—' }}
             <NTag v-if="!app.domain && ngx?.configs?.length" size="tiny" :bordered="false" style="margin-left: 6px">nginx 检测</NTag>
           </div>
@@ -274,7 +274,7 @@ onMounted(load);
       <NGridItem span="4 2:1">
         <NCard size="small" class="info-card cp-rise" style="--i: 3">
           <div class="info-k">仓库 / 分支</div>
-          <div class="info-v" style="font-size: 13px">{{ app.repo_url ? (app.repo_url.replace(/^https?:\/\//, '').replace(/\.git$/, '') + ' @ ' + (app.branch || 'main')) : '本地目录' }}</div>
+          <div class="info-v" style="font-size: var(--fs-sm)">{{ app.repo_url ? (app.repo_url.replace(/^https?:\/\//, '').replace(/\.git$/, '') + ' @ ' + (app.branch || 'main')) : '本地目录' }}</div>
         </NCard>
       </NGridItem>
     </NGrid>
@@ -314,7 +314,7 @@ onMounted(load);
 
         <NTabPane name="env" tab="环境变量">
           <NSpace vertical style="width: 100%">
-            <NText depth="3" style="font-size: 12.5px">写入应用目录的 .env 并由 systemd EnvironmentFile 加载；保存后重启应用生效。</NText>
+            <NText depth="3" style="font-size: var(--fs-xs)">写入应用目录的 .env 并由 systemd EnvironmentFile 加载；保存后重启应用生效。</NText>
             <NDynamicInput v-model:value="env" :on-create="() => ({ k: '', v: '' })">
               <template #default="{ value }">
                 <NInput v-model:value="value.k" placeholder="KEY" style="width: 220px; margin-right: 8px" :input-props="{ class: 'mono', 'aria-label': '环境变量名' }" />
@@ -381,7 +381,7 @@ onMounted(load);
                 <NButton size="small" tertiary :disabled="!ngxFile" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
                 <NButton size="small" tertiary :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
               </NSpace>
-              <NInput v-model:value="ngxContent" type="textarea" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: 12.5px' }" />
+              <NInput v-model:value="ngxContent" type="textarea" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
               <NSpace justify="space-between" align="center" style="margin-top: 10px">
                 <NText depth="3" style="font-size: var(--fs-xs)">保存将执行 nginx -t 校验，失败自动回滚并 reload 生效</NText>
                 <NButton type="primary" size="small" class="cp-press" :loading="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
@@ -403,7 +403,7 @@ onMounted(load);
               type="textarea"
               :autosize="{ minRows: 14, maxRows: 26 }"
               :read-only="!!unitInfo && !unitInfo.managed"
-              :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: 12.5px' }"
+              :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: var(--fs-xs)' }"
             />
             <NSpace justify="space-between" align="center">
               <NSpace size="small">
@@ -420,7 +420,7 @@ onMounted(load);
           <NSpace vertical :size="14">
             <NSpace align="center" :size="10">
               <NIcon :component="icons.ShieldCheckmarkOutline" :size="20" color="var(--cp-brand-soft)" />
-              <NText style="font-size: 13.5px">{{ app.domain || '（未配置域名）' }}</NText>
+              <NText style="font-size: var(--fs-sm)">{{ app.domain || '（未配置域名）' }}</NText>
               <NTag v-if="app.domain" size="tiny" :bordered="false" type="info">Let's Encrypt</NTag>
             </NSpace>
             <NText depth="3" style="font-size: var(--fs-2xs)">要求该域名 DNS A 记录已指向本机 IP。申请成功后自动切换为 HTTPS 反代并开启 80 → 443 跳转。</NText>
@@ -449,7 +449,7 @@ onMounted(load);
 .ngx-item { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
 .ngx-item:hover { background: var(--cp-hover); }
 .ngx-item.active { background: var(--cp-selected); }
-.ngx-name { font-size: 12.5px; color: var(--cp-text); font-weight: 550; }
+.ngx-name { font-size: var(--fs-xs); color: var(--cp-text); font-weight: 550; }
 .ngx-dom { font-size: var(--fs-2xs); color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .res-bar :deep(.n-card__content) { padding: 12px var(--space-4); }
 .res-item { display: inline-flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--cp-text); }

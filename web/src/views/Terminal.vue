@@ -57,7 +57,14 @@ function connect() {
 }
 
 function reconnect() {
-  ws?.close();
+  // 先摘掉旧 socket 的回调再 close：onclose 是异步派发的，新连接可能已经 onopen
+  // 把状态置成"已连接"，旧 socket 随后回调一句"连接已断开"就把界面盖回错误态，
+  // 终端看着断、其实还能打字。
+  if (ws) {
+    ws.onopen = ws.onmessage = ws.onclose = null;
+    ws.close();
+  }
+  ws = null;
   term?.clear();
   connect();
 }
@@ -139,7 +146,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .term-wrap {
   border: 1px solid var(--cp-border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
   background: var(--cp-code-bg);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);

@@ -204,7 +204,7 @@ onMounted(load);
             <NInput
               v-model:value="sql" type="textarea" :autosize="{ minRows: 4, maxRows: 9 }"
               placeholder="SELECT * FROM some_table LIMIT 20;"
-              :input-props="{ class: 'mono', 'aria-label': 'SQL 语句', style: 'font-size: 13px' }"
+              :input-props="{ class: 'mono', 'aria-label': 'SQL 语句', style: 'font-size: var(--fs-sm)' }"
               @keydown.ctrl.enter="runSql"
             />
             <NSpace align="center">
@@ -220,7 +220,7 @@ onMounted(load);
           <template v-else-if="redis">
             <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">版本</div><div class="rv">{{ redis.info?.redis_version || '—' }}</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">运行模式</div><div class="rv">{{ redis.info?.redis_mode || '—' }} / {{ redis.info?.mode || '—' }}</div></NCard></NGridItem>
+              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">运行模式</div><div class="rv">{{ redis.info?.redis_mode || '—' }} / {{ redis.authed ? '面板密码' : 'redis.conf' }}</div></NCard></NGridItem>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">连接客户端</div><div class="rv">{{ redis.info?.connected_clients ?? '—' }}</div></NCard></NGridItem>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">Key 总数</div><div class="rv">{{ redis.dbsize ?? '—' }}</div></NCard></NGridItem>
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">内存占用</div><div class="rv">{{ redis.info?.used_memory_human || '—' }}</div></NCard></NGridItem>
@@ -273,5 +273,5 @@ onMounted(load);
 <style scoped>
 .rstat :deep(.n-card__content) { padding: 12px 14px; }
 .rk { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: 5px; }
-.rv { font-size: 16px; font-weight: 600; color: var(--cp-text); }
+.rv { font-size: var(--fs-lg); font-weight: 600; color: var(--cp-text); }
 </style>

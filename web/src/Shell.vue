@@ -72,9 +72,9 @@ const MENU_ICON: Record<string, string> = {
 const menuOptions = computed(() => {
   // 文件管理能看到并下载应用目录里的 .env（明文口令），后端已收紧为 admin 专用；
   // 菜单同步隐藏，否则只读账号看得见入口、点进去只收到一句 403。
+  // 自检同理：/api/doctor 要跑 nginx -t / systemctl 这类特权命令，后端只放行 admin。
   const keys = ['/dashboard', '/apps', '/services', '/db', '/backups'];
-  if (isAdmin.value) keys.push('/files', '/terminal');
-  keys.push('/doctor');
+  if (isAdmin.value) keys.push('/files', '/terminal', '/doctor');
   keys.push('/settings');
   return keys.map((k) => ({ label: TITLES[k], key: k, icon: ico(MENU_ICON[k], 18) }));
 });
@@ -266,12 +266,12 @@ const userOpts = [
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: var(--fs-md);
   flex-shrink: 0;
   box-shadow: var(--shadow-glow);
 }
 .logo-text {
-  font-size: 14.5px;
+  font-size: var(--fs-md);
   color: var(--cp-text);
   letter-spacing: 0.01em;
   white-space: nowrap;
@@ -285,7 +285,7 @@ const userOpts = [
   padding: 0 16px;
   gap: 10px;
 }
-.cp-title { font-size: 12.5px; letter-spacing: 0.02em; }
+.cp-title { font-size: var(--fs-xs); letter-spacing: 0.02em; }
 .user-chip {
   display: flex;
   align-items: center;
@@ -305,7 +305,7 @@ const userOpts = [
   border-radius: 50%;
   background: var(--gradient-brand);
   color: #fff;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   display: flex;
   align-items: center;

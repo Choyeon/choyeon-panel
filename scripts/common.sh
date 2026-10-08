@@ -313,7 +313,12 @@ venv_create() {
 # ---------- 前端构建 ----------
 web_build() {
   step "构建前端（npm）"
-  (cd "$WEB_DIR" && npm ci --no-audit --fund=false 2>/dev/null || npm install --no-audit --fund=false)
+  # 不再 `npm ci 2>/dev/null || npm install`：那会把 lockfile 漂移等真实错误静音掉，
+  # 悄悄退化成非锁定安装，产出的 dist 不可复现还查不出原因。
+  if ! (cd "$WEB_DIR" && npm ci --no-audit --fund=false); then
+    warn "npm ci 失败，回退 npm install（产物可能不可复现，请尽快修 package-lock.json）"
+    (cd "$WEB_DIR" && npm install --no-audit --fund=false)
+  fi
   (cd "$WEB_DIR" && npm run build)
   ok "前端构建完成：$WEB_DIR/dist"
 }
@@ -328,16 +333,29 @@ render_unit() {
   local src="$PREFIX/deploy/choyeon-panel.service"
   [ -r "$src" ] || die "缺少 $src"
   step "安装 systemd unit -> $UNIT_FILE"
-  local line
+  local line extra app_root file_roots
+  app_root="${CP_APP_ROOT:-/root/www}"
+  file_roots="$app_root,/etc/nginx,$BACKUP_DIR"
   : > "$UNIT_FILE.tmp" || die "无法写入 $UNIT_FILE.tmp"
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line//\/root\/choyeon-panel/$PREFIX}"
+    extra=""
     case "$line" in
       Environment=CP_PORT=*) line="Environment=CP_PORT=$PORT" ;;
       Environment=CP_HOST=*) line="Environment=CP_HOST=$HOST" ;;
-      Environment=CP_DATA_DIR=*) line="Environment=CP_DATA_DIR=$DATA_DIR" ;;
+      Environment=CP_DATA_DIR=*)
+        line="Environment=CP_DATA_DIR=$DATA_DIR"
+        # 备份目录与应用根目录都可以用 CP_BACKUP_DIR / CP_APP_ROOT 改写，unit 必须跟着变：
+        # 否则 backup.sh 按 $BACKUP_DIR 写出去，面板服务却仍按模板里的默认值去找，
+        # 表现是"备份成功但面板列表永远为空"，文件管理也进不去备份目录。
+        extra="$(printf 'Environment=CP_BACKUP_DIR=%s\nEnvironment=CP_APP_ROOT=%s\n' "$BACKUP_DIR" "$app_root")"
+        ;;
+      Environment=CP_FILE_ROOTS=*) line="Environment=CP_FILE_ROOTS=$file_roots" ;;
     esac
     printf '%s\n' "$line" >> "$UNIT_FILE.tmp"
+    if [ -n "$extra" ]; then
+      printf '%s\n' "$extra" >> "$UNIT_FILE.tmp"
+    fi
   done < "$src"
   mv "$UNIT_FILE.tmp" "$UNIT_FILE"
   chmod 0644 "$UNIT_FILE"
@@ -427,6 +445,9 @@ backup_data() { # backup_data <标签>
   if [ -f "$PREFIX/.env" ] && ! tar -tzf "$out" | grep -qxF ".env"; then
     die "备份里缺 .env：$out"
   fi
+  # 归档内嵌 .env（数据库口令、Telegram token 等），而 tar 按 umask 默认产出 0644；
+  # CP_BACKUP_DIR 指到 /mnt/nas、/var/www 之类位置时密钥就成了全局可读。
+  chmod 600 "$out"
   echo "$out"
 }
 

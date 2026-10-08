@@ -25,7 +25,7 @@ else
   step "安装系统依赖"
   case "$OS_FAMILY" in
     debian) pkg_install ca-certificates curl git sqlite3 nginx rsync ;;
-    rhel)   pkg_install ca-certificates curl git sqlite nginx rsync ;;
+    rhel)   pkg_install ca-certificates curl git sqlite3 nginx rsync ;;
     *)      warn "未识别发行版，请自行确认已安装：git / nginx / sqlite3" ;;
   esac
 fi
@@ -61,6 +61,9 @@ fi
 
 mkdir -p "$DATA_DIR" "$BACKUP_DIR"
 chmod 0700 "$DATA_DIR"
+# 备份归档里含 .env（数据库口令、Telegram token 等），目录权限必须与数据目录一致，
+# 否则 CP_BACKUP_DIR 指到 /mnt/nas、/var/www 之类位置时，密钥就成了全局可读。
+chmod 0700 "$BACKUP_DIR"
 
 # ---------- 4. 构建 ----------
 venv_create
@@ -102,6 +105,7 @@ else
       *[!A-Za-z0-9.-]*) die "域名不合法：${DOMAIN}（只允许字母、数字、点与连字符）" ;;
     esac
     step "写入 /etc/nginx/conf.d/choyeon-panel.conf"
+    NGINX_CONF=/etc/nginx/conf.d/choyeon-panel.conf
     render_nginx() {
       local line
       while IFS= read -r line || [ -n "$line" ]; do
@@ -110,16 +114,68 @@ else
         printf '%s\n' "$line"
       done < "$PREFIX/deploy/nginx-panel.conf.example"
     }
-    render_nginx > /etc/nginx/conf.d/choyeon-panel.conf
-    nginx -t && systemctl reload nginx
-    ok "nginx 配置已生效"
-    if have_cmd certbot; then
+    # 模板的 443 段引用 /etc/letsencrypt/live/$DOMAIN/*.pem，而证书要 certbot 跑完才有，
+    # 所以全新域名首次安装必须先落一份纯 80 的引导配置（含 ACME 校验路径），
+    # nginx -t 才可能通过；随后 certbot --nginx 会把它原地升级成 TLS + 80→443 跳转。
+    bootstrap_http() {
+      printf '%s\n' \
+        "server {" \
+        "    listen 80;" \
+        "    server_name $DOMAIN;" \
+        "    client_max_body_size 20m;" \
+        "    access_log /var/log/nginx/choyeon-panel.access.log;" \
+        "    error_log  /var/log/nginx/choyeon-panel.error.log warn;" \
+        "    location ^~ /.well-known/acme-challenge/ { root /var/www/html; }" \
+        "    location / {" \
+        "        proxy_pass http://127.0.0.1:$PORT;" \
+        "        proxy_set_header Host \$host;" \
+        "        proxy_set_header X-Real-IP \$remote_addr;" \
+        "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" \
+        "        proxy_set_header X-Forwarded-Proto \$scheme;" \
+        "        proxy_http_version 1.1;" \
+        "        proxy_set_header Upgrade \$http_upgrade;" \
+        '        proxy_set_header Connection "upgrade";' \
+        "        proxy_buffering off;" \
+        "        proxy_cache off;" \
+        "        proxy_read_timeout 24h;" \
+        "        proxy_send_timeout 24h;" \
+        "    }" \
+        "}"
+    }
+    load_nginx() {
+      # 不能写成 `nginx -t && systemctl reload nginx`：AND-OR 列表里非末位命令失败
+      # 是被 set -e 豁免的，nginx -t 挂了脚本照样往下跑，于是"配置已生效"是句假话。
+      nginx -t || return 1
+      # 只用 reload：restart 会掐断正在跑的终端 WebSocket
+      systemctl reload nginx || return 1
+    }
+    if [ -f "$NGINX_CONF" ]; then
+      # certbot --nginx 把 SSL 段直接写进这个文件；无条件重写等于把 HTTPS 打回裸模板
+      cp -a "$NGINX_CONF" "$NGINX_CONF.bak-$(date +%Y%m%d%H%M%S)"
+      warn "已存在 $NGINX_CONF：保留现有配置未覆盖（已备份 .bak-*）；确需重新生成请先删除该文件再重跑"
+      if load_nginx; then ok "nginx 现有配置校验通过并已 reload"; else warn "nginx 配置校验未通过，请执行 nginx -t 排错后 systemctl reload nginx"; fi
+    elif [ -d "/etc/letsencrypt/live/$DOMAIN" ]; then
+      render_nginx > "$NGINX_CONF"
+      if load_nginx; then ok "nginx 配置已生效（TLS：复用已有证书）"; PANEL_URL="https://$DOMAIN"
+      else warn "nginx 配置校验未通过，已保留文件未 reload"; fi
+    else
+      bootstrap_http > "$NGINX_CONF"
+      if load_nginx; then ok "nginx 已生效（当前 HTTP，申请证书后自动升级 HTTPS）"; PANEL_URL="http://$DOMAIN"
+      else warn "nginx 配置校验未通过，请执行 nginx -t 排错后 systemctl reload nginx"; fi
+    fi
+    if have_cmd certbot && [ "$PANEL_URL" = "http://$DOMAIN" ]; then
       read_value "是否为 $DOMAIN 申请 Let's Encrypt 证书？(y/N)" "N"
       if [ "${REPLY:-N}" = "y" ] || [ "${REPLY:-N}" = "Y" ]; then
-        certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "admin@$DOMAIN" || warn "证书申请失败，请手动执行 certbot --nginx -d $DOMAIN"
+        if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "admin@$DOMAIN" && load_nginx; then
+          PANEL_URL="https://$DOMAIN"
+          ok "证书签发成功，面板走 https://$DOMAIN"
+        else
+          warn "证书申请失败（多为域名尚未解析到本机）；面板仍按 HTTP 提供服务，修复后手动执行：certbot --nginx -d $DOMAIN"
+        fi
+      else
+        warn "未申请证书：$DOMAIN 将以明文 HTTP 暴露管理面板，建议尽快补 TLS"
       fi
     fi
-    PANEL_URL="https://$DOMAIN"
   else
     log "跳过 nginx（面板仅监听 $HOST:$PORT，可后续用 scripts/ 下的示例配置接入）"
   fi
