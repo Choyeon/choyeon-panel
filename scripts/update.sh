@@ -6,6 +6,22 @@
 #   CP_BRANCH=v1.1.x bash scripts/update.sh
 #   bash scripts/update.sh --no-pull  # 不拉代码，仅重建并重启（改配置后常用）
 set -euo pipefail
+
+# 本脚本会在第 2 步用 git reset --hard 把自己和 common.sh 原地换掉，两个后果：
+# 1) bash 是按字节偏移边读边执行的，文件被替换后剩下的行取自新文件的同一偏移，
+#    表现是莫名其妙的语法错误或半条命令；
+# 2) common.sh 早就 source 进内存了，本次升级跑的还是旧函数——刚拉下来的修复要等
+#    下一次升级才生效（实测：render_unit 新增的 CP_BACKUP_DIR/CP_APP_ROOT 这次没落地）。
+# 所以先把自身和 common.sh 拷进临时目录，再从副本 exec，整轮用同一套代码。
+if [ -z "${CP_UPDATE_SNAPSHOT:-}" ]; then
+  _snap="$(mktemp -d "${TMPDIR:-/tmp}/choyeon-update-XXXXXX")"
+  mkdir -p "$_snap/scripts"
+  _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  cp "$_here/update.sh" "$_here/common.sh" "$_snap/scripts/"
+  exec env CP_UPDATE_SNAPSHOT="$_snap" bash "$_snap/scripts/update.sh" "$@"
+fi
+trap 'rm -rf "$CP_UPDATE_SNAPSHOT"' EXIT
+
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 DO_PULL=1
