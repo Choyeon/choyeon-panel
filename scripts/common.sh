@@ -13,7 +13,7 @@ set -euo pipefail
 _default_prefix() {
   local src
   src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)" || src=""
-  if [ -n "$src" ] && [ -d "$src/.git" ] && [ -f "$src/backend/main.py" ]; then
+  if [ -n "$src" ] && [ -d "$src/.git" ] && [ -f "$src/backend/app/main.py" ]; then
     printf '%s' "$src"
   else
     printf '%s' "/root/choyeon-panel"
