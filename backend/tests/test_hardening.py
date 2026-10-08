@@ -44,6 +44,17 @@ def _uid(prefix: str) -> str:
     return f"{prefix}{os.getpid() % 100000}{next(_seq)}"
 
 
+def _alive(pid: int) -> bool:
+    """进程是否还在（含僵尸）；信号已投递但内核尚未回收时也算活着。"""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 # ---------------------------------------------------------------- 终端资源回收
 class TestTerminalCleanup(unittest.IsolatedAsyncioTestCase):
     """回归：WS 异常断开时 pty 主从两端 fd 与 bash 进程都必须回收。
@@ -175,9 +186,14 @@ class TestTerminalCleanup(unittest.IsolatedAsyncioTestCase):
 
         terminal._reap_process(proc)
 
+        # 信号投递到进程真正消失之间有窗口：整套用例并发跑时这里最容易假红，
+        # 断言要等内核回收完，而不是赌 _reap_process 返回的那一刻。
+        for _ in range(100):
+            if proc.poll() is not None and not _alive(child):
+                break
+            await asyncio.sleep(0.05)
         self.assertIsNotNone(proc.poll(), "bash 必须被回收，不能留僵尸")
-        with self.assertRaises(OSError, msg="后台子进程要随进程组一起杀掉"):
-            os.kill(child, 0)
+        self.assertFalse(_alive(child), "后台子进程要随进程组一起杀掉")
 
 # ---------------------------------------------------------------- 备份可见性
 class TestBackupDiscovery(unittest.TestCase):
