@@ -239,7 +239,7 @@ window.addEventListener('resize', onResize);
             <NProgress
               type="line" :show-indicator="false" :percentage="c.pct" :height="4"
               :color="c.key === 'cpu' ? (c.pct > 85 ? 'var(--cp-err)' : 'var(--cp-brand)') : c.key === 'mem' ? (c.pct > 88 ? 'var(--cp-warn)' : 'var(--cp-ok)') : 'var(--cp-warn)'"
-              style="margin-top: 10px"
+              style="margin-top: var(--space-3)"
             />
           </template>
           <div class="sfoot">{{ c.foot }}</div>
@@ -312,7 +312,7 @@ window.addEventListener('resize', onResize);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
   background: linear-gradient(120deg, color-mix(in srgb, var(--cp-brand) 12%, transparent), color-mix(in srgb, var(--cp-brand-accent) 7%, transparent));
   border: 1px solid color-mix(in srgb, var(--cp-brand) 18%, transparent);
@@ -321,23 +321,23 @@ window.addEventListener('resize', onResize);
 }
 .hero-greet { font-size: var(--fs-md); color: var(--cp-text); }
 .hero-greet b { color: var(--cp-brand-soft); }
-.hero-host { display: flex; align-items: center; gap: 7px; font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: 5px; }
+.hero-host { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: var(--space-1); }
 .hero-host-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scard { position: relative; }
-.srow { display: flex; align-items: center; gap: 12px; }
+.srow { display: flex; align-items: center; gap: var(--space-3); }
 .sicon {
   width: 40px; height: 40px; border-radius: 11px;
   display: flex; align-items: center; justify-content: center;
   color: var(--c);
   background: color-mix(in srgb, var(--c) 14%, transparent);
 }
-.slabel { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-bottom: 2px; }
+.slabel { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-bottom: var(--space-1); }
 .stat-num.small { font-size: var(--fs-lg); }
 .unit { font-size: var(--fs-xs); color: var(--cp-text-mute); font-weight: 400; }
-.sfoot { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-top: 4px; }
+.sfoot { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-top: var(--space-1); }
 .app-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 6px; border-radius: var(--radius); cursor: pointer;
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-2); border-radius: var(--radius); cursor: pointer;
   transition: background var(--dur) var(--ease);
 }
 .app-row:hover { background: var(--cp-hover); }

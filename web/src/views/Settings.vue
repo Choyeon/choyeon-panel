@@ -178,7 +178,7 @@ onMounted(load);
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.OptionsOutline" :size="15" color="var(--cp-brand-soft)" /> 用户管理</span></template>
           <template #header-extra><NButton size="tiny" type="primary" :icon="ico('AddOutline', 12)" @click="showUser = true">新建用户</NButton></template>
-          <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: 8px">只读账号可查看全部监控/日志/数据，但不能执行启停、部署、删除、终端等任何写操作。</NText>
+          <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-2)">只读账号可查看全部监控/日志/数据，但不能执行启停、部署、删除、终端等任何写操作。</NText>
           <NDataTable size="small" :bordered="false" :scroll-x="620" :columns="userCols" :data="users">
             <template #empty><EmptyBox text="暂无用户" /></template>
           </NDataTable>
@@ -188,7 +188,7 @@ onMounted(load);
       <NGridItem v-if="isAdmin" span="2 1:2">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-warn)" /> 告警通知</span></template>
-          <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: 10px">每 30 分钟自动巡检：磁盘使用率、服务 failed、SSL 剩余天数。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次。</NText>
+          <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">每 30 分钟自动巡检：磁盘使用率、服务 failed、SSL 剩余天数。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次。</NText>
           <NForm label-placement="top" size="small">
             <NFormItem label="Telegram Bot Token"><NInput v-model:value="alerts.alert_telegram_bot" placeholder="如 123456:ABC-DEF…" :input-props="{ 'aria-label': 'Telegram Bot Token' }" /></NFormItem>
             <NFormItem label="Telegram Chat ID"><NInput v-model:value="alerts.alert_telegram_chat" placeholder="如 987654321" :input-props="{ 'aria-label': 'Telegram Chat ID' }" /></NFormItem>
@@ -198,7 +198,7 @@ onMounted(load);
               <NFormItem label="SSL 剩余天数" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_ssl_days" :min="0" :max="60" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" style="width: 130px" /></NFormItem>
             </NSpace>
           </NForm>
-          <NSpace style="margin-top: 12px">
+          <NSpace style="margin-top: var(--space-3)">
             <NButton type="primary" size="small" :icon="ico('SaveOutline')" @click="saveAlerts">保存配置</NButton>
             <NButton tertiary size="small" :icon="ico('CloudUploadOutline')" @click="testAlert">发送测试通知</NButton>
             <NButton tertiary size="small" :icon="ico('PulseOutline')" @click="runChecks">立即巡检</NButton>

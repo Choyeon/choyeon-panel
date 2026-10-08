@@ -71,12 +71,12 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NAlert v-if="error" type="error" :title="error" style="margin-bottom: 14px" />
+    <NAlert v-if="error" type="error" :title="error" style="margin-bottom: var(--space-4)" />
 
-    <NSkeleton v-if="loading && !report" height="96px" class="cp-shimmer" style="border-radius: 10px; margin-bottom: 14px" />
+    <NSkeleton v-if="loading && !report" height="96px" class="cp-shimmer" style="border-radius: 10px; margin-bottom: var(--space-4)" />
 
     <template v-if="report">
-      <NCard size="small" style="margin-bottom: 14px">
+      <NCard size="small" style="margin-bottom: var(--space-4)">
         <NSpace align="center" :size="16" wrap>
           <NProgress
             type="circle"
@@ -88,10 +88,10 @@ onMounted(load);
             <NText strong class="cp-pop" style="font-size: var(--fs-lg)">
               通过 {{ report.counts.pass }} · 注意 {{ report.counts.warn }} · 异常 {{ report.counts.fail }}
             </NText>
-            <div style="margin-top: 6px; color: var(--cp-text-dim); font-size: var(--fs-sm)">
+            <div style="margin-top: var(--space-2); color: var(--cp-text-dim); font-size: var(--fs-sm)">
               {{ report.status === 'pass' ? '全部检查通过' : '按下方修复建议逐项处理，异常项会直接影响可用性' }}
             </div>
-            <NSpace v-if="nextFix" :size="8" style="margin-top: 10px" align="center">
+            <NSpace v-if="nextFix" :size="8" style="margin-top: var(--space-3)" align="center">
               <NText depth="3" style="font-size: var(--fs-sm)">优先处理：</NText>
               <code class="mono-dim">{{ nextFix.fix }}</code>
               <NTooltip trigger="hover">
@@ -121,7 +121,7 @@ onMounted(load);
           class="cp-rise"
           :style="`--i:${idx}`"
         >
-          <NSpace align="center" justify="space-between" style="gap: 12px">
+          <NSpace align="center" justify="space-between" style="gap: var(--space-3)">
             <NSpace align="center" :size="10" style="min-width: 0">
               <NIcon
                 :size="18"
@@ -134,8 +134,8 @@ onMounted(load);
               <span class="dot" :class="TYPE[it.status].st"></span>{{ TYPE[it.status].label }}
             </span>
           </NSpace>
-          <div style="margin-top: 6px; color: var(--cp-text-mute); font-size: var(--fs-sm)">{{ it.detail }}</div>
-          <NSpace v-if="it.fix && it.status !== 'pass'" :size="8" align="center" style="margin-top: 8px">
+          <div style="margin-top: var(--space-2); color: var(--cp-text-mute); font-size: var(--fs-sm)">{{ it.detail }}</div>
+          <NSpace v-if="it.fix && it.status !== 'pass'" :size="8" align="center" style="margin-top: var(--space-2)">
             <code class="mono-dim">{{ it.fix }}</code>
             <NTooltip trigger="hover">
               <template #trigger>

@@ -83,7 +83,7 @@ onMounted(load);
 
 <template>
   <div>
-    <PageHeader title="系统服务" :sub="`systemd 单元：${activeCount} 个运行中${failedCount ? `，${failedCount} 个异常` : ''}。点击服务名可直接查看实时日志`">
+    <PageHeader title="系统服务" :sub="`systemd 服务 ${services.length} 个 · ${activeCount} 个运行中${failedCount ? ` · ${failedCount} 个异常` : ''}，点击服务名可看实时日志`">
       <template #actions>
         <NButton size="small" :quaternary="!showAll" :type="showAll ? 'primary' : 'default'" @click="showAll = !showAll">
           {{ showAll ? '只看关键服务' : '查看全部单元' }}
@@ -92,7 +92,7 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NInput :value="filter" @update:value="(v: string) => (filter = v)" placeholder="搜索 unit / 描述…" size="small" clearable style="width: 320px; max-width: 100%; margin-bottom: 12px">
+    <NInput :value="filter" @update:value="(v: string) => (filter = v)" placeholder="搜索 unit / 描述…" size="small" clearable style="width: 320px; max-width: 100%; margin-bottom: var(--space-3)">
       <template #prefix><NIcon :component="icons.SearchOutline" /></template>
     </NInput>
 
@@ -100,7 +100,7 @@ onMounted(load);
       <template #empty><EmptyBox text="没有匹配的服务" /></template>
     </NDataTable>
 
-    <NCard v-if="logUnit" size="small" closable :title="`${logUnit} · journalctl 实时日志`" style="margin-top: 14px" @close="logUnit = null">
+    <NCard v-if="logUnit" size="small" closable :title="`${logUnit} · journalctl 实时日志`" style="margin-top: var(--space-4)" @close="logUnit = null">
       <LogStream :url-path="`/system/services/${encodeURIComponent(logUnit)}/logs`" />
     </NCard>
   </div>

@@ -149,7 +149,7 @@ const userOpts = [
     </NLayoutSider>
 
     <NDrawer v-else v-model:show="drawer" :width="240" placement="left">
-      <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0 12px">
+      <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0 var(--space-3)">
         <template #header>
           <div class="logo">
             <div class="logo-mark" aria-hidden="true">C</div>
@@ -244,16 +244,15 @@ const userOpts = [
 .logo {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 16px 16px 12px;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-3);
   min-height: var(--header-h);
 }
 .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-5) var(--space-5) var(--space-6); }
 @media (max-width: 900px) {
-  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-4); }
+  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-4) var(--space-4) var(--space-5); }
 }
 @media (max-width: 640px) {
-  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-3); }
   .cp-title { font-size: var(--fs-sm); font-weight: 600; }
 }
 .logo-mark {
@@ -282,15 +281,18 @@ const userOpts = [
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
-  gap: 10px;
+  padding: 0 var(--space-5);
+  gap: var(--space-3);
+}
+@media (max-width: 900px) {
+  .cp-header { padding: 0 var(--space-4); }
 }
 .cp-title { font-size: var(--fs-xs); letter-spacing: 0.02em; }
 .user-chip {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 10px 4px 4px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1);
   border-radius: var(--radius-pill);
   border: 1px solid transparent;
   background: transparent;

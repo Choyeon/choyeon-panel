@@ -154,7 +154,7 @@ onMounted(async () => {
       </template>
     </PageHeader>
 
-    <NAlert type="info" :bordered="false" size="small" style="margin-bottom: 14px">
+    <NAlert type="info" :bordered="false" size="small" style="margin-bottom: var(--space-4)">
       调度由 systemd timer 独立完成，面板进程停止不影响备份执行。PG 使用 pg_dump 自定义格式（pg_restore 可恢复）；应用打包自动排除 node_modules / .venv / .next / .output。
     </NAlert>
 

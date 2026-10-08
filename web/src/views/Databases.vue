@@ -177,7 +177,7 @@ onMounted(load);
     </PageHeader>
 
     <NCard size="small" :content-style="{ padding: '0' }">
-      <NTabs type="line" animated pane-style="padding: 18px">
+      <NTabs type="line" animated pane-style="padding: var(--space-4)">
         <NTabPane name="pg" tab="PostgreSQL">
           <NSpace vertical size="medium">
             <NSpace justify="space-between" align="center" style="width: 100%">
@@ -191,7 +191,7 @@ onMounted(load);
               <template #empty><EmptyBox text="无法读取数据库列表（PostgreSQL 未运行？）" /></template>
             </NDataTable>
 
-            <NSpace justify="space-between" align="center" style="width: 100%; margin-top: 6px">
+            <NSpace justify="space-between" align="center" style="width: 100%; margin-top: var(--space-2)">
               <span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-warn)" /> 用户 / 角色</span>
               <NButton size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
@@ -271,7 +271,7 @@ onMounted(load);
 </template>
 
 <style scoped>
-.rstat :deep(.n-card__content) { padding: 12px 14px; }
-.rk { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: 5px; }
+.rstat :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
+.rk { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: var(--space-1); }
 .rv { font-size: var(--fs-lg); font-weight: 600; color: var(--cp-text); }
 </style>

@@ -256,7 +256,7 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive style="margin-bottom: 16px">
+    <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
       <NGridItem span="4 2:1">
         <NCard size="small" class="info-card cp-rise" style="--i: 0">
           <div class="info-k">运行时</div>
@@ -268,7 +268,7 @@ onMounted(load);
           <div class="info-k">监听端口</div>
           <div class="info-v mono-dim" style="font-size: var(--fs-md)">
             {{ app.port || '—' }}
-            <NTag v-if="app.portAuto" size="tiny" :bordered="false" style="margin-left: 6px">自动检测</NTag>
+            <NTag v-if="app.portAuto" size="tiny" :bordered="false" style="margin-left: var(--space-2)">自动检测</NTag>
           </div>
         </NCard>
       </NGridItem>
@@ -277,7 +277,7 @@ onMounted(load);
           <div class="info-k">域名</div>
           <div class="info-v" style="font-size: var(--fs-md)">
             {{ app.domain || ngx?.configs?.[0]?.analysis?.serverNames?.[0] || '—' }}
-            <NTag v-if="!app.domain && ngx?.configs?.length" size="tiny" :bordered="false" style="margin-left: 6px">nginx 检测</NTag>
+            <NTag v-if="!app.domain && ngx?.configs?.length" size="tiny" :bordered="false" style="margin-left: var(--space-2)">nginx 检测</NTag>
           </div>
         </NCard>
       </NGridItem>
@@ -289,7 +289,7 @@ onMounted(load);
       </NGridItem>
     </NGrid>
 
-    <NCard v-if="proc" size="small" class="res-bar" style="margin-bottom: 16px">
+    <NCard v-if="proc" size="small" class="res-bar" style="margin-bottom: var(--space-4)">
       <NSpace :size="26" align="center" wrap>
         <span class="res-item"><span class="res-k">进程</span><b class="mono-dim">{{ proc.running ? 'PID ' + proc.pid : '未运行' }}</b></span>
         <span class="res-item"><span class="res-k">内存</span><b class="mono-dim">{{ fmtMem(proc.memoryBytes) }}</b></span>
@@ -302,9 +302,9 @@ onMounted(load);
     </NCard>
 
     <NCard size="small" :content-style="{ padding: '0' }">
-      <NTabs type="line" animated pane-style="padding: 18px; padding-top: 6px">
+      <NTabs type="line" animated pane-style="padding: var(--space-4); padding-top: var(--space-2)">
         <NTabPane name="config" tab="基本配置">
-          <NForm label-placement="left" label-width="100" style="max-width: 660px; margin-top: 10px">
+          <NForm label-placement="left" label-width="100" style="max-width: 660px; margin-top: var(--space-3)">
             <NSpace vertical :size="10">
               <NFormItem label="名称"><NInput v-model:value="edit.name" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
               <NFormItem label="安装目录"><NInput v-model:value="edit.path" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
@@ -327,7 +327,7 @@ onMounted(load);
             <NText depth="3" style="font-size: var(--fs-xs)">写入应用目录的 .env 并由 systemd EnvironmentFile 加载；保存后重启应用生效。</NText>
             <NDynamicInput v-model:value="env" :on-create="() => ({ k: '', v: '' })">
               <template #default="{ value }">
-                <NInput v-model:value="value.k" placeholder="KEY" style="width: 220px; margin-right: 8px" :input-props="{ class: 'mono', 'aria-label': '环境变量名' }" />
+                <NInput v-model:value="value.k" placeholder="KEY" style="width: 220px; margin-right: var(--space-2)" :input-props="{ class: 'mono', 'aria-label': '环境变量名' }" />
                 <NInput v-model:value="value.v" placeholder="value" style="flex: 1" :input-props="{ class: 'mono', 'aria-label': '环境变量值' }" />
               </template>
             </NDynamicInput>
@@ -349,7 +349,7 @@ onMounted(load);
                 </NSpace>
               </div>
               <EmptyBox v-if="!deps.length" text="暂无部署记录" />
-              <NButton size="small" tertiary :icon="ico('RefreshOutline')" style="margin-top: 8px" @click="pollDeps">刷新</NButton>
+              <NButton size="small" tertiary :icon="ico('RefreshOutline')" style="margin-top: var(--space-2)" @click="pollDeps">刷新</NButton>
             </div>
             <div class="log-view" style="flex: 1; min-width: 0; max-height: 460px">{{ depLog?.log || '点击左侧记录查看部署日志' }}</div>
           </div>
@@ -360,7 +360,7 @@ onMounted(load);
         </NTabPane>
 
         <NTabPane name="nginx" tab="域名 / Nginx">
-          <div v-if="!ngx?.configs?.length" style="padding: 20px 0">
+          <div v-if="!ngx?.configs?.length" style="padding: var(--space-5) 0">
             <EmptyBox text="未找到与该应用关联的 nginx 配置（按域名或反代端口匹配）。配置域名并创建反代后，这里可直接快捷编辑" />
           </div>
           <div v-else class="split-view">
@@ -376,23 +376,23 @@ onMounted(load);
                   <div class="ngx-dom">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}</div>
                 </div>
               </div>
-              <div v-if="ngxFile" style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px">
+              <div v-if="ngxFile" style="margin-top: var(--space-3); display: flex; flex-wrap: wrap; gap: var(--space-2)">
                 <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.ssl ? 'success' : 'default'">{{ ngxFile.analysis.ssl ? 'HTTPS' : '仅 HTTP' }}</NTag>
                 <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.httpsRedirect ? 'success' : 'default'">301 跳转 {{ ngxFile.analysis.httpsRedirect ? '✓' : '✗' }}</NTag>
                 <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.websocket ? 'success' : 'default'">WebSocket {{ ngxFile.analysis.websocket ? '✓' : '✗' }}</NTag>
                 <NTag size="tiny" :bordered="false">body {{ ngxFile.analysis.bodySize || '默认 1m' }}</NTag>
               </div>
-              <NText v-if="ngxFile" depth="3" style="font-size: var(--fs-2xs); display: block; margin-top: 8px; word-break: break-all">{{ ngxFile.file }}</NText>
+              <NText v-if="ngxFile" depth="3" style="font-size: var(--fs-2xs); display: block; margin-top: var(--space-2); word-break: break-all">{{ ngxFile.file }}</NText>
             </div>
             <div style="flex: 1; min-width: 0">
-              <NSpace size="small" style="margin-bottom: 10px" wrap>
+              <NSpace size="small" style="margin-bottom: var(--space-3)" wrap>
                 <NButton size="small" tertiary :disabled="!ngxFile || ngxFile.analysis.websocket" :icon="ico('PulseOutline')" @click="quick('ws')">添加 WebSocket 支持</NButton>
                 <NInput v-model:value="bodySizeVal" size="small" style="width: 80px" placeholder="50m" :input-props="{ 'aria-label': '上传大小限制' }" />
                 <NButton size="small" tertiary :disabled="!ngxFile" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
                 <NButton size="small" tertiary :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
               </NSpace>
               <NInput v-model:value="ngxContent" type="textarea" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
-              <NSpace justify="space-between" align="center" style="margin-top: 10px">
+              <NSpace justify="space-between" align="center" style="margin-top: var(--space-3)">
                 <NText depth="3" style="font-size: var(--fs-xs)">保存将执行 nginx -t 校验，失败自动回滚并 reload 生效</NText>
                 <NButton type="primary" size="small" class="cp-press" :loading="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
               </NSpace>
@@ -447,22 +447,22 @@ onMounted(load);
 
 <style scoped>
 .page-loading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5) 0; }
-.info-card :deep(.n-card__content) { padding: 12px var(--space-4); }
-.info-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: 6px; }
+.info-card :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
+.info-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: var(--space-2); }
 .info-v { color: var(--cp-text); font-weight: 500; }
 .split-view { display: flex; align-items: flex-start; gap: var(--space-3); }
 .dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
-.dep-item { padding: 10px; border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
+.dep-item { padding: var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
 .dep-item:hover { background: var(--cp-hover); }
 .dep-item.active { background: var(--cp-selected); }
 .ngx-list { width: 260px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
-.ngx-item { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
+.ngx-item { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
 .ngx-item:hover { background: var(--cp-hover); }
 .ngx-item.active { background: var(--cp-selected); }
 .ngx-name { font-size: var(--fs-xs); color: var(--cp-text); font-weight: 550; }
 .ngx-dom { font-size: var(--fs-2xs); color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.res-bar :deep(.n-card__content) { padding: 12px var(--space-4); }
-.res-item { display: inline-flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--cp-text); }
+.res-bar :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
+.res-item { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); color: var(--cp-text); }
 .res-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); }
 @media (max-width: 900px) {
   .split-view { flex-direction: column; }

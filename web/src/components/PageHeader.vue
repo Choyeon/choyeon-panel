@@ -17,8 +17,8 @@ defineProps<{ title: string; sub?: string }>();
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
   flex-wrap: wrap;
 }
 .ph-main { min-width: 0; flex: 1 1 220px; }
@@ -31,19 +31,19 @@ defineProps<{ title: string; sub?: string }>();
   overflow-wrap: anywhere;
 }
 .ph-sub {
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
   font-size: var(--fs-xs);
   color: var(--cp-text-mute);
   overflow-wrap: anywhere;
 }
 .ph-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 @media (max-width: 640px) {
-  .ph { gap: 10px; }
+  .ph { gap: var(--space-3); margin-bottom: var(--space-4); }
   .ph-actions { justify-content: flex-start; width: 100%; }
 }
 </style>

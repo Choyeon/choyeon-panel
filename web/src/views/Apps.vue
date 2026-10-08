@@ -57,7 +57,7 @@ const columns: any[] = [
       r.port
         ? h('span', { class: 'mono-dim' }, [
             String(r.port),
-            ...(r.portAuto ? [h('span', { style: 'color:var(--cp-text-mute);font-size:var(--fs-2xs);margin-left:5px' }, '自动')] : []),
+            ...(r.portAuto ? [h('span', { style: 'color:var(--cp-text-mute);font-size:var(--fs-2xs);margin-left:var(--space-1)' }, '自动')] : []),
           ])
         : h('span', { class: 'cell-sub' }, '—'),
   },
@@ -225,7 +225,7 @@ onMounted(() => {
 
     <NModal v-model:show="showCreate" preset="card" title="新建应用" style="width: 620px; max-width: 94vw">
       <NSpace vertical :size="4">
-        <NAlert type="info" :bordered="false" size="small" style="margin-bottom: 8px">
+        <NAlert type="info" :bordered="false" size="small" style="margin-bottom: var(--space-2)">
           Git 仓库与「已有 unit」都可留空：仓库留空时纳管服务器上已有目录，unit 留空时由面板生成 systemd 服务并接管。
         </NAlert>
         <NForm label-placement="left" label-width="96">
@@ -286,7 +286,7 @@ onMounted(() => {
                   :input-props="{ class: 'mono', 'aria-label': '自定义 systemd unit 模板', style: 'font-size: var(--fs-xs)' }"
                   placeholder="留空则使用面板默认模板。支持占位符：{{name}} {{path}} {{start_cmd}} {{port}}，部署时自动渲染写入 /etc/systemd/system/panel-<名称>.service"
                 />
-                <div style="color:var(--cp-text-mute);font-size:var(--fs-xs);margin-top:6px">
+                <div style="color:var(--cp-text-mute);font-size:var(--fs-xs);margin-top:var(--space-2)">
                   创建后也可在应用详情「systemd 单元」页签随时修改，保存前自动 systemd-analyze verify 校验，失败即回滚。
                 </div>
               </NCollapseItem>

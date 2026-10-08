@@ -171,7 +171,7 @@ a:focus-visible,
   font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', ui-monospace, monospace;
   font-size: var(--fs-xs);
   line-height: 1.55;
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius);
   border: 1px solid var(--cp-border);
   overflow: auto;
@@ -193,7 +193,7 @@ a:focus-visible,
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  margin-right: 7px;
+  margin-right: var(--space-2);
   vertical-align: 1px;
 }
 .dot.ok {
@@ -211,19 +211,19 @@ a:focus-visible,
 }
 
 /* shared render-cell styles（DataTable h() 渲染器复用，非 scoped） */
-.cell-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.cell-main { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .cell-ico { flex-shrink: 0; display: flex; align-items: center; }
 .cell-txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .cell-name { font-size: var(--fs-sm); font-weight: 550; color: var(--cp-text); text-align: left; padding: 0 !important; }
 .cell-sub { font-size: var(--fs-2xs); color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vchip {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 2px 9px; border-radius: var(--radius-pill); font-size: var(--fs-xs); line-height: 18px;
+  padding: 2px var(--space-2); border-radius: var(--radius-pill); font-size: var(--fs-xs); line-height: 18px;
   background: var(--cp-hover); color: var(--cp-text-dim);
 }
 .vchip.node { background: color-mix(in srgb, var(--cp-node) 14%, transparent); color: var(--cp-node); }
 .vchip.python { background: color-mix(in srgb, var(--cp-python) 14%, transparent); color: var(--cp-python); }
-.st { display: inline-flex; align-items: center; gap: 7px; font-size: var(--fs-xs); }
+.st { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--fs-xs); }
 .st.ok { color: var(--cp-ok); }
 .st.err { color: var(--cp-err); }
 .st.warn { color: var(--cp-warn); }
@@ -234,7 +234,7 @@ a:focus-visible,
 .section-title {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-size: var(--fs-md);
   font-weight: 600;
   color: var(--cp-text);
@@ -291,9 +291,9 @@ a:focus-visible,
 .cp-press:active { transform: scale(0.98); }
 .cp-press { transition: transform var(--dur-fast) var(--ease); }
 
-/* 小屏适配：内容区减少内边距 */
+/* 小屏适配：正文收到标度上的 --fs-sm */
 @media (max-width: 640px) {
-  body { font-size: 13.5px; }
+  body { font-size: var(--fs-sm); }
 }
 
 /* 尊重系统「减少动效」设置 */

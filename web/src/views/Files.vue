@@ -188,7 +188,7 @@ onMounted(() => load());
       </template>
     </PageHeader>
 
-    <NCard size="small" style="margin-bottom: 14px" :content-style="{ padding: '12px 16px' }">
+    <NCard size="small" style="margin-bottom: var(--space-4)" :content-style="{ padding: 'var(--space-3) var(--space-4)' }">
       <NSpace vertical :size="10">
         <NSpace align="center" justify="space-between" style="width: 100%">
           <NBreadcrumb>
@@ -212,7 +212,7 @@ onMounted(() => load());
       </NSpace>
     </NCard>
 
-    <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: 10px">
+    <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">
       可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑。
     </NText>
 

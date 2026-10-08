@@ -134,7 +134,7 @@ onBeforeUnmount(() => {
         <span class="tdot" aria-hidden="true" style="background: var(--cp-err)"></span>
         <span class="tdot" aria-hidden="true" style="background: var(--cp-warn)"></span>
         <span class="tdot" aria-hidden="true" style="background: var(--cp-ok)"></span>
-        <NSpace align="center" :size="6" style="margin-left: 10px; color: var(--cp-text-dim); font-size: var(--fs-xs)">
+        <NSpace align="center" :size="6" style="margin-left: var(--space-3); color: var(--cp-text-dim); font-size: var(--fs-xs)">
           <NIcon :component="icons.TerminalOutline" :size="13" /> root@choyeon — 面板终端
         </NSpace>
       </div>
@@ -154,15 +154,15 @@ onBeforeUnmount(() => {
 .term-bar {
   display: flex;
   align-items: center;
-  padding: 9px 14px;
+  padding: var(--space-2) var(--space-4);
   background: var(--cp-hover);
   border-bottom: 1px solid var(--cp-border);
 }
-.tdot { width: 11px; height: 11px; border-radius: 50%; margin-right: 6px; display: inline-block; }
+.tdot { width: 11px; height: 11px; border-radius: 50%; margin-right: var(--space-2); display: inline-block; }
 .term-host {
   height: calc(100vh - 260px);
   min-height: 320px;
-  padding: 10px 6px 10px 12px;
+  padding: var(--space-3) var(--space-2) var(--space-3) var(--space-3);
 }
 @media (max-width: 640px) {
   .term-host { height: calc(100vh - 300px); min-height: 260px; }
