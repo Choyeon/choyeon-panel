@@ -5,7 +5,22 @@
 set -euo pipefail
 
 # ---------- 可覆盖的变量（均可通过环境变量注入） ----------
-PREFIX="${CP_PREFIX:-/root/choyeon-panel}"
+# PREFIX 默认值必须能从"脚本自己所在的仓库"推出来。
+# 实测：装在 /root/www/choyeon-panel 的实例执行 scripts/update.sh 时，
+# 硬编码的 /root/choyeon-panel 不存在，脚本在第一行校验就 [fail] 退出，
+# 于是"拉代码→备份→重建→重启→健康探测"整条流程从未执行，
+# 面板还在跑旧构建，而 choyeonctl upgrade 报的却是同一个错。
+_default_prefix() {
+  local src
+  src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)" || src=""
+  if [ -n "$src" ] && [ -d "$src/.git" ] && [ -f "$src/backend/main.py" ]; then
+    printf '%s' "$src"
+  else
+    printf '%s' "/root/choyeon-panel"
+  fi
+}
+
+PREFIX="${CP_PREFIX:-$(_default_prefix)}"
 REPO="${CP_REPO:-https://github.com/Choyeon/choyeon-panel.git}"
 BRANCH="${CP_BRANCH:-main}"
 SERVICE_NAME="${CP_SERVICE:-choyeon-panel}"
