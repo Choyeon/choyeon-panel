@@ -150,9 +150,17 @@ async def app_nginx_save(app_id: int, req: Request):
 @router.post("/api/apps/{app_id}/nginx/quick")
 async def app_nginx_quick(app_id: int, req: Request):
     body = await _body(req)
+    kind = body.get("kind") or ""
+    file = body.get("file") or ""
+    if not file:
+        return JSONResponse(status_code=400, content={"error": "缺少 file 参数"})
+    # 先在这里挡掉未知 kind：一是 body["kind"] 缺失时旧写法抛 KeyError，返回一句
+    # "'kind'" 让人摸不着头脑；二是审计动作名直接来自它，不能是任意字符串。
+    if kind not in ("ws", "body", "redirect"):
+        return JSONResponse(status_code=400, content={"error": "未知的快捷操作类型"})
     try:
-        r = await nginx_ops.quick_edit_config(body["file"], body["kind"], body.get("value"))
-        dbm.audit(req.state.cp_sub, f"app:nginx-{body['kind']}", body["file"])
+        r = await nginx_ops.quick_edit_config(file, kind, body.get("value"))
+        dbm.audit(req.state.cp_sub, f"app:nginx-{kind}", file)
         return r
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})

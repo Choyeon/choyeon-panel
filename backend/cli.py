@@ -298,6 +298,15 @@ async def cmd_user(a: argparse.Namespace) -> dict:
     return {}
 
 
+def _tail(raw: int) -> int:
+    """--lines 来自命令行，用之前先夹住。
+
+    0 会让 `splitlines()[-0:]` 返回**整份**日志（本想只看尾巴，结果全量打印，
+    部署日志上限是几十万字节）；负数会把 journalctl 直接打挂。
+    """
+    return max(1, min(int(raw or 1), 5000))
+
+
 async def cmd_app(a: argparse.Namespace) -> dict:
     from app.services import apps_service
     from app.templates import apply_template, list_templates
@@ -377,7 +386,7 @@ async def cmd_app(a: argparse.Namespace) -> dict:
         if not row:
             Out.error("该应用还没有部署记录", EXIT_FAIL)
         log = row["log"] or ""
-        tail = "\n".join(log.splitlines()[-a.lines:])
+        tail = "\n".join(log.splitlines()[-_tail(a.lines):])
         Out.result({"id": row["id"], "status": row["status"], "commit": row["commit_sha"], "log": tail}, tail)
         return {"id": row["id"], "status": row["status"], "log": tail}
 
@@ -432,7 +441,7 @@ async def cmd_service(a: argparse.Namespace) -> dict:
 
 async def cmd_logs(a: argparse.Namespace) -> dict:
     if have_systemd():
-        r = await sh(["journalctl", "-u", SERVICE, "-n", str(a.lines), "--no-pager"], timeout=30)
+        r = await sh(["journalctl", "-u", SERVICE, "-n", str(_tail(a.lines)), "--no-pager"], timeout=30)
         text = r["out"]
     else:
         text = "(无 systemd，请查看启动终端输出)"

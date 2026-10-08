@@ -80,5 +80,11 @@ async def redis():
 @router.post("/api/db/redis/password")
 async def redis_password(req: Request):
     body = await _body(req)
-    pg_service.set_redis_password(body.get("password") or "")
-    return {"ok": True}
+    pw = (body.get("password") or "").strip()
+    try:
+        r = pg_service.set_redis_password(pw)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    # 只记事件不记内容：口令进审计表等于把凭据抄进一份谁都能翻的日志
+    dbm.audit(req.state.cp_sub, "db:redis-password", "已清空" if not pw else "已更新")
+    return r

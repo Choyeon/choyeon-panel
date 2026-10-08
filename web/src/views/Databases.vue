@@ -92,26 +92,32 @@ const roleCols: any[] = [
   },
 ];
 
-async function manage(action: string, name: string, extra: any = {}) {
+async function manage(action: string, name: string, extra: any = {}): Promise<boolean> {
   try {
     await api.pgManage({ action, name, ...extra });
     msg.success('完成');
     load();
+    return true;
   } catch (e: any) {
     msg.error(e.message);
+    return false;
   }
 }
 async function createDb() {
   if (!dbForm.value.name) return msg.error('请填写名称');
-  await manage('createDb', dbForm.value.name, { owner: dbForm.value.owner || undefined });
-  showDb.value = false;
-  dbForm.value = { name: '', owner: '' };
+  // 失败时保持弹窗与已填内容不变：以前不管成败都关窗清空，
+  // 用户看到红色报错时表单已经空了，只能凭记忆重打一遍。
+  if (await manage('createDb', dbForm.value.name, { owner: dbForm.value.owner || undefined })) {
+    showDb.value = false;
+    dbForm.value = { name: '', owner: '' };
+  }
 }
 async function createRole() {
   if (!roleForm.value.name || !roleForm.value.password) return msg.error('用户名与密码必填');
-  await manage('createRole', roleForm.value.name, { password: roleForm.value.password });
-  showRole.value = false;
-  roleForm.value = { name: '', password: '' };
+  if (await manage('createRole', roleForm.value.name, { password: roleForm.value.password })) {
+    showRole.value = false;
+    roleForm.value = { name: '', password: '' };
+  }
 }
 function openPwd(name: string) {
   pwdTarget.value = name;
@@ -120,8 +126,7 @@ function openPwd(name: string) {
 }
 async function confirmPwd() {
   if (!pwdValue.value) return msg.error('密码不能为空');
-  await manage('setPassword', pwdTarget.value, { password: pwdValue.value });
-  showPwd.value = false;
+  if (await manage('setPassword', pwdTarget.value, { password: pwdValue.value })) showPwd.value = false;
 }
 async function runSql() {
   if (!sql.value.trim()) return;
@@ -136,9 +141,13 @@ async function runSql() {
   }
 }
 async function saveRedisPass() {
+  const cleared = !redisPass.value.trim();
   try {
     await api.redisPassword(redisPass.value);
-    msg.success('已保存');
+    // 空值现在是"清除"（服务端以前静默忽略空值，界面却照样提示"已保存"，
+    // 于是填错口令的人永远改不掉它）；文案要说清楚清掉之后读的是 redis.conf。
+    msg.success(cleared ? '已清除，改回读取 redis.conf' : '已保存');
+    redisPass.value = '';
     load();
   } catch (e: any) {
     msg.error(e.message);
@@ -147,8 +156,12 @@ async function saveRedisPass() {
 
 const hitRate = () => {
   const i = redis.value?.info;
-  if (!i?.keyspace_hits || !i?.keyspace_misses) return '—';
-  const hit = Number(i.keyspace_hits), mis = Number(i.keyspace_misses);
+  if (!i) return '—';
+  // INFO 里的值是字符串，且 keyspace_hits=0 是合法值（旧写法用 `!i.keyspace_hits`
+  // 判断，把"一次都没命中"当成缺字段，永远显示 —）；非数字更要挡住，否则渲染出 NaN%。
+  const hit = Number(i.keyspace_hits);
+  const mis = Number(i.keyspace_misses);
+  if (!Number.isFinite(hit) || !Number.isFinite(mis) || hit + mis <= 0) return '—';
   return Math.round((hit / (hit + mis)) * 100) + '%';
 };
 
@@ -216,7 +229,7 @@ onMounted(load);
               <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
             </NGrid>
             <NSpace align="center" style="margin-top: var(--space-4)">
-              <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码（redis.conf 未配 requirepass 可留空）" style="width: 320px" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />
+              <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码（留空保存＝清除，改读 redis.conf）" style="width: 320px" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />
               <NButton size="small" :icon="ico('SaveOutline')" @click="saveRedisPass">保存</NButton>
             </NSpace>
           </template>

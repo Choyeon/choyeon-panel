@@ -3,7 +3,9 @@
 覆盖：应用安装目录不得指向面板自身要害目录、部署模板端口/安装命令自洽、
 证书续期失败必须报错、二进制上传不被毁、viewer 看不到应用密钥与审计、
 改名后旧 unit/站点被拆除、备份目标应用被删后要在列表里露出来、
-公开状态接口不回显管理员用户名、CLI 的 --json 契约与部署等待。
+公开状态接口不回显管理员用户名、CLI 的 --json 契约与部署等待、
+文件接口对 viewer 全面关闭、写入不跟随符号链接、审计字段长度受约束、
+终端会话计数不漏、psql 管道不互等，以及接口错误不留半成品变更。
 """
 
 import asyncio
@@ -22,6 +24,8 @@ from unittest import mock
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_fix_ut_"))
 os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_fix_roots_"))
 
+from fastapi.responses import JSONResponse  # noqa: E402
+
 from app import config, templates  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.routers import apps as apps_router  # noqa: E402
@@ -38,8 +42,16 @@ def _uid(prefix: str) -> str:
     return f"{prefix}{os.getpid() % 100000}{next(_seq)}"
 
 
-def _req(role: str = "admin", sub: str = "tester", query: dict | None = None):
-    return SimpleNamespace(state=SimpleNamespace(cp_role=role, cp_sub=sub), query_params=query or {})
+def _req(role: str = "admin", sub: str = "tester", query: dict | None = None, body=None, headers: dict | None = None):
+    async def _json():
+        return body
+
+    return SimpleNamespace(
+        state=SimpleNamespace(cp_role=role, cp_sub=sub),
+        query_params=query or {},
+        headers=headers or {},
+        json=_json,
+    )
 
 
 class TestProtectedInstallPath(unittest.TestCase):
@@ -278,6 +290,207 @@ class TestAuthStatusPrivacy(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(main.dbm, "query_one", return_value=None):
             self.assertTrue((await main.auth_status())["needsSetup"])
+
+
+class TestFileApiIsAdminOnly(unittest.IsolatedAsyncioTestCase):
+    """回归：文件接口能直接读到应用目录下的 .env，把 app_get 的脱敏整份绕过。"""
+
+    async def test_viewer_blocked_on_every_endpoint(self):
+        from app.routers import files as files_router
+
+        for name in ("files_list", "files_read", "files_write", "files_download", "files_action"):
+            with self.subTest(endpoint=name):
+                resp = await getattr(files_router, name)(_req(role="viewer"))
+                self.assertEqual(resp.status_code, 403, f"{name} 必须要求管理员")
+                self.assertIn("管理员", resp.body.decode())
+
+    async def test_admin_list_reports_server_side_roots(self):
+        from app.routers import files as files_router
+
+        res = await files_router.files_list(_req(query={"path": ""}))
+        self.assertNotIsInstance(res, JSONResponse, "空 path 应回落到白名单第一项，而不是报错")
+        self.assertEqual(res["roots"], list(files_service.ROOTS))
+        self.assertEqual(
+            res["path"],
+            files_service.safe_path(files_service.ROOTS[0]),
+            "起始目录必须由服务层按白名单给出，不能由前端写死",
+        )
+
+
+class TestWriteRefusesSymlinkTarget(unittest.TestCase):
+    """回归：检查与写入之间把目标换成符号链接，内容就会被写到白名单之外（TOCTOU）。
+
+    O_NOFOLLOW 只在"已经算好的规范路径此时又变成了链接"这一窗口里生效，
+    而 safe_path 本身会先解析链接，所以这里用打桩复现那个窗口，
+    并另加一条用例确认正常（指向白名单内文件）的链接编辑没被打破。
+    """
+
+    def _paths(self):
+        root = files_service.ROOTS[0]
+        os.makedirs(root, exist_ok=True)
+        return root, f"{root}/cp_follow_real.txt", f"{root}/cp_follow_link.txt"
+
+    def test_swapped_target_rejected(self):
+        root, real, link = self._paths()
+        self.addCleanup(lambda: os.path.exists(real) and os.remove(real))
+        self.addCleanup(lambda: os.path.lexists(link) and os.remove(link))
+        Path(real).write_text("original")
+        os.symlink(real, link)
+        # 模拟竞态：safe_path 已返回规范路径，随后那个路径被换成了链接
+        with mock.patch.object(files_service, "safe_path", return_value=link), self.assertRaises(RuntimeError) as ctx:
+            files_service.write_text(link, "overwritten")
+        self.assertIn("符号链接", str(ctx.exception))
+        self.assertEqual(Path(real).read_text(), "original", "拒绝写入时原文件必须没被动过")
+
+    def test_ordinary_write_still_lands(self):
+        root, real, _ = self._paths()
+        self.addCleanup(lambda: os.path.exists(real) and os.remove(real))
+        r = files_service.write_text(real, "content")
+        self.assertEqual(r["size"], len("content"))
+        self.assertEqual(Path(real).read_text(), "content")
+
+
+class TestAuditFieldsTruncated(unittest.TestCase):
+    """回归：audit 只截断 detail，action 有一部分直接拼请求体，一条超长输入就能撑爆审计表。"""
+
+    def test_username_and_action_clamped(self):
+        dbm.audit("u" * 400, "a" * 400, "d" * 4000)
+        row = dbm.query_one("SELECT username,action,detail FROM audit ORDER BY id DESC LIMIT 1")
+        self.assertEqual(len(row["username"]), 64)
+        self.assertEqual(len(row["action"]), 64)
+        self.assertEqual(len(row["detail"]), 500)
+        dbm.execute("DELETE FROM audit WHERE id=(SELECT MAX(id) FROM audit)")
+
+
+class TestNginxQuickKindWhitelisted(unittest.IsolatedAsyncioTestCase):
+    """回归：kind 是拼进审计动作名的请求体字段，且未知值会被当成"强制 HTTPS 跳转"执行。"""
+
+    async def test_unknown_kind_rejected_before_touching_nginx(self):
+        from app.routers import apps as apps_router
+
+        with mock.patch.object(nginx_ops, "quick_edit_config") as edit:
+            resp = await apps_router.app_nginx_quick(1, _req(body={"file": "/etc/nginx/conf.d/a", "kind": "rm-all"}))
+        self.assertEqual(resp.status_code, 400)
+        edit.assert_not_called()
+        self.assertEqual(
+            dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action LIKE ?", ("app:nginx-rm%",))["c"],
+            0,
+            "未知 kind 不该留下一条以它命名的审计",
+        )
+
+    async def test_missing_file_rejected(self):
+        from app.routers import apps as apps_router
+
+        with mock.patch.object(nginx_ops, "quick_edit_config") as edit:
+            resp = await apps_router.app_nginx_quick(1, _req(body={"kind": "ws"}))
+        self.assertEqual(resp.status_code, 400)
+        edit.assert_not_called()
+
+    def test_service_layer_also_rejects(self):
+        with self.assertRaises(RuntimeError):
+            asyncio.run(nginx_ops.quick_edit_config("/etc/nginx/conf.d/x.conf", "nonsense"))
+
+
+class TestAlertsSaveAuditOnlyOnSuccess(unittest.IsolatedAsyncioTestCase):
+    """回归：校验不过时一个字段都没落库，却先写了一条 settings:alerts 审计。"""
+
+    async def test_rejected_save_leaves_no_audit(self):
+        before = dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("settings:alerts",))["c"]
+        resp = await extras.alerts_save(_req(body={"alert_disk_pct": "abc"}))
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("settings:alerts",))["c"],
+            before,
+            "没有任何变更时不该留下一条看起来改过配置的审计",
+        )
+
+    async def test_good_save_is_audited(self):
+        before = dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("settings:alerts",))["c"]
+        self.assertTrue(await extras.alerts_save(_req(body={"alert_disk_pct": "90"})))
+        self.assertEqual(
+            dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("settings:alerts",))["c"], before + 1
+        )
+
+
+class TestRedisPasswordCanBeCleared(unittest.IsolatedAsyncioTestCase):
+    """回归：set_redis_password 忽略空值，填错口令后在界面上永远清不掉。"""
+
+    async def test_empty_clears(self):
+        from app.routers import dbops
+
+        dbm.set_setting("redis_password", "wrong-on-purpose")
+        self.addCleanup(dbm.set_setting, "redis_password", "")
+        await dbops.redis_password(_req(body={"password": ""}))
+        self.assertEqual(dbm.get_setting("redis_password"), "", "空值必须真的清掉旧口令")
+        self.assertGreater(
+            dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("db:redis-password",))["c"],
+            0,
+            "改动凭据必须留痕",
+        )
+
+    async def test_whitespace_rejected(self):
+        from app.services import pg_service
+
+        with self.assertRaises(RuntimeError):
+            pg_service.set_redis_password("has space")
+
+
+class TestTerminalSessionAccounting(unittest.IsolatedAsyncioTestCase):
+    """回归：accept() 抛异常时额度不归还，终端会被永久占满。"""
+
+    def _ws(self, role="admin", fail_accept=False):
+        class FakeWS:
+            scope = {"type": "websocket", "state": {"cp_role": role, "cp_sub": "t"}}
+
+            def __init__(self):
+                self.closed = None
+
+            async def accept(self):
+                # 客户端在握手中途断开时，真实 EventSource 就是这个表现
+                if fail_accept:
+                    raise RuntimeError("client went away")
+
+            async def close(self, code=None, reason=""):
+                self.closed = code
+
+        return FakeWS()
+
+    async def test_counter_released_when_accept_fails(self):
+        from app.routers import terminal
+
+        before = terminal._SESSIONS
+        with self.assertRaises(RuntimeError):
+            await terminal.terminal(self._ws(fail_accept=True))
+        self.assertEqual(terminal._SESSIONS, before, "握手中途失败也必须归还额度")
+
+    async def test_no_close_audit_for_session_that_never_opened(self):
+        from app.routers import terminal
+
+        before = dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("terminal:close",))["c"]
+        with self.assertRaises(RuntimeError):
+            await terminal.terminal(self._ws(fail_accept=True))
+        self.assertEqual(
+            dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("terminal:close",))["c"],
+            before,
+            "没建立过的会话不该在审计里留下一次关闭",
+        )
+
+    async def test_viewer_closed_without_session(self):
+        from app.routers import terminal
+
+        before = terminal._SESSIONS
+        ws = self._ws(role="viewer")
+        await terminal.terminal(ws)
+        self.assertEqual(ws.closed, 4403)
+        self.assertEqual(terminal._SESSIONS, before)
+
+    def test_resize_frame_is_validated(self):
+        from app.routers import terminal
+
+        self.assertEqual(terminal._dim("abc", 100, 400), 100)
+        self.assertEqual(terminal._dim(-5, 28, 200), 28)
+        self.assertEqual(terminal._dim(9999, 100, 400), 400)
+        self.assertEqual(terminal._dim(120, 100, 400), 120)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from .. import database as dbm
 from .. import security
+from ..deps import need_admin as _need_admin
 from ..services import alerts_service, nginx_ops
 from ..util import is_http_url
 
@@ -27,12 +28,6 @@ async def _body(req: Request) -> dict:
     except Exception:  # noqa: BLE001
         b = None
     return b if isinstance(b, dict) else {}
-
-
-def _need_admin(req: Request):
-    if req.state.cp_role != "admin":
-        return JSONResponse(status_code=403, content={"error": "需要管理员权限"})
-    return None
 
 
 @router.get("/api/users")
@@ -181,12 +176,13 @@ async def alerts_save(req: Request):
             continue
         accepted[k] = val
     # 先全部校验再落库：部分写入会让通道配置变成"一半新一半旧"的不可解释状态
-    if not errors:
-        for k, val in accepted.items():
-            dbm.set_setting(k, val)
-    dbm.audit(req.state.cp_sub, "settings:alerts", ",".join(accepted.keys()) or "-")
     if errors:
+        # 校验不过时一个字段都没写，也就没有"变更"可记。旧写法先落一条
+        # settings:alerts 审计再返回 400，事后翻审计会以为配置真的改过。
         return JSONResponse(status_code=400, content={"error": "；".join(errors)})
+    for k, val in accepted.items():
+        dbm.set_setting(k, val)
+    dbm.audit(req.state.cp_sub, "settings:alerts", ",".join(accepted.keys()) or "-")
     return {"ok": True}
 
 

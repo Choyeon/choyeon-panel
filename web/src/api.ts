@@ -1,3 +1,5 @@
+import { ref } from 'vue';
+
 const base = '/api';
 const TOKEN_KEY = 'cp_token';
 const ROLE_KEY = 'cp_role';
@@ -8,14 +10,23 @@ export function getToken() {
 export function setToken(t: string) {
   t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY);
 }
-/** 未登录时按最小权限处理（只读），避免本地存储缺失时误判为管理员 */
+/**
+ * 当前角色，未登录时按最小权限处理（只读），避免本地存储缺失时误判为管理员。
+ * 必须是响应式的：Shell 只挂载一次，登录/登出/被降权都不会重跑它的 setup。
+ * 用 localStorage 直读的话，切换账号后侧栏仍停留在旧角色的菜单项上
+ * （只读账号看得见「终端」「文件」，点进去才收 403），必须刷新页面才对。
+ */
+const roleRef = ref(localStorage.getItem(ROLE_KEY) || 'viewer');
+
 export function getRole() {
-  return localStorage.getItem(ROLE_KEY) || 'viewer';
+  return roleRef.value;
 }
 export function setRole(r: string) {
+  roleRef.value = r;
   localStorage.setItem(ROLE_KEY, r);
 }
 export function clearSession() {
+  roleRef.value = 'viewer';
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(ROLE_KEY);
 }
@@ -80,7 +91,9 @@ export const api = {
   stats: () => req('/system/stats'),
   services: () => req('/system/services'),
   serviceAction: (unit: string, verb: string) => req(`/system/services/${encodeURIComponent(unit)}`, { body: { verb } }),
-  certbotRenew: () => req('/system/certbot-renew', { body: {} }),
+  // certbot 续期在服务器上最长可跑到几分钟，前端 15s 就 abort 会显示"请求超时"，
+  // 而续期其实还在跑：用户重试 → 多个 certbot 并发抢同一张证书。给到 620s（略大于服务端上限）。
+  certbotRenew: () => req('/system/certbot-renew', { body: {}, timeout: 620000 }),
   apps: () => req('/apps'),
   app: (id: number) => req(`/apps/${id}`),
   createApp: (a: any) => req('/apps', { body: a }),
@@ -105,12 +118,14 @@ export const api = {
   alertSettings: () => req('/settings/alerts'),
   saveAlerts: (body: any) => req('/settings/alerts', { body }),
   alertTest: () => req('/settings/alerts/test', { body: {}, timeout: 25000 }),
-  alertRunChecks: () => req('/settings/alerts/run-checks', { body: {} }),
+  alertRunChecks: () => req('/settings/alerts/run-checks', { body: {}, timeout: 60000 }),
   firewall: () => req('/firewall'),
   pgDbs: () => req('/db/pg/databases'),
   pgRoles: () => req('/db/pg/roles'),
   pgManage: (body: any) => req('/db/pg/manage', { body }),
-  pgQuery: (sql: string) => req('/db/pg/query', { body: { sql } }),
+  // 服务端 psql 自己在 30s 放弃，前端必须比它慢一点：
+  // 定成默认 15s 时用户看到的是"请求超时"，而真实结果（错误原因/成功）已经丢了。
+  pgQuery: (sql: string) => req('/db/pg/query', { body: { sql }, timeout: 40000 }),
   redis: () => req('/db/redis'),
   redisPassword: (p: string) => req('/db/redis/password', { body: { password: p } }),
   backups: () => req('/backups'),

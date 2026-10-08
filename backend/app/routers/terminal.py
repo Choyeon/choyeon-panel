@@ -20,6 +20,18 @@ router = APIRouter()
 _SESSIONS = 0  # 当前终端会话数，避免并发 pty 拖垮机器
 
 
+def _dim(raw: object, fallback: int, cap: int) -> int:
+    # 浏览器传来的尺寸先校验再写进 ioctl：负数/非数字会让 struct.pack 抛错。
+    # 一帧坏数据不该打死整个会话，所以回落默认值而不是往上抛。
+    try:
+        n = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+    if n <= 0:
+        return fallback
+    return min(n, cap)
+
+
 def _reap_process(proc: subprocess.Popen) -> None:
     """在独立线程里回收 bash 及其整个进程组（TERM → 3s → KILL）。
 
@@ -68,16 +80,22 @@ async def terminal(ws: WebSocket):
     # 占额度必须紧接检查、中间不引入 await：`await ws.accept()` 与审计写入都会让出事件循环，
     # 两个并发握手可同时通过上面的上限检查，实际会话数突破 TERMINAL_MAX_SESSIONS 并泄漏 pty。
     _SESSIONS += 1
-    await ws.accept()
-    user = state.get("cp_sub") or "?"
-    dbm.audit(user, "terminal:open")
-
     master = slave = None
     proc = None
-    loop = asyncio.get_running_loop()
+    opened = False
+    user = state.get("cp_sub") or "?"
+    loop = None
     reader_added = False
     pump = None
     try:
+        # accept/审计必须在 try 内：客户端在握手中途断开时 accept() 会抛异常，
+        # 旧写法此时已经占了一个额度却永远不会释放（finally 还没进入），
+        # 反复几次后 TERMINAL_MAX_SESSIONS 被占满，终端整个功能永久不可用直到重启。
+        await ws.accept()
+        opened = True
+        dbm.audit(user, "terminal:open")
+
+        loop = asyncio.get_running_loop()
         master, slave = pty.openpty()
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 100, 0, 0))
         env = dict(os.environ)
@@ -125,8 +143,10 @@ async def terminal(ws: WebSocket):
                 with contextlib.suppress(OSError):
                     os.write(master, str(msg.get("data", ""))[:65536].encode())
             elif kind == "resize":
-                cols = min(int(msg.get("cols") or 100), 400)
-                rows = min(int(msg.get("rows") or 28), 200)
+                # 帧来自浏览器，坏一帧不该杀掉整个会话：旧写法裸调 int()，
+                # 收到 {"cols":"abc"} 直接抛 ValueError，终端无故断开且看不到原因。
+                cols = _dim(msg.get("cols"), 100, 400)
+                rows = _dim(msg.get("rows"), 28, 200)
                 with contextlib.suppress(OSError):
                     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
             elif kind == "ping":
@@ -150,7 +170,8 @@ async def terminal(ws: WebSocket):
         # 既不用 await（避免取消打断后面的审计），也不会留僵尸进程。
         if proc is not None:
             threading.Thread(target=_reap_process, args=(proc,), daemon=True).start()
-        try:
-            dbm.audit(user, "terminal:close")
-        except Exception as e:  # noqa: BLE001
-            warn("terminal audit failed:", e)
+        if opened:
+            try:
+                dbm.audit(user, "terminal:close")
+            except Exception as e:  # noqa: BLE001
+                warn("terminal audit failed:", e)

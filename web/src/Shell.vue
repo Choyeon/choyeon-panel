@@ -70,8 +70,10 @@ const MENU_ICON: Record<string, string> = {
 };
 
 const menuOptions = computed(() => {
-  const keys = ['/dashboard', '/apps', '/services', '/db', '/backups', '/files'];
-  if (isAdmin.value) keys.push('/terminal');
+  // 文件管理能看到并下载应用目录里的 .env（明文口令），后端已收紧为 admin 专用；
+  // 菜单同步隐藏，否则只读账号看得见入口、点进去只收到一句 403。
+  const keys = ['/dashboard', '/apps', '/services', '/db', '/backups'];
+  if (isAdmin.value) keys.push('/files', '/terminal');
   keys.push('/doctor');
   keys.push('/settings');
   return keys.map((k) => ({ label: TITLES[k], key: k, icon: ico(MENU_ICON[k], 18) }));

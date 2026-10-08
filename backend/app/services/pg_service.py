@@ -40,24 +40,33 @@ async def psql(sql: str) -> str:
         start_new_session=True,
     )
 
-    async def _collect():
+    async def _write_stdin():
         proc.stdin.write(sql.encode())
         await proc.stdin.drain()
         proc.stdin.close()
+
+    async def _drain(stream, limit=None):
         chunks = []
         size = 0
         while True:
-            part = await proc.stdout.read(64 * 1024)
+            part = await stream.read(64 * 1024)
             if not part:
                 break
             size += len(part)
-            if size > 512 * 1024:
+            if limit and size > limit:
                 kill_group(proc)
                 raise RuntimeError("输出过大（>512KB），请加 LIMIT")
             chunks.append(part)
-        err = await proc.stderr.read()
+        return b"".join(chunks)
+
+    async def _collect():
+        # 三个方向必须并发：先写完再读，遇到「SQL 很长 + 输出撑满 64KB 管道」时
+        # 双方互等，只会以一句没头没尾的「psql 超时」收场（stderr 同理）。
+        _, out, err = await asyncio.gather(
+            _write_stdin(), _drain(proc.stdout, 512 * 1024), _drain(proc.stderr)
+        )
         await proc.wait()
-        return b"".join(chunks), err
+        return out, err
 
     try:
         out, err = await asyncio.wait_for(_collect(), timeout=30)
@@ -214,6 +223,11 @@ async def redis_info() -> dict:
 
 
 def set_redis_password(p: str):
-    if p:
-        dbm.set_setting("redis_password", p)
+    # 空值要能真的清空：旧写法 `if p:` 让"填错口令后清掉重填"做不到——
+    # 接口返回 ok、前端提示已保存，但 redis_password() 仍返回旧值，
+    # 面板从此卡在 NOAUTH，唯一出路是手工改数据库。
+    p = (p or "").strip()
+    if p and not re.match(r"^\S{1,512}$", p):
+        raise RuntimeError("Redis 口令不能包含空白字符，且不超过 512 位")
+    dbm.set_setting("redis_password", p)
     return {"ok": True}

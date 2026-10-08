@@ -16,7 +16,7 @@ const linesCount = ref(200);
 const following = ref(true);
 const autoScroll = ref(true);
 const box = ref<HTMLElement | null>(null);
-const streamLive = ref(true);
+const streamState = ref<'live' | 'retry' | 'closed'>('live');
 let es: EventSource | null = null;
 
 const text = computed(() => lines.value.join('\n') || '(无日志)');
@@ -33,7 +33,7 @@ async function copyAll() {
 function open() {
   close();
   es = new EventSource(logUrl(props.urlPath, linesCount.value));
-  es.onopen = () => (streamLive.value = true);
+  es.onopen = () => (streamState.value = 'live');
   es.onmessage = async (e) => {
     try {
       lines.value.push(JSON.parse(e.data));
@@ -46,7 +46,12 @@ function open() {
       if (box.value) box.value.scrollTop = box.value.scrollHeight;
     }
   };
-  es.onerror = () => (streamLive.value = false); // EventSource 会自动重连
+  es.onerror = () => {
+    // 只有 CONNECTING/OPEN 时浏览器才会自动重连。服务端返回 401（登录过期）、
+    // 403 或非 SSE 响应时 readyState 直接变 CLOSED，再也不会重试；
+    // 旧写法一律显示"重连中"，用户只能对着一个永远不动的提示干等。
+    streamState.value = es && es.readyState === EventSource.CLOSED ? 'closed' : 'retry';
+  };
   following.value = true;
 }
 function close() {
@@ -94,8 +99,9 @@ onBeforeUnmount(close);
       <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="2000" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="refresh" />
       <NText depth="3" id="ls-autoscroll-label" style="font-size: var(--fs-xs)">自动滚动</NText>
       <NSwitch v-model:value="autoScroll" size="small" aria-labelledby="ls-autoscroll-label" />
-      <span class="st" style="font-size: 12px" :class="streamLive ? 'ok' : 'err'">
-        <span class="dot" :class="streamLive ? 'ok' : 'err'"></span>{{ streamLive ? 'SSE 实时' : 'SSE 重连中…' }}
+      <span class="st" style="font-size: 12px" :class="streamState === 'live' ? 'ok' : streamState === 'retry' ? 'warn' : 'err'">
+        <span class="dot" :class="streamState === 'live' ? 'ok' : streamState === 'retry' ? 'warn' : 'err'"></span>
+        {{ streamState === 'live' ? 'SSE 实时' : streamState === 'retry' ? 'SSE 重连中…' : 'SSE 已断开，点刷新重试' }}
       </span>
     </NSpace>
     <div

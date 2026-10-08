@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import { onMounted, ref, h } from 'vue';
+import { computed, onMounted, ref, h } from 'vue';
 import {
   NDataTable, NButton, NSpace, NTag, NModal, NForm, NFormItem, NInput, NInputNumber,
   NSelect, NPopconfirm, useMessage, NIcon, NAlert, NSwitch,
 } from 'naive-ui';
-import { api, getToken } from '../api';
+import { api, apiUrl, getRole, getToken } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
 const msg = useMessage();
+const isAdmin = computed(() => getRole() === 'admin');
 const rows = ref<any[]>([]);
 const apps = ref<any[]>([]);
 const show = ref(false);
@@ -72,7 +73,12 @@ const columns: any[] = [
             r.files.slice(0, 5).map((f: any) =>
               h(
                 NButton,
-                { size: 'tiny', tertiary: true, tag: 'a', href: `/api/files/download?path=${encodeURIComponent((r.dir || '/root/backups/panel') + '/' + f.name)}&token=${getToken()}`, target: '_blank' },
+                // 下载走 /api/files/download，该接口现在只允许管理员：
+                // 只读账号点开的是一张 JSON 错误页，不如直接不给这个入口。
+                // 没有 dir（还没产出过备份文件）时同样不给，否则链接指向 /<文件名>，必报路径超范围。
+                isAdmin.value && r.dir
+                  ? { size: 'tiny', tertiary: true, tag: 'a', href: `${apiUrl('/files/download')}?path=${encodeURIComponent(`${r.dir}/${f.name}`)}&token=${encodeURIComponent(getToken())}`, target: '_blank' }
+                  : { size: 'tiny', tertiary: true, title: isAdmin.value ? '备份目录未知，无法下载' : '仅管理员可下载备份文件' },
                 { icon: ico('DownloadOutline', 12), default: () => `${f.name.replace(`bk${r.id}-`, '').replace('.dump.gz', '').replace('.tar.gz', '')} · ${fmt(f.size)}` },
               ),
             ))

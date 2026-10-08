@@ -2,7 +2,8 @@ import json
 import time
 
 from starlette.datastructures import Headers, MutableHeaders, QueryParams
-from starlette.responses import Response
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from . import config, security
 from .log import log
@@ -45,6 +46,18 @@ SECURITY_HEADERS = [
 
 def _json(status: int, msg: str) -> Response:
     return Response(json.dumps({"error": msg}, ensure_ascii=False), status_code=status, media_type="application/json")
+
+
+def need_admin(req: Request) -> JSONResponse | None:
+    """中间件只挡得住写操作，读接口得自己表态。
+
+    viewer 账号的"只读"含义是"看不到不该看的"，不是"能读所有 GET"：
+    文件接口能读任意 .env、备份接口能下载含口令的 dump，
+    所以这类端点必须显式要求 admin，而不是靠 HTTP 方法猜。
+    """
+    if req.state.cp_role != "admin":
+        return JSONResponse(status_code=403, content={"error": "需要管理员权限"})
+    return None
 
 
 def _extract_token(headers: Headers, query: QueryParams) -> str:

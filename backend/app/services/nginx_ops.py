@@ -242,6 +242,10 @@ async def save_app_config(path: str, content: str) -> dict:
 
 
 async def quick_edit_config(path: str, kind: str, value: str | None = None) -> dict:
+    # kind 来自请求体，且会拼进审计动作名。旧写法把"其它值"一律当 HTTPS 跳转处理，
+    # 于是一个拼错的 kind 也会改配置、审计里出现 f"app:nginx-{任意字符串}"。
+    if kind not in ("ws", "body", "redirect"):
+        raise RuntimeError("未知的快捷操作类型")
     real = _safe_conf_path(path)
     c = Path(real).read_text(errors="replace")
     if kind == "ws":
@@ -266,7 +270,7 @@ async def quick_edit_config(path: str, kind: str, value: str | None = None) -> d
             if not m:
                 raise RuntimeError("未找到 server_name，无法插入")
             c = c.replace(m.group(0), f"{m.group(0)}\n{m.group(1)}client_max_body_size {value};")
-    else:
+    elif kind == "redirect":
         a = analyze_config(c)
         if not a["ssl"]:
             raise RuntimeError("该配置尚未启用 HTTPS，请先在「域名 / SSL」申请证书")

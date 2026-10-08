@@ -154,9 +154,15 @@ def bump_token_epoch() -> str:
 
 
 def audit(username, action: str, detail=None) -> None:
+    # 三个字段都要截断：action/detail 有一部分调用方直接把请求体拼进去
+    # （如 f"file:{body['action']}"），一条 1MB 的输入就能把审计表撑大、
+    # 并把 /api/audit 页面变成自伤式 DoS。username 同理来自 token 声明。
     if detail is not None and len(str(detail)) > 500:
         detail = str(detail)[:500]
-    execute("INSERT INTO audit(username,action,detail) VALUES(?,?,?)", (username, action, detail))
+    execute(
+        "INSERT INTO audit(username,action,detail) VALUES(?,?,?)",
+        (str(username or "")[:64], str(action or "")[:64], detail),
+    )
 
 
 def append_deploy_log(dep_id: int, text: str) -> None:

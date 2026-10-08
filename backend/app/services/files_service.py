@@ -1,4 +1,5 @@
 import datetime as _dt
+import errno
 import os
 import shutil
 import stat
@@ -37,7 +38,12 @@ def safe_path(p: str) -> str:
 
 
 def list_dir(p: str) -> dict:
-    abs_ = safe_path(p or "/root/www")
+    # 默认目录必须由服务层给出：写死 /root/www 时，改过 CP_FILE_ROOTS 的部署
+    # 一进文件页就落在白名单外，报「路径超出允许范围」，用户以为是 bug。
+    # roots 一并回给前端，页面据此渲染快捷入口，不再自己猜目录。
+    if not ROOTS:
+        raise RuntimeError("未配置 CP_FILE_ROOTS，文件管理不可用")
+    abs_ = safe_path(p or ROOTS[0])
     if not os.path.isdir(abs_):
         raise RuntimeError("不是目录")
     entries = []
@@ -54,7 +60,7 @@ def list_dir(p: str) -> dict:
             pass
         entries.append({"name": name, "isDir": is_dir, "size": size, "mtime": mtime})
     entries.sort(key=lambda e: (0 if e["isDir"] else 1, str(e["name"]).lower()))
-    return {"path": abs_, "entries": entries}
+    return {"path": abs_, "roots": list(ROOTS), "entries": entries}
 
 
 def read_text(p: str) -> dict:
@@ -80,7 +86,16 @@ def write_text(p: str, content: str | bytes) -> dict:
     if len(data) > MAX_FILE_BYTES:
         raise RuntimeError(f"内容超过 {MAX_FILE_BYTES // 1024 // 1024}MB，拒绝写入")
     Path(os.path.dirname(abs_)).mkdir(parents=True, exist_ok=True)
-    Path(abs_).write_bytes(data)
+    # O_NOFOLLOW：safe_path 是按"当前"的符号链接解析的，检查与写入之间换一个链接
+    # 就能把内容写到白名单外（TOCTOU）。拒绝跟随最后一层链接，让写入只落在真文件上。
+    try:
+        fd = os.open(abs_, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise RuntimeError("目标是符号链接，为避免写到别处已拒绝") from None
+        raise RuntimeError(f"写入失败：{e.strerror or e}") from None
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
     return {"path": abs_, "size": len(data)}
 
 

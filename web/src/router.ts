@@ -1,5 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router';
-import { getToken, onUnauthorized } from './api';
+import { getToken, getRole, onUnauthorized } from './api';
 
 export const TITLES: Record<string, string> = {
   '/dashboard': '总览', '/apps': '应用', '/services': '系统服务', '/db': '数据库',
@@ -25,8 +25,13 @@ export const router = createRouter({
   ],
 });
 
+// 只有管理员能看到/用得上的页面：菜单里已隐藏，但地址栏直达同样要拦，
+// 否则只读账号会停在一个只会报 403 的空页面上。
+const ADMIN_ONLY = ['/files', '/terminal'];
+
 router.beforeEach((to) => {
   if (to.path !== '/login' && !getToken()) return '/login';
+  if (ADMIN_ONLY.includes(to.path) && getRole() !== 'admin') return '/dashboard';
 });
 
 router.afterEach((to) => {

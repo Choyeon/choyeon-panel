@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, h } from 'vue';
+import { computed, onMounted, ref, h } from 'vue';
 import {
   NDataTable, NButton, NSpace, NInput, NText, NBreadcrumb, NBreadcrumbItem, NModal,
   NPopconfirm, useMessage, NIcon, NCard,
@@ -10,7 +10,10 @@ import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
 const msg = useMessage();
-const path = ref('/root/www');
+// path 初始为空：起始目录由服务端按 CP_FILE_ROOTS 决定。
+// 前端写死 /root/www 时，改过白名单的部署一进这一页就请求一个不在范围内的目录。
+const path = ref('');
+const roots = ref<string[]>([]);
 const entries = ref<any[]>([]);
 const editing = ref(false);
 const editPath = ref('');
@@ -28,9 +31,11 @@ function ico(name: string, size = 14) {
 
 function fmt(n: number, isDir: boolean) {
   if (isDir) return '—';
-  const u = ['B', 'KB', 'MB', 'GB'];
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
-  while (n >= 1024 && i < 2) { n /= 1024; i++; }
+  // 上限原来是 2（MB）：node_modules、备份包这类目录里的文件动辄几 GB，
+  // 显示成 "5120.0 MB" 既不直观也像算错了。
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
 }
 
@@ -43,6 +48,7 @@ async function load(p = path.value) {
   try {
     const r = await api.files(p);
     path.value = r.path;
+    roots.value = r.roots || [];
     entries.value = r.entries;
     crumbs.value = splitPath(r.path);
   } catch (e: any) {
@@ -155,7 +161,7 @@ const columns: any[] = [
     title: '操作', key: 'ops', width: 210,
     render: (e: any) =>
       h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, tag: 'a', href: `${apiUrl('/files/download')}?path=${encodeURIComponent(join(e.name))}&token=${getToken()}`, target: '_blank', icon: ico('DownloadOutline', 12) }, () => '下载'),
+        h(NButton, { size: 'tiny', tertiary: true, tag: 'a', href: `${apiUrl('/files/download')}?path=${encodeURIComponent(join(e.name))}&token=${encodeURIComponent(getToken())}`, target: '_blank', icon: ico('DownloadOutline', 12) }, () => '下载'),
         ...(e.isDir ? [] : [h(NButton, { size: 'tiny', tertiary: true, icon: ico('PencilOutline', 12), onClick: () => open(e) }, () => '编辑')]),
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('OptionsOutline', 12), onClick: () => openRename(e) }, () => '改名'),
         h(NPopconfirm, { onPositiveClick: () => del(e) }, {
@@ -166,7 +172,10 @@ const columns: any[] = [
   },
 ];
 
-const quick = ['/root/www', '/etc/nginx', '/root/backups/panel'];
+// 快捷入口与"可访问范围"都来自服务端白名单：前端写死一份的话，
+// 改过 CP_FILE_ROOTS 的部署点一下就报"路径超出允许范围"。
+const quick = computed(() => roots.value);
+const homeRoot = computed(() => roots.value[0] || '/');
 onMounted(() => load());
 </script>
 
@@ -184,7 +193,7 @@ onMounted(() => load());
         <NSpace align="center" justify="space-between" style="width: 100%">
           <NBreadcrumb>
             <NBreadcrumbItem>
-              <NButton text type="primary" size="tiny" @click="load('/root/www')">{{ crumbs[0] || 'root' }}</NButton>
+              <NButton text type="primary" size="tiny" @click="load(homeRoot)">{{ crumbs[0] || 'root' }}</NButton>
             </NBreadcrumbItem>
             <NBreadcrumbItem v-for="(c, i) in crumbs.slice(1)" :key="i">
               <NButton text size="tiny" style="color: var(--cp-text-dim)" @click="load('/' + crumbs.slice(0, i + 1).join('/'))">{{ c }}</NButton>
@@ -203,7 +212,9 @@ onMounted(() => load());
       </NSpace>
     </NCard>
 
-    <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">可访问范围：/root/www（项目）、/etc/nginx（配置）、/root/backups/panel（备份）。点击文件名直接在线编辑。</NText>
+    <NText depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">
+      可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑。
+    </NText>
 
     <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :scroll-x="760" :max-height="'calc(100vh - 360px)'" :row-key="(e: any) => e.name">
       <template #empty><EmptyBox text="空目录" /></template>

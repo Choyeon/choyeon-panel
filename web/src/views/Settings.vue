@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, h } from 'vue';
+import { computed, onMounted, ref, h } from 'vue';
 import {
   NCard, NText, NSpace, NDataTable, NButton, useMessage, NInput, NModal, NForm, NFormItem,
   NSelect, NPopconfirm, NTag, NInputNumber, NIcon, NGrid, NGridItem,
@@ -10,7 +10,7 @@ import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
 const msg = useMessage();
-const isAdmin = getRole() === 'admin';
+const isAdmin = computed(() => getRole() === 'admin');
 const auditLog = ref<any[]>([]);
 const renewing = ref(false);
 const renewLog = ref('');
@@ -29,17 +29,23 @@ function ico(name: string, size = 14) {
   return () => h(NIcon, { size }, { default: () => h(icons[name]) });
 }
 
-async function load() {
+async function grab(fn: () => Promise<any>, set: (v: any) => void) {
+  // 每个数据块各自兜错：以前是一条链，只读账号在第一步 /api/audit 就收到 403，
+  // 于是后面的防火墙状态根本没被请求，卡片永远停在"检测中…"。
   try {
-    auditLog.value = await api.audit(100);
-    if (isAdmin) {
-      users.value = await api.users();
-      alerts.value = await api.alertSettings();
-    }
-    fw.value = await api.firewall();
+    set(await fn());
   } catch (e: any) {
     msg.error(e.message);
   }
+}
+
+async function load() {
+  if (isAdmin.value) {
+    await grab(() => api.audit(100), (v) => (auditLog.value = v));
+    await grab(() => api.users(), (v) => (users.value = v));
+    await grab(() => api.alertSettings(), (v) => (alerts.value = v));
+  }
+  await grab(() => api.firewall(), (v) => (fw.value = v));
 }
 async function renew() {
   renewing.value = true;
@@ -213,7 +219,7 @@ onMounted(load);
         </NCard>
       </NGridItem>
 
-      <NGridItem span="2 1:1">
+      <NGridItem v-if="isAdmin" span="2 1:1">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-brand-soft)" /> 证书维护</span></template>
           <NSpace vertical :size="10">
@@ -224,7 +230,7 @@ onMounted(load);
         </NCard>
       </NGridItem>
 
-      <NGridItem span="2">
+      <NGridItem v-if="isAdmin" span="2">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.DocumentTextOutline" :size="15" color="var(--cp-text-mute)" /> 操作审计</span></template>
           <template #header-extra><NButton size="tiny" tertiary :icon="ico('RefreshOutline', 12)" @click="load">刷新</NButton></template>
