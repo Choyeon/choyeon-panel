@@ -164,11 +164,16 @@ export const api = {
   pgTables: (db: string) => req(`/db/pg/${encodeURIComponent(db)}/tables`),
   pgTable: (db: string, schema: string, name: string, page: number, size: number) =>
     req(`/db/pg/${encodeURIComponent(db)}/table?schema=${encodeURIComponent(schema)}&name=${encodeURIComponent(name)}&page=${page}&size=${size}`),
+  // 行写入：服务端 psql 上限 30s，前端给 40s（与 pgQuery 同一套口径）
+  pgRow: (db: string, body: any) => req(`/db/pg/${encodeURIComponent(db)}/row`, { body, timeout: 40000 }),
   redis: () => req('/db/redis'),
   redisKeys: (cursor: string, pattern: string) =>
     req(`/db/redis/keys?cursor=${encodeURIComponent(cursor)}&pattern=${encodeURIComponent(pattern)}`),
   redisKey: (k: string) => req(`/db/redis/key?k=${encodeURIComponent(k)}`),
   redisDel: (keys: string[]) => req('/db/redis/del', { body: { keys } }),
+  redisSet: (key: string, value: string) => req('/db/redis/set', { body: { key, value } }),
+  redisMember: (body: any) => req('/db/redis/member', { body }),
+  redisTtl: (key: string, ttl: number) => req('/db/redis/ttl', { body: { key, ttl } }),
   redisPassword: (p: string) => req('/db/redis/password', { body: { password: p } }),
   backups: () => req('/backups'),
   createBackup: (b: any) => req('/backups', { body: b }),

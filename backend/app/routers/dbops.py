@@ -144,3 +144,63 @@ async def redis_key_del(req: Request):
     # 不记录 key 内容：业务 key 名本身可能带敏感信息，只记删了几个
     dbm.audit(req.state.cp_sub, "db:redis-del", f"{r['deleted']} 个 key")
     return r
+
+
+# ---------- 在线写入（表行 + Redis 值） ----------
+
+@router.post("/api/db/pg/{db}/row")
+async def pg_row_write(db: str, req: Request):
+    """按主键（无主键时按 ctid）更新/删除单行，或插入单行。
+
+    审计只记 库.表 + 动作 + 影响行数：字段值可能是密码、token 或业务数据，
+    抄进审计表等于又开了一份人人可读的副本。
+    """
+    body = await _body(req)
+    action = str(body.get("action") or "")
+    schema = str(body.get("schema") or "public")
+    table = str(body.get("table") or "")
+    try:
+        r = await pg_service.write_row(db, schema, table, action, body.get("key"), body.get("values"))
+        dbm.audit(req.state.cp_sub, f"db:row-{action}", f"{db}.{schema}.{table} ×{r['affected']}")
+        return r
+    except Exception as e:  # noqa: BLE001
+        dbm.audit(req.state.cp_sub, f"db:row-{action}", f"{db}.{schema}.{table}(失败: {str(e)[:120]})")
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.post("/api/db/redis/set")
+async def redis_key_set(req: Request):
+    body = await _body(req)
+    try:
+        r = await pg_service.redis_set(str(body.get("key") or ""), str(body.get("value") or ""))
+        dbm.audit(req.state.cp_sub, "db:redis-set", f"string key（TTL {'保留' if r['ttl_kept'] else '未变'}）")
+        return r
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.post("/api/db/redis/member")
+async def redis_key_member(req: Request):
+    body = await _body(req)
+    typ = str(body.get("type") or "")
+    op = str(body.get("op") or "")
+    try:
+        r = await pg_service.redis_member(
+            str(body.get("key") or ""), typ, op,
+            str(body.get("value") or ""), str(body.get("field") or ""), str(body.get("score") or ""),
+        )
+        dbm.audit(req.state.cp_sub, f"db:redis-{typ}-{op}", f"{str(body.get('key') or '')[:80]}")
+        return r
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.post("/api/db/redis/ttl")
+async def redis_key_ttl(req: Request):
+    body = await _body(req)
+    try:
+        r = await pg_service.redis_ttl(str(body.get("key") or ""), body.get("ttl"))
+        dbm.audit(req.state.cp_sub, "db:redis-ttl", f"{str(body.get('key') or '')[:80]} → {r['ttl']}s")
+        return r
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})

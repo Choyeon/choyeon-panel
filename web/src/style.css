@@ -250,6 +250,23 @@ button.cell-name { justify-content: flex-start; }
 .st.idle { color: var(--cp-idle); }
 .mono-dim { font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; font-size: var(--fs-xs); color: var(--cp-text-dim); }
 
+/* 数据浏览器（PG 行 / Redis key）用的全局类：这些元素由 NDataTable 的 columns.render
+   创建，scoped 样式落不到它们身上，只能放全局。 */
+.cp-row-click { cursor: pointer; }
+.json-chip {
+  display: inline-flex; align-items: center; padding: 1px 7px; cursor: pointer;
+  border: 1px dashed var(--cp-border, rgba(128, 128, 128, 0.3)); border-radius: var(--radius-pill);
+  background: transparent; color: var(--cp-text-dim);
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; font-size: var(--fs-2xs);
+}
+.json-chip:hover { border-style: solid; color: var(--cp-brand-soft); }
+.json-tip {
+  margin: 0; max-width: 420px; max-height: 320px; overflow: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; font-size: var(--fs-2xs);
+  white-space: pre-wrap; word-break: break-all; line-height: 1.5;
+}
+.n-data-table-tr.row-active > .n-data-table-td { background: var(--cp-selected) !important; }
+
 /* 区块标题：全站统一（表格分组、卡片头、设置区块） */
 .section-title {
   display: inline-flex;

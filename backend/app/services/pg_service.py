@@ -20,9 +20,14 @@ def _quote_pass(p: str) -> str:
 
 
 PSQL_BASE = "psql -X -A -t -v ON_ERROR_STOP=1"
+# standard_conforming_strings=on 必须由服务端保证：关掉时反斜杠参与转义，
+# \' 就能提前结束字符串，_sql_lit 的双写单引号挡不住。走 PGOPTIONS 而不是
+# 在脚本里 `SET ...;`——psql 会把这条 utility 语句的命令标签 "SET" 打到 stdout，
+# 混进 RETURNING 的结果里，实测让 affected 多算 1 行、让"没匹配到行"变成假成功。
+PGOPTS = "PGOPTIONS='-c standard_conforming_strings=on' "
 
 
-async def psql(sql: str, db: str | None = None) -> str:
+async def psql(sql: str, db: str | None = None, quiet: bool = False) -> str:
     """执行 SQL，返回 stdout。db 必须由调用方先过 is_ident 校验。
 
     ON_ERROR_STOP=1 是这里的关键：psql 默认对每条语句独立报错但整体退出码仍是 0，
@@ -30,8 +35,12 @@ async def psql(sql: str, db: str | None = None) -> str:
     返回码 0、stdout 只有 "1\\n2"、ERROR 只在 stderr——面板因此把
     "drop_role 目标不存在""SQL 控制台中途报错"一律显示为成功（假成功）。
     加上之后出错语句之后的内容不再执行，退出码 3，错误能真正上抛。
+
+    quiet=True 只给写入路径用：`-t` 不抑制命令标签，实测
+    `UPDATE ... RETURNING 1` 未命中时 stdout 是 "UPDATE 0"，按行数统计影响条数
+    会得出 1，把"没改到任何行"报成成功。加 `-q` 后只剩 RETURNING 的真实行。
     """
-    base = PSQL_BASE + (f" -d {db}" if db else "")
+    base = PGOPTS + PSQL_BASE + (" -q" if quiet else "") + (f" -d {db}" if db else "")
     proc = await asyncio.create_subprocess_exec(
         "su", "-s", "/bin/sh", "postgres", "-c", base,
         stdin=asyncio.subprocess.PIPE,
@@ -251,31 +260,179 @@ async def list_tables(db: str) -> list:
     ), db=db)
 
 
-async def table_data(db: str, schema: str, table: str, page: int, size: int) -> dict:
+CTID_RE = re.compile(r"^\(\d+,\d+\)$")
+SYSTEM_SCHEMAS = ("pg_catalog", "information_schema")
+MAX_CELL_CHARS = 4 * 1024 * 1024
+
+
+def _q(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _sql_lit(v) -> str:
+    """前端标量 → SQL 字面量。
+
+    只有两种形态：None → NULL，其余 → 单引号字面量（' 翻倍）。写入语句前会
+    `SET standard_conforming_strings = on`，反斜杠因此不参与转义，这是本函数
+    安全的前提（否则 \' 就能提前结束字面量）。Postgres 把未知类型的字面量按
+    目标列类型隐式转换，所以 int/bool/jsonb/timestamp/数组都走同一条路径。
+    """
+    if v is None:
+        return "NULL"
+    s = v if isinstance(v, str) else str(v)
+    if "\x00" in s:
+        raise RuntimeError("值中包含空字符（NUL），Postgres 不允许写入")
+    if len(s) > MAX_CELL_CHARS:
+        raise RuntimeError(f"单个值超过 {MAX_CELL_CHARS // 1048576}MB 上限")
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _count_affected(out: str) -> int:
+    return len([l for l in (out or "").split("\n") if l != ""])
+
+
+def _row_predicate(key, pk: list) -> str:
+    """把前端回传的行标识变成 WHERE 条件。
+
+    优先主键；没有主键的表退到 ctid（table_data 每行都带 _ctid）。ctid 在
+    VACUUM FULL / 分区表上会失效，所以只作为兜底，且严格校验格式。
+    """
+    if not isinstance(key, dict) or not key:
+        raise RuntimeError("缺少行定位条件")
+    if "_ctid" in key:
+        c = str(key["_ctid"])
+        if not CTID_RE.match(c):
+            raise RuntimeError("ctid 格式不合法")
+        return f"ctid = '{c}'::tid"
+    if not pk:
+        raise RuntimeError("该表没有主键，请改用 SQL 控制台")
+    if sorted(str(k) for k in key) != sorted(pk):
+        raise RuntimeError("定位条件必须给出完整主键列")
+    parts = []
+    for c in pk:
+        v = key[c]
+        parts.append(f"{_q(c)} IS NULL" if v is None else f"{_q(c)} = {_sql_lit(v)}")
+    return " AND ".join(parts)
+
+
+def _clean_values(values, allowed: dict) -> dict:
+    if not isinstance(values, dict) or not values:
+        raise RuntimeError("没有要提交的字段")
+    if len(values) > 200:
+        raise RuntimeError("一次提交的字段过多（上限 200）")
+    out: dict = {}
+    for k, v in values.items():
+        if k not in allowed:
+            raise RuntimeError(f"未知列：{str(k)[:64]}")
+        out[str(k)] = None if v is None else (v if isinstance(v, str) else str(v))
+    return out
+
+
+async def table_meta(db: str, schema: str, table: str) -> dict:
+    """列元数据 + 主键。既给前端渲染只读详情/编辑表单，也是写入时的列白名单。"""
     for v, what in ((db, "数据库"), (schema, "schema"), (table, "表")):
         if not is_ident(v):
             raise RuntimeError(f"{what}名不合法（仅支持小写字母/数字/下划线）")
+    cols = await psql_json(_json_agg(
+        "SELECT ordinal_position::int AS pos, column_name::text AS name,\n"
+        "        data_type::text AS type, udt_name::text AS udt,\n"
+        "        is_nullable='YES' AS nullable, coalesce(column_default,'') AS \"default\",\n"
+        "        (coalesce(column_default,'') LIKE 'nextval%'\n"
+        "          OR coalesce(is_identity,'NO')='YES'\n"
+        "          OR coalesce(identity_generation,'')<>'') AS auto\n"
+        f"   FROM information_schema.columns\n"
+        f"  WHERE table_schema='{schema}' AND table_name='{table}'",
+        "t.pos",
+    ), db=db)
+    pk = await psql_json(_json_agg(
+        "SELECT a.attname::text AS name, k.ord::int AS ord\n"
+        "   FROM pg_index i,\n"
+        "        unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord),\n"
+        "        pg_attribute a\n"
+        f"  WHERE i.indrelid = '{_q(schema)}.{_q(table)}'::regclass AND i.indisprimary\n"
+        "    AND a.attrelid = i.indrelid AND a.attnum = k.attnum",
+        "t.ord",
+    ), db=db)
+    return {
+        "columns": [c for c in cols if isinstance(c, dict)],
+        "pk": [p.get("name") for p in pk if isinstance(p, dict) and p.get("name")],
+    }
+
+
+async def write_row(db: str, schema: str, table: str, action: str, key, values) -> dict:
+    """按主键（或 ctid）更新/删除单行，或插入单行。
+
+    列名一律先过 table_meta 白名单再双引号包裹，值只走 _sql_lit 字面量，
+    标识符本身由 is_ident 把关——三条路都封住才敢让浏览器直接写业务库。
+    """
+    if schema in SYSTEM_SCHEMAS or table.startswith("pg_"):
+        raise RuntimeError("禁止直接修改系统表")
+    meta = await table_meta(db, schema, table)
+    allowed = {c["name"]: c for c in meta["columns"] if c.get("name")}
+    if not allowed:
+        raise RuntimeError("读不到这张表的列信息")
+    quoted = f"{_q(schema)}.{_q(table)}"
+
+    if action == "insert":
+        items = _clean_values(values, allowed)
+        col_sql = ", ".join(_q(k) for k in items)
+        val_sql = ", ".join(_sql_lit(v) for v in items.values())
+        ret = ", ".join(f"{_q(c)}::text" for c in meta["pk"]) or "ctid::text"
+        out = await psql(f"INSERT INTO {quoted} ({col_sql}) VALUES ({val_sql}) RETURNING {ret};", db, quiet=True)
+        first = (out or "").split("\n")[0]
+        got = first.split("|") if first else []
+        newpk = dict(zip(meta["pk"], got)) if meta["pk"] and len(got) == len(meta["pk"]) else {}
+        return {"affected": 1, "pk": newpk}
+
+    pred = _row_predicate(key, meta["pk"])
+    if action == "update":
+        sets = ", ".join(f"{_q(k)} = {_sql_lit(v)}" for k, v in _clean_values(values, allowed).items())
+        n = _count_affected(await psql(f"UPDATE {quoted} SET {sets} WHERE {pred} RETURNING 1;", db, quiet=True))
+        if n == 0:
+            raise RuntimeError("没有匹配到该行（内容可能已被改动），请刷新后重试")
+        return {"affected": n}
+    if action == "delete":
+        n = _count_affected(await psql(f"DELETE FROM {quoted} WHERE {pred} RETURNING 1;", db, quiet=True))
+        if n == 0:
+            raise RuntimeError("没有匹配到该行，可能已被删除")
+        return {"affected": n}
+    raise RuntimeError("未知操作")
+
+
+async def table_data(db: str, schema: str, table: str, page: int, size: int) -> dict:
+    meta = await table_meta(db, schema, table)
+    names = [c["name"] for c in meta["columns"] if c.get("name")]
+    if not names:
+        raise RuntimeError("读不到这张表的列信息")
     size = max(1, min(size, 200))
     page = max(1, page)
     quoted = f'"{schema}"."{table}"'
     total_s = await psql(f"SELECT count(*)::text FROM {quoted}", db)
-    cols_raw = await psql(
-        "SELECT coalesce(json_agg(column_name ORDER BY ordinal_position)::text,'[]')\n"
-        f"  FROM information_schema.columns WHERE table_schema='{schema}' AND table_name='{table}'",
-        db,
-    )
+    # _ctid 随行返回：无主键的表靠它定位要改哪一行，前端只把它当标识、不渲染成列。
+    # 有主键时显式 ORDER BY：不带排序的 LIMIT/OFFSET 翻页可能重复或漏行。
+    order = f" ORDER BY {', '.join(_q(c) for c in meta['pk'])}" if meta["pk"] else ""
     rows_raw = await psql(
         "SELECT coalesce(json_agg(row_to_json(t))::text,'[]'::text) FROM ("
-        f"SELECT * FROM {quoted} LIMIT {size} OFFSET {(page - 1) * size}) t",
+        f"SELECT ctid::text AS _ctid, * FROM {quoted}{order} LIMIT {size} OFFSET {(page - 1) * size}) t",
         db,
     )
     return {
-        "columns": json.loads(cols_raw or "[]"),
+        "columns": names,
+        "cols": meta["columns"],
+        "pk": meta["pk"],
         "rows": json.loads(rows_raw or "[]"),
         "total": int(total_s or 0),
         "page": page,
         "size": size,
     }
+
+
+# redis-cli 的错误回应（raw 模式）没有统一前缀，只能按 Redis 的错误 token 认。
+_RERR_RE = re.compile(
+    r"^(?:\(\w+\)\s*)?(?:ERR\b|WRONGTYPE\b|NOAUTH\b|WRONGPASS\b|NOPERM\b|MOVED\b|ASK\b"
+    r"|CLUSTERDOWN\b|BADDB\b|BADFORMAT\b|WRONGNUMTYPE\b|INVALIDOBJ\b|BUSYKEY\b|NOSCRIPT\b"
+    r"|MASTERDOWN\b|LOADING\b|READONLY\b|DENYS\b|OOM\b)"
+)
 
 
 async def _rcli(args: list) -> str:
@@ -287,13 +444,50 @@ async def _rcli(args: list) -> str:
     out = r["out"] or ""
     if r["code"] != 0:
         raise RuntimeError(out or f"redis-cli 执行失败（code {r['code']}，未安装或 Redis 未运行）")
-    if out.startswith(("NOAUTH", "WRONGPASS", "(error)")):
+    if _RERR_RE.match(out):
+        # redis-cli 出错时退出码仍是 0（实测 WRONGTYPE/NOAUTH 都返回 0），
+        # 只能按错误回应的首 token 判；不判就会把 "(error)" 文本当数据返回给上层，
+        # 于是 HSET 失败被当成成功、错误正文被当成 key 的值显示出来。
         raise RuntimeError(out)
     return out
 
 
 def _lines(out: str) -> list:
     return [l for l in out.split("\n") if l != ""]
+
+
+async def _rcli_exact(args: list) -> str:
+    """与 _rcli 相同的调用，但保留 stdout 原样（只去掉 redis-cli 自己补的结尾换行）。
+
+    util.run 会 strip() 输出：编辑 string key 的表单若用 strip 过的值回填，
+    用户点一次「保存」就把值末尾的换行静默吃掉了——读来改数据必须用原始字节。
+    """
+    env = dict(os.environ)
+    p = redis_password()
+    if p:
+        env["REDISCLI_AUTH"] = p
+    proc = await asyncio.create_subprocess_exec(
+        "redis-cli", "--no-auth-warning", *args, env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+    except TimeoutError:
+        kill_group(proc)
+        raise RuntimeError("redis-cli 超时") from None
+    text = out.decode(errors="replace")
+    if proc.returncode or text.startswith(("NOAUTH", "WRONGPASS", "(error)")):
+        raise RuntimeError(text.strip() or "redis-cli 执行失败（未安装或 Redis 未运行）")
+    return text[:-1] if text.endswith("\n") else text
+
+
+def _check_key(k: str) -> str:
+    k = str(k or "")
+    if not k or len(k) > 512:
+        raise RuntimeError("key 不合法")
+    return k
 
 
 async def redis_scan(cursor: str = "0", pattern: str = "*", count: int = 200) -> dict:
@@ -310,8 +504,7 @@ def _pairs(flat: list) -> list:
 
 
 async def redis_key(k: str) -> dict:
-    if not k or len(k) > 512:
-        raise RuntimeError("key 不合法")
+    k = _check_key(k)
     ktype = (await _rcli(["TYPE", k])).strip()
     ttl = (await _rcli(["TTL", k])).strip()
     mem = (await _rcli(["MEMORY", "USAGE", k])).strip()
@@ -319,7 +512,7 @@ async def redis_key(k: str) -> dict:
     if ktype == "string":
         slen = int(await _rcli(["STRLEN", k]) or 0)
         truncated = slen > 65536
-        data: object = await _rcli(["GETRANGE", k, "0", "65535"]) if truncated else await _rcli(["GET", k])
+        data: object = await _rcli(["GETRANGE", k, "0", "65535"]) if truncated else await _rcli_exact(["GET", k])
     elif ktype == "hash":
         n = int(await _rcli(["HLEN", k]) or 0)
         truncated = n > 200
@@ -358,3 +551,69 @@ async def redis_del(keys: list) -> dict:
         if out.strip().startswith("1"):
             deleted += 1
     return {"deleted": deleted}
+
+
+# ---------- Redis 在线写入 ----------
+
+async def redis_set(k: str, value: str) -> dict:
+    """覆盖 string 值，并保留原来的过期时间。
+
+    SET 会把 key 变成永不过期，照直写等于顺手改掉了 TTL；先读 PTTL 再补
+    PEXPIRE（不用 SET KEEPTTL，兼容 Redis 5）。
+    """
+    k = _check_key(k)
+    if len(value) > MAX_CELL_CHARS:
+        raise RuntimeError(f"值超过 {MAX_CELL_CHARS // 1048576}MB 上限")
+    # SET 会无条件覆盖 key：不先确认类型，用户在 string 编辑器里点一次保存就能把
+    # 一个 hash/list 整个换成字符串。
+    ktype = (await _rcli(["TYPE", k])).strip()
+    if ktype not in ("string", "none"):
+        raise RuntimeError(f"该 key 是 {ktype}，不能用字符串编辑器覆盖")
+    pttl = (await _rcli(["PTTL", k])).strip()
+    keep = int(pttl) if pttl.lstrip("-").isdigit() and int(pttl) > 0 else 0
+    await _rcli(["SET", k, value])
+    if keep:
+        await _rcli(["PEXPIRE", k, str(keep)])
+    return {"ok": True, "ttl_kept": bool(keep)}
+
+
+async def redis_member(k: str, typ: str, op: str, value: str = "", field: str = "", score: str = "") -> dict:
+    """集合类 key 的条目增删：hash 按 field，其余按 value 本身。"""
+    k = _check_key(k)
+    typ = str(typ or "").lower()
+    op = str(op or "").lower()
+    if op not in ("add", "del"):
+        raise RuntimeError("未知操作")
+    if typ not in ("hash", "list", "set", "zset"):
+        raise RuntimeError(f"{typ or '该'}类型不支持在线增删条目")
+    if typ == "hash":
+        if not field:
+            raise RuntimeError("缺少 field")
+        args = ["HSET", k, field, value] if op == "add" else ["HDEL", k, field]
+    elif typ == "list":
+        args = ["RPUSH", k, value] if op == "add" else ["LREM", k, "0", value]
+    elif typ == "set":
+        args = ["SADD", k, value] if op == "add" else ["SREM", k, value]
+    else:
+        s = str(score or "").strip()
+        if op == "add" and not re.match(r"^-?\d+(\.\d+)?$", s):
+            raise RuntimeError("score 必须是数字")
+        args = ["ZADD", k, s, value] if op == "add" else ["ZREM", k, value]
+    out = (await _rcli(args)).strip()
+    n = int(out) if out.lstrip("-").isdigit() else None
+    if op == "del" and n == 0:
+        raise RuntimeError("没有找到要删除的条目（值需完全一致）")
+    return {"ok": True, "n": n}
+
+
+async def redis_ttl(k: str, ttl) -> dict:
+    k = _check_key(k)
+    try:
+        t = int(str(ttl).strip())
+    except ValueError:
+        raise RuntimeError("TTL 必须是整数秒，-1 表示不过期") from None
+    if t < -1 or t > 31536000000:
+        raise RuntimeError("TTL 范围：-1（永久）到 1000 年")
+    # EXPIRE 传负数会直接删 key，永久只能走 PERSIST
+    out = (await _rcli(["PERSIST", k] if t == -1 else ["EXPIRE", k, str(t)])).strip()
+    return {"ok": True, "applied": out.startswith("1"), "ttl": t}

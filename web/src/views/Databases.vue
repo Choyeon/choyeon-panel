@@ -3,13 +3,15 @@ import { computed, onMounted, ref, h } from 'vue';
 import {
   NTabs, NTabPane, NDataTable, NSpace, NModal, NInput, NForm, NFormItem,
   NPopconfirm, NCard, NText, NTag, useMessage, NIcon, NGrid, NGridItem, NSkeleton,
-  NSelect, NPagination,
+  NSelect, NPagination, NTooltip,
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { api } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
+import RowEditor from '../components/RowEditor.vue';
+import RedisKeyPanel from '../components/RedisKeyPanel.vue';
 
 const msg = useMessage();
 const dbs = ref<any[]>([]);
@@ -176,10 +178,15 @@ const tablesBusy = ref(false);
 const curTable = ref<any>(null);
 const tRows = ref<any[]>([]);
 const tCols = ref<string[]>([]);
+const tColMeta = ref<any[]>([]);
+const tPk = ref<string[]>([]);
 const tTotal = ref(0);
 const tPage = ref(1);
 const tSize = ref(50);
 const tBusy = ref(false);
+const showRow = ref(false);
+const rowModel = ref<any>(null);
+const rowInsert = ref(false);
 
 const dbOptions = computed(() => (Array.isArray(dbs.value) ? dbs.value : []).map((d: any) => ({ label: d.name, value: d.name })));
 const browseCols: any[] = [
@@ -188,33 +195,73 @@ const browseCols: any[] = [
   { title: '大小', key: 'size', width: 100, render: (r: any) => h('span', { class: 'vchip' }, r.size ?? '—') },
   { title: '', key: 'go', width: 80, render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => pickTable(r) }, () => '查看数据') },
 ];
-const dataCols = computed<any[]>(() => tCols.value.map((c: string) => ({
-  title: c, key: c, ellipsis: { tooltip: false }, width: 180,
-  render: (r: any) => fmtCell(r[c]),
-})));
-const pairCols: any[] = [
-  { title: 'Field / Member', key: 'field', ellipsis: { tooltip: false } },
-  { title: 'Value / Score', key: 'value', ellipsis: { tooltip: false } },
-];
-const idxCols: any[] = [
-  { title: '#', key: 'i', width: 70 },
-  { title: 'Value', key: 'v', ellipsis: { tooltip: false } },
-];
+const dataCols = computed<any[]>(() => [
+  {
+    title: '行', key: 'go', width: 78, fixed: 'left' as const, className: 'row-ops',
+    render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => openRow(r, false) }, () => '查看'),
+  },
+  ...tCols.value.map((c: string) => ({
+    title: c, key: c, ellipsis: { tooltip: false }, width: 180,
+    render: (r: any) => fmtCell(r[c], c),
+  })),
+]);
 const keyCols: any[] = [
   { type: 'selection' },
   { title: 'Key', key: 'k', render: (r: any) => h('span', { class: 'mono-dim', style: 'word-break:break-all' }, r.k) },
+  {
+    title: '', key: 'go', width: 66, className: 'row-ops',
+    render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => inspectKey(r.k) }, () => '查看'),
+  },
 ];
 
-function fmtCell(v: any) {
+function jsonBrief(v: any) {
+  if (Array.isArray(v)) return `Array(${v.length})`;
+  return `{ ${Object.keys(v || {}).length} 项 }`;
+}
+
+function fmtCell(v: any, col = '') {
   if (v === null || v === undefined) return h('span', { class: 'cell-sub' }, 'NULL');
-  if (typeof v === 'object') return h('span', { class: 'mono-dim', style: 'font-size:var(--fs-2xs)' }, JSON.stringify(v));
+  if (typeof v === 'object') {
+    // 字典/数组在 180px 网格里只会糊成一串引号：单元格给摘要芯片，
+    // 悬停看格式化 JSON，点击直接打开行详情（那里有完整的树 + 编辑）。
+    return h(NTooltip, { trigger: 'hover', placement: 'top' }, {
+      trigger: () =>
+        h('button', {
+          type: 'button', class: 'json-chip', 'aria-label': `查看 ${col} 列的完整内容`,
+          onClick: (e: MouseEvent) => { e.stopPropagation(); },
+        }, jsonBrief(v)),
+      default: () => h('pre', { class: 'json-tip' }, JSON.stringify(v, null, 2).slice(0, 3000)),
+    });
+  }
   return String(v);
+}
+
+/** 整行可点开详情，但操作列/勾选框的点击要放行，否则点删除会先弹抽屉。 */
+function rowProps(r: any) {
+  return {
+    class: 'cp-row-click',
+    onClick: (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.closest('.row-ops') || t.closest('input') || t.closest('.n-checkbox'))) return;
+      openRow(r, false);
+    },
+  };
+}
+function keyRowProps(r: any) {
+  return { class: 'cp-row-click', onClick: () => inspectKey(r.k) };
+}
+function openRow(r: any, insert: boolean) {
+  rowInsert.value = insert;
+  rowModel.value = insert ? null : r;
+  showRow.value = true;
 }
 
 async function loadTables() {
   curTable.value = null;
   tRows.value = [];
   tCols.value = [];
+  tColMeta.value = [];
+  tPk.value = [];
   if (!brDb.value) return;
   tablesBusy.value = true;
   try {
@@ -237,6 +284,8 @@ async function loadTableData() {
   try {
     const r = await api.pgTable(brDb.value, curTable.value.schema, curTable.value.name, tPage.value, tSize.value);
     tCols.value = r.columns || [];
+    tColMeta.value = r.cols || [];
+    tPk.value = r.pk || [];
     tRows.value = r.rows || [];
     tTotal.value = r.total || 0;
   } catch (e: any) {
@@ -259,15 +308,6 @@ const rBusy = ref(false);
 const rDetail = ref<any>(null);
 const rSel = ref<string[]>([]);
 const rDetailBusy = ref(false);
-const jsonValue = computed(() => {
-  const v = rDetail.value?.value;
-  if (rDetail.value?.type !== 'string' || typeof v !== 'string') return '';
-  try {
-    return JSON.stringify(JSON.parse(v), null, 2);
-  } catch {
-    return '';
-  }
-});
 
 async function scanKeys(more = false) {
   rBusy.value = true;
@@ -293,6 +333,9 @@ async function inspectKey(k: string) {
   } finally {
     rDetailBusy.value = false;
   }
+}
+function refreshDetail() {
+  if (rDetail.value?.key) void inspectKey(rDetail.value.key);
 }
 async function delKeys(keys: string[]) {
   try {
@@ -370,11 +413,12 @@ async function delKeys(keys: string[]) {
               <NSpace align="center" :size="10" wrap>
                 <NButton size="tiny" tertiary :icon="ico('ArrowBackOutline')" @click="curTable = null">表列表</NButton>
                 <NTag size="small" :bordered="false" type="info">{{ curTable.schema }}.{{ curTable.name }}</NTag>
-                <NText depth="3" style="font-size: var(--fs-xs)">{{ tTotal }} 行 · {{ tCols.length }} 列</NText>
+                <NText depth="3" style="font-size: var(--fs-xs)">{{ tTotal }} 行 · {{ tCols.length }} 列 · 点击任意行查看/编辑</NText>
                 <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" @click="loadTableData">刷新</NButton>
+                <NButton size="tiny" type="primary" tertiary :icon="ico('AddOutline')" :disabled="!tColMeta.length" @click="openRow(null, true)">新增行</NButton>
                 <NPagination v-model:page="tPage" :page-count="Math.max(1, Math.ceil(tTotal / tSize))" :page-size="tSize" size="small" :show-quick-jumper="false" @update:page="onPage" />
               </NSpace>
-              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" max-height="calc(100vh - 430px)" :row-key="(r: any) => r" :scroll-x="Math.max(560, tCols.length * 180)">
+              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" max-height="calc(100vh - 430px)" :row-key="(r: any) => r._ctid" :row-props="rowProps" :scroll-x="Math.max(560, 78 + tCols.length * 180)">
                 <template #empty><EmptyBox text="这张表没有数据" /></template>
               </NDataTable>
             </template>
@@ -404,47 +448,22 @@ async function delKeys(keys: string[]) {
                   :row-key="(r: any) => r.k"
                   v-model:checked-row-keys="rSel"
                   :loading="rBusy"
+                  :row-props="keyRowProps"
+                  :row-class-name="(r: any) => (r.k === rDetail?.key ? 'row-active' : '')"
                   :max-height="380"
                 >
                   <template #empty><EmptyBox :text="rBusy ? '扫描中…' : '没有匹配的 key（SCAN 从 0 开始，可换模式再试）'" /></template>
                 </NDataTable>
               </div>
-              <NCard v-if="rDetail" size="small" class="rk-detail" :title="rDetail.key">
-                <template #header-extra>
-                  <NSpace :size="6">
-                    <NTag size="tiny" :bordered="false" type="warning">{{ rDetail.type }}</NTag>
-                    <NTag size="tiny" :bordered="false">{{ rDetail.ttl === -1 ? '永不过期' : rDetail.ttl === -2 || rDetail.ttl == null ? '—' : `${rDetail.ttl}s 剩余` }}</NTag>
-                    <NTag size="tiny" :bordered="false">{{ rDetail.mem == null ? '—' : `${rDetail.mem} B` }}</NTag>
-                  </NSpace>
-                </template>
-                <NSpace vertical :size="8">
-                  <NText v-if="rDetail.truncated" depth="3" style="font-size: var(--fs-xs)">内容过长，仅显示前部分（截断）</NText>
-                  <pre v-if="jsonValue" class="mono-pre">{{ jsonValue }}</pre>
-                  <pre v-else-if="rDetail.type === 'string'" class="mono-pre">{{ rDetail.value }}</pre>
-                  <NDataTable
-                    v-else-if="rDetail.type === 'hash' || rDetail.type === 'zset'"
-                    size="small" :bordered="false" :max-height="280"
-                    :columns="pairCols"
-                    :data="rDetail.value || []" :row-key="(r: any) => r"
-                  />
-                  <NDataTable
-                    v-else-if="Array.isArray(rDetail.value)"
-                    size="small" :bordered="false" :max-height="280"
-                    :columns="idxCols"
-                    :data="(rDetail.value || []).map((v: any, i: number) => ({ i, v }))" :row-key="(r: any) => r.i"
-                  />
-                  <NText v-else depth="3" style="font-size: var(--fs-xs)">该类型暂不支持在线查看（{{ rDetail.type }}）</NText>
-                  <NSpace justify="end">
-                    <NPopconfirm @positive-click="delKeys([rDetail.key])">
-                      <template #trigger>
-                        <NButton size="tiny" tertiary type="error" :icon="ico('TrashOutline')">删除此 key</NButton>
-                      </template>
-                      UNLINK {{ rDetail.key }}？
-                    </NPopconfirm>
-                  </NSpace>
-                </NSpace>
-              </NCard>
-              <NText v-else-if="rKeys.length" depth="3" style="font-size: var(--fs-xs); align-self: center">点击左侧 key 查看内容</NText>
+              <RedisKeyPanel
+                v-if="rDetail" :detail="rDetail" :busy="rDetailBusy"
+                @refresh="refreshDetail" @deleted="(k: string) => delKeys([k])"
+              />
+              <NSkeleton v-else-if="rDetailBusy" height="220px" class="cp-shimmer" style="flex: 1 1 340px; border-radius: var(--radius-lg)" />
+              <div v-else-if="rKeys.length" class="rk-hint">
+                <NIcon :component="icons.EyeOutline" :size="18" color="var(--cp-text-mute)" />
+                <span>点击左侧任意 key 查看并编辑内容</span>
+              </div>
             </div>
           </NSpace>
         </NTabPane>
@@ -501,6 +520,13 @@ async function delKeys(keys: string[]) {
         </NSpace>
       </NSpace>
     </NModal>
+
+    <RowEditor
+      v-if="brDb && curTable" v-model:show="showRow" :db="brDb"
+      :schema="curTable.schema" :table="curTable.name"
+      :cols="tColMeta" :pk="tPk" :row="rowModel" :insert="rowInsert"
+      @saved="loadTableData"
+    />
   </div>
 </template>
 
@@ -520,4 +546,13 @@ async function delKeys(keys: string[]) {
 .rbr-flex { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
 .rk-list { flex: 1 1 320px; min-width: 0; }
 .rk-detail { flex: 1 1 340px; min-width: 0; }
+/* 占位提示自己占住详情列的宽度：以前它是个裸 NText，被 flex 挤到容器外沿、文字裁半截 */
+.rk-hint {
+  flex: 1 1 340px; min-width: 0; align-self: stretch;
+  display: flex; align-items: center; justify-content: center; gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+  border: 1px dashed var(--cp-border, rgba(128, 128, 128, 0.28));
+  border-radius: var(--radius-lg, 12px);
+  color: var(--cp-text-mute); font-size: var(--fs-xs);
+}
 </style>
