@@ -55,13 +55,13 @@ const dbCols: any[] = [
         h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name), h('div', { class: 'cell-sub' }, `owner: ${r.owner}`)]),
       ]),
   },
-  { title: '大小', key: 'size', width: 100, render: (r: any) => h('span', { class: 'mono-dim' }, r.size) },
+  { title: '大小', key: 'size', width: 96, render: (r: any) => h('span', { class: 'mono-dim' }, r.size) },
   {
-    title: '连接数', key: 'conns', width: 90,
+    title: '连接数', key: 'conns', width: 88,
     render: (r: any) => h('span', { class: 'vchip' }, `${r.conns} conn`),
   },
   {
-    title: '操作', key: 'ops', width: 80,
+    title: '操作', key: 'ops', width: 64,
     render: (r: any) =>
       h(NPopconfirm, { onPositiveClick: () => manage('dropDb', r.name) }, {
         trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除数据库 ${r.name}`, 'aria-label': `删除数据库 ${r.name}` }, { default: () => '' }),
@@ -78,10 +78,10 @@ const roleCols: any[] = [
         h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name)]),
       ]),
   },
-  { title: '登录', key: 'login', width: 90, render: (r: any) => h('span', { class: 'st ' + (r.login ? 'ok' : 'idle') }, [h('span', { class: 'dot ' + (r.login ? 'ok' : 'idle') }), r.login ? '可登录' : '仅组']) },
-  { title: 'Superuser', key: 'super', width: 100, render: (r: any) => (r.super ? h(NTag, { size: 'tiny', bordered: false, type: 'warning' }, () => 'SUPER') : h('span', { class: 'cell-sub' }, '—')) },
+  { title: '登录', key: 'login', width: 88, render: (r: any) => h('span', { class: 'st ' + (r.login ? 'ok' : 'idle') }, [h('span', { class: 'dot ' + (r.login ? 'ok' : 'idle') }), r.login ? '可登录' : '仅组']) },
+  { title: 'Superuser', key: 'super', width: 92, render: (r: any) => (r.super ? h(NTag, { size: 'tiny', bordered: false, type: 'warning' }, () => 'SUPER') : h('span', { class: 'cell-sub' }, '—')) },
   {
-    title: '操作', key: 'ops', width: 150,
+    title: '操作', key: 'ops', width: 136,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('PencilOutline'), onClick: () => openPwd(r.name) }, () => '改密'),
@@ -325,7 +325,7 @@ async function delKeys(keys: string[]) {
                 <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="showDb = true">新建数据库</NButton>
               </NSpace>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :scroll-x="640" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []">
+            <NDataTable size="small" :bordered="false" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []">
               <template #empty><EmptyBox text="无法读取数据库列表（PostgreSQL 未运行？）" /></template>
             </NDataTable>
 
@@ -333,7 +333,7 @@ async function delKeys(keys: string[]) {
               <span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-warn)" /> 用户 / 角色</span>
               <NButton size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :scroll-x="620" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320" />
+            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320" />
           </NSpace>
         </NTabPane>
 
@@ -360,7 +360,7 @@ async function delKeys(keys: string[]) {
               <NSelect v-model:value="brDb" :options="dbOptions" size="small" style="width: 200px" placeholder="选择数据库" aria-label="浏览的数据库" @update:value="loadTables" />
               <NText depth="3" style="font-size: var(--fs-xs)">共 {{ tables.length }} 张表</NText>
             </NSpace>
-            <NDataTable v-if="!curTable" size="small" :bordered="false" :scroll-x="640" :columns="browseCols" :data="tables" :loading="tablesBusy" max-height="calc(100vh - 400px)">
+            <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" max-height="calc(100vh - 400px)">
               <template #empty><EmptyBox :text="brDb ? (tablesBusy ? '加载中…' : '这个库里没有表') : '先选择一个数据库'" /></template>
             </NDataTable>
             <template v-else>
@@ -371,7 +371,7 @@ async function delKeys(keys: string[]) {
                 <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" @click="loadTableData">刷新</NButton>
                 <NPagination v-model:page="tPage" :page-count="Math.max(1, Math.ceil(tTotal / tSize))" :page-size="tSize" size="small" :show-quick-jumper="false" @update:page="onPage" />
               </NSpace>
-              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" :scroll-x="Math.max(600, tCols.length * 180)" max-height="calc(100vh - 430px)" :row-key="(r: any) => r">
+              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" max-height="calc(100vh - 430px)" :row-key="(r: any) => r">
                 <template #empty><EmptyBox text="这张表没有数据" /></template>
               </NDataTable>
             </template>
@@ -392,7 +392,7 @@ async function delKeys(keys: string[]) {
                 删除这 {{ rSel.length }} 个 key？UNLINK 异步回收，不可恢复。
               </NPopconfirm>
             </NSpace>
-            <NSpace :size="12" align="start" wrap>
+            <div class="rbr-flex">
               <div class="rk-list">
                 <NDataTable
                   size="small" :bordered="false"
@@ -402,12 +402,11 @@ async function delKeys(keys: string[]) {
                   v-model:checked-row-keys="rSel"
                   :loading="rBusy"
                   :max-height="380"
-                  style="width: 420px"
                 >
                   <template #empty><EmptyBox :text="rBusy ? '扫描中…' : '没有匹配的 key（SCAN 从 0 开始，可换模式再试）'" /></template>
                 </NDataTable>
               </div>
-              <NCard v-if="rDetail" size="small" style="flex: 1; min-width: 320px; max-width: 640px" :title="rDetail.key">
+              <NCard v-if="rDetail" size="small" class="rk-detail" :title="rDetail.key">
                 <template #header-extra>
                   <NSpace :size="6">
                     <NTag size="tiny" :bordered="false" type="warning">{{ rDetail.type }}</NTag>
@@ -443,7 +442,7 @@ async function delKeys(keys: string[]) {
                 </NSpace>
               </NCard>
               <NText v-else-if="rKeys.length" depth="3" style="font-size: var(--fs-xs); align-self: center">点击左侧 key 查看内容</NText>
-            </NSpace>
+            </div>
           </NSpace>
         </NTabPane>
 
@@ -514,4 +513,8 @@ async function delKeys(keys: string[]) {
   font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-xs);
   white-space: pre-wrap; word-break: break-all; color: var(--cp-text);
 }
+/* 窄容器（侧栏展开/窗口收窄）下 key 列表与详情上下堆叠，避免横向溢出裁切 */
+.rbr-flex { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+.rk-list { flex: 1 1 320px; min-width: 0; }
+.rk-detail { flex: 1 1 340px; min-width: 0; }
 </style>
