@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import {
   NConfigProvider, NMessageProvider, NDialogProvider, NNotificationProvider,
   zhCN, dateZhCN, darkTheme,
@@ -7,15 +7,18 @@ import {
 import { darkOverrides, lightOverrides } from './theme';
 import Shell from './Shell.vue';
 
-type Mode = 'dark' | 'light' | 'auto';
+type Mode = 'dark' | 'light';
 const STORE_KEY = 'cp_theme';
 
-const mode = ref<Mode>((localStorage.getItem(STORE_KEY) as Mode) || 'auto');
-const systemDark = ref(window.matchMedia('(prefers-color-scheme: dark)').matches);
-let mq: MediaQueryList | null = null;
+function initialMode(): Mode {
+  const saved = localStorage.getItem(STORE_KEY);
+  if (saved === 'dark' || saved === 'light') return saved;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
 
-const isDark = computed(() => (mode.value === 'auto' ? systemDark.value : mode.value === 'dark'));
+const mode = ref<Mode>(initialMode());
 
+const isDark = computed(() => mode.value === 'dark');
 const themeOverrides = computed(() => (isDark.value ? darkOverrides : lightOverrides));
 
 function apply() {
@@ -30,17 +33,7 @@ function setMode(m: Mode) {
   apply();
 }
 
-function onSystemChange(e: MediaQueryListEvent) {
-  systemDark.value = e.matches;
-  if (mode.value === 'auto') apply();
-}
-
-onMounted(() => {
-  apply();
-  mq = window.matchMedia('(prefers-color-scheme: dark)');
-  mq.addEventListener('change', onSystemChange);
-});
-onBeforeUnmount(() => mq?.removeEventListener('change', onSystemChange));
+onMounted(() => apply());
 
 defineExpose({ setMode, mode });
 </script>

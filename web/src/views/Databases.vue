@@ -218,15 +218,15 @@ onMounted(load);
         <NTabPane name="redis" tab="Redis">
           <NText v-if="redis?.error" depth="3">{{ redis.error }}</NText>
           <template v-else-if="redis">
-            <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">版本</div><div class="rv">{{ redis.info?.redis_version || '—' }}</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">运行模式</div><div class="rv">{{ redis.info?.redis_mode || '—' }} / {{ redis.authed ? '面板密码' : 'redis.conf' }}</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">连接客户端</div><div class="rv">{{ redis.info?.connected_clients ?? '—' }}</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">Key 总数</div><div class="rv">{{ redis.dbsize ?? '—' }}</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">内存占用</div><div class="rv">{{ redis.info?.used_memory_human || '—' }}</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">运行时长</div><div class="rv">{{ Math.round((redis.info?.uptime_in_seconds || 0) / 3600) }} 小时</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">累计命令</div><div class="rv">{{ redis.info?.total_commands_processed ?? '—' }}</div></NCard></NGridItem>
-              <NGridItem span="4 2:2 1:1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
+            <NGrid cols="2 s:4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">版本</div><div class="rv">{{ redis.info?.redis_version || '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">运行模式</div><div class="rv">{{ redis.info?.redis_mode || '—' }} / {{ redis.authed ? '面板密码' : 'redis.conf' }}</div></NCard></NGridItem>
+              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">连接客户端</div><div class="rv">{{ redis.info?.connected_clients ?? '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">Key 总数</div><div class="rv">{{ redis.dbsize ?? '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">内存占用</div><div class="rv">{{ redis.info?.used_memory_human || '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">运行时长</div><div class="rv">{{ Math.round((redis.info?.uptime_in_seconds || 0) / 3600) }} 小时</div></NCard></NGridItem>
+              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">累计命令</div><div class="rv">{{ redis.info?.total_commands_processed ?? '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
             </NGrid>
             <NSpace align="center" style="margin-top: var(--space-4)">
               <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码（留空保存＝清除，改读 redis.conf）" style="width: 320px" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />

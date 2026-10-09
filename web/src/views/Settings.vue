@@ -138,10 +138,15 @@ const userCols: any[] = [
     title: '用户', key: 'username',
     render: (u: any) =>
       h('div', { class: 'cell-main' }, [
-        h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: u.role === 'admin' ? icons.ShieldCheckmarkOutline : icons.OptionsOutline, size: 17, color: u.role === 'admin' ? 'var(--cp-warn)' : 'var(--cp-text-mute)' }),
+        h('span', { class: 'cell-avatar' }, [
+          u.avatar
+            ? h('img', { src: u.avatar, alt: '' })
+            : h(NIcon, { component: icons.PersonCircleOutline, size: 28, color: 'var(--cp-text-mute)' }),
         ]),
-        h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, u.username), h('div', { class: 'cell-sub' }, u.created_at || '')]),
+        h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name' }, u.nickname || u.username),
+          h('div', { class: 'cell-sub' }, u.nickname ? `${u.username} · ${u.created_at || ''}` : (u.created_at || '')),
+        ]),
       ]),
   },
   { title: '角色', key: 'role', width: 100, render: (u: any) => h('span', { class: 'vchip' + (u.role === 'admin' ? ' node' : '') }, u.role === 'admin' ? '管理员' : '只读') },
@@ -177,8 +182,8 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NGrid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGridItem v-if="isAdmin" span="2 1:2">
+    <NGrid cols="1 s:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+      <NGridItem v-if="isAdmin" span="1 s:2">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.OptionsOutline" :size="15" color="var(--cp-brand-soft)" /> 用户管理</span></template>
           <template #header-extra><NButton size="tiny" type="primary" :icon="ico('AddOutline', 12)" @click="showUser = true">新建用户</NButton></template>
@@ -189,7 +194,7 @@ onMounted(load);
         </NCard>
       </NGridItem>
 
-      <NGridItem v-if="isAdmin" span="2 1:2">
+      <NGridItem v-if="isAdmin" span="1 s:2">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-warn)" /> 告警通知</span></template>
           <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">每 30 分钟自动巡检：磁盘使用率、服务 failed、SSL 剩余天数。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次。</NText>
@@ -210,7 +215,7 @@ onMounted(load);
         </NCard>
       </NGridItem>
 
-      <NGridItem span="2 1:1">
+      <NGridItem span="1 s:2 m:1">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.ShieldCheckmarkOutline" :size="15" color="var(--cp-ok)" /> 防火墙</span></template>
           <NSpace vertical :size="12">
@@ -223,7 +228,7 @@ onMounted(load);
         </NCard>
       </NGridItem>
 
-      <NGridItem v-if="isAdmin" span="2 1:1">
+      <NGridItem v-if="isAdmin" span="1 s:2 m:1">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-brand-soft)" /> 证书维护</span></template>
           <NSpace vertical :size="12">
@@ -234,7 +239,7 @@ onMounted(load);
         </NCard>
       </NGridItem>
 
-      <NGridItem v-if="isAdmin" span="2">
+      <NGridItem v-if="isAdmin" span="1 s:2">
         <NCard size="small">
           <template #header><span class="section-title"><NIcon :component="icons.DocumentTextOutline" :size="15" color="var(--cp-text-mute)" /> 操作审计</span></template>
           <template #header-extra><NButton size="tiny" tertiary :icon="ico('RefreshOutline', 12)" @click="load">刷新</NButton></template>

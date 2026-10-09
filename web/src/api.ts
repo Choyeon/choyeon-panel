@@ -3,12 +3,30 @@ import { ref } from 'vue';
 const base = '/api';
 const TOKEN_KEY = 'cp_token';
 const ROLE_KEY = 'cp_role';
+const NICK_KEY = 'cp_nickname';
+const AVA_KEY = 'cp_avatar';
+const USER_KEY = 'cp_username';
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY) || '';
 }
 export function setToken(t: string) {
   t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY);
+}
+export function getUsername() {
+  return localStorage.getItem(USER_KEY) || '';
+}
+export function getNickname() {
+  return localStorage.getItem(NICK_KEY) || '';
+}
+export function setNickname(n: string) {
+  localStorage.setItem(NICK_KEY, n);
+}
+export function getAvatar() {
+  return localStorage.getItem(AVA_KEY) || '';
+}
+export function setAvatar(a: string) {
+  localStorage.setItem(AVA_KEY, a);
 }
 /**
  * 当前角色，未登录时按最小权限处理（只读），避免本地存储缺失时误判为管理员。
@@ -29,6 +47,9 @@ export function clearSession() {
   roleRef.value = 'viewer';
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(ROLE_KEY);
+  localStorage.removeItem(NICK_KEY);
+  localStorage.removeItem(AVA_KEY);
+  localStorage.removeItem(USER_KEY);
 }
 
 export const onUnauthorized: Array<() => void> = [];
@@ -87,6 +108,7 @@ export const api = {
   setup: (username: string, password: string) => req('/auth/setup', { body: { username, password } }),
   login: (username: string, password: string) => req('/auth/login', { body: { username, password } }),
   changePassword: (oldp: string, newp: string) => req('/auth/password', { body: { old: oldp, new: newp } }),
+  updateProfile: (nickname: string, avatar: string) => req('/auth/profile', { body: { nickname, avatar } }),
   info: () => req('/system/info'),
   stats: () => req('/system/stats'),
   services: () => req('/system/services'),
@@ -153,6 +175,14 @@ export const api = {
 
 export function apiUrl(path: string) {
   return `${base}${path}`;
+}
+
+export function saveLoginData(r: { token: string; role: string; username?: string; nickname?: string; avatar?: string }) {
+  setToken(r.token);
+  setRole(r.role || 'admin');
+  if (r.username) localStorage.setItem(USER_KEY, r.username);
+  localStorage.setItem(NICK_KEY, r.nickname || '');
+  localStorage.setItem(AVA_KEY, r.avatar || '');
 }
 
 export function logUrl(path: string, lines = 200) {

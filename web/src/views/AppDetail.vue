@@ -269,14 +269,14 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
-      <NGridItem span="4 2:1">
+    <NGrid cols="1 s:2 m:4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
+      <NGridItem span="1">
         <NCard size="small" class="info-card cp-rise" style="--i: 0">
           <div class="info-k">运行时</div>
           <div class="info-v"><span :class="app.type === 'node' ? 'vchip node' : 'vchip python'">{{ app.type === 'node' ? 'Node.js' : 'Python' }}</span></div>
         </NCard>
       </NGridItem>
-      <NGridItem span="4 2:1">
+      <NGridItem span="1">
         <NCard size="small" class="info-card cp-rise" style="--i: 1">
           <div class="info-k">监听端口</div>
           <div class="info-v mono-dim" style="font-size: var(--fs-md)">
@@ -285,7 +285,7 @@ onMounted(load);
           </div>
         </NCard>
       </NGridItem>
-      <NGridItem span="4 2:1">
+      <NGridItem span="1">
         <NCard size="small" class="info-card cp-rise" style="--i: 2">
           <div class="info-k">域名</div>
           <div class="info-v" style="font-size: var(--fs-md)">
@@ -294,7 +294,7 @@ onMounted(load);
           </div>
         </NCard>
       </NGridItem>
-      <NGridItem span="4 2:1">
+      <NGridItem span="1">
         <NCard size="small" class="info-card cp-rise" style="--i: 3">
           <div class="info-k">仓库 / 分支</div>
           <div class="info-v" style="font-size: var(--fs-sm)">{{ app.repo_url ? (app.repo_url.replace(/^https?:\/\//, '').replace(/\.git$/, '') + ' @ ' + (app.branch || 'main')) : '本地目录' }}</div>

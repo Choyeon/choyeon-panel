@@ -112,6 +112,7 @@ class AuthMiddleware:
                 and scope["method"] in MUTATIONS
                 and role != "admin"
                 and not path.startswith("/api/auth/password")
+                and not path.startswith("/api/auth/profile")
             ):
                 await _json(403, "只读账号不能执行写操作")(scope, receive, send)
                 return

@@ -83,8 +83,8 @@ async def auth_status():
     return {"needsSetup": not dbm.query_one("SELECT 1 FROM users LIMIT 1")}
 
 
-def _user_token(username: str, role: str) -> dict:
-    return {"token": security.sign_token(username, role), "role": role}
+def _user_token(username: str, role: str, nickname: str = '', avatar: str = '') -> dict:
+    return {"token": security.sign_token(username, role), "role": role, "username": username, "nickname": nickname, "avatar": avatar}
 
 
 @app.post("/api/auth/setup")
@@ -126,7 +126,7 @@ async def login(req: Request):
     dbm.audit(user["username"], "login")
     security.clear_attempts(ip)
     role = user["role"] or "admin"
-    return _user_token(user["username"], role)
+    return _user_token(user["username"], role, user.get("nickname", ""), user.get("avatar", ""))
 
 
 async def _json_body(req: Request) -> dict:
@@ -171,7 +171,26 @@ async def change_password(req: Request):
     # 仅让当前用户的旧 token 失效，并立即签发新 token，避免用户被踢下线
     security.bump_user_epoch(me["username"])
     dbm.audit(me["username"], "password_change")
-    return _user_token(me["username"], role)
+    return _user_token(me["username"], role, me.get("nickname", ""), me.get("avatar", ""))
+
+
+@app.post("/api/auth/profile")
+async def update_profile(req: Request):
+    me = dbm.query_one("SELECT * FROM users WHERE username=?", (req.state.cp_sub,))
+    if not me:
+        return JSONResponse(status_code=404, content={"error": "用户不存在"})
+    body = await _json_body(req)
+    nickname = body.get("nickname")
+    avatar = body.get("avatar")
+    if nickname is not None:
+        nickname = str(nickname).strip()[:32]
+        dbm.execute("UPDATE users SET nickname=? WHERE id=?", (nickname, me["id"]))
+    if avatar is not None:
+        avatar = str(avatar).strip()[:256]
+        dbm.execute("UPDATE users SET avatar=? WHERE id=?", (avatar, me["id"]))
+    dbm.audit(req.state.cp_sub, "profile:update")
+    updated = dbm.query_one("SELECT nickname,avatar FROM users WHERE id=?", (me["id"],))
+    return {"ok": True, "nickname": updated["nickname"], "avatar": updated["avatar"]}
 
 
 # ---------- routers ----------

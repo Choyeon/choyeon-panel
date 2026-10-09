@@ -34,7 +34,7 @@ async def _body(req: Request) -> dict:
 async def users_list(req: Request):
     if r := _need_admin(req):
         return r
-    return dbm.query("SELECT id,username,role,created_at FROM users ORDER BY id")
+    return dbm.query("SELECT id,username,role,nickname,avatar,created_at FROM users ORDER BY id")
 
 
 @router.post("/api/users")
@@ -93,8 +93,14 @@ async def users_update(uid: str, req: Request):
         if len(body["password"]) < 8:
             return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
         new_hash = security.hash_pass(body["password"])
+    new_nickname = None
+    if "nickname" in body:
+        new_nickname = str(body["nickname"] or "").strip()[:32]
+    new_avatar = None
+    if "avatar" in body:
+        new_avatar = str(body["avatar"] or "").strip()[:256]
 
-    if new_role is None and new_hash is None:
+    if new_role is None and new_hash is None and new_nickname is None and new_avatar is None:
         dbm.audit(req.state.cp_sub, "user:update", f"{u['username']}(无变更)")
         return {"ok": True}
 
@@ -102,6 +108,10 @@ async def users_update(uid: str, req: Request):
         dbm.execute("UPDATE users SET role=? WHERE id=?", (new_role, u["id"]))
     if new_hash is not None:
         dbm.execute("UPDATE users SET pass_hash=? WHERE id=?", (new_hash, u["id"]))
+    if new_nickname is not None:
+        dbm.execute("UPDATE users SET nickname=? WHERE id=?", (new_nickname, u["id"]))
+    if new_avatar is not None:
+        dbm.execute("UPDATE users SET avatar=? WHERE id=?", (new_avatar, u["id"]))
     # role 与 password 都只存在于已签发的 token 里（中间件读的是 token 的 role，
     # 不是库里的），改完必须吊销旧 token，否则把 admin 降成 viewer 后
     # 对方手上的旧 token 在 TTL 内（最长 72h）依旧是 admin——连写操作都拦不住（实测）。

@@ -224,13 +224,13 @@ window.addEventListener('resize', onResize);
     </div>
 
     <!-- stat cards -->
-    <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+    <NGrid cols="1 s:2 m:4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGridItem v-for="(c, ci) in [
         { key: 'cpu', label: 'CPU', icon: 'PulseOutline', color: 'var(--cp-brand)', value: `${stat.cpu ?? '-'}`, unit: '%', pct: stat.cpu || 0, foot: `${info.cpuCores || '?'} 核 · 负载 ${(stat.load || []).map((x: number) => x.toFixed(1)).join(' / ') || '-'}` },
         { key: 'mem', label: '内存', icon: 'CubeOutline', color: 'var(--cp-ok)', value: fmtBytes(stat.memUsed), unit: ` / ${fmtBytes(stat.memTotal)}`, pct: Math.round(((stat.memUsed || 0) / (stat.memTotal || 1)) * 100), foot: `可用 ${fmtBytes((stat.memTotal || 0) - (stat.memUsed || 0))}` },
         { key: 'disk', label: '磁盘 /', icon: 'DocumentTextOutline', color: 'var(--cp-warn)', value: fmtBytes(stat.diskUsed), unit: ` / ${fmtBytes(stat.diskTotal)}`, pct: Math.round(((stat.diskUsed || 0) / (stat.diskTotal || 1)) * 100), foot: `剩余 ${fmtBytes((stat.diskTotal || 0) - (stat.diskUsed || 0))}` },
         { key: 'net', label: '网络', icon: 'WifiOutline', color: 'var(--cp-brand-accent)', value: `↓ ${fmtBytes(stat.netRx)}/s  ↑ ${fmtBytes(stat.netTx)}/s`, unit: '', pct: 0, foot: `在线 ${fmtUptime(stat.uptime || 0)}` },
-      ]" :key="c.key" span="4 2:2 1:1">
+      ]" :key="c.key" span="1">
         <NCard size="small" class="scard cp-rise" :style="`--i:${ci}`">
           <div class="srow">
             <div class="sicon" :style="`--c:${c.color}`"><NIcon :component="icons[c.icon]" :size="19" /></div>
@@ -252,15 +252,15 @@ window.addEventListener('resize', onResize);
     </NGrid>
 
     <!-- charts -->
-    <NGrid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGridItem span="2 1:2">
+    <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+      <NGridItem span="1">
         <NCard size="small">
           <template #header><span class="section-title">CPU 趋势</span></template>
           <NSkeleton v-if="loading" height="60px" :repeat="3" class="cp-shimmer" style="border-radius: var(--radius-sm)" />
           <div ref="cpuEl" style="height: 200px; width: 100%; min-width: 0"></div>
         </NCard>
       </NGridItem>
-      <NGridItem span="2 1:2">
+      <NGridItem span="1">
         <NCard size="small">
           <template #header><span class="section-title">内存趋势</span></template>
           <NSkeleton v-if="loading" height="60px" :repeat="3" class="cp-shimmer" style="border-radius: var(--radius-sm)" />
@@ -270,8 +270,8 @@ window.addEventListener('resize', onResize);
     </NGrid>
 
     <!-- apps + services overview -->
-    <NGrid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGridItem span="2 1:2">
+    <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+      <NGridItem span="1">
         <NCard size="small">
           <template #header><span class="section-title">应用（{{ runningApps }}/{{ apps.length }} 运行中）</span></template>
           <template #header-extra>
@@ -288,7 +288,7 @@ window.addEventListener('resize', onResize);
           <EmptyBox v-if="!apps.length" :text="sideError ? '应用列表获取失败，下个刷新周期自动重试' : '暂无应用，去应用页创建第一个'" />
         </NCard>
       </NGridItem>
-      <NGridItem span="2 1:2">
+      <NGridItem span="1">
         <NCard size="small">
           <template #header><span class="section-title">服务健康</span></template>
           <template #header-extra>

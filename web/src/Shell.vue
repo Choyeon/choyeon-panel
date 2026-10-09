@@ -2,31 +2,36 @@
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
-  NLayout, NLayoutSider, NLayoutHeader, NLayoutContent, NMenu, NSpace, NText, NButton,
-  NModal, NInput, NDropdown, NDrawer, NDrawerContent, NIcon, useMessage,
+  NLayout, NLayoutSider, NMenu, NSpace, NText, NButton,
+  NModal, NInput, NDrawer, NDrawerContent, NIcon, useMessage,
 } from 'naive-ui';
-import { setToken, getRole, clearSession, api } from './api';
+import { setToken, getRole, getUsername, getNickname, setNickname, getAvatar, setAvatar, clearSession, api } from './api';
 import { icons } from './icons';
 import { TITLES } from './router';
 
-type ThemeMode = 'dark' | 'light' | 'auto';
-const props = defineProps<{ themeMode?: ThemeMode }>();
-const emit = defineEmits<{ 'update:themeMode': [ThemeMode] }>();
+const props = defineProps<{ themeMode?: 'dark' | 'light' }>();
+const emit = defineEmits<{ 'update:themeMode': ['dark' | 'light'] }>();
 
 const route = useRoute();
 const router = useRouter();
 const msg = useMessage();
 const collapsed = ref(false);
 const showPwd = ref(false);
+const showProfile = ref(false);
 const oldPwd = ref('');
 const newPwd = ref('');
 const pwdBusy = ref(false);
+const profileBusy = ref(false);
+const editNickname = ref('');
+const editAvatar = ref('');
 const renewing = ref(false);
 
 const isMobile = ref(false);
 const drawer = ref(false);
 const isLogin = computed(() => route.path === '/login');
 const isAdmin = computed(() => getRole() === 'admin');
+const displayName = computed(() => getNickname() || getUsername() || '管理员');
+const avatarUrl = computed(() => getAvatar());
 const pageTitle = computed(() =>
   route.path.startsWith('/apps/') ? '应用详情' : TITLES[route.path] || 'choyeon panel',
 );
@@ -71,9 +76,6 @@ const MENU_ICON: Record<string, string> = {
 };
 
 const menuOptions = computed(() => {
-  // 文件管理能看到并下载应用目录里的 .env（明文口令），后端已收紧为 admin 专用；
-  // 菜单同步隐藏，否则只读账号看得见入口、点进去只收到一句 403。
-  // 自检同理：/api/doctor 要跑 nginx -t / systemctl 这类特权命令，后端只放行 admin。
   const keys = ['/dashboard', '/apps', '/services', '/db', '/backups'];
   if (isAdmin.value) keys.push('/files', '/terminal', '/doctor');
   keys.push('/settings');
@@ -91,12 +93,10 @@ function doLogout() {
 }
 
 async function doChangePwd() {
-  // 第一次改密成功后旧口令就不再匹配，连点第二下只会报"原密码错误"，
-  // 让人误以为没改成功又试一遍。
   pwdBusy.value = true;
   try {
     const r = await api.changePassword(oldPwd.value, newPwd.value);
-    if (r?.token) setToken(r.token); // 改密后旧 token 失效，服务端会签发新 token
+    if (r?.token) setToken(r.token);
     oldPwd.value = newPwd.value = '';
     showPwd.value = false;
     msg.success('密码已修改');
@@ -107,23 +107,30 @@ async function doChangePwd() {
   }
 }
 
-const themeIcon = computed(() =>
-  props.themeMode === 'light' ? 'SunnyOutline' : props.themeMode === 'dark' ? 'MoonOutline' : 'ColorPaletteOutline',
-);
-const themeOpts = [
-  { label: '跟随系统', key: 'auto' },
-  { label: '浅色', key: 'light' },
-  { label: '深色', key: 'dark' },
-];
+function openProfile() {
+  editNickname.value = getNickname();
+  editAvatar.value = getAvatar();
+  showProfile.value = true;
+}
 
-const userOpts = [
-  { label: '修改密码', key: 'pwd', icon: ico('KeyOutline', 16) },
-  { label: '退出登录', key: 'out', icon: ico('ArrowForwardOutline', 16) },
-];
-// DropdownOption 上没有 onClick，多出来的键会被 naive-ui 静默丢掉，动作只能走 :on-select。
-function onUserSelect(key: string) {
-  if (key === 'pwd') showPwd.value = true;
-  else doLogout();
+async function doSaveProfile() {
+  profileBusy.value = true;
+  try {
+    const r = await api.updateProfile(editNickname.value, editAvatar.value);
+    setNickname(r.nickname || '');
+    setAvatar(r.avatar || '');
+    showProfile.value = false;
+    msg.success('个人资料已更新');
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    profileBusy.value = false;
+  }
+}
+
+const themeIcon = computed(() => (props.themeMode === 'light' ? 'MoonOutline' : 'SunnyOutline'));
+function toggleTheme() {
+  emit('update:themeMode', props.themeMode === 'light' ? 'dark' : 'light');
 }
 </script>
 
@@ -171,8 +178,8 @@ function onUserSelect(key: string) {
       </NDrawerContent>
     </NDrawer>
 
-    <NLayout :content-style="'display:flex;flex-direction:column;height:100vh;overflow:hidden'">
-      <NLayoutHeader bordered class="cp-header">
+    <div class="cp-main">
+      <header class="cp-header">
         <NSpace align="center" :size="8" :wrap="false">
           <NButton
             v-if="isMobile"
@@ -186,39 +193,43 @@ function onUserSelect(key: string) {
           <NText depth="3" class="cp-title">{{ pageTitle }}</NText>
         </NSpace>
 
-        <NSpace align="center" :size="8" :wrap="false">
+        <NSpace align="center" :size="10" :wrap="false">
           <NButton v-if="isAdmin && !isMobile" size="small" tertiary :loading="renewing" @click="renewNow">
             续期证书
           </NButton>
 
-          <NDropdown
-            :options="themeOpts"
-            trigger="click"
-            placement="bottom-end"
-            :on-select="(k: string) => emit('update:themeMode', k as ThemeMode)"
+          <NButton
+            quaternary circle size="small"
+            :title="themeIcon === 'MoonOutline' ? '切换深色模式' : '切换浅色模式'"
+            :aria-label="themeIcon === 'MoonOutline' ? '切换深色模式' : '切换浅色模式'"
+            @click="toggleTheme"
           >
-            <NButton quaternary circle size="small" title="外观主题" aria-label="切换外观主题" :icon="ico(themeIcon)" />
-          </NDropdown>
+            <template #icon><NIcon :component="icons[themeIcon]" :size="18" /></template>
+          </NButton>
 
-          <NDropdown :options="userOpts" trigger="click" placement="bottom-end" :on-select="onUserSelect">
-            <button class="user-chip" type="button" :aria-label="`账号菜单，当前：${isAdmin ? '管理员' : '只读'}`">
-              <span class="avatar">{{ isAdmin ? 'A' : 'V' }}</span>
-              <span v-if="!isMobile" class="user-role">{{ isAdmin ? '管理员' : '只读' }}</span>
-            </button>
-          </NDropdown>
+          <button class="user-chip" type="button" :aria-label="`账号菜单，当前：${displayName}`" @click="openProfile">
+            <span class="avatar">
+              <img v-if="avatarUrl" :src="avatarUrl" alt="" />
+              <NIcon v-else :component="icons.PersonCircleOutline" :size="24" />
+            </span>
+            <span v-if="!isMobile" class="user-name">{{ displayName }}</span>
+          </button>
+
+          <NButton size="tiny" quaternary @click="showPwd = true" :aria-label="'修改密码'">
+            <template #icon><NIcon :component="icons.KeyOutline" :size="14" /></template>
+          </NButton>
+          <NButton size="tiny" quaternary @click="doLogout" :aria-label="'退出登录'">
+            <template #icon><NIcon :component="icons.ArrowForwardOutline" :size="14" /></template>
+          </NButton>
         </NSpace>
-      </NLayoutHeader>
+      </header>
 
-      <NLayoutContent
-        content-style="overflow: auto; flex: 1"
-        :native-scrollbar="false"
-        class="cp-content"
-      >
+      <div class="cp-scroll">
         <router-view v-slot="{ Component }">
           <transition name="page" mode="out-in"><component :is="Component" /></transition>
         </router-view>
-      </NLayoutContent>
-    </NLayout>
+      </div>
+    </div>
 
     <NModal v-model:show="showPwd" preset="card" title="修改密码" style="width: 400px; max-width: 94vw">
       <NSpace vertical :size="12">
@@ -246,6 +257,29 @@ function onUserSelect(key: string) {
         </NSpace>
       </NSpace>
     </NModal>
+
+    <NModal v-model:show="showProfile" preset="card" title="个人资料" style="width: 440px; max-width: 94vw">
+      <NSpace vertical :size="16">
+        <div class="profile-avatar-preview">
+          <span class="avatar-lg">
+            <img v-if="editAvatar" :src="editAvatar" alt="" />
+            <NIcon v-else :component="icons.PersonCircleOutline" :size="48" color="var(--cp-text-mute)" />
+          </span>
+        </div>
+        <div class="field">
+          <label>昵称</label>
+          <NInput v-model:value="editNickname" placeholder="显示名称（最多 32 字）" :input-props="{ 'aria-label': '昵称' }" maxlength="32" />
+        </div>
+        <div class="field">
+          <label>头像 URL</label>
+          <NInput v-model:value="editAvatar" placeholder="https://… （留空使用默认头像）" :input-props="{ 'aria-label': '头像 URL' }" maxlength="256" />
+        </div>
+        <NSpace justify="end" :size="8">
+          <NButton tertiary @click="showProfile = false">取消</NButton>
+          <NButton type="primary" class="cp-press" :loading="profileBusy" @click="doSaveProfile">保存</NButton>
+        </NSpace>
+      </NSpace>
+    </NModal>
   </NLayout>
 </template>
 
@@ -258,14 +292,6 @@ function onUserSelect(key: string) {
   gap: var(--space-3);
   padding: var(--space-4) var(--space-4) var(--space-3);
   min-height: var(--header-h);
-}
-.cp-content :deep(.n-layout-scroll-container) { padding: var(--space-6) var(--space-6) var(--space-6); }
-@media (max-width: 900px) {
-  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-5) var(--space-5) var(--space-5); }
-}
-@media (max-width: 640px) {
-  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-4) var(--space-4) var(--space-4); }
-  .cp-title { font-size: var(--fs-sm); font-weight: 600; }
 }
 .logo-mark {
   width: 28px;
@@ -288,20 +314,42 @@ function onUserSelect(key: string) {
   white-space: nowrap;
 }
 .logo-text b { color: var(--cp-brand-soft); }
+
+.cp-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
 .cp-header {
   height: var(--header-h);
+  min-height: var(--header-h);
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 var(--space-5);
   gap: var(--space-3);
-  backdrop-filter: blur(8px);
-  background: color-mix(in srgb, var(--cp-bg-1) 85%, transparent);
+  border-bottom: 1px solid var(--cp-border);
+  background: var(--cp-bg-1);
+}
+.cp-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: var(--space-6);
 }
 @media (max-width: 900px) {
   .cp-header { padding: 0 var(--space-4); }
+  .cp-scroll { padding: var(--space-5); }
+}
+@media (max-width: 640px) {
+  .cp-title { font-size: var(--fs-sm); font-weight: 600; }
+  .cp-scroll { padding: var(--space-4); }
 }
 .cp-title { font-size: var(--fs-xs); letter-spacing: 0.02em; }
+
 .user-chip {
   display: flex;
   align-items: center;
@@ -323,17 +371,55 @@ function onUserSelect(key: string) {
   color: var(--cp-brand);
 }
 .avatar {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  background: var(--gradient-brand);
-  color: #fff;
-  font-size: var(--fs-2xs);
-  font-weight: 600;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  background: var(--cp-hover);
+  color: var(--cp-text-mute);
 }
-.user-role { font-size: var(--fs-sm); font-weight: 500; }
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.user-name {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-avatar-preview {
+  display: flex;
+  justify-content: center;
+}
+.avatar-lg {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--cp-hover);
+  border: 2px solid var(--cp-border);
+}
+.avatar-lg img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.field label {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--cp-text-dim);
+  margin-bottom: var(--space-1);
+}
 </style>

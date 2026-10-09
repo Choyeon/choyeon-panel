@@ -83,6 +83,10 @@ def migrate() -> None:
         cols = _columns("users")
         if "role" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+        if "nickname" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''")
+        if "avatar" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''")
         acols = _columns("apps")
         if "db_names" not in acols:
             conn.execute("ALTER TABLE apps ADD COLUMN db_names TEXT")

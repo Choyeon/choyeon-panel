@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { NInput, NButton, NSpace, NIcon, NAlert } from 'naive-ui';
-import { api, setToken, setRole } from '../api';
+import { api, saveLoginData } from '../api';
 import { icons } from '../icons';
 
 const router = useRouter();
@@ -54,8 +54,7 @@ async function submit() {
     const r = needsSetup.value
       ? await api.setup(username.value, password.value)
       : await api.login(username.value, password.value);
-    setToken(r.token);
-    setRole(r.role || 'admin');
+    saveLoginData(r);
     try {
       localStorage.setItem(LAST_USER, username.value);
     } catch {
