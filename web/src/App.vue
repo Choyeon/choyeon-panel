@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 import {
   NConfigProvider, NMessageProvider, NDialogProvider, NNotificationProvider,
   zhCN, dateZhCN, darkTheme,
 } from 'naive-ui';
 import { darkOverrides, lightOverrides } from './theme';
+import { revealThemeSwitch, type ThemeOrigin } from './themeReveal';
 import Shell from './Shell.vue';
 
 type Mode = 'dark' | 'light';
@@ -27,10 +28,15 @@ function apply() {
   if (meta) meta.setAttribute('content', isDark.value ? '#101014' : '#f5f6fa');
 }
 
-function setMode(m: Mode) {
-  mode.value = m;
+function setMode(m: Mode, origin?: ThemeOrigin) {
+  if (m === mode.value) return;
   localStorage.setItem(STORE_KEY, m);
-  apply();
+  const commit = async () => {
+    mode.value = m;
+    apply();
+    await nextTick();
+  };
+  void revealThemeSwitch({ origin, toDark: m === 'dark', mutate: commit });
 }
 
 onMounted(() => apply());

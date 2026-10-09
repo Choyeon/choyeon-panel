@@ -8,9 +8,10 @@ import { NButton } from './ui';
 import { setToken, getRole, getUsername, getNickname, setNickname, getAvatar, setAvatar, clearSession, api } from './api';
 import { icons } from './icons';
 import { TITLES } from './router';
+import type { ThemeOrigin } from './themeReveal';
 
 const props = defineProps<{ themeMode?: 'dark' | 'light' }>();
-const emit = defineEmits<{ 'update:themeMode': ['dark' | 'light'] }>();
+const emit = defineEmits<{ 'update:themeMode': [mode: 'dark' | 'light', origin?: ThemeOrigin] }>();
 
 const route = useRoute();
 const router = useRouter();
@@ -224,8 +225,11 @@ function onUserSelect(key: string) {
 }
 
 const themeIcon = computed(() => (props.themeMode === 'light' ? 'MoonOutline' : 'SunnyOutline'));
-function toggleTheme() {
-  emit('update:themeMode', props.themeMode === 'light' ? 'dark' : 'light');
+// 圆形动效的圆心取按钮自身位置，所以要把点击事件里的元素几何一起交给 App.vue
+function toggleTheme(ev: MouseEvent) {
+  const b = (ev.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+  const origin = b ? { x: b.left + b.width / 2, y: b.top + b.height / 2 } : undefined;
+  emit('update:themeMode', props.themeMode === 'light' ? 'dark' : 'light', origin);
 }
 </script>
 

@@ -302,6 +302,14 @@ button.cell-name { justify-content: flex-start; }
 .cp-press:active { transform: scale(0.98); }
 .cp-press { transition: transform var(--dur-fast) var(--ease); }
 
+/* 主题圆形扩散期间冻结一切过渡：View Transition 拍的是「切换完成后」的快照，
+   若组件还在自己的颜色过渡里爬坡，快照就拍到半亮的界面，圆形边缘会露出旧色。 */
+html.cp-vt *,
+html.cp-vt *::before,
+html.cp-vt *::after {
+  transition: none !important;
+}
+
 /* 小屏适配：正文收到标度上的 --fs-sm */
 @media (max-width: 640px) {
   body { font-size: var(--fs-sm); }
