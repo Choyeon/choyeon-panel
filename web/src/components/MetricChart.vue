@@ -8,11 +8,11 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NSkeleton } from 'naive-ui';
 import * as echarts from 'echarts/core';
 import { LineChart } from 'echarts/charts';
-import { GridComponent, TooltipComponent } from 'echarts/components';
+import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import { cssVar } from '../theme';
 
-echarts.use([LineChart, GridComponent, TooltipComponent, CanvasRenderer]);
+echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomComponent, LegendComponent, CanvasRenderer]);
 
 interface ChartSeries {
   name: string;
@@ -22,6 +22,10 @@ interface ChartSeries {
   area?: boolean;
   /** 绑定的 y 轴下标，0 主轴 / 1 副轴（load1+进程数这类双量纲图用） */
   axis?: number;
+  /** 只描边不填充的细线（1Panel 的"下行"就是这种次级曲线） */
+  thin?: boolean;
+  /** 1Panel 的监控曲线是折线（不平滑），直连更能看出尖峰；实时 CPU 图仍用平滑 */
+  straight?: boolean;
 }
 
 const props = withDefaults(
@@ -33,6 +37,11 @@ const props = withDefaults(
     y2Fmt?: (v: number) => string;
     tipFmt?: (v: number) => string;
     loading?: boolean;
+    /** 底部拖动条：实时曲线也要能回看前几分钟，光靠 tooltip 做不到 */
+    dataZoom?: boolean;
+    legend?: boolean;
+    /** y 轴单位标题，1Panel 写成 "( KB/s )" 这种带括号的弱色注记 */
+    yName?: string;
   }>(),
   {
     xs: () => [],
@@ -42,6 +51,9 @@ const props = withDefaults(
     y2Fmt: undefined,
     tipFmt: undefined,
     loading: false,
+    dataZoom: false,
+    legend: false,
+    yName: undefined,
   },
 );
 
@@ -78,16 +90,24 @@ function fmtFn(fn?: (v: number) => string, fallback = '') {
   return (v: number) => (fn ? fn(Number(v)) : `${v}${fallback}`);
 }
 
+/** 用户拖动过的时间窗口。3s 一次的 setOption(notMerge) 会把没保存的窗口重置回全量，
+ *  表现为"刚框选好区间就自己弹回去"，所以每次重建 option 前先把它抄下来。 */
+let zoom = { start: 0, end: 100 };
+
 function buildOption() {
   const label = cssVar('--cp-text-dim', '#8a90a0');
   const axisLine = cssVar('--cp-border-strong', '#2c2c33');
   const split = cssVar('--cp-line', '#eef1f7');
+  const tipBg = cssVar('--cp-bg-1', '#ffffff');
+  const tipText = cssVar('--cp-text', '#1f2329');
   const hasSecond = props.series.some((s) => (s.axis ?? 0) !== 0);
   const yAxis: any[] = [
     {
       type: 'value',
-      splitLine: { lineStyle: { color: split } },
+      // 1Panel 的分割线是虚线，比实线更退后，曲线是主角
+      splitLine: { lineStyle: { type: 'dashed', color: split } },
       axisLabel: { color: label, fontSize: 11.5, formatter: fmtFn(props.yFmt) },
+      ...(props.yName ? { name: props.yName, nameTextStyle: { color: label, fontSize: 11.5 } } : {}),
     },
   ];
   if (hasSecond) {
@@ -99,32 +119,80 @@ function buildOption() {
   }
   return {
     // containLabel 只按轴标签的"半宽"预留，最右侧那个时间标签仍会被画布裁掉半个字；
-    // 双轴图再留 8px，否则副轴刻度贴边。
-    grid: { left: 8, right: hasSecond ? 8 : 26, top: 14, bottom: 4, containLabel: true },
+    // 双轴图再留 8px，否则副轴刻度贴边。有 dataZoom 时底部要腾出滑块（18px + 8px 间距）。
+    // 注意：1Panel 写的是 left/right:65，那是为了给**绝对定位悬浮在图上方**的读数芯片
+    // 让位；我们的芯片在正常文档流里（.chip-row），照抄 65 只会白白吃掉两侧宽度。
+    grid: {
+      left: 8,
+      right: hasSecond ? 8 : 26,
+      top: props.legend ? 28 : 14,
+      bottom: props.dataZoom ? 26 : 4,
+      containLabel: true,
+    },
     xAxis: {
       type: 'category', data: props.xs, boundaryGap: false,
       axisLine: { lineStyle: { color: axisLine } },
+      axisTick: { lineStyle: { color: axisLine } },
       axisLabel: { color: label, fontSize: 11.5, showMaxLabel: true, hideOverlap: true },
     },
     yAxis,
     series: props.series.map((s) => {
       const col = resolveColor(s.color);
       return {
-        name: s.name, type: 'line', smooth: 0.4, showSymbol: false,
+        name: s.name, type: 'line', smooth: s.straight ? false : 0.4, showSymbol: false,
+        // 点数上千时（24h/7d 档）先做 LTTB 降采样，否则每 3s 重建 option 会明显卡顿
+        sampling: 'lttb',
         yAxisIndex: s.axis ?? 0, data: s.data,
-        lineStyle: { width: 2, color: col },
+        // legend 的圆点取 itemStyle.color，只给 lineStyle 的话图例会掉回默认调色板色
+        itemStyle: { color: col },
+        lineStyle: { width: s.thin ? 1.2 : 2, color: col },
         areaStyle: s.area ? { color: areaGradient(s.color) } : undefined,
       };
     }),
     tooltip: {
       trigger: 'axis',
+      backgroundColor: tipBg,
+      borderColor: axisLine,
+      textStyle: { color: tipText, fontSize: 12 },
       ...(props.tipFmt ? { valueFormatter: (v: unknown) => props.tipFmt!(Number(v)) } : {}),
     },
+    ...(props.legend
+      ? {
+          legend: {
+            show: true, top: 2, right: 4, itemWidth: 8, itemHeight: 8, icon: 'circle',
+            textStyle: { color: label, fontSize: 12 },
+          },
+        }
+      : {}),
+    ...(props.dataZoom
+      ? {
+          dataZoom: [
+            {
+              type: 'slider', height: 18, bottom: 2, start: zoom.start, end: zoom.end,
+              borderColor: 'transparent', backgroundColor: split,
+              fillerColor: rgbaOf('--cp-brand', 0.12),
+              dataBackground: { lineStyle: { width: 1, color: axisLine }, areaStyle: { color: axisLine } },
+              selectedDataBackground: { lineStyle: { width: 1, color: cssVar('--cp-brand') }, areaStyle: { color: 'transparent' } },
+              handleStyle: { color: cssVar('--cp-brand'), borderColor: cssVar('--cp-brand') },
+              moveHandleStyle: { color: axisLine },
+              showDetail: false,
+            },
+            // 滚轮缩放：滑块只给"拖"，看长历史时还得能缩到某个窗口
+            { type: 'inside', start: zoom.start, end: zoom.end, zoomOnMouseWheel: false, moveOnMouseWheel: true },
+          ],
+        }
+      : {}),
     animation: false,
   };
 }
 
 function render() {
+  if (chart && props.dataZoom) {
+    const cur: any = (chart.getOption() as any)?.dataZoom?.[0];
+    if (cur && typeof cur.start === 'number' && typeof cur.end === 'number') {
+      zoom = { start: cur.start, end: cur.end };
+    }
+  }
   chart?.setOption(buildOption(), { notMerge: true });
 }
 

@@ -5,9 +5,9 @@ import {
   NLayout, NLayoutSider, NMenu, NSpace, NText, NModal, NInput, NDrawer, NDrawerContent, NIcon, NDropdown, useMessage,
 } from 'naive-ui';
 import { NButton } from './ui';
-import { setToken, getRole, getUsername, getNickname, setNickname, getAvatar, setAvatar, clearSession, api } from './api';
+import { setToken, getRole, getUsername, getNickname, setNickname, getAvatar, setAvatar, clearSession, api, req } from './api';
 import { icon, icons } from './icons';
-import { TITLES } from './router';
+import { ADMIN_ONLY, TITLES } from './router';
 import type { ThemeOrigin } from './themeReveal';
 
 const props = defineProps<{ themeMode?: 'dark' | 'light' }>();
@@ -62,9 +62,14 @@ function onResize() {
   isMobile.value = window.innerWidth < 900;
   if (!isMobile.value) drawer.value = false;
 }
+
+// 页脚版本号读 /api/health（公开端点，不需要 token）。取不到就整块不显示，
+// 而不是写死一个字符串——那会比"没有版本"更容易骗人。
+const panelVersion = ref('');
 onMounted(() => {
   onResize();
   window.addEventListener('resize', onResize);
+  req('/health').then((d: any) => { if (d?.version) panelVersion.value = String(d.version); }).catch(() => {});
 });
 onBeforeUnmount(() => window.removeEventListener('resize', onResize));
 
@@ -99,17 +104,51 @@ const MENU_ICON: Record<string, string> = {
   '/settings': 'SettingsOutline',
 };
 
+/* 侧栏分组照抄 1Panel 的 Sidebar/SubItem.vue 规则：用**嵌套子菜单**（不是
+   el-menu 的 type:'group'，1Panel 根本没有分组标题项），并且"只有一个孩子的父项
+   直接升级成普通菜单项"（v-if="children.length > 1" ? sub-menu : item）。
+   只读账号下多个分组会只剩一项，如果不升级就会多出一层无意义的折叠。 */
+const MENU_GROUPS: { label: string; icon: string; items: string[] }[] = [
+  { label: '网站与服务', icon: 'GlobeOutline', items: ['/apps', '/sites', '/services', '/db'] },
+  { label: '数据与备份', icon: 'TimeOutline', items: ['/backups', '/cron', '/files'] },
+  { label: '日志与告警', icon: 'DocumentTextOutline', items: ['/alerts', '/logs', '/logsearch'] },
+  { label: '运维工具', icon: 'BuildOutline', items: ['/terminal', '/doctor'] },
+  { label: '面板管理', icon: 'SettingsOutline', items: ['/users', '/audit', '/settings'] },
+];
+
+function menuItem(k: string) {
+  return { label: TITLES[k], key: k, icon: ico(MENU_ICON[k], 18) };
+}
+
 const menuOptions = computed(() => {
-  const keys = ['/dashboard', '/apps', '/services', '/db', '/sites', '/backups', '/alerts', '/logs'];
-  if (isAdmin.value) keys.push('/users', '/audit', '/cron', '/files', '/terminal', '/doctor', '/logsearch');
-  keys.push('/settings');
-  return keys.map((k) => ({ label: TITLES[k], key: k, icon: ico(MENU_ICON[k], 18) }));
+  const out: any[] = [menuItem('/dashboard')];
+  for (const g of MENU_GROUPS) {
+    const keys = g.items.filter((k) => !ADMIN_ONLY.includes(k) || isAdmin.value);
+    if (!keys.length) continue;
+    if (keys.length === 1) out.push(menuItem(keys[0]));
+    else out.push({ label: g.label, key: `grp:${g.label}`, icon: ico(g.icon, 18), children: keys.map(menuItem) });
+  }
+  return out;
 });
 
 function go(key: string) {
+  if (key.startsWith('grp:')) return; // 父项只做展开，不导航
   drawer.value = false;
   router.push(key);
 }
+
+/* element-plus 的 el-menu 会自动展开当前项所在的 sub-menu（default-openeds 由
+   default-active 反推）。naive-ui 的 NMenu 不会，所以这里自己把 active 映射成分组 key，
+   否则打开面板只看见六个分组名、一个功能项都点不到。 */
+const expandedKeys = ref<string[]>([]);
+watch(
+  active,
+  (path) => {
+    const g = MENU_GROUPS.find((x) => x.items.includes(path));
+    expandedKeys.value = g ? [`grp:${g.label}`] : [];
+  },
+  { immediate: true },
+);
 
 function doLogout() {
   clearSession();
@@ -250,8 +289,8 @@ function toggleTheme(ev: MouseEvent) {
     <NLayoutSider
       v-if="!isMobile"
       collapse-mode="width"
-      :collapsed-width="64"
-      :width="208"
+      :collapsed-width="75"
+      :width="180"
       :collapsed="collapsed"
       bordered
       show-trigger="bar"
@@ -265,12 +304,14 @@ function toggleTheme(ev: MouseEvent) {
         <span v-if="!collapsed" class="logo-text">choyeon <b>panel</b></span>
       </div>
       <NMenu
-        :indent="18"
+        :indent="16"
         :collapsed-icon-size="19"
         :collapsed="collapsed"
-        :collapsed-width="64"
+        :collapsed-width="75"
         :value="active"
         :options="menuOptions"
+        :expanded-keys="expandedKeys"
+        @update:expanded-keys="(k: string[]) => (expandedKeys = k)"
         @update:value="(k: string) => go(k)"
       />
     </NLayoutSider>
@@ -283,7 +324,14 @@ function toggleTheme(ev: MouseEvent) {
             <span class="logo-text">choyeon <b>panel</b></span>
           </div>
         </template>
-        <NMenu :indent="14" :value="active" :options="menuOptions" @update:value="(k: string) => go(k)" />
+        <NMenu
+          :indent="14"
+          :value="active"
+          :options="menuOptions"
+          :expanded-keys="expandedKeys"
+          @update:expanded-keys="(k: string[]) => (expandedKeys = k)"
+          @update:value="(k: string) => go(k)"
+        />
       </NDrawerContent>
     </NDrawer>
 
@@ -336,6 +384,12 @@ function toggleTheme(ev: MouseEvent) {
           <transition name="page"><component :is="Component" /></transition>
         </router-view>
       </div>
+
+      <!-- 页脚照 1Panel 的 AppFooter：48px 高、上发丝线、左边版权、右边版本 chip -->
+      <footer v-if="!isMobile" class="cp-footer">
+        <span class="cp-footer-copy">Copyright © 2026 choyeon</span>
+        <span v-if="panelVersion" class="cp-footer-ver">choyeon panel {{ panelVersion }}</span>
+      </footer>
     </div>
 
     <NModal v-model:show="showPwd" preset="card" title="修改密码" style="width: 400px; max-width: 94vw">
@@ -410,7 +464,35 @@ function toggleTheme(ev: MouseEvent) {
 
 <style scoped>
 .cp-shell { height: 100vh; }
-.cp-sider { background: var(--cp-bg-1); }
+.cp-sider { background: var(--cp-menu-bg); }
+/* 菜单胶囊：1Panel 的每一项都是独立圆角块（42px、4px 圆角、7px 上下间距、
+   0 0 4px 外阴影），选中项再加 2px 内描边 + 4×14px 左竖条。naive 的 Menu
+   themeOverrides 只能给颜色，形状只能在这里补。 */
+.cp-sider :deep(.n-menu) { padding: 0 var(--menu-pad-x); }
+.cp-sider :deep(.n-menu .n-menu-item-content) {
+  margin: 7px 0;
+  border-radius: var(--radius-lg);
+  background: var(--cp-menu-item-bg);
+  box-shadow: 0 0 4px var(--cp-menu-shadow-color);
+}
+.cp-sider :deep(.n-menu-item-content--selected) {
+  box-shadow: 0 0 4px var(--cp-menu-shadow-color), inset 0 0 0 2px var(--cp-brand);
+  background: var(--cp-menu-item-active);
+}
+.cp-sider :deep(.n-menu .n-menu-item-content--selected > .n-menu-item-content-header::before) {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 14px;
+  border-radius: var(--radius-lg);
+  background: var(--cp-brand);
+}
+/* 折叠态下胶囊会挤成一条，去掉左右留白，竖条也不显示 */
+.cp-sider :deep(.n-menu--collapsed) { padding: 0; }
+.cp-sider :deep(.n-menu--collapsed .n-menu-item-content) { margin: 6px 0; box-shadow: none; }
 .logo {
   display: flex;
   align-items: center;
@@ -462,12 +544,34 @@ function toggleTheme(ev: MouseEvent) {
 }
 .cp-scroll {
   /* 内边距抽成变量：淡出中的旧页面绝对定位时，要用同一个值对齐新页面的起点
-     （绝对定位的 inset:0 落在 padding box 上，直接写 inset:0 会偏移一个 padding）。 */
-  --pad-scroll: var(--space-6);
+     （绝对定位的 inset:0 落在 padding box 上，直接写 inset:0 会偏移一个 padding）。
+     桌面档对齐 1Panel 的 .app-main { padding: 7px 20px }，与 --page-pad 同一个值，
+     表格高度 calc(--table-h) 依赖的就是它。 */
+  --pad-scroll: var(--page-pad);
   flex: 1;
   overflow: auto;
   position: relative;
   padding: var(--pad-scroll);
+}
+.cp-footer {
+  flex-shrink: 0;
+  min-height: var(--footer-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 10px var(--space-5);
+  border-top: 1px solid var(--cp-footer-border);
+  background: var(--cp-bg);
+  font-size: var(--fs-xs);
+  color: var(--cp-text-mute);
+  letter-spacing: 0.02em;
+}
+.cp-footer-ver {
+  padding: 2px var(--space-3);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--cp-footer-border);
+  font-variant-numeric: tabular-nums;
 }
 /* 切页叠层：旧页面绝对定位后不占高度，新页面立即接管布局，中间没有空窗期。
    动效本身（opacity/transform）定义在 style.css 的 .page-* 全局块里。 */

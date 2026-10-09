@@ -39,7 +39,7 @@ export const router = createRouter({
 // 否则只读账号会停在一个只会报 403 的空页面上。
 // cron 与 logsearch 的每一个端点（连列表和候选项）在服务端都是 need_admin，
 // 少了这一条，只读账号会停在一片"加载失败"的空表格上。
-const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/users', '/audit', '/cron', '/logsearch'];
+export const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/users', '/audit', '/cron', '/logsearch'];
 
 router.beforeEach((to) => {
   if (to.path !== '/login' && !getToken()) return '/login';

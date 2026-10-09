@@ -48,14 +48,17 @@ def _proc_raw() -> dict:
         if ":" in line:
             k, v = line.split(":", 1)
             mem[k.strip()] = int(v.strip().split()[0]) * 1024
+    nics: dict[str, tuple[int, int]] = {}
     rx = tx = 0
     for line in _read("/proc/net/dev").split("\n")[2:]:
         if ":" not in line:
             continue
         name, rest = line.split(":", 1)
-        if name.strip() == "lo":
+        name = name.strip()
+        if name == "lo":
             continue
         f = [int(x) for x in rest.split()]
+        nics[name] = (f[0], f[8])
         rx += f[0]
         tx += f[8]
     du = shutil.disk_usage("/")
@@ -76,11 +79,23 @@ def _proc_raw() -> dict:
     return {
         "idle": idle, "total": total, "perCore": per_core,
         "memTotal": mem.get("MemTotal", 0), "memAvailable": mem.get("MemAvailable", 0),
-        "rx": rx, "tx": tx,
+        "rx": rx, "tx": tx, "nics": nics, "nicUp": _proc_nic_up(nics),
         "diskTotal": du.total, "diskUsed": du.used,
         "ioRead": io_r, "ioWrite": io_w,
         "load": load, "uptime": _uptime(), "procs": procs, "source": "proc",
     }
+
+
+def _proc_nic_up(names) -> dict[str, bool]:
+    """sysfs 的 operstate。读不到（容器里常如此）时按 up 处理：把未知渲染成"断开"
+    会让监控面板谎报网卡故障。"""
+    out = {}
+    for n in names:
+        try:
+            out[n] = _read(f"/sys/class/net/{n}/operstate").strip() != "down"
+        except OSError:
+            out[n] = True
+    return out
 
 
 def _psutil_raw() -> dict:
@@ -92,21 +107,28 @@ def _psutil_raw() -> dict:
         for c in psutil.cpu_times(percpu=True)
     ]
     vm = psutil.virtual_memory()
+    nics: dict[str, tuple[int, int]] = {}
     rx = tx = 0
     for name, st in psutil.net_io_counters(pernic=True).items():
-        if name != "lo":
-            rx += st.bytes_recv
-            tx += st.bytes_sent
+        if name == "lo":
+            continue
+        nics[name] = (st.bytes_recv, st.bytes_sent)
+        rx += st.bytes_recv
+        tx += st.bytes_sent
     du = shutil.disk_usage("/")
     dio = psutil.disk_io_counters()
     try:
         load = [round(x, 2) for x in psutil.getloadavg()]
     except (AttributeError, OSError):
         load = [0.0, 0.0, 0.0]
+    try:
+        nic_up = {n: bool(psutil.net_if_stats().get(n).isup) for n in nics}
+    except Exception:  # noqa: BLE001 - 链路状态是附加信息，拿不到不该拖累整轮采样
+        nic_up = {n: True for n in nics}
     return {
         "idle": idle, "total": total, "perCore": per_core,
         "memTotal": vm.total, "memAvailable": vm.available,
-        "rx": rx, "tx": tx,
+        "rx": rx, "tx": tx, "nics": nics, "nicUp": nic_up,
         "diskTotal": du.total, "diskUsed": du.used,
         "ioRead": getattr(dio, "read_bytes", 0) if dio else 0,
         "ioWrite": getattr(dio, "write_bytes", 0) if dio else 0,
@@ -131,6 +153,7 @@ async def snapshot() -> dict:
     cpu = 0.0
     per_core = [0.0] * len(raw["perCore"])
     net_rx = net_tx = io_r = io_w = 0
+    elapsed = 0.0
     if _prev:
         dt = raw["total"] - _prev["total"]
         di = raw["idle"] - _prev["idle"]
@@ -147,9 +170,23 @@ async def snapshot() -> dict:
         net_tx = _rate(raw["tx"], _prev["tx"], elapsed)
         io_r = _rate(raw["ioRead"], _prev["ioRead"], elapsed)
         io_w = _rate(raw["ioWrite"], _prev["ioWrite"], elapsed)
+    # 每网卡明细：首帧没有分母，速率记 0 而不是把开机累计量当成瞬时值。
+    prev_nics = (_prev or {}).get("nics") or {}
+    nic_rows = []
+    for name, (c_rx, c_tx) in sorted(raw["nics"].items()):
+        p = prev_nics.get(name)
+        nic_rows.append({
+            "name": name,
+            "rx": _rate(c_rx, p[0], elapsed) if p else 0,
+            "tx": _rate(c_tx, p[1], elapsed) if p else 0,
+            "totalRx": c_rx,
+            "totalTx": c_tx,
+            "up": bool(raw["nicUp"].get(name, True)),
+        })
     _prev = {
         "idle": raw["idle"], "total": raw["total"], "perCore": raw["perCore"],
         "rx": raw["rx"], "tx": raw["tx"], "ioRead": raw["ioRead"], "ioWrite": raw["ioWrite"],
+        "nics": raw["nics"],
         "at": now_ms,
     }
 
@@ -170,6 +207,9 @@ async def snapshot() -> dict:
         "diskTotal": raw["diskTotal"],
         "netRx": net_rx,
         "netTx": net_tx,
+        "netTotalRx": raw["rx"],
+        "netTotalTx": raw["tx"],
+        "nics": nic_rows,
         "ioRead": io_r,
         "ioWrite": io_w,
         "procs": raw["procs"],

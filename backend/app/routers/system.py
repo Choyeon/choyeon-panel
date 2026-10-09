@@ -29,6 +29,45 @@ async def sys_stats():
     return await system_metrics.snapshot()
 
 
+@router.get("/api/system/overview")
+async def sys_overview():
+    """仪表盘「概览」条：一次请求拿齐四个计数，取代前端各页各自拉全表再数长度。
+
+    站点数只扫 nginx 配置（纯文件读），不走 _site_rows() 的那条链路——后者还要查
+    apps 表并向 systemd 逐个问单元状态，那是打开网站页才需要的开销。
+    nginx 不在时如实返回 null + reason，前端显示「—」而不是 0。
+    """
+    from .sites import _conf_dirs_available, _scan_nginx_sites  # 路由互引只在需要时建立
+
+    apps = await aio_db.query_one("SELECT COUNT(*) c FROM apps")
+    cron = await aio_db.query_one("SELECT COUNT(*) c, COALESCE(SUM(enabled),0) e FROM cron_task")
+    backups = await aio_db.query_one("SELECT COUNT(*) c FROM backups WHERE enabled=1")
+    alerts = await aio_db.query_one("SELECT COUNT(*) c FROM alerts_log WHERE acked=0")
+
+    def _site_count():
+        if not _conf_dirs_available():
+            return None, "未检测到 nginx 配置目录"
+        names = set()
+        for entry in _scan_nginx_sites():
+            names.update(d.lower() for d in entry["domains"])
+        return len(names), None
+
+    try:
+        sites, site_reason = await asyncio.to_thread(_site_count)
+    except Exception as e:  # noqa: BLE001 - 计数失败不该让整条概览消失
+        sites, site_reason = None, f"站点扫描失败：{type(e).__name__}"
+
+    return {
+        "apps": int(apps["c"]),
+        "cron": int(cron["c"]),
+        "cronEnabled": int(cron["e"] or 0),
+        "backups": int(backups["c"]),
+        "openAlerts": int(alerts["c"]),
+        "sites": sites,
+        "sitesReason": site_reason,
+    }
+
+
 @router.get("/api/system/processes")
 async def sys_processes(req: Request):
     """Top 进程表。整表扫描比 stats 贵，服务层带 3 秒缓存。"""

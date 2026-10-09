@@ -135,6 +135,7 @@ export const api = {
     request('/auth/avatar', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/octet-stream' }), body: blob }, 60000).then(parse),
   info: () => req('/system/info'),
   stats: () => req('/system/stats'),
+  overview: () => req('/system/overview'),
   services: () => req('/system/services'),
   serviceAction: (unit: string, verb: string) => req(`/system/services/${encodeURIComponent(unit)}`, { body: { verb } }),
   // certbot 续期在服务器上最长可跑到几分钟，前端 15s 就 abort 会显示"请求超时"，

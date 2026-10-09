@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { NCard, NDropdown, NGrid, NGridItem, NIcon, NProgress, NSpace, NTag, NText } from 'naive-ui';
+import { NCard, NDropdown, NGrid, NGridItem, NIcon, NSelect, NSpace, NTag, NText } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, getRole, req } from '../api';
 import { icons, icon } from '../icons';
 import { fmtAgo, fmtBytes } from '../composables/useFormat';
 import EmptyBox from '../components/EmptyBox.vue';
 import MetricChart from '../components/MetricChart.vue';
+import StatGauge from '../components/StatGauge.vue';
+import InfoList, { type InfoItem } from '../components/InfoList.vue';
 
 const router = useRouter();
 const isAdmin = getRole() === 'admin';
@@ -23,16 +25,6 @@ const rtLoading = ref(true);
 let disposed = false;
 let timer: number | null = null;
 
-// 卡片宽度装不下 "8.0 GB / 49.0 GB"（会折成两行且把 GB 单独甩下去）。同单位时
-// 把单位只写一次，交给小号 .unit 显示，主数字保持一行。
-function usedTotal(used: number, total: number) {
-  const a = fmtBytes(used);
-  const b = fmtBytes(total);
-  const su = a.replace(/^[\d.]+\s*/, '');
-  return su && b.endsWith(su)
-    ? { value: a.slice(0, a.length - su.length).trim(), unit: ` / ${b}` }
-    : { value: a, unit: ` / ${b}` };
-}
 function fmtUptime(s: number) {
   if (!s) return '-';
   const d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
@@ -50,6 +42,163 @@ const runningApps = computed(() => apps.value.filter((a) => a.running).length);
 const hour = new Date().getHours();
 const greet = hour < 6 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好';
 
+/* ---------- 概览计数（一次请求拿齐，取代各页拉全表再数长度） ---------- */
+const ov = ref<any>(null);
+const ovError = ref('');
+const ovItems = computed(() => {
+  const o = ov.value;
+  const list: { label: string; to: string; value: number | null; note: string; danger?: boolean }[] = [
+    {
+      label: '网站', to: '/sites',
+      value: o ? o.sites : null,
+      // sites 为 null 时后端给了 sitesReason（一般是没有 nginx），显示「—」而不是 0
+      note: o ? (o.sites == null ? o.sitesReason || '未检测到站点' : 'nginx 域名数') : ovError.value || '读取中',
+    },
+    { label: '应用', to: '/apps', value: o?.apps ?? null, note: '已创建应用' },
+    { label: '备份任务', to: '/backups', value: o?.backups ?? null, note: '启用中的计划' },
+    {
+      label: '未确认告警', to: '/alerts', value: o?.openAlerts ?? null,
+      note: '等待处理', danger: (o?.openAlerts ?? 0) > 0,
+    },
+  ];
+  // /cron 的每个端点服务端都是 need_admin，只读账号点了只会撞路由守卫弹回总览，
+  // 所以这一格干脆不出现，而不是给个按不动的数字。
+  if (isAdmin) {
+    list.splice(2, 0, {
+      label: '定时任务', to: '/cron',
+      value: o?.cron ?? null, note: o ? `启用 ${o.cronEnabled} 个` : '启用中的计划',
+    });
+  }
+  return list;
+});
+
+async function loadOverview() {
+  try {
+    const d = await req('/system/overview');
+    if (disposed) return;
+    ov.value = d;
+    ovError.value = '';
+  } catch (e: any) {
+    if (disposed) return;
+    ov.value = null;
+    ovError.value = e?.message || '概览计数获取失败';
+  }
+}
+
+/* ---------- 状态：圆环仪表 ---------- */
+const num = (v: any) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const pct = (used: any, total: any) => {
+  const u = num(used), t = num(total);
+  return u != null && t ? Math.round((u / t) * 10000) / 100 : null;
+};
+const cpuVal = computed(() => num(stat.value.cpu));
+const memVal = computed(() => pct(stat.value.memUsed, stat.value.memTotal));
+const diskVal = computed(() => pct(stat.value.diskUsed, stat.value.diskTotal));
+const cores = computed(() => num(info.value.cpuCores) ?? num(stat.value.cpuCores) ?? 0);
+// 负载按「相对核数」画环：load1 = 核数即 100%，这是 1Panel 把负载放进同一排仪表的口径。
+const loadVal = computed(() => {
+  const l = num((stat.value.load || [])[0]);
+  return l != null && cores.value ? Math.round((l / cores.value) * 10000) / 100 : null;
+});
+function band(v: number | null, warn: number, err: number) {
+  if (v == null) return 'var(--cp-brand)';
+  return v >= err ? 'var(--cp-err)' : v >= warn ? 'var(--cp-warn)' : 'var(--cp-brand)';
+}
+const loadWord = computed(() => {
+  const v = loadVal.value;
+  if (v == null) return '采集中';
+  return v < 70 ? '运行流畅' : v < 100 ? '有一定压力' : '负载偏高';
+});
+const gauges = computed(() => [
+  {
+    key: 'cpu', label: 'CPU', percent: cpuVal.value, text: cpuVal.value == null ? '-' : String(cpuVal.value),
+    unit: '%', detail: `${cores.value || '?'} 核`, color: band(cpuVal.value, 70, 85),
+  },
+  {
+    key: 'mem', label: '内存', percent: memVal.value, text: memVal.value == null ? '-' : String(memVal.value),
+    unit: '%', detail: `${fmtBytes(stat.value.memUsed || 0)} / ${fmtBytes(stat.value.memTotal || 0)}`,
+    color: band(memVal.value, 80, 90),
+  },
+  {
+    key: 'load', label: '负载', percent: loadVal.value, text: loadWord.value, unit: '',
+    detail: `1min ${(stat.value.load || [0])[0].toFixed(2)}`, color: band(loadVal.value, 70, 100),
+  },
+  {
+    key: 'disk', label: '磁盘 /', percent: diskVal.value, text: diskVal.value == null ? '-' : String(diskVal.value),
+    unit: '%', detail: `${fmtBytes(stat.value.diskUsed || 0)} / ${fmtBytes(stat.value.diskTotal || 0)}`,
+    color: band(diskVal.value, 80, 90),
+  },
+]);
+
+/* ---------- 监控：网卡选择 + 流量/磁盘 IO 段选 + 拖动条曲线 ---------- */
+type MonMode = 'net' | 'io';
+const monMode = ref<MonMode>('net');
+const ALL_NIC = '__all';
+const monNic = ref(ALL_NIC);
+// 每网卡速率是后端每 3s 现算的增量，历史不入库；这里在客户端攒环形缓冲，
+// 一次请求都不多发，切网卡也能立刻画出各自曲线。
+const MON_CAP = 240;
+interface MonPoint {
+  t: number;
+  net: Record<string, [number, number]>;
+  all: [number, number];
+  ioR: number;
+  ioW: number;
+}
+const monBuf = ref<MonPoint[]>([]);
+
+const nicList = computed<any[]>(() => stat.value.nics || []);
+const nicOpts = computed(() => [
+  { label: '全部网卡', value: ALL_NIC },
+  ...nicList.value.map((n: any) => ({ label: n.up ? n.name : `${n.name}（已断开）`, value: n.name })),
+]);
+// 网卡热插拔/重命名后原名就没了，选中项必须自己回到「全部网卡」，
+// 否则曲线会静止在一条 0 线上，看着像链路断了。
+watch(nicList, (list) => {
+  if (monNic.value !== ALL_NIC && !list.some((n: any) => n.name === monNic.value)) monNic.value = ALL_NIC;
+});
+
+const monXs = computed(() => monBuf.value.map((p) => new Date(p.t).toLocaleTimeString()));
+const monSeries = computed(() => {
+  const buf = monBuf.value;
+  // 1Panel 的监控曲线是**直连折线**（不平滑）：网速尖峰要能看出毛刺，平滑会把峰抹平。
+  if (monMode.value === 'io') {
+    return [
+      { name: '读取', color: '--cp-ok', data: buf.map((p) => p.ioR), area: true, straight: true },
+      { name: '写入', color: '--cp-warn', data: buf.map((p) => p.ioW), area: true, straight: true },
+    ];
+  }
+  const pick = (p: MonPoint, i: 0 | 1) => (monNic.value === ALL_NIC ? p.all[i] : p.net[monNic.value]?.[i] ?? 0);
+  return [
+    { name: '上行', color: '--cp-ok', data: buf.map((p) => pick(p, 1)), area: true, straight: true },
+    { name: '下行', color: '--cp-warn', data: buf.map((p) => pick(p, 0)), area: true, straight: true },
+  ];
+});
+const monChips = computed(() => {
+  const s = stat.value;
+  if (monMode.value === 'io') {
+    return [
+      { k: '读取', v: `${fmtBytes(s.ioRead || 0)}/s` },
+      { k: '写入', v: `${fmtBytes(s.ioWrite || 0)}/s` },
+    ];
+  }
+  const one = monNic.value === ALL_NIC ? null : nicList.value.find((n: any) => n.name === monNic.value);
+  if (one) {
+    return [
+      { k: '上行', v: `${fmtBytes(one.tx || 0)}/s` }, { k: '下行', v: `${fmtBytes(one.rx || 0)}/s` },
+      { k: '总发送', v: fmtBytes(one.totalTx || 0) }, { k: '总接收', v: fmtBytes(one.totalRx || 0) },
+    ];
+  }
+  return [
+    { k: '上行', v: `${fmtBytes(s.netTx || 0)}/s` }, { k: '下行', v: `${fmtBytes(s.netRx || 0)}/s` },
+    { k: '总发送', v: fmtBytes(s.netTotalTx || 0) }, { k: '总接收', v: fmtBytes(s.netTotalRx || 0) },
+  ];
+});
+const monNicDown = computed(() => {
+  const one = monNic.value === ALL_NIC ? null : nicList.value.find((n: any) => n.name === monNic.value);
+  return one && !one.up;
+});
+
 /* ---------- 实时：3s 轮询 /system/stats 的内存曲线 ---------- */
 const rtHistory = computed(() => (stat.value.history || []).slice(-60));
 const rtXs = computed<string[]>(() => rtHistory.value.map((x: any) => new Date(x.t).toLocaleTimeString()));
@@ -60,6 +209,21 @@ const rtSeries = computed(() => [
     // memUsed 是字节，1GB = 1024*1024*1024；除以 1048576 得到的是 MB，轴上会显示"3000G"
     data: rtHistory.value.map((x: any) => Math.round((x.memUsed / 1073741824) * 10) / 10) as (number | null)[],
   },
+]);
+
+/* ---------- 系统信息 ---------- */
+const sysItems = computed<InfoItem[]>(() => [
+  { k: '主机名', v: info.value.hostname || '' },
+  { k: '系统', v: info.value.prettyName || info.value.platform || '' },
+  // 1Panel 的系统信息卡把「内核版本」单列一行；后端的 platform 就是 "Linux <release>"
+  { k: '内核版本', v: String(info.value.platform || '').split(' ').slice(1).join(' ') },
+  { k: '架构', v: info.value.arch || '' },
+  { k: 'CPU', v: info.value.cpuModel || '', mono: false },
+  { k: '核心数', v: cores.value ? String(cores.value) : '' },
+  { k: '负载', v: (stat.value.load || []).map((x: number) => x.toFixed(2)).join(' / ') },
+  { k: '运行时长', v: stat.value.uptime ? fmtUptime(stat.value.uptime) : '' },
+  { k: '解释器', v: info.value.node || '', mono: true },
+  { k: '采样方式', v: stat.value.source === 'psutil' ? 'psutil' : stat.value.source ? '/proc 直读' : '' },
 ]);
 
 /* ---------- 历史：持久化行 /system/history ---------- */
@@ -118,6 +282,16 @@ async function tick() {
     const s = await api.stats();
     if (disposed) return;
     stat.value = s;
+    const net: Record<string, [number, number]> = {};
+    let ar = 0;
+    let at = 0;
+    for (const n of s.nics || []) {
+      net[n.name] = [n.rx || 0, n.tx || 0];
+      ar += n.rx || 0;
+      at += n.tx || 0;
+    }
+    const point: MonPoint = { t: Date.now(), net, all: [ar, at], ioR: s.ioRead || 0, ioW: s.ioWrite || 0 };
+    monBuf.value = [...monBuf.value.slice(-(MON_CAP - 1)), point];
   } catch {
     return; // 401 时 api 层已跳转登录；网络抖动等下个周期自动恢复
   } finally {
@@ -193,7 +367,7 @@ const refreshing = ref(false);
 async function refresh() {
   refreshing.value = true;
   try {
-    await Promise.all([tick(), loadHistory(), loadSide(), loadProcs()]);
+    await Promise.all([tick(), loadHistory(), loadSide(), loadProcs(), loadOverview()]);
   } finally {
     if (!disposed) refreshing.value = false;
   }
@@ -219,12 +393,12 @@ function quickGo(key: string) {
 onMounted(() => {
   // 挂载期全部并发取数，不再串行瀑布
   api.info().then((d) => { if (!disposed) info.value = d; }).catch(() => { /* 降级为未知主机信息 */ });
-  Promise.all([tick(), loadHistory(), loadSide(), loadProcs(), probeAlerts()]);
+  Promise.all([tick(), loadHistory(), loadSide(), loadProcs(), probeAlerts(), loadOverview()]);
   let n = 0;
   timer = window.setInterval(() => {
     tick();
     if (++n % 5 === 0) { loadSide(); loadProcs(); }   // 侧栏/进程 15s，随 tick 自动重试失败态
-    if (n % 10 === 0) loadHistory();                  // raw 行 30s 一条，历史曲线同频更新
+    if (n % 10 === 0) { loadHistory(); loadOverview(); } // raw 行 30s 一条，历史曲线同频更新
   }, 3000);
 });
 
@@ -258,33 +432,110 @@ onBeforeUnmount(() => {
       </NSpace>
     </div>
 
-    <!-- stat cards -->
-    <NGrid cols="1 s:2 m:4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGridItem v-for="(c, ci) in [
-        { key: 'cpu', label: 'CPU', icon: 'PulseOutline', color: 'var(--cp-brand)', value: `${stat.cpu ?? '-'}`, unit: '%', pct: stat.cpu || 0, foot: `${info.cpuCores || '?'} 核 · 负载 ${(stat.load || []).map((x: number) => x.toFixed(1)).join(' / ') || '-'}` },
-        { key: 'mem', label: '内存', icon: 'CubeOutline', color: 'var(--cp-ok)', ...usedTotal(stat.memUsed, stat.memTotal), pct: Math.round(((stat.memUsed || 0) / (stat.memTotal || 1)) * 100), foot: `可用 ${fmtBytes((stat.memTotal || 0) - (stat.memUsed || 0))}` },
-        { key: 'disk', label: '磁盘 /', icon: 'DocumentTextOutline', color: 'var(--cp-warn)', ...usedTotal(stat.diskUsed, stat.diskTotal), pct: Math.round(((stat.diskUsed || 0) / (stat.diskTotal || 1)) * 100), foot: `剩余 ${fmtBytes((stat.diskTotal || 0) - (stat.diskUsed || 0))}` },
-        { key: 'net', label: '网络', icon: 'WifiOutline', color: 'var(--cp-brand-accent)', value: `↓ ${fmtBytes(stat.netRx)}/s  ↑ ${fmtBytes(stat.netTx)}/s`, unit: '', pct: 0, foot: `在线 ${fmtUptime(stat.uptime || 0)}` },
-      ]" :key="c.key" span="1">
-        <NCard size="small" class="scard cp-rise" :style="`--i:${ci}`">
-          <div class="srow">
-            <div class="sicon" :style="`--c:${c.color}`"><NIcon :component="icons[c.icon]" :size="19" /></div>
-            <div style="flex: 1; min-width: 0">
-              <div class="slabel">{{ c.label }}</div>
-              <div class="stat-num cp-pop" :class="{ small: c.key === 'net' }" :key="c.value">{{ c.value }}<span v-if="c.unit" class="unit">{{ c.unit }}</span></div>
+    <!-- 主体两列（1Panel 首页是 el-col 16/8）：左 = 概览 → 状态 → 监控，右 = 系统信息 → 应用 → 服务健康 -->
+    <div class="home-grid">
+      <div class="home-main">
+        <!-- 概览：1Panel 的卡片高 166px，格子里"标签在上、数字在下"，数字是 link 按钮 -->
+        <NCard size="small" class="ov-card">
+          <template #header><span class="section-title">概览</span></template>
+          <div class="ov-row">
+            <div
+              v-for="(it, i) in ovItems" :key="it.label" class="ov-item cp-rise" :class="{ danger: it.danger }"
+              :style="`--i:${i}`" role="link" tabindex="0" :aria-label="`${it.label} ${it.value ?? '未知'}，前往${it.label}页面`"
+              @click="router.push(it.to)" @keyup.enter="router.push(it.to)" @keyup.space.prevent="router.push(it.to)"
+            >
+              <div class="ov-label">{{ it.label }}</div>
+              <div class="ov-num">{{ it.value ?? '—' }}</div>
+              <div class="ov-note">{{ ov ? it.note : (ovError || '读取中') }}</div>
             </div>
           </div>
-          <template v-if="c.key !== 'net'">
-            <NProgress
-              type="line" :show-indicator="false" :percentage="c.pct" :height="4"
-              :color="c.key === 'cpu' ? (c.pct > 85 ? 'var(--cp-err)' : 'var(--cp-brand)') : c.key === 'mem' ? (c.pct > 88 ? 'var(--cp-warn)' : 'var(--cp-ok)') : 'var(--cp-warn)'"
-              style="margin-top: var(--space-3)"
-            />
-          </template>
-          <div class="sfoot">{{ c.foot }}</div>
+          <EmptyBox v-if="ovError" :text="`概览计数获取失败：${ovError}，30 秒轮询会自动重试`" />
         </NCard>
-      </NGridItem>
-    </NGrid>
+
+        <NCard size="small">
+          <template #header><span class="section-title">状态</span></template>
+          <template #header-extra>
+            <NText depth="3" class="sfoot">每 3 秒采样</NText>
+          </template>
+          <div class="gauge-row">
+            <StatGauge
+              v-for="g in gauges" :key="g.key" :percent="g.percent" :text="g.text" :unit="g.unit"
+              :label="g.label" :detail="g.detail" :color="g.color"
+            />
+          </div>
+        </NCard>
+
+        <NCard size="small">
+          <template #header><span class="section-title">监控</span></template>
+          <template #header-extra>
+            <NSpace align="center" :size="8" :wrap="false">
+              <NSelect
+                v-if="monMode === 'net'"
+                v-model:value="monNic" size="tiny" class="nic-select" :options="nicOpts"
+                aria-label="选择网卡"
+              />
+              <div class="cp-seg" role="group" aria-label="监控指标">
+                <button type="button" :aria-pressed="monMode === 'net'" @click="monMode = 'net'">流量</button>
+                <button type="button" :aria-pressed="monMode === 'io'" @click="monMode = 'io'">磁盘 IO</button>
+              </div>
+            </NSpace>
+          </template>
+          <div class="chip-row">
+            <span v-for="c in monChips" :key="c.k" class="cp-chip">{{ c.k }} <b>{{ c.v }}</b></span>
+            <span v-if="monNicDown" class="cp-chip down">{{ monNic }} 链路已断开，速率仅供占位</span>
+            <span v-else-if="!nicList.length" class="cp-chip down">未识别到物理网卡</span>
+          </div>
+          <MetricChart
+            :xs="monXs" :series="monSeries" height="383px" :loading="rtLoading"
+            :y-fmt="rateAxisFmt" :tip-fmt="rateTipFmt" y-name="( B/s )" data-zoom legend
+          />
+          <NText depth="3" class="chart-foot">
+            实时窗口最多 {{ MON_CAP * 3 / 60 }} 分钟（{{ MON_CAP }} 个 3 秒采样点），底部滑块可框选回看。
+          </NText>
+        </NCard>
+      </div>
+
+      <div class="home-aside">
+        <NCard size="small">
+          <template #header><span class="section-title">系统信息</span></template>
+          <InfoList :items="sysItems" />
+        </NCard>
+
+        <NCard size="small">
+          <template #header><span class="section-title">应用（{{ runningApps }}/{{ apps.length }} 运行中）</span></template>
+          <template #header-extra>
+            <NButton text type="primary" size="tiny" aria-label="查看全部应用" @click="router.push('/apps')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
+          </template>
+          <div v-for="(a, ai) in apps.slice(0, 6)" :key="a.id" class="app-row cp-rise" :style="`--i:${ai}`" role="button" tabindex="0"
+               :aria-label="`查看应用 ${a.name}`"
+               @click="router.push(`/apps/${a.id}`)" @keyup.enter="router.push(`/apps/${a.id}`)" @keyup.space.prevent="router.push(`/apps/${a.id}`)">
+            <NIcon :component="a.type === 'node' ? icons.LogoElectron : icons.LogoPython" :size="18" :color="a.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)'" />
+            <span class="app-name">{{ a.name }}</span>
+            <span class="dot" :class="a.running ? 'ok' : 'idle'"></span>
+            <NText depth="3" style="font-size: var(--fs-xs)">{{ a.running ? '运行中' : a.deploying ? '部署中' : '已停止' }}</NText>
+          </div>
+          <EmptyBox v-if="!apps.length" :text="sideError ? '应用列表获取失败，下个刷新周期自动重试' : '暂无应用，去应用页创建第一个'" />
+        </NCard>
+
+        <NCard size="small">
+          <template #header><span class="section-title">服务健康</span></template>
+          <template #header-extra>
+            <NButton text type="primary" size="tiny" aria-label="查看全部服务" @click="router.push('/services')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
+          </template>
+          <EmptyBox v-if="sideError" :text="`服务状态获取失败：${sideError}`" />
+          <EmptyBox v-else-if="!failedUnits.length" text="所有 systemd 服务运行正常，无 failed 单元" />
+          <div v-else>
+            <div v-for="u in failedUnits.slice(0, 6)" :key="u" class="app-row" role="button" tabindex="0"
+                 :aria-label="`查看异常服务 ${u}`"
+                 @click="router.push('/services')" @keyup.enter="router.push('/services')" @keyup.space.prevent="router.push('/services')">
+              <NIcon :component="icons.AlertCircleOutline" :size="18" color="var(--cp-err)" />
+              <span class="app-name">{{ u }}</span>
+              <span class="st err"><span class="dot err"></span>failed</span>
+            </div>
+          </div>
+        </NCard>
+      </div>
+    </div>
 
     <!-- 实时：CPU + 内存双轴折线 -->
     <NCard size="small">
@@ -301,8 +552,9 @@ onBeforeUnmount(() => {
         <NTag size="small" :bordered="false" :type="mstat?.samplerAlive ? 'success' : 'warning'">
           {{ mstat?.samplerAlive ? '采样器运行中' : '采样器未运行' }}
         </NTag>
-        <NButton v-for="r in RANGES" :key="r" size="tiny" :type="histRange === r ? 'primary' : 'default'"
-                 :tertiary="histRange !== r" @click="pickRange(r)">{{ r }}</NButton>
+        <div class="cp-seg" role="group" aria-label="历史区间">
+          <button v-for="r in RANGES" :key="r" type="button" :aria-pressed="histRange === r" @click="pickRange(r)">{{ r }}</button>
+        </div>
       </NSpace>
     </div>
     <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
@@ -312,7 +564,7 @@ onBeforeUnmount(() => {
           <EmptyBox v-if="histError" :text="`历史数据获取失败：${histError}，下个周期自动重试`" />
           <EmptyBox v-else-if="histEmpty" text="暂无历史数据：需采样器运行约 30 秒后出现首点" />
           <MetricChart v-else :xs="histXs" :series="netSeries" height="200px" :loading="histLoading"
-                       :y-fmt="rateAxisFmt" :tip-fmt="rateTipFmt" />
+                       :y-fmt="rateAxisFmt" :tip-fmt="rateTipFmt" data-zoom legend />
         </NCard>
       </NGridItem>
       <NGridItem span="1">
@@ -321,7 +573,7 @@ onBeforeUnmount(() => {
           <EmptyBox v-if="histError" :text="`历史数据获取失败：${histError}`" />
           <EmptyBox v-else-if="histEmpty" text="暂无历史数据：等待采样器写入首点" />
           <MetricChart v-else :xs="histXs" :series="diskSeries" height="200px" :loading="histLoading"
-                       :y-fmt="(v: number) => v + '%'" />
+                       :y-fmt="(v: number) => v + '%'" data-zoom legend />
         </NCard>
       </NGridItem>
       <NGridItem span="1">
@@ -330,7 +582,7 @@ onBeforeUnmount(() => {
           <EmptyBox v-if="histError" :text="`历史数据获取失败：${histError}`" />
           <EmptyBox v-else-if="histEmpty" text="暂无历史数据：等待采样器写入首点" />
           <MetricChart v-else :xs="histXs" :series="ioSeries" height="200px" :loading="histLoading"
-                       :y-fmt="rateAxisFmt" :tip-fmt="rateTipFmt" />
+                       :y-fmt="rateAxisFmt" :tip-fmt="rateTipFmt" data-zoom legend />
         </NCard>
       </NGridItem>
       <NGridItem span="1">
@@ -338,7 +590,7 @@ onBeforeUnmount(() => {
           <template #header><span class="section-title">负载与进程数</span></template>
           <EmptyBox v-if="histError" :text="`历史数据获取失败：${histError}`" />
           <EmptyBox v-else-if="histEmpty" text="暂无历史数据：等待采样器写入首点" />
-          <MetricChart v-else :xs="histXs" :series="loadSeries" height="200px" :loading="histLoading" />
+          <MetricChart v-else :xs="histXs" :series="loadSeries" height="200px" :loading="histLoading" data-zoom legend />
         </NCard>
       </NGridItem>
     </NGrid>
@@ -402,46 +654,6 @@ onBeforeUnmount(() => {
         </NCard>
       </NGridItem>
     </NGrid>
-
-    <!-- apps + services overview -->
-    <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGridItem span="1">
-        <NCard size="small">
-          <template #header><span class="section-title">应用（{{ runningApps }}/{{ apps.length }} 运行中）</span></template>
-          <template #header-extra>
-            <NButton text type="primary" size="tiny" aria-label="查看全部应用" @click="router.push('/apps')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
-          </template>
-          <div v-for="(a, ai) in apps.slice(0, 6)" :key="a.id" class="app-row cp-rise" :style="`--i:${ai}`" role="button" tabindex="0"
-               :aria-label="`查看应用 ${a.name}`"
-               @click="router.push(`/apps/${a.id}`)" @keyup.enter="router.push(`/apps/${a.id}`)" @keyup.space.prevent="router.push(`/apps/${a.id}`)">
-            <NIcon :component="a.type === 'node' ? icons.LogoElectron : icons.LogoPython" :size="18" :color="a.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)'" />
-            <span class="app-name">{{ a.name }}</span>
-            <span class="dot" :class="a.running ? 'ok' : 'idle'"></span>
-            <NText depth="3" style="font-size: var(--fs-xs)">{{ a.running ? '运行中' : a.deploying ? '部署中' : '已停止' }}</NText>
-          </div>
-          <EmptyBox v-if="!apps.length" :text="sideError ? '应用列表获取失败，下个刷新周期自动重试' : '暂无应用，去应用页创建第一个'" />
-        </NCard>
-      </NGridItem>
-      <NGridItem span="1">
-        <NCard size="small">
-          <template #header><span class="section-title">服务健康</span></template>
-          <template #header-extra>
-            <NButton text type="primary" size="tiny" aria-label="查看全部服务" @click="router.push('/services')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
-          </template>
-          <EmptyBox v-if="sideError" :text="`服务状态获取失败：${sideError}`" />
-          <EmptyBox v-else-if="!failedUnits.length" text="所有 systemd 服务运行正常，无 failed 单元" />
-          <div v-else>
-            <div v-for="u in failedUnits.slice(0, 6)" :key="u" class="app-row" role="button" tabindex="0"
-                 :aria-label="`查看异常服务 ${u}`"
-                 @click="router.push('/services')" @keyup.enter="router.push('/services')" @keyup.space.prevent="router.push('/services')">
-              <NIcon :component="icons.AlertCircleOutline" :size="18" color="var(--cp-err)" />
-              <span class="app-name">{{ u }}</span>
-              <span class="st err"><span class="dot err"></span>failed</span>
-            </div>
-          </div>
-        </NCard>
-      </NGridItem>
-    </NGrid>
   </NSpace>
 </template>
 
@@ -461,30 +673,81 @@ onBeforeUnmount(() => {
 .hero-greet b { color: var(--cp-brand-soft); }
 .hero-host { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: var(--space-1); }
 .hero-host-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.scard { position: relative; }
-.srow { display: flex; align-items: center; gap: var(--space-3); }
-.sicon {
-  width: 40px; height: 40px; border-radius: 11px;
-  display: flex; align-items: center; justify-content: center;
-  color: var(--c);
-  background: color-mix(in srgb, var(--c) 14%, transparent);
-}
-.slabel { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-bottom: var(--space-1); }
-.stat-num.small { font-size: var(--fs-lg); }
-.unit { font-size: var(--fs-xs); color: var(--cp-text-mute); font-weight: 400; }
 .sfoot { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-top: var(--space-1); }
+
+/* ---------- 概览条（1Panel：卡片 166px 高，标签在上、数字在下、数字是 link 按钮） ---------- */
+.ov-card :deep(.n-card__content) { min-height: 106px; }
+.ov-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 1px;
+  background: var(--cp-line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.ov-item {
+  background: var(--cp-bg-1);
+  padding: var(--space-3) var(--space-2);
+  text-align: center;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease);
+  min-width: 0;
+}
+.ov-item:hover, .ov-item:focus-visible { background: var(--cp-hover); }
+.ov-item:focus-visible { outline: 2px solid var(--cp-brand); outline-offset: -2px; }
+.ov-label { font-size: var(--fs-md); color: var(--cp-text-dim); }
+.ov-num {
+  margin-top: 10px;
+  font-size: 18px;
+  line-height: 32px;
+  font-weight: 500;
+  color: var(--cp-brand);
+  font-variant-numeric: tabular-nums;
+}
+.ov-item.danger .ov-num { color: var(--cp-err); }
+.ov-note { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- 状态仪表 + 监控 / 侧栏 两列（1Panel 首页是 el-col 16/8 = 2fr/1fr） ---------- */
+.home-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+.home-main, .home-aside { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+/* 1Panel 的状态区是 12 栅格、每环占 3（一行四个），窄屏每环占 6（一行两个） */
+.gauge-row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 10px; }
+.gauge-row > * { grid-column: span 3; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: var(--space-3); }
+.cp-chip.down {
+  background: color-mix(in srgb, var(--cp-err) 9%, transparent);
+  border-color: color-mix(in srgb, var(--cp-err) 42%, transparent);
+  color: var(--cp-err);
+}
+.cp-chip.down b { color: var(--cp-err); }
+.nic-select { width: 200px; }
+.chart-foot { display: block; margin-top: var(--space-2); font-size: var(--fs-xs); line-height: 1.5; }
+@media (max-width: 1023px) {
+  .home-grid { grid-template-columns: minmax(0, 1fr); }
+  .gauge-row > * { grid-column: span 6; }
+}
+@media (max-width: 560px) {
+  .gauge-row > * { grid-column: span 12; }
+}
+
+/* ---------- 列表行 ---------- */
 .hist-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--space-3); flex-wrap: wrap; margin-top: var(--space-2);
 }
 .hist-head .sfoot { margin-top: 0; }
+/* 应用行做成 1Panel 的 h-app-card 那种带描边小卡（8px 10px 内边距、10px 圆角、
+   hover 换成主色描边）；图标格按侧栏宽度缩到 38px，58px 在 320px 栏里会挤掉名字。 */
 .app-row {
   display: flex; align-items: center; gap: var(--space-3);
-  padding: var(--space-2); border-radius: var(--radius); cursor: pointer;
-  transition: background var(--dur) var(--ease);
+  padding: 8px 10px; min-height: 48px;
+  border: 1px solid var(--cp-border); border-radius: var(--radius-xl);
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
-.app-row:hover { background: var(--cp-hover); }
-.app-name { font-size: var(--fs-sm); color: var(--cp-text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.app-row + .app-row { margin-top: var(--space-2); }
+.app-row:hover { border-color: var(--cp-brand); background: var(--cp-hover); }
+.app-name { font-size: var(--fs-md); font-weight: 600; color: var(--cp-text-strong); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .alert-row {
   display: flex; align-items: center; gap: var(--space-3);
   padding: var(--space-2); border-radius: var(--radius);
