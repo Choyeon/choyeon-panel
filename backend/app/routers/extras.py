@@ -224,7 +224,14 @@ async def audit_list(req: Request):
         limit = 100
     # 必须 clamp 下界：SQLite 里 LIMIT 负数表示"不限制"，
     # 只写 min(limit, 500) 的话 ?limit=-1 会把整张审计表吐出来（实测 601 条全返回）。
-    return dbm.query("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (max(1, min(limit, 500)),))
+    # LEFT JOIN 取昵称：audit.username 存的是登录名，而用户改完昵称后希望审计里看到的是昵称；
+    # 用户被删掉后审计仍需保留（登录名查不到人），LEFT JOIN 而不是 JOIN 就是为了这个。
+    return dbm.query(
+        "SELECT a.id,a.username,a.action,a.detail,a.created_at,u.nickname,u.avatar"
+        " FROM audit a LEFT JOIN users u ON u.username=a.username"
+        " ORDER BY a.id DESC LIMIT ?",
+        (max(1, min(limit, 500)),),
+    )
 
 
 @router.post("/api/system/certbot-renew")

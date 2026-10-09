@@ -4,6 +4,7 @@ import {
   NAlert, NButton, NCard, NIcon, NProgress, NResult, NSpace, NText, NSkeleton, NTooltip, useMessage,
 } from 'naive-ui';
 import PageHeader from '../components/PageHeader.vue';
+import EmptyBox from '../components/EmptyBox.vue';
 import { api } from '../api';
 import { icons } from '../icons';
 
@@ -178,9 +179,7 @@ onMounted(load);
             </NTooltip>
           </NSpace>
         </div>
-        <div v-if="!shown.length" style="padding: var(--space-6); text-align: center; color: var(--cp-text-mute); font-size: var(--fs-sm)">
-          {{ filter === 'all' ? '暂无检查结果' : `没有${filter === 'fail' ? '异常' : '注意'}项，切换筛选查看其他` }}
-        </div>
+        <EmptyBox v-if="!shown.length" :text="filter === 'all' ? '暂无检查结果' : `没有${filter === 'fail' ? '异常' : '注意'}项，切换筛选查看其他`" />
       </NCard>
     </template>
 

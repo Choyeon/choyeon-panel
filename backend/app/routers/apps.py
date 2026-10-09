@@ -145,6 +145,18 @@ async def app_deploy(app_id: int, req: Request):
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 
+@router.post("/api/apps/{app_id}/sync")
+async def app_sync(app_id: int, req: Request):
+    try:
+        # 同步会动工作区并重启服务，属于写操作（viewer 已被中间件挡在 POST 之外），
+        # 失败也要留下记录，所以审计写在服务层返回之后、只记动作与 commit。
+        r = await apps_service.sync_app(app_id)
+        dbm.audit(req.state.cp_sub, "app:sync", f"{app_id}({r.get('commit') or '-'})")
+        return r
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
 @router.get("/api/apps/{app_id}/deployments")
 async def app_deployments(app_id: int):
     return dbm.query(

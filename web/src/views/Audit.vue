@@ -39,17 +39,21 @@ function actionType(a: string) {
 const filtered = computed(() => {
   if (!kw.value) return rows.value;
   const k = kw.value.toLowerCase();
-  return rows.value.filter((r) => `${r.username || ''} ${r.action} ${r.detail || ''}`.toLowerCase().includes(k));
+  // 昵称是用户看得见的名字，过滤必须一起匹配，否则按昵称搜会"查无此人"
+  return rows.value.filter((r) => `${r.username || ''} ${r.nickname || ''} ${r.action} ${r.detail || ''}`.toLowerCase().includes(k));
 });
 
 const cols: any[] = [
   { title: '时间 (UTC)', key: 'created_at', width: 165, render: (r: any) => h('span', { class: 'mono-dim' }, r.created_at) },
   {
-    title: '用户', key: 'username', width: 130,
+    title: '用户', key: 'username', width: 150,
     render: (r: any) =>
       h('div', { class: 'cell-main', style: 'gap:var(--space-2)' }, [
-        h(NIcon, { component: icons.PersonCircleOutline, size: 18, color: 'var(--cp-text-mute)' }),
-        h('span', { class: 'cell-name' }, r.username || '—'),
+        ...(r.avatar
+          ? [h('span', { class: 'cell-avatar sm' }, [h('img', { src: r.avatar, alt: '' })])]
+          : [h(NIcon, { component: icons.PersonCircleOutline, size: 18, color: 'var(--cp-text-mute)' })]),
+        // 有昵称显示昵称，没有则回退登录名；system 等审计主体不在 users 表里，原样显示。
+        h('span', { class: 'cell-name', title: r.nickname ? `登录名：${r.username || '—'}` : r.username }, r.nickname || r.username || '—'),
       ]),
   },
   { title: '操作', key: 'action', width: 190, render: (r: any) => h(NTag, { size: 'tiny', bordered: false, type: actionType(r.action) }, () => r.action) },

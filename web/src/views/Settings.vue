@@ -7,6 +7,7 @@ import {
 import { api, getRole } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
+import EmptyBox from '../components/EmptyBox.vue';
 
 const msg = useMessage();
 const isAdmin = computed(() => getRole() === 'admin');
@@ -113,6 +114,7 @@ onMounted(load);
               <NText depth="3" style="font-size: var(--fs-xs)">面板对防火墙只读；开启/改规则请 SSH 手动操作，以免误锁 SSH。</NText>
             </NSpace>
             <div v-if="fw?.output" class="log-view" style="max-height: 220px">{{ fw.output }}</div>
+            <EmptyBox v-else-if="fw" text="ufw 未返回规则输出：未安装时属正常，规则请用 SSH 手动维护" />
           </NSpace>
         </NCard>
       </NGridItem>
@@ -124,6 +126,7 @@ onMounted(load);
             <NText depth="3" style="font-size: var(--fs-xs)">certbot renew 检查所有已安装证书并自动续期（系统每日定时任务已托管，此处用于手动触发验证）。</NText>
             <NButton type="primary" size="small" :loading="renewing" :icon="ico('SyncOutline')" style="align-self: flex-start" @click="renew">立即续期</NButton>
             <div v-if="renewLog" class="log-view" style="max-height: 220px">{{ renewLog }}</div>
+            <EmptyBox v-else text="本次会话还没有执行过续期，点击上方按钮后即可看到 certbot 输出" />
           </NSpace>
         </NCard>
       </NGridItem>

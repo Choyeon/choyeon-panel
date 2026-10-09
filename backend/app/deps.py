@@ -16,6 +16,8 @@ PUBLIC_PREFIXES = (
     "/api/auth/status",
     "/api/auth/login",
     "/api/auth/setup",
+    # 头像由 <img> 直接加载，带不了 Authorization；路由本身只按白名单文件名回读图片。
+    "/api/avatars",
 )
 MUTATIONS = {"POST", "PATCH", "PUT", "DELETE"}
 

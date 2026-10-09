@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch, h } from 'vue';
+import { onBeforeUnmount, onMounted, ref, watch, h, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NCard, NTabs, NTabPane, NSpace, NButton, NText, NTag, NInput, NDynamicInput,
   useMessage, NPopconfirm, NIcon, NForm, NFormItem, NSkeleton, NGrid, NGridItem, NSelect, NAlert,
 } from 'naive-ui';
-import { api } from '../api';
+import { api, repoHref, siteHref } from '../api';
 import { icons } from '../icons';
 import LogStream from '../components/LogStream.vue';
 import PageHeader from '../components/PageHeader.vue';
@@ -43,6 +43,13 @@ const unitInfo = ref<any>(null);
 const unitContent = ref('');
 const unitSaving = ref(false);
 const proc = ref<any>(null);
+
+// 仓库外链：只认 https，且 URL 里的 user:token@ 凭据段已在 repoHref 中剥掉，
+// 密钥既不会显示在页面上，也不会进地址栏和新标签页。
+const repoUrl = computed(() => repoHref(app.value?.repo_url));
+
+// 域名同样只走白名单化的外链构造（siteHref），nginx 检测出的怪值不会变成可点链接
+const siteUrl = computed(() => siteHref(app.value?.domain || ngx.value?.configs?.[0]?.analysis?.serverNames?.[0]));
 
 async function loadUnit() {
   try {
@@ -184,6 +191,19 @@ async function deploy() {
     acting.value = '';
   }
 }
+async function sync() {
+  acting.value = 'sync';
+  try {
+    const r = await api.appSync(id);
+    msg.success(r.changed ? `已同步到 ${r.commit || '最新版本'} 并重启` : `远端无新提交（${r.commit || '当前版本'}）`);
+    // load() 里已经带上了 deployments，不必再单独轮询一次
+    later(load, 1200);
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    acting.value = '';
+  }
+}
 async function pollDeps() {
   // 轮询是 setTimeout 里跑的，失败若不在这里吞掉就变成未处理的 promise rejection：
   // 界面上部署记录停在旧数据、也没有任何提示。
@@ -274,6 +294,7 @@ watch(
         </span>
         <span v-if="app.deploying" class="st warn"><span class="dot warn"></span>部署中</span>
         <NButton size="small" type="primary" class="cp-press" :loading="acting === 'deploy'" :disabled="!!acting" :icon="ico('CloudUploadOutline')" @click="deploy">立即部署</NButton>
+        <NButton v-if="app.repo_url" size="small" tertiary :loading="acting === 'sync'" :disabled="!!acting || app.deploying" :icon="ico('CloudDownloadOutline')" title="拉取远端最新代码并重启，不重装依赖、不改 unit/反代" @click="sync">一键同步</NButton>
         <NButton size="small" :tertiary="!app.running" :type="app.running ? 'warning' : 'success'" :loading="acting === (app.running ? 'stop' : 'start')" :disabled="!!acting" :icon="ico(app.running ? 'StopOutline' : 'PlayOutline')" @click="act(app.running ? 'stop' : 'start')">
           {{ app.running ? '停止' : '启动' }}
         </NButton>
@@ -306,8 +327,9 @@ watch(
       <NGridItem span="1">
         <NCard size="small" class="info-card cp-rise" style="--i: 2">
           <div class="info-k">域名</div>
-          <div class="info-v" style="font-size: var(--fs-md)">
-            {{ app.domain || ngx?.configs?.[0]?.analysis?.serverNames?.[0] || '—' }}
+          <div class="info-v repo-cell" style="font-size: var(--fs-md)">
+            <a v-if="siteUrl" :href="siteUrl" target="_blank" rel="noopener noreferrer" class="repo-link">{{ app.domain || ngx?.configs?.[0]?.analysis?.serverNames?.[0] }}<NIcon :component="icons.OpenOutline" :size="12" class="repo-ico" /></a>
+            <template v-else>{{ app.domain || ngx?.configs?.[0]?.analysis?.serverNames?.[0] || '—' }}</template>
             <NTag v-if="!app.domain && ngx?.configs?.length" size="tiny" :bordered="false" style="margin-left: var(--space-2)">nginx 检测</NTag>
           </div>
         </NCard>
@@ -315,7 +337,15 @@ watch(
       <NGridItem span="1">
         <NCard size="small" class="info-card cp-rise" style="--i: 3">
           <div class="info-k">仓库 / 分支</div>
-          <div class="info-v" style="font-size: var(--fs-sm)">{{ app.repo_url ? (app.repo_url.replace(/^https?:\/\//, '').replace(/\.git$/, '') + ' @ ' + (app.branch || 'main')) : '本地目录' }}</div>
+          <div class="info-v repo-cell" style="font-size: var(--fs-sm)">
+            <template v-if="repoUrl">
+              <a :href="repoUrl" target="_blank" rel="noopener noreferrer" class="repo-link" title="在新标签页打开仓库">
+                {{ repoUrl.replace(/^https:\/\//, '') }}<NIcon :component="icons.OpenOutline" :size="12" class="repo-ico" />
+              </a>
+              <span class="mono-dim"> @ {{ app.branch || 'main' }}</span>
+            </template>
+            <span v-else>{{ app.repo_url ? app.repo_url + ' @ ' + (app.branch || 'main') : '本地目录' }}</span>
+          </div>
         </NCard>
       </NGridItem>
     </NGrid>
@@ -496,6 +526,23 @@ watch(
 .info-card :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
 .info-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: var(--space-2); }
 .info-v { color: var(--cp-text); font-weight: 500; }
+.repo-cell { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
+.repo-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--cp-brand-soft);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur) var(--ease);
+}
+.repo-link:hover { color: var(--cp-brand); text-decoration: underline; }
+.repo-ico { flex-shrink: 0; }
 .split-view { display: flex; align-items: flex-start; gap: var(--space-3); }
 .dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
 .dep-item { padding: var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }

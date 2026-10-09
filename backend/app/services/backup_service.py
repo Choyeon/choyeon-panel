@@ -1,19 +1,28 @@
+import gzip
 import os
+import re
+import shutil
+import sqlite3
 import sys
+import tarfile
 from contextlib import suppress
 from pathlib import Path
 
+from .. import backup_runner
 from .. import config
 from .. import database as dbm
 from ..log import warn
-from ..util import is_name, run, unit_env_value, unit_pct_escape
+from ..util import is_name, run, sh_escape, unit_env_value, unit_pct_escape
 from .files_service import iso_ms
-from .pg_service import is_ident
+from .pg_service import is_ident, psql
 
 BACKUP_DIR = config.BACKUP_DIR
 BACKEND_DIR = str(Path(config.BASE, "backend"))
 _VENV_PY = str(Path(BACKEND_DIR, ".venv", "bin", "python"))
 PYTHON_BIN = _VENV_PY if os.path.exists(_VENV_PY) else sys.executable
+
+# 与 backups.kind 的 CHECK 约束保持一致（database.py 建表 + 迁移都按这份）
+KINDS = ("pg", "app", "sqlite")
 
 
 def _unit_base(bid: int) -> str:
@@ -30,12 +39,19 @@ def _unit_dir() -> str:
 
 
 def _target_missing(b: dict) -> bool:
-    """app 类备份的目标必须还在 apps 表里。
+    """app / sqlite 类备份的目标必须还在 apps 表里。
 
     应用被删除后备份行不会跟着走，timer 每晚跑一次 backup_runner 就 SystemExit 一次，
     而面板上这条任务依旧显示"已启用"——只有翻 journalctl 才发现备份早就不产出了。
     """
-    return b["kind"] == "app" and not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (b["target"],))
+    if b["kind"] == "app":
+        return not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (b["target"],))
+    if b["kind"] == "sqlite":
+        t = str(b["target"] or "")
+        if t.isdigit():
+            return not dbm.query_one("SELECT 1 FROM apps WHERE id=?", (int(t),))
+        return not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (t,))
+    return False
 
 
 def list_backups() -> list:
@@ -51,7 +67,14 @@ def list_backups() -> list:
             for f in files:
                 try:
                     st = os.stat(f"{BACKUP_DIR}/{f}")
-                    entries.append({"name": f, "size": st.st_size, "mtime": iso_ms(st.st_mtime)})
+                    entries.append({
+                        "name": f,
+                        "size": st.st_size,
+                        "mtime": iso_ms(st.st_mtime),
+                        # 面板数据目录的备份（bk0-/panel-）与 .sql.gz 走不了自动恢复，
+                        # 前端据此把"恢复"按钮置灰，而不是让人点了才知道不行。
+                        "restoreable": _restoreable(b["kind"], f),
+                    })
                 except OSError:
                     continue
             b["files"] = entries
@@ -135,6 +158,15 @@ def _validate_target(kind: str, target):
         raise RuntimeError("PG 库名不合法")
     if kind == "app" and not is_name(target or ""):
         raise RuntimeError("应用名不合法")
+    if kind == "sqlite":
+        # sqlite 的 target 存 app_id（应用改名后 name 型 target 会指向不存在的目录），
+        # 同时兼容按应用名配置的历史写法。
+        t = str(target or "")
+        if t.isdigit():
+            if not dbm.query_one("SELECT 1 FROM apps WHERE id=?", (int(t),)):
+                raise RuntimeError("应用不存在")
+        elif not is_name(t) or not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (t,)):
+            raise RuntimeError("SQLite 备份目标应用不存在")
 
 
 def _validate_fields(i: dict):
@@ -149,8 +181,8 @@ def _validate_fields(i: dict):
 
 
 async def create_backup(i: dict) -> dict:
-    if i.get("kind") not in ("pg", "app"):
-        raise RuntimeError("kind 必须是 pg 或 app")
+    if i.get("kind") not in KINDS:
+        raise RuntimeError("kind 必须是 pg/app/sqlite")
     _validate_target(i["kind"], i.get("target"))
     _validate_fields(i)
     res = dbm.execute(
@@ -199,8 +231,8 @@ async def update_backup(bid: int, i: dict) -> dict:
         "kind": i["kind"] if i.get("kind") is not None else cur["kind"],
         "target": i["target"] if i.get("target") is not None else cur["target"],
     }
-    if merged["kind"] not in ("pg", "app"):
-        raise RuntimeError("kind 必须是 pg 或 app")
+    if merged["kind"] not in KINDS:
+        raise RuntimeError("kind 必须是 pg/app/sqlite")
     # create 有、update 没有——这道不对称就是上面 _validate_target 说的漏洞，补齐
     _validate_target(merged["kind"], merged["target"])
     dbm.execute(
@@ -249,6 +281,250 @@ async def delete_backup(bid: int):
             os.unlink(f)
     await run("systemctl", ["daemon-reload"])
     dbm.execute("DELETE FROM backups WHERE id=?", (bid,))
+
+
+_SQLITE_NAME_RE = re.compile(r"^bk\d+-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}(?:-\d+)?-(.+)\.sqlite\.gz$")
+
+
+def _restoreable(kind: str, name: str) -> bool:
+    """这个备份文件能不能走自动恢复。
+
+    pg 的 .sql.gz 是 pg_dumpall 的整库文本档，恢复意味着重建集群里所有库和角色，
+    绝不能由一个按钮触发；面板自身数据库（bk0- 之类）也不该被服务覆盖。
+    """
+    if kind == "sqlite":
+        return name.endswith(".sqlite.gz")
+    if kind == "app":
+        return name.endswith(".tar.gz")
+    if kind == "pg":
+        return name.endswith(".dump.gz")
+    return False
+
+
+def _backup_file_path(bid: int, filename: str) -> str:
+    """恢复只允许读取"本任务名下、真实落在备份目录里"的普通文件。
+
+    filename 完全来自请求体：直接拼路径就是任意文件读取（`../../etc/shadow`），
+    而且它会成为 tar 解包与 pg_restore 的输入。这里同时管住目录穿越与软链接跳出。
+    """
+    if not filename or filename != os.path.basename(filename):
+        raise RuntimeError("备份文件名不合法")
+    if not filename.startswith(f"bk{bid}-"):
+        raise RuntimeError("该文件不属于这个备份任务")
+    real = os.path.realpath(os.path.join(BACKUP_DIR, filename))
+    if os.path.dirname(real) != os.path.realpath(BACKUP_DIR):
+        raise RuntimeError("备份文件名不合法")
+    if not os.path.isfile(real):
+        raise RuntimeError("备份文件不存在（可能已被保留策略清理）")
+    return real
+
+
+def _sqlite_app(target):
+    t = str(target or "")
+    app = None
+    if t.isdigit():
+        app = dbm.query_one("SELECT * FROM apps WHERE id=?", (int(t),))
+    if not app:
+        app = dbm.query_one("SELECT * FROM apps WHERE name=?", (t,))
+    if not app:
+        raise RuntimeError("备份目标应用已不存在")
+    if not os.path.isdir(app["path"]):
+        raise RuntimeError(f"应用目录不存在：{app['path']}")
+    return app
+
+
+async def _sh_script(script: str, timeout: int = 1800) -> dict:
+    """bash + pipefail 执行整段脚本，返回 {code, out}（pipefail 才不会吞管道左侧失败）。"""
+    return await run("/bin/bash", ["-o", "pipefail", "-c", script], timeout=timeout)
+
+
+async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
+    from . import apps_service, systemd_ops
+
+    app = _sqlite_app(bk["target"])
+    unit = apps_service.unit_name(app)
+    ts = backup_runner.stamp()
+
+    # 恢复会把目标库整份覆盖，出事时用户唯一能退回的就是覆盖前的那一版，
+    # 所以这一步不能省、也不能放在覆盖之后。用在线备份 API 而不是 cp：
+    # 正在被写入的库直接复制出来的文件恢复时会报 database image is malformed。
+    cands = backup_runner.find_sqlite_dbs(app["path"])
+    if not cands:
+        raise RuntimeError(f"{app['path']} 下没有找到数据库文件（*.db / *.sqlite*）")
+    m = _SQLITE_NAME_RE.match(os.path.basename(src_file))
+    if m:
+        stem = m.group(1)
+        dst = next((c for c in cands if os.path.splitext(os.path.basename(c))[0] == stem), None)
+        if not dst:
+            raise RuntimeError(f"目录里找不到与备份同名的数据库 {stem}.db；现有候选：{', '.join(cands[:4])}")
+    else:
+        # 旧格式（文件名不带源库名）只能按"最大的那个库"定位，如实说明而不是假装精确
+        dst = cands[0]
+        log.append(f"!! 备份文件名未记录源库名，按目录内最大库定位：{dst}")
+
+    pre = f"{dst}.pre-restore-{ts}.sqlite.gz"
+    backup_runner.sqlite_snapshot(dst, pre)
+    log.append(f"==> 已留存当前库：{os.path.basename(pre)}")
+
+    tmp = f"{src_file}.restoring-{ts}"
+    with gzip.open(src_file, "rb") as g, open(tmp, "wb") as f:
+        shutil.copyfileobj(g, f, 1024 * 1024)
+    mode = os.stat(dst).st_mode & 0o777
+    try:
+        con = sqlite3.connect(tmp)
+        try:
+            ok = con.execute("PRAGMA quick_check").fetchone()[0]
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        os.unlink(tmp)
+        raise RuntimeError(f"快照文件无法打开，未做任何改动：{e}")
+    if ok != "ok":
+        os.unlink(tmp)
+        raise RuntimeError(f"快照完整性检查未通过（{ok}），已放弃恢复")
+
+    stopped = False
+    try:
+        if await systemd_ops.is_active(unit):
+            await systemd_ops.service_action(unit, "stop")
+            stopped = True
+            log.append(f"==> 已停止 {unit}")
+        else:
+            log.append(f"==> {unit} 未在运行，跳过停止")
+        # 残留的 WAL/SHM 属于旧库：留着它们，服务一打开就会把旧帧套到刚写回的库上
+        for ext in ("-wal", "-shm", "-journal"):
+            if os.path.exists(dst + ext):
+                os.unlink(dst + ext)
+        os.replace(tmp, dst)
+        os.chmod(dst, mode)
+        log.append(f"==> 数据已写回 {dst}")
+    except Exception:
+        for p in (tmp,):
+            if os.path.exists(p):
+                with suppress(OSError):
+                    os.unlink(p)
+        raise
+    finally:
+        try:
+            await systemd_ops.service_action(unit, "start")
+            log.append(f"==> 已启动 {unit}" + ("（恢复前为运行状态）" if stopped else ""))
+        except Exception as e:  # noqa: BLE001
+            log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
+
+
+async def _restore_app(bk: dict, src_file: str, log: list) -> None:
+    from . import apps_service, systemd_ops
+
+    app = dbm.query_one("SELECT * FROM apps WHERE name=?", (bk["target"],))
+    if not app:
+        raise RuntimeError("备份目标应用已不存在")
+    dest = app["path"]
+    if not os.path.isdir(dest):
+        raise RuntimeError(f"应用目录不存在：{dest}")
+    unit = apps_service.unit_name(app)
+    ts = backup_runner.stamp()
+
+    env = os.path.join(dest, ".panel.env")
+    env_keep = None
+    if os.path.exists(env):
+        # 归档里的 .panel.env 是备份当时的环境变量，而口令/端口可能早就改过了，
+        # 覆盖回去会让服务突然起不来且毫无提示。先留存现值，解包后再还原现值。
+        env_keep = f"{env}.pre-restore-{ts}"
+        shutil.copy2(env, env_keep)
+
+    with tarfile.open(src_file, "r:gz") as tf:
+        members = []
+        for m in tf.getmembers():
+            name = m.name.replace("\\", "/")
+            parts = [p for p in name.split("/") if p]
+            if name.startswith("/") or ".." in parts or not parts:
+                raise RuntimeError(f"归档含不安全路径：{m.name}")
+            if not (m.isfile() or m.isdir()):
+                # 链接型条目会把写入引到目录之外（备份里一个 node_modules 软链就能覆盖系统文件）
+                raise RuntimeError(f"归档含不支持的条目类型：{m.name}")
+            members.append(m)
+        stopped = False
+        try:
+            if await systemd_ops.is_active(unit):
+                await systemd_ops.service_action(unit, "stop")
+                stopped = True
+                log.append(f"==> 已停止 {unit}")
+            tf.extractall(path=dest, members=members)
+            log.append(f"==> 已解包 {len(members)} 个条目到 {dest}")
+            if env_keep:
+                shutil.copy2(env_keep, env)
+                log.append("==> 保留当前 .panel.env（未使用归档内的环境变量）")
+        finally:
+            if stopped:
+                try:
+                    await systemd_ops.service_action(unit, "start")
+                    log.append(f"==> 已启动 {unit}")
+                except Exception as e:  # noqa: BLE001
+                    log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
+
+
+async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
+    db = bk["target"]
+    if db == "all":
+        raise RuntimeError("整库备份（pg_dumpall）请手工恢复：gzip -dc 文件 | sudo -u postgres psql -v ON_ERROR_STOP=1")
+    if not is_ident(db):
+        raise RuntimeError("库名不合法")
+    ts = backup_runner.stamp()
+    # 文件名保持 bk<id>-<时间戳>-pre-restore.dump.gz：prune 是按名字排序删最旧的，
+    # 这里用当前时间戳正好排在末尾；写成 bk<id>-pre-restore-... 会排到所有真实备份之后，
+    # 等于每次恢复都留下一个永不轮替的文件把 keep 名额吃掉。
+    pre = os.path.join(BACKUP_DIR, f"bk{bk['id']}-{ts}-pre-restore.dump.gz")
+    # 恢复会 drop 目标库，先给当前内容做一份同目录的 dump 作为退路
+    code = (await _sh_script(backup_runner.dump_cmd(f"su -s /bin/sh postgres -c 'pg_dump -Fc {db}'", pre)))["code"]
+    if code != 0:
+        raise RuntimeError(f"当前库快照失败（exit {code}），未做任何改动")
+    log.append(f"==> 已留存当前库：{os.path.basename(pre)}")
+
+    owner = ""
+    with suppress(Exception):
+        owner = (await psql(f"SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='{db}';")).strip()
+    if not is_ident(owner):
+        owner = "postgres"
+
+    # PG 15+ 的 dropdb --force 会先断开现有连接；旧版本没有这个参数，退回普通 dropdb，
+    # 这时若报 "other users are connected" 就是真有人在用，如实报错而不是强杀。
+    # set -e 保证 drop 没成功就不会 createdb/restore（否则会在残留库上叠加恢复内容）。
+    def su(inner: str) -> str:
+        return f"su -s /bin/sh postgres -c {sh_escape(inner)}"
+
+    script = "\n".join(
+        [
+            "set -e",
+            f"{su(f'dropdb --if-exists --force {db}')} || {su(f'dropdb --if-exists {db}')}",
+            su(f"createdb -O {owner} {db}"),
+            f"gzip -dc {sh_escape(src_file)} | {su(f'pg_restore -d {db} --no-privileges --exit-on-error')}",
+        ]
+    )
+    r = await _sh_script(script, timeout=3600)
+    if r["code"] != 0:
+        raise RuntimeError(
+            f"恢复失败（退出码 {r['code']}），当前库已被删除，可用 {os.path.basename(pre)} 重试恢复：{r['out'][-500:]}"
+        )
+    log.append(f"==> 库 {db} 已从 {os.path.basename(src_file)} 恢复（属主 {owner}）")
+
+
+async def restore_backup(bid: int, filename: str) -> dict:
+    """用指定备份文件把目标覆盖回备份当时的状态（admin 手动触发，不可逆操作）。"""
+    bk = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
+    if not bk:
+        raise RuntimeError("备份任务不存在")
+    path = _backup_file_path(bid, filename)
+    if not _restoreable(bk["kind"], os.path.basename(path)):
+        raise RuntimeError("该备份类型不支持自动恢复，请手工恢复")
+    log: list[str] = [f"==> 恢复 {os.path.basename(path)}（kind={bk['kind']}, target={bk['target']}）"]
+    if bk["kind"] == "sqlite":
+        await _restore_sqlite(bk, path, log)
+    elif bk["kind"] == "app":
+        await _restore_app(bk, path, log)
+    else:
+        await _restore_pg(bk, path, log)
+    dbm.audit("system", "backup:restore", f"{bid}:{os.path.basename(path)}")
+    return {"ok": True, "log": "\n".join(log)}
 
 
 async def run_backup_now(bid: int) -> dict:

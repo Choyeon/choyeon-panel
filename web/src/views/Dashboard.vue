@@ -7,7 +7,7 @@ import { LineChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import { api, getRole } from '../api';
-import { icons } from '../icons';
+import { icons, icon } from '../icons';
 import { cssVar } from '../theme';
 import EmptyBox from '../components/EmptyBox.vue';
 
@@ -141,6 +141,16 @@ async function loadSide() {
   }
 }
 
+const refreshing = ref(false);
+async function refresh() {
+  refreshing.value = true;
+  try {
+    await Promise.all([tick(), loadSide()]);
+  } finally {
+    refreshing.value = false;
+  }
+}
+
 const quickOpts = [
   { label: '部署新应用', key: 'deploy', icon: 'AddOutline', to: '/apps' },
   { label: '打开终端', key: 'term', icon: 'TerminalOutline', to: '/terminal', disabled: !isAdmin },
@@ -217,6 +227,8 @@ window.addEventListener('resize', onResize);
         <span v-if="sideError" class="st warn"><span class="dot warn"></span>服务状态未知</span>
         <span v-else-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
         <span v-else class="st err"><span class="dot err"></span>{{ failedUnits.length }} 个服务异常</span>
+        <!-- 统计每 3s 自动刷，这里的手动刷新是为了立刻确认刚做过的操作（部署/改配置）生效 -->
+        <NButton size="small" tertiary :loading="refreshing" :icon="icon('RefreshOutline')" aria-label="立即刷新状态" @click="refresh" />
         <NDropdown trigger="click" :options="quickMenu" :on-select="quickGo">
           <NButton type="primary" round size="small" class="cp-press">快捷操作</NButton>
         </NDropdown>

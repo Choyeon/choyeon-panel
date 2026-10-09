@@ -107,6 +107,7 @@ APP_ROOT = _path("CP_APP_ROOT", "/root/www")
 BACKUP_DIR = _path("CP_BACKUP_DIR", "/root/backups/panel")
 FILE_ROOTS = _paths("CP_FILE_ROOTS", "/root/www,/etc/nginx,/root/backups/panel")
 WEB_DIST = BASE / "web" / "dist"
+AVATAR_DIR = str(Path(DATA_DIR) / "avatars")
 SYS_HELPER = BASE / "backend" / "python" / "sys_helper.py"
 
 # ---------- 外部命令 ----------
@@ -121,6 +122,8 @@ LOGIN_LIMIT = _int("CP_LOGIN_LIMIT", 10, 1, 100)          # 每 IP 每分钟
 LOGIN_WINDOW_SEC = 60
 AUDIT_KEEP = _int("CP_AUDIT_KEEP", 5000, 100)             # 审计日志保留条数
 MAX_UPLOAD_BYTES = _int("CP_MAX_UPLOAD_MB", 8, 1, 512) * 1024 * 1024
+# 头像走浏览器本地压缩（256px JPEG 通常 20-80KB），2MB 足够宽松又能挡住误传的原始大图
+AVATAR_MAX_BYTES = _int("CP_AVATAR_MAX_KB", 2048, 32, 16384) * 1024
 TERMINAL_MAX_SESSIONS = _int("CP_TERMINAL_MAX_SESSIONS", 4, 1, 32)
 
 # 是否发送 HSTS 头（仅在 HTTPS 直接暴露时开启；反代场景由 nginx 负责）

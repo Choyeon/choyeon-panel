@@ -333,7 +333,9 @@ async function delKeys(keys: string[]) {
               <span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-warn)" /> 用户 / 角色</span>
               <NButton size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320" />
+            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320">
+              <template #empty><EmptyBox text="没有可读取的角色（PostgreSQL 未运行？）" /></template>
+            </NDataTable>
           </NSpace>
         </NTabPane>
 
@@ -447,7 +449,7 @@ async function delKeys(keys: string[]) {
         </NTabPane>
 
         <NTabPane name="redis" tab="Redis">
-          <NText v-if="redis?.error" depth="3">{{ redis.error }}</NText>
+          <EmptyBox v-if="redis?.error" :text="`Redis 连接失败：${redis.error}`" />
           <template v-else-if="redis">
             <NGrid cols="2 s:4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
               <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">版本</div><div class="rv">{{ redis.info?.redis_version || '—' }}</div></NCard></NGridItem>

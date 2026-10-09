@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .. import database as dbm
+from ..deps import need_admin
 from ..services import backup_service
 
 router = APIRouter()

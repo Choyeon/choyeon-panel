@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS audit(
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS backups(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL CHECK(kind IN ('pg','app')),
+  kind TEXT NOT NULL CHECK(kind IN ('pg','app','sqlite')),
   target TEXT NOT NULL,
   schedule TEXT NOT NULL DEFAULT 'daily',
   hour INTEGER NOT NULL DEFAULT 3,
@@ -99,6 +99,33 @@ def migrate() -> None:
         dcols = _columns("deployments")
         if "commit_sha" not in dcols:
             conn.execute("ALTER TABLE deployments ADD COLUMN commit_sha TEXT")
+        # SQLite 备份任务：kind 的 CHECK 约束无法 ALTER，而 `CREATE TABLE IF NOT EXISTS`
+        # 对已存在的旧表是空操作——旧库会一直只认 pg/app，新建 sqlite 任务时抛
+        # IntegrityError（面板路由兜成 400，用户看到的是"参数不合法"而不是"该版本支持"）。
+        # 所以按现有 migrate 风格重建表结构迁移，列完全一致、数据原样搬过去。
+        bt = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='backups'").fetchone()
+        if bt and bt["sql"] and "sqlite" not in bt["sql"]:
+            conn.executescript(
+                """
+                BEGIN;
+                CREATE TABLE backups_v2(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  kind TEXT NOT NULL CHECK(kind IN ('pg','app','sqlite')),
+                  target TEXT NOT NULL,
+                  schedule TEXT NOT NULL DEFAULT 'daily',
+                  hour INTEGER NOT NULL DEFAULT 3,
+                  minute INTEGER NOT NULL DEFAULT 30,
+                  keep INTEGER NOT NULL DEFAULT 7,
+                  enabled INTEGER NOT NULL DEFAULT 1,
+                  created_at TEXT DEFAULT (datetime('now'))
+                );
+                INSERT INTO backups_v2(id,kind,target,schedule,hour,minute,keep,enabled,created_at)
+                  SELECT id,kind,target,schedule,hour,minute,keep,enabled,created_at FROM backups;
+                DROP TABLE backups;
+                ALTER TABLE backups_v2 RENAME TO backups;
+                COMMIT;
+                """
+            )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_deployments_app ON deployments(app_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit(id)")
         conn.commit()

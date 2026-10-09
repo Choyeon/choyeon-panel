@@ -82,6 +82,12 @@ function authHeaders(extra: Record<string, string> = {}) {
 
 async function parse(res: Response) {
   const data = await res.json().catch(() => ({}) as any);
+  // /auth/login|setup|password 的 401/403 是"这次认证动作失败"，不该把人已登录的会话清掉；
+  // /auth/avatar 是已登录用户的功能，它的失败必须正常提示，且响应体只有 {"detail": ...}
+  // （FastAPI 默认字段名，不是面板统一的 error），不加这条特例界面会显示 "HTTP 413" 这种空话。
+  if (!res.ok && res.url.includes('/auth/avatar')) {
+    throw new Error((data as any).error || (data as any).detail || `HTTP ${res.status}`);
+  }
   if (res.status === 401 && !String(res.url).includes('/auth/')) notifyUnauthorized();
   if (!res.ok) throw new Error((data as any).error || `HTTP ${res.status}`);
   return data as any;
@@ -111,6 +117,9 @@ export const api = {
   login: (username: string, password: string) => req('/auth/login', { body: { username, password } }),
   changePassword: (oldp: string, newp: string) => req('/auth/password', { body: { old: oldp, new: newp } }),
   updateProfile: (nickname: string, avatar: string) => req('/auth/profile', { body: { nickname, avatar } }),
+  // 头像上传走原始字节（后端不引 python-multipart），Content-Type 必须覆盖默认的 JSON
+  uploadAvatar: (blob: Blob) =>
+    request('/auth/avatar', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/octet-stream' }), body: blob }, 60000).then(parse),
   info: () => req('/system/info'),
   stats: () => req('/system/stats'),
   services: () => req('/system/services'),
@@ -125,6 +134,8 @@ export const api = {
   deleteApp: (id: number, purge: boolean) => req(`/apps/${id}${purge ? '?purge=1' : ''}`, { method: 'DELETE' }),
   appAction: (id: number, verb: string) => req(`/apps/${id}/action`, { body: { verb } }),
   deploy: (id: number) => req(`/apps/${id}/deploy`, { body: {} }),
+  // 一键同步 = fetch + reset + 重启，不跑 install；git fetch 服务端上限 300s，给到 320s
+  appSync: (id: number) => req(`/apps/${id}/sync`, { body: {}, timeout: 320000 }),
   deployments: (id: number) => req(`/apps/${id}/deployments`),
   deployment: (id: number, depId: number) => req(`/apps/${id}/deployments/${depId}`),
   appSsl: (id: number, email?: string) => req(`/apps/${id}/ssl`, { body: { email }, timeout: 320000 }),
@@ -167,6 +178,9 @@ export const api = {
   // 重试就会并发（certbot 抢同一张证书、pg_dump 抢同一份磁盘、LE 重复订单限流）。
   // 对应服务端：certbot 申请 300s / renew 600s，psql 30s，backup_runner 1800s。
   runBackup: (id: number) => req(`/backups/${id}/run`, { body: {}, timeout: 1860000 }),
+  // 恢复在服务端最长 3600s（pg 的 drop/create/restore），前端超时必须更长，
+  // 否则本地 abort 之后远端还在写库，用户会以为没执行又点一次。
+  restoreBackup: (id: number, file: string) => req(`/backups/${id}/restore`, { body: { file }, timeout: 3700000 }),
   files: (path: string) => req(`/files?path=${encodeURIComponent(path)}`),
   fileContent: (path: string) => req(`/files/content?path=${encodeURIComponent(path)}`),
   saveFile: (path: string, content: string | ArrayBuffer) =>
@@ -184,6 +198,27 @@ export const api = {
 
 export function apiUrl(path: string) {
   return `${base}${path}`;
+}
+
+/**
+ * 仓库地址 → 可点击的 https 外链。
+ * 只认 https（http/ssh 形式交给用户自己处理），并且剥掉 `user:token@` 凭据段：
+ * repo_url 允许内嵌访问令牌，原样渲染成 <a href> 会把密钥显示在地址栏与链接标题里。
+ */
+export function repoHref(url: any): string {
+  const s = String(url || '');
+  if (!/^https:\/\//i.test(s)) return '';
+  return s.replace(/^(https:\/\/)[^/@]*@/i, '$1').replace(/\.git$/i, '');
+}
+
+/**
+ * 域名 → 站点外链。只接受合法主机名（含点、无空格/斜杠），
+ * 域名来自用户输入与 nginx 配置，直接拼进 <a href> 会放行 javascript: 之类的怪值。
+ */
+export function siteHref(domain: any): string {
+  const s = String(domain || '').trim().toLowerCase();
+  if (!/^[a-z0-9.-]{1,253}$/.test(s) || !s.includes('.') || s.startsWith('.') || s.endsWith('.')) return '';
+  return `https://${s}`;
 }
 
 export function saveLoginData(r: { token: string; role: string; username?: string; nickname?: string; avatar?: string }) {

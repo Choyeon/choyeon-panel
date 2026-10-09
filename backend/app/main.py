@@ -1,11 +1,12 @@
 import asyncio
+import os
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config, security
@@ -191,6 +192,79 @@ async def update_profile(req: Request):
     dbm.audit(req.state.cp_sub, "profile:update")
     updated = dbm.query_one("SELECT nickname,avatar FROM users WHERE id=?", (me["id"],))
     return {"ok": True, "nickname": updated["nickname"], "avatar": updated["avatar"]}
+
+
+# ---------- avatar upload (authenticated) ----------
+# 只认这四类位图的魔数：接口收的是原始字节，若信 Content-Type 或文件名，
+# 任何人都能以"头像"名义把 HTML/脚本写进 data 目录，再由同源的 GET 原样回吐——
+# 那就是存储型 XSS 的起点（面板还带 admin 会话）。
+_AVATAR_TYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}
+_AVATAR_NAME_RE = re.compile(r"^(\d{1,10})\.(png|jpe?g|webp|gif)$")
+
+
+def _sniff_image(b: bytes) -> str | None:
+    if b[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if b[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "webp"
+    if b[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    return None
+
+
+@app.post("/api/auth/avatar")
+async def upload_avatar(req: Request):
+    me = dbm.query_one("SELECT id FROM users WHERE username=?", (req.state.cp_sub,))
+    if not me:
+        return JSONResponse(status_code=404, content={"error": "用户不存在"})
+    limit = config.AVATAR_MAX_BYTES
+    declared = req.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        return JSONResponse(status_code=413, content={"error": f"图片超过 {limit // (1024 * 1024)}MB"})
+    # 流式读并边读边判：await req.body() 会先把整个请求体吃进内存，
+    # 上限靠 Content-Length 判断又能被伪造（不发该头即分块传输），必须在读取过程中截断。
+    buf = bytearray()
+    async for chunk in req.stream():
+        buf.extend(chunk)
+        if len(buf) > limit:
+            return JSONResponse(status_code=413, content={"error": f"图片超过 {limit // (1024 * 1024)}MB"})
+    data = bytes(buf)
+    if len(data) < 32:
+        return JSONResponse(status_code=400, content={"error": "图片内容为空或过小"})
+    ext = _sniff_image(data)
+    if not ext:
+        return JSONResponse(status_code=415, content={"error": "只支持 PNG / JPEG / WebP / GIF"})
+
+    os.makedirs(config.AVATAR_DIR, exist_ok=True)
+    # 文件名只用用户自增 id：不采用用户名（可能含 . 与 ..），也不采用客户端给的扩展名。
+    for f in os.listdir(config.AVATAR_DIR):
+        if f.startswith(f"{me['id']}."):
+            with suppress(OSError):
+                os.unlink(os.path.join(config.AVATAR_DIR, f))
+    path = os.path.join(config.AVATAR_DIR, f"{me['id']}.{ext}")
+    with open(path, "wb") as fh:
+        fh.write(data)
+    os.chmod(path, 0o644)
+    url = f"/api/avatars/{me['id']}.{ext}?v={int(time.time())}"
+    dbm.execute("UPDATE users SET avatar=? WHERE id=?", (url, me["id"]))
+    dbm.audit(req.state.cp_sub, "avatar:upload", f"{len(data)}B")
+    return {"avatar": url}
+
+
+@app.get("/api/avatars/{name}")
+async def get_avatar(name: str):
+    # 免登录（<img> 带不了 Authorization），所以只按白名单形状取文件：
+    # 文件名完全由正则捕获组重建，请求里的任何路径片段都进不了 os.path.join。
+    m = _AVATAR_NAME_RE.match(name or "")
+    if not m:
+        return JSONResponse(status_code=404, content={"error": "not found"})
+    ext = "jpg" if m.group(2) in ("jpg", "jpeg") else m.group(2)
+    path = os.path.join(config.AVATAR_DIR, f"{m.group(1)}.{ext}")
+    if not os.path.isfile(path):
+        return JSONResponse(status_code=404, content={"error": "not found"})
+    return FileResponse(path, media_type=_AVATAR_TYPES[ext], headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ---------- routers ----------

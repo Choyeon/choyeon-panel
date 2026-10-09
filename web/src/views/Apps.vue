@@ -6,7 +6,7 @@ import {
   NRadioGroup, NRadioButton, NPopconfirm, NIcon, NAlert, NTag, NCollapse, NCollapseItem,
   useMessage,
 } from 'naive-ui';
-import { api } from '../api';
+import { api, repoHref, siteHref } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
@@ -91,6 +91,35 @@ function roleLabel(c: any) {
   return c.component_role === 'frontend' ? '前端' : c.component_role === 'backend' ? '后端' : '组件';
 }
 
+// 仓库外链：只认 https，并把 URL 里的 user:token@ 凭据段剥掉（见 api.ts 的 repoHref）
+function repoLink(url: any, size = 13) {
+  const href = repoHref(url);
+  if (!href) return null;
+  return h('a', {
+    class: 'cell-repo',
+    href,
+    target: '_blank',
+    rel: 'noopener noreferrer',
+    title: '在代码托管站点打开仓库',
+    'aria-label': '在代码托管站点打开仓库',
+  }, [h(NIcon, { component: icons.OpenOutline, size })]);
+}
+
+function syncBtn(r: any, iconOnly = false) {
+  if (!r.repo_url) return null;
+  // 同步只在配了仓库时可用；这里不重装依赖、不改 unit/nginx，几分钟的部署换成几秒的拉取+重启。
+  return h(NButton, {
+    size: 'tiny',
+    tertiary: true,
+    title: '一键同步：拉取最新代码并重启（不重装依赖）',
+    'aria-label': `同步 ${r.name}`,
+    loading: busyOn(r.id, 'sync'),
+    disabled: rowBusy(r.id) || r.deploying,
+    icon: ico('CloudDownloadOutline', iconOnly ? 13 : 14),
+    onClick: () => sync(r),
+  }, { default: () => (iconOnly ? '' : '同步') });
+}
+
 function appCell(r: any) {
   const kids = childMap.value.get(r.id) || [];
   const parts = [
@@ -102,6 +131,7 @@ function appCell(r: any) {
         h(NSpace, { size: 6, align: 'center', wrap: false }, () => [
           h(NButton, { text: true, type: 'primary', class: 'cell-name', onClick: () => router.push(`/apps/${r.id}`) }, () => r.name),
           ...(kids.length ? [h(NTag, { size: 'tiny', bordered: false, type: 'info' }, { default: () => `组合 ${kids.length + 1} 件` })] : []),
+          repoLink(r.repo_url),
         ]),
         h('div', { class: 'cell-sub' }, r.domain || r.unit || r.path || '—'),
       ]),
@@ -118,6 +148,9 @@ function appCell(r: any) {
             h(NButton, { text: true, type: 'primary', class: 'cell-name', style: 'font-size:var(--fs-sm)', onClick: () => router.push(`/apps/${c.id}`) }, () => c.name),
             h(NTag, { size: 'tiny', bordered: false, type: c.component_role === 'frontend' ? 'success' : 'warning' }, { default: () => roleLabel(c) }),
             ...(!c.running && !c.deploying ? [h('span', { class: 'st idle' }, [h('span', { class: 'dot idle' }), '已停止'])] : []),
+            // 组合项目的每个组件是独立仓库/独立服务，同步得分别触发
+            syncBtn(c, true),
+            repoLink(c.repo_url, 12),
           ]),
         ]),
       ]),
@@ -151,9 +184,16 @@ const columns: any[] = [
       const ds = (r.domains || []) as string[];
       if (!ds.length) return h('span', { class: 'cell-sub' }, '—');
       return h(NSpace, { size: 4, wrap: false }, () => [
-        ...ds.slice(0, 2).map((d) =>
-          h(NTag, { size: 'small', bordered: false, type: r.domain ? 'default' : 'info' }, { default: () => d }),
-        ),
+        ...ds.slice(0, 2).map((d) => {
+          const href = siteHref(d);
+          return h(
+            NTag,
+            href
+              ? { size: 'small', bordered: false, type: r.domain ? 'default' : 'info', tag: 'a', href, target: '_blank', rel: 'noopener noreferrer', class: 'dom-tag', title: `在新标签页打开 ${href}` }
+              : { size: 'small', bordered: false, type: r.domain ? 'default' : 'info' },
+            { default: () => d },
+          );
+        }),
         ...(ds.length > 2 ? [h('span', { class: 'cell-sub' }, `+${ds.length - 2}`)] : []),
         ...(!r.domain ? [h('span', { style: 'color:var(--cp-text-mute);font-size:var(--fs-2xs)' }, 'nginx 检测')] : []),
       ]);
@@ -169,10 +209,11 @@ const columns: any[] = [
           : h('span', { class: 'st idle' }, [h('span', { class: 'dot idle' }), '已停止']),
   },
   {
-    title: '操作', key: 'ops', width: 292,
+    title: '操作', key: 'ops', width: 360,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busyOn(r.id, 'deploy'), disabled: rowBusy(r.id), icon: ico('CloudUploadOutline'), onClick: () => act(r.id, 'deploy') }, () => '部署'),
+        syncBtn(r),
         h(NButton, {
           size: 'tiny', tertiary: true, type: r.running ? 'warning' : 'success',
           loading: busyOn(r.id, r.running ? 'stop' : 'start'), disabled: rowBusy(r.id),
@@ -216,6 +257,18 @@ async function rollback(r: any) {
   try {
     const res = await api.appAction(r.id, 'rollback');
     msg.success(`已回滚到 ${res.commit || '上一版本'}`);
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    busy.value = null;
+  }
+}
+async function sync(r: any) {
+  busy.value = { id: r.id, verb: 'sync' };
+  try {
+    const res = await api.appSync(r.id);
+    msg.success(res.changed ? `已同步到 ${res.commit || '最新版本'} 并重启` : `远端无新提交（${res.commit || '当前版本'}）`);
+    later(load, 900);
   } catch (e: any) {
     msg.error(e.message);
   } finally {
@@ -328,7 +381,7 @@ onMounted(() => {
       </template>
     </PageHeader>
 
-    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1020" :max-height="'calc(100vh - 268px)'">
+    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1180" :max-height="'calc(100vh - 268px)'">
       <template #empty>
         <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
       </template>
@@ -477,4 +530,10 @@ onMounted(() => {
 
 <style scoped>
 :deep(.cell-child) { margin-top: var(--space-2); padding-left: var(--space-4); border-left: 1px dashed var(--cp-border, rgba(128,128,128,.25)); }
+/* 外链小图标：默认是链接蓝， hover 才提亮，避免名称列出现一排抢视线的图标 */
+:deep(.cell-repo) { display: inline-flex; align-items: center; color: var(--cp-text-mute); cursor: pointer; transition: color var(--dur) var(--ease); }
+:deep(.cell-repo:hover) { color: var(--cp-brand); }
+/* 域标签即站点入口：可点击时用品牌色给出反馈，不可点击时保持原样 */
+:deep(.dom-tag) { cursor: pointer; transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
+:deep(.dom-tag:hover) { color: var(--cp-brand-soft); background: color-mix(in srgb, var(--cp-brand) 14%, transparent); }
 </style>

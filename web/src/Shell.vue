@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NLayout, NLayoutSider, NMenu, NSpace, NText, NButton,
-  NModal, NInput, NDrawer, NDrawerContent, NIcon, useMessage,
+  NModal, NInput, NDrawer, NDrawerContent, NIcon, NDropdown, useMessage,
 } from 'naive-ui';
 import { setToken, getRole, getUsername, getNickname, setNickname, getAvatar, setAvatar, clearSession, api } from './api';
 import { icons } from './icons';
@@ -18,20 +18,27 @@ const msg = useMessage();
 const collapsed = ref(false);
 const showPwd = ref(false);
 const showProfile = ref(false);
+const showLogout = ref(false);
 const oldPwd = ref('');
 const newPwd = ref('');
 const pwdBusy = ref(false);
 const profileBusy = ref(false);
 const editNickname = ref('');
 const editAvatar = ref('');
+const avatarBusy = ref(false);
 const renewing = ref(false);
+const fileInput = ref<HTMLInputElement | null>(null);
 
 const isMobile = ref(false);
 const drawer = ref(false);
+// 头像/昵称存在 localStorage（不是响应式源），模态框开关时正好是值可能变了的时刻，
+// 用它做依赖让顶栏在保存资料或上传头像后立即刷新，而不是等到下次整页重载。
+const profileTick = ref(0);
+watch(showProfile, (v) => { if (!v) profileTick.value += 1; });
 const isLogin = computed(() => route.path === '/login');
 const isAdmin = computed(() => getRole() === 'admin');
-const displayName = computed(() => getNickname() || getUsername() || '管理员');
-const avatarUrl = computed(() => getAvatar());
+const displayName = computed(() => (profileTick.value, getNickname() || getUsername() || '管理员'));
+const avatarUrl = computed(() => (profileTick.value, getAvatar()));
 const pageTitle = computed(() =>
   route.path.startsWith('/apps/') ? '应用详情' : TITLES[route.path] || 'choyeon panel',
 );
@@ -130,6 +137,88 @@ async function doSaveProfile() {
   }
 }
 
+// ---------- 头像上传：浏览器端裁剪压缩成 256px 方图，再按原始字节 POST ----------
+// 不引第三方图库依赖：中心裁剪 + canvas 缩放足够把 4MB 手机照压到 20-80KB，
+// 而直接把原图丢给后端既撑体积又让 GET 回读变慢（头像在每页都渲染）。
+const AVA_SIDE = 256;
+
+function cropToSquare(file: File, side: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const w = img.naturalWidth;
+      const hh = img.naturalHeight;
+      if (!w || !hh) {
+        reject(new Error('图片尺寸为 0，无法处理'));
+        return;
+      }
+      const crop = Math.min(w, hh);
+      const cv = document.createElement('canvas');
+      cv.width = side;
+      cv.height = side;
+      const ctx = cv.getContext('2d');
+      if (!ctx) {
+        reject(new Error('当前浏览器不支持图片处理'));
+        return;
+      }
+      // JPEG 没有透明通道：PNG 直接转会让透明区变黑块，先铺一层底色再画
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, side, side);
+      ctx.drawImage(img, (w - crop) / 2, (hh - crop) / 2, crop, crop, 0, 0, side, side);
+      cv.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error('图片压缩失败'))),
+        'image/jpeg',
+        0.88,
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('图片无法解码，换一张试试'));
+    };
+    img.src = url;
+  });
+}
+
+async function onPickAvatar(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  // 清空 value：否则连续选同一个文件不会触发 change，看起来像"按钮没反应"
+  input.value = '';
+  if (!file) return;
+  if (!/^image\/(png|jpe?g|webp|gif)$/.test(file.type)) {
+    msg.error('只支持 PNG / JPEG / WebP / GIF');
+    return;
+  }
+  avatarBusy.value = true;
+  try {
+    const blob = await cropToSquare(file, AVA_SIDE);
+    const r = await api.uploadAvatar(blob);
+    editAvatar.value = r.avatar;
+    setAvatar(r.avatar);
+    profileTick.value += 1;
+    msg.success(`头像已更新（${Math.round(blob.size / 1024)}KB）`);
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    avatarBusy.value = false;
+  }
+}
+
+const userOptions = computed(() => [
+  { label: '编辑资料', key: 'profile', icon: () => h(NIcon, { size: 16 }, { default: () => h(icons.PersonCircleOutline) }) },
+  { label: '修改密码', key: 'password', icon: () => h(NIcon, { size: 16 }, { default: () => h(icons.KeyOutline) }) },
+  { type: 'divider', key: 'd1' },
+  { label: '退出登录', key: 'logout', icon: () => h(NIcon, { size: 16 }, { default: () => h(icons.ArrowForwardOutline) }) },
+]);
+
+function onUserSelect(key: string) {
+  if (key === 'profile') openProfile();
+  else if (key === 'password') showPwd.value = true;
+  else if (key === 'logout') showLogout.value = true;
+}
+
 const themeIcon = computed(() => (props.themeMode === 'light' ? 'MoonOutline' : 'SunnyOutline'));
 function toggleTheme() {
   emit('update:themeMode', props.themeMode === 'light' ? 'dark' : 'light');
@@ -209,20 +298,16 @@ function toggleTheme() {
             <template #icon><NIcon :component="icons[themeIcon]" :size="18" /></template>
           </NButton>
 
-          <button class="user-chip" type="button" :aria-label="`账号菜单，当前：${displayName}`" @click="openProfile">
-            <span class="avatar">
-              <img v-if="avatarUrl" :src="avatarUrl" alt="" />
-              <NIcon v-else :component="icons.PersonCircleOutline" :size="24" />
-            </span>
-            <span v-if="!isMobile" class="user-name">{{ displayName }}</span>
-          </button>
-
-          <NButton size="tiny" quaternary @click="showPwd = true" :aria-label="'修改密码'">
-            <template #icon><NIcon :component="icons.KeyOutline" :size="14" /></template>
-          </NButton>
-          <NButton size="tiny" quaternary @click="doLogout" :aria-label="'退出登录'">
-            <template #icon><NIcon :component="icons.ArrowForwardOutline" :size="14" /></template>
-          </NButton>
+          <NDropdown trigger="click" placement="bottom-end" :options="userOptions" :on-select="onUserSelect">
+            <button class="user-chip" type="button" :aria-label="`账号菜单，当前：${displayName}`">
+              <span class="avatar">
+                <img v-if="avatarUrl" :src="avatarUrl" alt="" />
+                <NIcon v-else :component="icons.PersonCircleOutline" :size="24" />
+              </span>
+              <span v-if="!isMobile" class="user-name">{{ displayName }}</span>
+              <NIcon v-if="!isMobile" :component="icons.ChevronForwardOutline" :size="12" class="chip-caret" aria-hidden="true" />
+            </button>
+          </NDropdown>
         </NSpace>
       </header>
 
@@ -274,7 +359,12 @@ function toggleTheme() {
         </div>
         <div class="field">
           <label>头像 URL</label>
-          <NInput v-model:value="editAvatar" placeholder="https://… （留空使用默认头像）" :input-props="{ 'aria-label': '头像 URL' }" maxlength="256" />
+          <NSpace :size="8" :wrap="false">
+            <NInput v-model:value="editAvatar" placeholder="https://… （留空使用默认头像）" :input-props="{ 'aria-label': '头像 URL' }" maxlength="256" />
+            <NButton tertiary :loading="avatarBusy" :icon="ico('CloudUploadOutline', 16)" @click="fileInput?.click()">上传</NButton>
+          </NSpace>
+          <input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden-file" @change="onPickAvatar" />
+          <NText depth="3" class="field-hint">上传自动中心裁剪为 256×256 并压缩到约 50KB，无需图床链接。</NText>
         </div>
         <NSpace justify="end" :size="8">
           <NButton tertiary @click="showProfile = false">取消</NButton>
@@ -282,6 +372,19 @@ function toggleTheme() {
         </NSpace>
       </NSpace>
     </NModal>
+
+    <NModal
+      v-model:show="showLogout"
+      preset="dialog"
+      type="warning"
+      title="退出登录"
+      content="退出后需要重新输入账号密码才能进入面板。"
+      positive-text="退出"
+      negative-text="取消"
+      :positive-button-props="{ type: 'warning' }"
+      style="width: 380px; max-width: 94vw"
+      @positive-click="doLogout"
+    />
   </NLayout>
 </template>
 
@@ -396,6 +499,19 @@ function toggleTheme() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.chip-caret {
+  transform: rotate(90deg);
+  opacity: 0.55;
+}
+.hidden-file {
+  display: none;
+}
+.field-hint {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
 }
 
 .profile-avatar-preview {

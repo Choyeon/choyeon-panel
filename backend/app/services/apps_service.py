@@ -583,6 +583,101 @@ async def rollback_app(app_id: int) -> dict:
     return {"ok": True, "commit": target["commit_sha"], "deployment": target["id"], "from": current}
 
 
+async def sync_app(app_id: int) -> dict:
+    """拉取远端最新代码并重启服务——比部署短的路径：不装依赖、不写 env/unit/nginx。
+
+    代码改完想立刻上线时，走 deploy 要等 npm/pip 几分钟，sync 只有 fetch/reset/restart
+    三步，通常在几秒内完成。仍然落一条 deployments 记录（status=success + commit_sha），
+    这样同步上去的版本也能被「回滚」选中，不会出现"同步完发现坏了、回滚列表里找不到上一版"。
+    """
+    app = get_app(app_id)
+    if not app:
+        raise RuntimeError("应用不存在")
+    _ensure_no_deployment(app_id, "同步")
+    if not app["repo_url"]:
+        raise RuntimeError("应用未配置 Git 仓库地址，无法同步")
+    if not is_git_url(app["repo_url"]):
+        raise RuntimeError("Git 仓库地址不合法")
+    branch = app["branch"] or "main"
+    if not is_branch(branch):
+        raise RuntimeError("分支名不合法")
+    path = app["path"]
+    # 单体仓库（monorepo）里前后端组件常常各占一个子目录，子目录没有 .git。
+    # 用 rev-parse 找到真正的工作树根，同步才能覆盖"组件目录在同一个仓库内"的场景。
+    repo_dir = path
+    if not os.path.isdir(f"{path}/.git"):
+        top = await run("git", ["-C", path, "rev-parse", "--show-toplevel"], cwd=None, timeout=30)
+        cand = (top["out"] or "").strip().splitlines()[-1] if top["code"] == 0 else ""
+        if cand and os.path.isdir(f"{cand}/.git"):
+            repo_dir = cand
+    if not os.path.isdir(f"{repo_dir}/.git"):
+        raise RuntimeError(f"{path} 下没有 Git 仓库，请先执行一次完整部署")
+
+    dep_id = dbm.execute("INSERT INTO deployments(app_id,status) VALUES(?,'running')", (app_id,))
+    before = await _current_sha(repo_dir)
+    out: list[str] = []
+
+    def log(text: str):
+        out.append(text)
+        _append_log(dep_id, text)
+
+    try:
+        if repo_dir != path:
+            log(f"==> 仓库根 {repo_dir}（应用目录是其子目录，本次会更新整个仓库）")
+        log(f"==> git fetch origin {branch}")
+        r = await run("git", ["fetch", "origin", branch], cwd=repo_dir, timeout=300)
+        log(redact_creds(r["out"]))
+        if r["code"] != 0:
+            raise RuntimeError(f"拉取远端失败（exit {r['code']}）")
+
+        r = await run("git", ["checkout", branch], cwd=repo_dir, timeout=120)
+        if r["code"] != 0:
+            # 分支可能只存在于刚拉取的远端（本地从未 checkout 过）：
+            # checkout 失败先试一次跟踪分支创建，仍失败才是真问题。
+            log(redact_creds(r["out"]))
+            r = await run("git", ["checkout", "-B", branch, f"origin/{branch}"], cwd=repo_dir, timeout=120)
+            if r["code"] != 0:
+                raise RuntimeError(f"切换分支失败（exit {r['code']}）")
+        log(f"==> git reset --hard origin/{branch}")
+        st = await run("git", ["status", "--porcelain"], cwd=repo_dir, timeout=60)
+        if st["code"] == 0 and st["out"].strip():
+            # reset --hard 只会丢已跟踪文件的本地改动，未跟踪目录（构建备份、缓存）不受影响，
+            # 所以警告只统计跟踪改动，别把一堆 "??" 说成"要被覆盖"吓到人。
+            dirty = [ln for ln in st["out"].splitlines() if ln.strip() and not ln.startswith("??")]
+            untracked = [ln for ln in st["out"].splitlines() if ln.startswith("??")]
+            if dirty:
+                log(f"!!! 工作区有 {len(dirty)} 处未提交改动，将被覆盖：{'; '.join(dirty[:6])}")
+            if untracked:
+                log(f"==> 另有 {len(untracked)} 个未跟踪路径（不受本次同步影响）")
+        r = await run("git", ["reset", "--hard", f"origin/{branch}"], cwd=repo_dir, timeout=120)
+        log(redact_creds(r["out"]))
+        if r["code"] != 0:
+            raise RuntimeError(f"更新工作区失败（exit {r['code']}）")
+
+        after = await _current_sha(repo_dir)
+        log(f"==> 当前 commit {after or '未知'}" + (f"（同步前 {before}）" if before else ""))
+        if before and after and before != after:
+            log(f"==> 版本变化 {before} -> {after}")
+        elif before and after == before:
+            log("==> 远端无新提交，工作区版本未变化")
+
+        log(f"==> 重启服务 {unit_name(app)}")
+        await service_action(unit_name(app), "restart")
+        dbm.execute(
+            "UPDATE deployments SET status='success', commit_sha=?, finished_at=datetime('now') WHERE id=?",
+            (after, dep_id),
+        )
+        dbm.execute("UPDATE apps SET updated_at=datetime('now') WHERE id=?", (app_id,))
+        log("==> 同步完成")
+        return {"ok": True, "commit": after, "from": before, "changed": bool(before and after and before != after), "deployment": dep_id, "out": "\n".join(out)}
+    except Exception as e:  # noqa: BLE001
+        # 服务没起来却把记录留在 running，前端会一直显示"部署中"，
+        # 且 _ensure_no_deployment 会让这个应用此后无法再同步/回滚。
+        dbm.execute("UPDATE deployments SET status='failed', finished_at=datetime('now') WHERE id=?", (dep_id,))
+        log(f"!!! 同步失败: {e}")
+        raise
+
+
 async def _run_deployment(app: dict, dep_id: int):
     def finish(ok: bool):
         dbm.execute(
