@@ -259,11 +259,12 @@ function onUserSelect(key: string) {
   padding: var(--space-4) var(--space-4) var(--space-3);
   min-height: var(--header-h);
 }
-.cp-content :deep(.n-layout-scroll-container) { padding: var(--space-4) var(--space-5) var(--space-5); }
+.cp-content :deep(.n-layout-scroll-container) { padding: var(--space-6) var(--space-6) var(--space-6); }
 @media (max-width: 900px) {
-  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-3) var(--space-4) var(--space-4); }
+  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-5) var(--space-5) var(--space-5); }
 }
 @media (max-width: 640px) {
+  .cp-content :deep(.n-layout-scroll-container) { padding: var(--space-4) var(--space-4) var(--space-4); }
   .cp-title { font-size: var(--fs-sm); font-weight: 600; }
 }
 .logo-mark {
