@@ -3,7 +3,7 @@ import { onBeforeUnmount, onMounted, ref, h, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   NSpace, NDataTable, NModal, NForm, NFormItem, NInput, NInputNumber, NSelect,
-  NRadioGroup, NRadioButton, NPopconfirm, NIcon, NAlert, NTag, NCollapse, NCollapseItem,
+  NRadioGroup, NRadioButton, NIcon, NAlert, NTag, NCollapse, NCollapseItem,
   useMessage,
 } from 'naive-ui';
 import { NButton } from '../ui';
@@ -11,6 +11,10 @@ import { api, repoHref, siteHref } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
+import CpToolbarCard from '../components/CpToolbarCard.vue';
+import CpRowActions from '../components/CpRowActions.vue';
+import CpStatusTag from '../components/CpStatusTag.vue';
+import ConfirmActionDialog from '../components/ConfirmActionDialog.vue';
 
 const router = useRouter();
 const msg = useMessage();
@@ -158,6 +162,21 @@ function appCell(r: any) {
   return parts;
 }
 
+// 1Panel 的操作列是文字按钮 + 5px gap，超过 ellipsis 个收进「更多」；
+// 列宽按它的估算取 35 + 2*58 + 58 = 209。
+function rowActions(r: any) {
+  const stop = !!r.running;
+  const list: { label: string; run: () => void; danger?: boolean; disabled?: boolean }[] = [
+    { label: '部署', run: () => act(r.id, 'deploy'), disabled: rowBusy(r.id) },
+  ];
+  if (r.repo_url) list.push({ label: '同步', run: () => sync(r), disabled: rowBusy(r.id) || !!r.deploying });
+  list.push({ label: stop ? '停止' : '启动', run: () => act(r.id, stop ? 'stop' : 'start'), disabled: rowBusy(r.id) });
+  list.push({ label: '重启', run: () => act(r.id, 'restart'), disabled: !stop || rowBusy(r.id) });
+  list.push({ label: '回滚', run: () => rollback(r), disabled: rowBusy(r.id) });
+  list.push({ label: '删除', run: () => askDel(r), danger: true, disabled: rowBusy(r.id) });
+  return list;
+}
+
 const columns: any[] = [
   {
     title: '应用', key: 'name',
@@ -202,35 +221,20 @@ const columns: any[] = [
     title: '状态', key: 'status', width: 110,
     render: (r: any) =>
       r.deploying
-        ? h('span', { class: 'st warn' }, [h('span', { class: 'dot warn' }), '部署中'])
+        ? h(CpStatusTag, { status: 'deploying', text: '部署中' })
         : r.running
-          ? h('span', { class: 'st ok' }, [h('span', { class: 'dot ok' }), '运行中'])
-          : h('span', { class: 'st idle' }, [h('span', { class: 'dot idle' }), '已停止']),
+          ? h(CpStatusTag, { status: 'running', text: '运行中' })
+          : h(CpStatusTag, { status: 'stopped', text: '已停止' }),
   },
   {
-    title: '操作', key: 'ops', width: 452,
-    render: (r: any) =>
-      h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busyOn(r.id, 'deploy'), disabled: rowBusy(r.id), icon: ico('CloudUploadOutline'), onClick: () => act(r.id, 'deploy') }, () => '部署'),
-        syncBtn(r),
-        h(NButton, {
-          size: 'tiny', tertiary: true, type: r.running ? 'warning' : 'success',
-          loading: busyOn(r.id, r.running ? 'stop' : 'start'), disabled: rowBusy(r.id),
-          icon: ico(r.running ? 'StopOutline' : 'PlayOutline'), onClick: () => act(r.id, r.running ? 'stop' : 'start'),
-        }, () => (r.running ? '停止' : '启动')),
-        h(NButton, { size: 'tiny', tertiary: true, disabled: !r.running || rowBusy(r.id), loading: busyOn(r.id, 'restart'), icon: ico('SyncOutline'), onClick: () => act(r.id, 'restart') }, () => '重启'),
-        h(NButton, { size: 'tiny', quaternary: true, title: '回滚到上一次成功部署', loading: busyOn(r.id, 'rollback'), disabled: rowBusy(r.id), icon: ico('ArrowBackOutline'), onClick: () => rollback(r) }, () => '回滚'),
-        h(NPopconfirm, { onPositiveClick: () => del(r) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除应用 ${r.name}` }, { default: () => '删除' }),
-          default: () => '仅删除面板配置，服务器文件保留。彻底清理请到应用详情页操作。',
-        }),
-      ]),
+    title: '操作', key: 'ops', width: 209, align: 'center',
+    render: (r: any) => h(CpRowActions, { buttons: rowActions(r), ellipsis: 2 }),
   },
 ];
 
 const loading = ref(false);
-// 行内按钮要知道"是哪个动作在跑"：只记 id 会让部署按钮替启停转圈，
-// 同一行连点两次也拦不住。
+// 行内动作要记住"是哪个 verb 在跑"：verb 决定名称列的「同步」该不该转圈，
+// 操作列的文字按钮没有加载态，靠 rowBusy 整行置灰挡住连点。
 const busy = ref<{ id: number; verb: string } | null>(null);
 const busyOn = (id: number, verb: string) => busy.value?.id === id && busy.value?.verb === verb;
 const rowBusy = (id: number) => busy.value?.id === id;
@@ -312,14 +316,19 @@ function pickTemplate(key: string) {
   form.value.port = t.port || null;
 }
 
-async function del(r: any) {
-  try {
-    await api.deleteApp(r.id, false);
-    msg.success('已删除配置');
-    load();
-  } catch (e: any) {
-    msg.error(e.message);
-  }
+const opRef = ref<any>(null);
+function askDel(r: any) {
+  // 删除走 1Panel 的 OpDialog：标题 + 名单 + 一句后果，不在行内现写弹窗
+  opRef.value?.acceptParams({
+    title: '删除应用配置',
+    names: [r.name],
+    msg: '此操作将仅删除面板配置，服务器文件保留；需要彻底清理请到应用详情页操作。是否继续？',
+    api: async () => {
+      await api.deleteApp(r.id, false);
+      load();
+    },
+    successMsg: '已删除配置',
+  });
 }
 async function create() {
   if (!form.value.name) return msg.error('请填写应用名称');
@@ -370,21 +379,35 @@ onMounted(() => {
 
 <template>
   <div>
-    <PageHeader title="应用" :sub="`共 ${topLevel.length} 个项目 · ${runningCount} 个服务运行中。部署、启停、日志与域名反代集中在此管理；前后端分离项目合并为一个条目`">
-      <template #actions>
+    <PageHeader title="应用" :sub="`共 ${topLevel.length} 个项目 · ${runningCount} 个服务运行中`" />
+
+    <!-- 1Panel 把长说明从标题里挪到表头上方的 info alert，并在尾部给一个快捷跳转 -->
+    <NAlert type="info" :bordered="false" class="apps-prompt">
+      <div class="apps-prompt-row">
+        <span>部署、启停、日志与域名反代集中在此管理；前后端分离项目会合并为一个条目展示，各组件仍可独立操作。</span>
+        <NButton text type="primary" size="small" :icon="ico('ArrowForwardOutline')" @click="router.push('/sites')">网站与证书</NButton>
+      </div>
+    </NAlert>
+
+    <CpToolbarCard>
+      <template #left>
+        <NButton size="small" type="primary" round :icon="ico('AddOutline')" @click="showCreate = true">新建应用</NButton>
+      </template>
+      <template #right>
         <NInput :value="kw" @update:value="(v: string) => (kw = v)" placeholder="搜索名称/域名/端口" size="small" clearable style="width: 200px; max-width: 100%">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
-        <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
-        <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="showCreate = true">新建应用</NButton>
+        <NButton size="small" tertiary round :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
       </template>
-    </PageHeader>
 
-    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1280" class="cp-tbl tbl-apps" :max-height="'var(--table-h)'">
-      <template #empty>
-        <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
-      </template>
-    </NDataTable>
+      <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1040" class="cp-tbl tbl-apps" :max-height="'var(--table-h)'">
+        <template #empty>
+          <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
+        </template>
+      </NDataTable>
+    </CpToolbarCard>
+
+    <ConfirmActionDialog ref="opRef" />
 
     <NModal v-model:show="showCreate" preset="card" title="新建应用" style="width: 640px; max-width: 94vw">
       <NSpace vertical :size="4">
@@ -528,6 +551,12 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 顶部提示与下方内容卡之间是 1Panel 的 common-prompt 间距 */
+.apps-prompt { margin-bottom: var(--space-5); }
+.apps-prompt-row { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; }
+/* 说明 alert 和工具行都排在表格之外，把它们占掉的像素补进 --table-h 的扣减项（1Panel 的 heightDiff 语义）；
+   带 .cp-tbl 前缀是为了盖过 style.css 里 .tbl-apps 的 0px，不改共享文件。 */
+.cp-tbl.tbl-apps { --chrome-extra: 140px; }
 :deep(.cell-child) { margin-top: var(--space-2); padding-left: var(--space-4); border-left: 1px dashed var(--cp-border, rgba(128,128,128,.25)); }
 /* 外链小图标：默认是链接蓝， hover 才提亮，避免名称列出现一排抢视线的图标 */
 :deep(.cell-repo) { display: inline-flex; align-items: center; color: var(--cp-text-mute); cursor: pointer; transition: color var(--dur) var(--ease); }

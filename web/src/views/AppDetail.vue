@@ -2,15 +2,18 @@
 import { onBeforeUnmount, onMounted, ref, watch, h, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
-  NCard, NTabs, NTabPane, NSpace, NText, NTag, NInput, NDynamicInput,
+  NCard, NSpace, NText, NTag, NInput, NDynamicInput,
   useMessage, NPopconfirm, NIcon, NForm, NFormItem, NSkeleton, NGrid, NGridItem, NSelect, NAlert,
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, repoHref, siteHref } from '../api';
 import { icon, icons } from '../icons';
 import LogStream from '../components/LogStream.vue';
-import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
+import PageTabBar from '../components/PageTabBar.vue';
+import DescriptionsCard from '../components/DescriptionsCard.vue';
+import CpStatusTag from '../components/CpStatusTag.vue';
+import ConfirmActionDialog from '../components/ConfirmActionDialog.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -29,9 +32,11 @@ function later(fn: () => void, ms: number) {
 onBeforeUnmount(() => timers.forEach(clearTimeout));
 const saving = ref(false);
 const acting = ref('');
-// 标签受控是必要的：show:lazy 只解决"没点开不挂载"，解决不了"点开过一次就一直挂着"。
-// 运行日志那条 SSE 只有在当前标签时才挂载，切走就随组件销毁，不会在背后白占一个 journalctl -f。
+// 页签受控 + 内容用 v-if 挂载：运行日志那条 SSE 只有在当前页签时才存在，
+// 切走就随组件销毁，不会在背后白占一个 journalctl -f。
 const tab = ref('config');
+const envView = ref<'detail' | 'edit'>('detail');
+const opRef = ref<any>(null);
 const loadErr = ref('');
 const sslEmail = ref('');
 
@@ -54,6 +59,64 @@ const repoUrl = computed(() => repoHref(app.value?.repo_url));
 
 // 域名同样只走白名单化的外链构造（siteHref），nginx 检测出的怪值不会变成可点链接
 const siteUrl = computed(() => siteHref(app.value?.domain || ngx.value?.configs?.[0]?.analysis?.serverNames?.[0]));
+
+const panes = computed(() => [
+  { key: 'config', label: '基本配置' },
+  { key: 'env', label: '环境变量' },
+  // badge 只表示「有非成功记录」，不假设部署记录的排序方向
+  { key: 'deploy', label: '部署记录', badge: deps.value.some((d: any) => d.status !== 'success' && d.status !== 'running') },
+  { key: 'logs', label: '运行日志' },
+  { key: 'nginx', label: '域名 / Nginx' },
+  { key: 'unit', label: 'systemd 单元' },
+  { key: 'ssl', label: 'SSL 证书' },
+]);
+
+const domainText = computed(() => app.value?.domain || ngx.value?.configs?.[0]?.analysis?.serverNames?.[0] || '');
+
+// 1Panel 的详情表就是「一列一条事实」：后端没有的字段（如运行时长）直接不出现，不补占位值。
+const infoItems = computed(() => {
+  const a = app.value || {};
+  const port = a.port ? String(a.port) : '';
+  const repo = a.repo_url ? `${a.repo_url} @ ${a.branch || 'main'}` : '';
+  return [
+    { label: '运行时', value: a.type === 'node' ? 'Node.js' : a.type === 'python' ? 'Python' : a.type || '' },
+    { label: '监听端口', value: port ? `${port}${a.portAuto ? '（自动检测）' : ''}` : '', mono: true, copy: port || undefined },
+    { label: '域名', value: domainText.value, slot: siteUrl.value ? 'site' : undefined },
+    { label: '仓库 / 分支', value: repo || '本地目录', mono: true, copy: a.repo_url || undefined, slot: repoUrl.value ? 'repo' : undefined },
+    { label: '应用路径', value: a.path || '', mono: true, copy: a.path || undefined },
+  ];
+});
+
+const resItems = computed(() => {
+  const p = proc.value;
+  if (!p) return [];
+  return [
+    { label: '进程 PID', value: p.running && p.pid ? String(p.pid) : '未运行', mono: true },
+    { label: '内存', value: fmtMem(p.memoryBytes), mono: true },
+    { label: 'CPU 累计', value: p.cpuSeconds != null ? `${p.cpuSeconds}s` : '', mono: true },
+    { label: '重启次数', value: p.restarts != null ? String(p.restarts) : '' },
+    { label: '自启动时间', value: p.execStartAt || p.activeSince || '', mono: true },
+    { label: '子状态', value: p.subState || '' },
+  ];
+});
+
+// 环境变量里名字像凭据的一律遮罩（1Panel 的 password 型参数处理方式）
+const SECRET_KEY_RE = /(pass(word)?|pwd|secret|token|api[_-]?key|access[_-]?key|credential)/i;
+const envItems = computed(() =>
+  env.value
+    .filter((x) => x && typeof x.k === 'string' && x.k)
+    .map((x) => ({ label: x.k, value: x.v, mono: true, secret: SECRET_KEY_RE.test(x.k) })),
+);
+
+function onDescSlot(name: string) {
+  const url = name === 'site' ? siteUrl.value : name === 'repo' ? repoUrl.value : '';
+  if (url) window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+const appStatus = computed(() => {
+  if (app.value?.deploying) return { status: 'installing', text: '部署中' };
+  return app.value?.running ? { status: 'running', text: '运行中' } : { status: 'stopped', text: '已停止' };
+});
 
 async function loadUnit() {
   try {
@@ -241,14 +304,18 @@ async function ssl() {
     msg.error(e.message);
   }
 }
-async function purge() {
-  try {
-    await api.deleteApp(id, true);
-    msg.success('已删除并清理文件');
-    router.push('/apps');
-  } catch (e: any) {
-    msg.error(e.message);
-  }
+function purge() {
+  // 1Panel 的删除走 OpDialog：标题 + 被操作对象名单 + 一句后果，页面里不再现写弹窗
+  opRef.value?.acceptParams({
+    title: '彻底删除应用',
+    names: [app.value?.name, app.value?.unit, app.value?.path].filter(Boolean),
+    msg: '此操作将删除面板配置、systemd unit 与目录文件，不可恢复，是否继续？',
+    api: async () => {
+      await api.deleteApp(id, true);
+      router.push('/apps');
+    },
+    successMsg: '已删除并清理文件',
+  });
 }
 
 onMounted(load);
@@ -285,84 +352,53 @@ watch(
     <NSkeleton v-for="i in 3" :key="i" height="88px" class="cp-shimmer" style="border-radius: var(--radius-lg)" />
   </div>
   <div v-else>
-    <PageHeader :title="app.name" :sub="`${app.unit} · ${app.path}`">
-      <template #actions>
-        <NButton size="small" quaternary @click="router.push('/apps')">
-          <template #icon><NIcon :component="icons.ArrowBackOutline" /></template>
-          返回列表
-        </NButton>
-        <span class="st" :class="app.running ? 'ok' : 'idle'">
-          <span class="dot" :class="app.running ? 'ok' : 'idle'"></span>{{ app.running ? '运行中' : '已停止' }}
-        </span>
-        <span v-if="app.deploying" class="st warn"><span class="dot warn"></span>部署中</span>
-        <NButton size="small" type="primary" class="cp-press" :loading="acting === 'deploy'" :disabled="!!acting" :icon="ico('CloudUploadOutline')" @click="deploy">立即部署</NButton>
-        <NButton v-if="app.repo_url" size="small" tertiary :loading="acting === 'sync'" :disabled="!!acting || app.deploying" :icon="ico('CloudDownloadOutline')" title="拉取远端最新代码并重启，不重装依赖、不改 unit/反代" @click="sync">一键同步</NButton>
-        <NButton size="small" :tertiary="!app.running" :type="app.running ? 'warning' : 'success'" :loading="acting === (app.running ? 'stop' : 'start')" :disabled="!!acting" :icon="ico(app.running ? 'StopOutline' : 'PlayOutline')" @click="act(app.running ? 'stop' : 'start')">
-          {{ app.running ? '停止' : '启动' }}
-        </NButton>
-        <NButton size="small" tertiary :disabled="!app.running || !!acting" :loading="acting === 'restart'" :icon="ico('SyncOutline')" @click="act('restart')">重启</NButton>
-        <NPopconfirm @positive-click="purge">
+    <div class="ad-head">
+      <div class="ad-head-left">
+        <NButton size="small" quaternary :icon="ico('ArrowBackOutline', 16)" @click="router.push('/apps')">返回列表</NButton>
+        <h2 class="ad-title" :title="app.name">{{ app.name }}</h2>
+        <CpStatusTag :status="appStatus.status" :text="appStatus.text" class="ad-status" />
+      </div>
+      <div class="ad-head-right">
+        <NButton size="small" type="primary" round class="cp-press" :loading="acting === 'deploy'" :disabled="!!acting" :icon="ico('CloudUploadOutline')" @click="deploy">立即部署</NButton>
+        <NButton v-if="app.repo_url" size="small" tertiary round :loading="acting === 'sync'" :disabled="!!acting || app.deploying" :icon="ico('CloudDownloadOutline')" title="拉取远端最新代码并重启，不重装依赖、不改 unit/反代" @click="sync">一键同步</NButton>
+        <NPopconfirm v-if="app.running" @positive-click="act('stop')">
           <template #trigger>
-            <NButton size="small" quaternary type="error" :icon="ico('TrashOutline')" title="彻底删除应用与文件">彻底删除</NButton>
+            <NButton size="small" type="warning" round :loading="acting === 'stop'" :disabled="!!acting" :icon="ico('StopOutline')">停止</NButton>
           </template>
-          将同时删除 {{ app.path }} 目录文件与 systemd unit，不可恢复！
+          此操作将停止，是否继续？
         </NPopconfirm>
-      </template>
-    </PageHeader>
+        <NButton v-else size="small" type="success" round :loading="acting === 'start'" :disabled="!!acting" :icon="ico('PlayOutline')" @click="act('start')">启动</NButton>
+        <NPopconfirm @positive-click="act('restart')">
+          <template #trigger>
+            <NButton size="small" tertiary round :disabled="!app.running || !!acting" :loading="acting === 'restart'" :icon="ico('SyncOutline')">重启</NButton>
+          </template>
+          此操作将重启，是否继续？
+        </NPopconfirm>
+        <NButton size="small" tertiary round type="error" :icon="ico('TrashOutline')" title="彻底删除应用与文件" @click="purge">彻底删除</NButton>
+      </div>
+    </div>
+    <p class="ad-sub">{{ app.unit }}</p>
 
-    <NGrid cols="1 s:2 m:4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
+    <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
       <NGridItem span="1">
-        <NCard size="small" class="info-card cp-rise" style="--i: 0">
-          <div class="info-k">运行时</div>
-          <div class="info-v"><span :class="app.type === 'node' ? 'vchip node' : 'vchip python'">{{ app.type === 'node' ? 'Node.js' : 'Python' }}</span></div>
+        <NCard size="small" class="cp-rise" style="--i: 0">
+          <template #header><span class="cp-chart-title">基本信息</span></template>
+          <DescriptionsCard :items="infoItems" @open-slot="onDescSlot" />
         </NCard>
       </NGridItem>
       <NGridItem span="1">
-        <NCard size="small" class="info-card cp-rise" style="--i: 1">
-          <div class="info-k">监听端口</div>
-          <div class="info-v mono-dim" style="font-size: var(--fs-md)">
-            {{ app.port || '—' }}
-            <NTag v-if="app.portAuto" size="tiny" :bordered="false" style="margin-left: var(--space-2)">自动检测</NTag>
-          </div>
-        </NCard>
-      </NGridItem>
-      <NGridItem span="1">
-        <NCard size="small" class="info-card cp-rise" style="--i: 2">
-          <div class="info-k">域名</div>
-          <div class="info-v repo-cell" style="font-size: var(--fs-md)">
-            <a v-if="siteUrl" :href="siteUrl" target="_blank" rel="noopener noreferrer" class="repo-link">{{ app.domain || ngx?.configs?.[0]?.analysis?.serverNames?.[0] }}<NIcon :component="icons.OpenOutline" :size="12" class="repo-ico" /></a>
-            <template v-else>{{ app.domain || ngx?.configs?.[0]?.analysis?.serverNames?.[0] || '—' }}</template>
-            <NTag v-if="!app.domain && ngx?.configs?.length" size="tiny" :bordered="false" style="margin-left: var(--space-2)">nginx 检测</NTag>
-          </div>
-        </NCard>
-      </NGridItem>
-      <NGridItem span="1">
-        <NCard size="small" class="info-card cp-rise" style="--i: 3">
-          <div class="info-k">仓库 / 分支</div>
-          <div class="info-v repo-cell" style="font-size: var(--fs-sm)">
-            <template v-if="repoUrl">
-              <a :href="repoUrl" target="_blank" rel="noopener noreferrer" class="repo-link" title="在新标签页打开仓库">
-                {{ repoUrl.replace(/^https:\/\//, '') }}<NIcon :component="icons.OpenOutline" :size="12" class="repo-ico" />
-              </a>
-              <span class="mono-dim"> @ {{ app.branch || 'main' }}</span>
-            </template>
-            <span v-else>{{ app.repo_url ? app.repo_url + ' @ ' + (app.branch || 'main') : '本地目录' }}</span>
-          </div>
+        <NCard size="small" class="cp-rise" style="--i: 1">
+          <template #header>
+            <div class="res-head">
+              <span class="cp-chart-title">运行状态</span>
+              <NButton size="small" tertiary round :icon="ico('RefreshOutline')" @click="loadProc">刷新</NButton>
+            </div>
+          </template>
+          <DescriptionsCard v-if="resItems.length" :items="resItems" />
+          <EmptyBox v-else text="未获取到进程信息（systemd 未返回该 unit 的读数）" />
         </NCard>
       </NGridItem>
     </NGrid>
-
-    <NCard v-if="proc" size="small" class="res-bar" style="margin-bottom: var(--space-4)">
-      <NSpace :size="24" align="center" wrap>
-        <span class="res-item"><span class="res-k">进程</span><b class="mono-dim">{{ proc.running ? 'PID ' + proc.pid : '未运行' }}</b></span>
-        <span class="res-item"><span class="res-k">内存</span><b class="mono-dim">{{ fmtMem(proc.memoryBytes) }}</b></span>
-        <span class="res-item"><span class="res-k">CPU 累计</span><b class="mono-dim">{{ proc.cpuSeconds != null ? proc.cpuSeconds + 's' : '—' }}</b></span>
-        <span class="res-item"><span class="res-k">重启次数</span><b class="mono-dim" :style="proc.restarts > 3 ? 'color:var(--cp-warn)' : ''">{{ proc.restarts }}</b></span>
-        <span class="res-item"><span class="res-k">自启动</span><b class="mono-dim">{{ proc.execStartAt || proc.activeSince || '—' }}</b></span>
-        <span class="res-item"><span class="res-k">状态</span><b class="mono-dim">{{ proc.subState }}</b></span>
-        <NButton size="small" tertiary :icon="ico('RefreshOutline')" @click="loadProc">刷新</NButton>
-      </NSpace>
-    </NCard>
 
     <NCard v-if="app.components?.length" size="small" class="comp-bar" style="margin-bottom: var(--space-4)">
       <NSpace align="center" :size="10" wrap>
@@ -379,172 +415,174 @@ watch(
       </NSpace>
     </NCard>
 
-    <NCard size="small" :content-style="{ padding: '0' }">
-      <NTabs v-model:value="tab" type="line" animated display-directive="show:lazy" :tabs-padding="16" pane-style="padding: var(--space-4); padding-top: var(--space-2)">
-        <NTabPane name="config" tab="基本配置">
-          <NForm label-placement="left" label-width="100" style="max-width: 660px; margin-top: var(--space-3)">
-            <NSpace vertical :size="12">
-              <NFormItem label="名称"><NInput v-model:value="edit.name" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
-              <NFormItem label="安装目录"><NInput v-model:value="edit.path" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
-              <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" :input-props="{ 'aria-label': 'Git 仓库地址' }" /></NFormItem>
-              <NFormItem label="分支"><NInput v-model:value="edit.branch" :input-props="{ 'aria-label': '分支' }" /></NFormItem>
-              <NFormItem label="安装命令"><NInput v-model:value="edit.install_cmd" :input-props="{ 'aria-label': '安装命令' }" /></NFormItem>
-              <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" /></NFormItem>
-              <NFormItem label="端口"><NInput v-model:value="edit.port" placeholder="留空表示无端口" :input-props="{ 'aria-label': '监听端口' }" /></NFormItem>
-              <NFormItem label="域名"><NInput v-model:value="edit.domain" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
-              <NFormItem label="关联数据库">
-                <NSelect v-model:value="dbSel" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" aria-label="关联数据库" style="width: 100%" />
-              </NFormItem>
-              <NButton type="primary" :loading="saving" :icon="ico('SaveOutline')" @click="save">保存配置</NButton>
-            </NSpace>
-          </NForm>
-        </NTabPane>
+    <PageTabBar :tabs="panes" :value="tab" @update="(k: string) => (tab = k)" />
 
-        <NTabPane name="env" tab="环境变量">
-          <NSpace vertical style="width: 100%">
-            <NText depth="3" style="font-size: var(--fs-xs)">写入应用目录的 .env 并由 systemd EnvironmentFile 加载；保存后重启应用生效。</NText>
+    <NCard size="small" class="cp-rise" style="--i: 2; margin-top: 10px">
+      <div v-if="tab === 'config'">
+        <NForm label-placement="left" label-width="100" style="max-width: 660px">
+          <NSpace vertical :size="12">
+            <NFormItem label="名称"><NInput v-model:value="edit.name" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
+            <NFormItem label="安装目录"><NInput v-model:value="edit.path" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
+            <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" :input-props="{ 'aria-label': 'Git 仓库地址' }" /></NFormItem>
+            <NFormItem label="分支"><NInput v-model:value="edit.branch" :input-props="{ 'aria-label': '分支' }" /></NFormItem>
+            <NFormItem label="安装命令"><NInput v-model:value="edit.install_cmd" :input-props="{ 'aria-label': '安装命令' }" /></NFormItem>
+            <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" /></NFormItem>
+            <NFormItem label="端口"><NInput v-model:value="edit.port" placeholder="留空表示无端口" :input-props="{ 'aria-label': '监听端口' }" /></NFormItem>
+            <NFormItem label="域名"><NInput v-model:value="edit.domain" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
+            <NFormItem label="关联数据库">
+              <NSelect v-model:value="dbSel" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" aria-label="关联数据库" style="width: 100%" />
+            </NFormItem>
+            <NButton type="primary" size="small" round :loading="saving" :icon="ico('SaveOutline')" @click="save">保存配置</NButton>
+          </NSpace>
+        </NForm>
+      </div>
+
+      <div v-else-if="tab === 'env'">
+        <NSpace vertical :size="12" style="width: 100%">
+          <div class="cp-help">写入应用目录的 .env 并由 systemd EnvironmentFile 加载；保存后重启应用生效。</div>
+          <!-- 1Panel 的参数抽屉是「只读详情 / 编辑」互斥切换：默认只读，敏感值先遮罩 -->
+          <NButton size="small" tertiary round :icon="ico(envView === 'edit' ? 'EyeOutline' : 'PencilOutline')" style="align-self: flex-start" @click="envView = envView === 'edit' ? 'detail' : 'edit'">
+            {{ envView === 'edit' ? '详情' : '编辑' }}
+          </NButton>
+          <template v-if="envView === 'detail'">
+            <DescriptionsCard v-if="envItems.length" :items="envItems" label-width="34%" />
+            <EmptyBox v-else text="该应用还没有环境变量" />
+          </template>
+          <template v-else>
             <NDynamicInput v-model:value="env" :on-create="() => ({ k: '', v: '' })">
               <template #default="{ value }">
                 <NInput v-model:value="value.k" placeholder="KEY" style="width: 220px; margin-right: var(--space-2)" :input-props="{ class: 'mono', 'aria-label': '环境变量名' }" />
                 <NInput v-model:value="value.v" placeholder="value" style="flex: 1" :input-props="{ class: 'mono', 'aria-label': '环境变量值' }" />
               </template>
             </NDynamicInput>
-            <NButton size="small" type="primary" :icon="ico('SaveOutline')" style="align-self: flex-start" @click="save">保存环境变量</NButton>
-          </NSpace>
-        </NTabPane>
+            <NButton size="small" type="primary" round :icon="ico('SaveOutline')" style="align-self: flex-start" @click="save">保存环境变量</NButton>
+          </template>
+        </NSpace>
+      </div>
 
-        <NTabPane name="deploy" tab="部署记录">
-          <div class="split-view">
-            <div class="dep-list">
-              <div v-for="d in deps" :key="d.id" class="dep-item" :class="{ active: depLog?.id === d.id }"
-                   role="button" tabindex="0" :aria-label="`查看部署记录 #${d.id}`"
-                   @click="viewDep(d.id)" @keyup.enter="viewDep(d.id)" @keyup.space.prevent="viewDep(d.id)">
-                <NSpace align="center" justify="space-between" style="width: 100%">
-                  <NText depth="3" style="font-size: var(--fs-xs)">#{{ d.id }} · {{ d.started_at }}</NText>
-                  <span class="st" :class="d.status === 'success' ? 'ok' : d.status === 'running' ? 'warn' : 'err'" style="font-size: var(--fs-2xs)">
-                    <span class="dot" :class="d.status === 'success' ? 'ok' : d.status === 'running' ? 'warn' : 'err'"></span>{{ d.status }}
-                  </span>
-                </NSpace>
-              </div>
-              <EmptyBox v-if="!deps.length" text="暂无部署记录" />
-              <NButton size="small" tertiary :icon="ico('RefreshOutline')" style="margin-top: var(--space-2)" @click="pollDeps">刷新</NButton>
-            </div>
-            <div class="log-view" style="flex: 1; min-width: 0; max-height: 460px">{{ depLog?.log || '点击左侧记录查看部署日志' }}</div>
-          </div>
-        </NTabPane>
-
-        <NTabPane name="logs" tab="运行日志">
-          <LogStream v-if="tab === 'logs'" :key="app.id" :url-path="`/apps/${app.id}/logs`" />
-        </NTabPane>
-
-        <NTabPane name="nginx" tab="域名 / Nginx">
-          <div v-if="!ngx?.configs?.length" style="padding: var(--space-5) 0">
-            <EmptyBox text="未找到与该应用关联的 nginx 配置（按域名或反代端口匹配）。配置域名并创建反代后，这里可直接快捷编辑" />
-          </div>
-          <div v-else class="split-view">
-            <div class="ngx-list">
-              <div
-                v-for="c in ngx.configs" :key="c.file" class="ngx-item" :class="{ active: ngxFile?.file === c.file }"
-                role="button" tabindex="0" :aria-label="`查看 nginx 配置 ${c.name}`"
-                @click="selConfig(c)" @keyup.enter="selConfig(c)" @keyup.space.prevent="selConfig(c)"
-              >
-                <NIcon :component="icons.GlobeOutline" :size="15" :color="c.analysis.ssl ? 'var(--cp-ok)' : 'var(--cp-text-mute)'" />
-                <div style="min-width: 0">
-                  <div class="ngx-name">{{ c.name }}</div>
-                  <div class="ngx-dom">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}</div>
-                </div>
-              </div>
-              <div v-if="ngxFile" style="margin-top: var(--space-3); display: flex; flex-wrap: wrap; gap: var(--space-2)">
-                <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.ssl ? 'success' : 'default'">{{ ngxFile.analysis.ssl ? 'HTTPS' : '仅 HTTP' }}</NTag>
-                <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.httpsRedirect ? 'success' : 'default'">301 跳转 {{ ngxFile.analysis.httpsRedirect ? '✓' : '✗' }}</NTag>
-                <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.websocket ? 'success' : 'default'">WebSocket {{ ngxFile.analysis.websocket ? '✓' : '✗' }}</NTag>
-                <NTag size="tiny" :bordered="false">body {{ ngxFile.analysis.bodySize || '默认 1m' }}</NTag>
-              </div>
-              <NText v-if="ngxFile" depth="3" style="font-size: var(--fs-2xs); display: block; margin-top: var(--space-2); word-break: break-all">{{ ngxFile.file }}</NText>
-            </div>
-            <div style="flex: 1; min-width: 0">
-              <NSpace size="small" style="margin-bottom: var(--space-3)" wrap>
-                <NButton size="small" tertiary :disabled="!ngxFile || ngxFile.analysis.websocket" :icon="ico('PulseOutline')" @click="quick('ws')">添加 WebSocket 支持</NButton>
-                <NInput v-model:value="bodySizeVal" size="small" style="width: 80px" placeholder="50m" :input-props="{ 'aria-label': '上传大小限制' }" />
-                <NButton size="small" tertiary :disabled="!ngxFile" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
-                <NButton size="small" tertiary :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
-              </NSpace>
-              <NInput v-model:value="ngxContent" type="textarea" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
-              <NSpace justify="space-between" align="center" style="margin-top: var(--space-3)">
-                <NText depth="3" style="font-size: var(--fs-xs)">保存将执行 nginx -t 校验，失败自动回滚并 reload 生效</NText>
-                <NButton type="primary" size="small" class="cp-press" :loading="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
+      <div v-else-if="tab === 'deploy'">
+        <div class="split-view">
+          <div class="dep-list">
+            <div v-for="d in deps" :key="d.id" class="dep-item" :class="{ active: depLog?.id === d.id }"
+                 role="button" tabindex="0" :aria-label="`查看部署记录 #${d.id}`"
+                 @click="viewDep(d.id)" @keyup.enter="viewDep(d.id)" @keyup.space.prevent="viewDep(d.id)">
+              <NSpace align="center" justify="space-between" style="width: 100%">
+                <NText depth="3" style="font-size: var(--fs-xs)">#{{ d.id }} · {{ d.started_at }}</NText>
+                <CpStatusTag :status="d.status === 'running' ? 'installing' : d.status" :text="d.status" />
               </NSpace>
             </div>
+            <EmptyBox v-if="!deps.length" text="暂无部署记录" />
+            <NButton size="small" tertiary round :icon="ico('RefreshOutline')" style="margin-top: var(--space-2)" @click="pollDeps">刷新</NButton>
           </div>
-        </NTabPane>
+          <div class="log-view dep-log" :class="{ 'dep-log-empty': !depLog }">{{ depLog?.log || '点击左侧记录查看部署日志' }}</div>
+        </div>
+      </div>
 
-        <NTabPane name="unit" tab="systemd 单元">
-          <NSpace vertical :size="12" style="width: 100%">
-            <NAlert v-if="unitInfo && !unitInfo.managed" type="warning" :bordered="false" size="small">
-              该应用为纳管模式（unit {{ app.unit }} 由外部管理），面板只读展示，不会写入该文件。
-            </NAlert>
-            <NText depth="3" style="font-size: var(--fs-2xs)">
-              文件：<span class="mono-dim">{{ unitInfo?.path }}</span>。保存流程：写入 → systemd-analyze verify 校验 → daemon-reload，任一步失败自动回滚。修改后需重启服务才生效；面板生成模式下保存会同步更新部署模板，后续部署按此模板渲染。占位符 <code v-pre>{{name}} {{path}} {{start_cmd}} {{port}}</code> 可在模板中使用。
-            </NText>
-            <NInput
-              v-model:value="unitContent"
-              type="textarea"
-              :autosize="{ minRows: 14, maxRows: 26 }"
-              :read-only="!!unitInfo && !unitInfo.managed"
-              :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: var(--fs-xs)' }"
-            />
-            <NSpace justify="space-between" align="center">
-              <NSpace size="small">
-                <NButton size="small" tertiary :icon="ico('RefreshOutline')" @click="loadUnit">重新读取</NButton>
-                <NButton v-if="unitInfo?.managed" size="small" tertiary @click="restoreDefaultTpl">恢复面板默认模板</NButton>
-                <NButton v-if="unitInfo?.managed" size="small" tertiary type="warning" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
-              </NSpace>
-              <NButton type="primary" size="small" :loading="unitSaving" :disabled="!unitInfo?.managed" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
-            </NSpace>
-          </NSpace>
-        </NTabPane>
+      <div v-else-if="tab === 'logs'">
+        <LogStream :key="app.id" :url-path="`/apps/${app.id}/logs`" />
+      </div>
 
-        <NTabPane name="ssl" tab="SSL 证书">
-          <NSpace vertical :size="16">
-            <NSpace align="center" :size="8">
-              <NIcon :component="icons.ShieldCheckmarkOutline" :size="20" color="var(--cp-brand-soft)" />
-              <NText style="font-size: var(--fs-sm)">{{ app.domain || '（未配置域名）' }}</NText>
-              <NTag v-if="app.domain" size="tiny" :bordered="false" type="info">Let's Encrypt</NTag>
+      <div v-else-if="tab === 'nginx'">
+        <div v-if="!ngx?.configs?.length" style="padding: var(--space-5) 0">
+          <EmptyBox text="未找到与该应用关联的 nginx 配置（按域名或反代端口匹配）。配置域名并创建反代后，这里可直接快捷编辑" />
+        </div>
+        <div v-else class="split-view">
+          <div class="ngx-list">
+            <div
+              v-for="c in ngx.configs" :key="c.file" class="ngx-item" :class="{ active: ngxFile?.file === c.file }"
+              role="button" tabindex="0" :aria-label="`查看 nginx 配置 ${c.name}`"
+              @click="selConfig(c)" @keyup.enter="selConfig(c)" @keyup.space.prevent="selConfig(c)"
+            >
+              <NIcon :component="icons.GlobeOutline" :size="15" :color="c.analysis.ssl ? 'var(--cp-ok)' : 'var(--cp-text-mute)'" />
+              <div style="min-width: 0">
+                <div class="ngx-name">{{ c.name }}</div>
+                <div class="ngx-dom">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}</div>
+              </div>
+            </div>
+            <div v-if="ngxFile" style="margin-top: var(--space-3); display: flex; flex-wrap: wrap; gap: var(--space-2)">
+              <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.ssl ? 'success' : 'default'">{{ ngxFile.analysis.ssl ? 'HTTPS' : '仅 HTTP' }}</NTag>
+              <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.httpsRedirect ? 'success' : 'default'">301 跳转 {{ ngxFile.analysis.httpsRedirect ? '✓' : '✗' }}</NTag>
+              <NTag size="tiny" :bordered="false" :type="ngxFile.analysis.websocket ? 'success' : 'default'">WebSocket {{ ngxFile.analysis.websocket ? '✓' : '✗' }}</NTag>
+              <NTag size="tiny" :bordered="false">body {{ ngxFile.analysis.bodySize || '默认 1m' }}</NTag>
+            </div>
+            <NText v-if="ngxFile" depth="3" style="font-size: var(--fs-2xs); display: block; margin-top: var(--space-2); word-break: break-all">{{ ngxFile.file }}</NText>
+          </div>
+          <div style="flex: 1; min-width: 0">
+            <NSpace size="small" style="margin-bottom: var(--space-3)" wrap>
+              <NButton size="small" tertiary round :disabled="!ngxFile || ngxFile.analysis.websocket" :icon="ico('PulseOutline')" @click="quick('ws')">添加 WebSocket 支持</NButton>
+              <NInput v-model:value="bodySizeVal" size="small" style="width: 80px" placeholder="50m" :input-props="{ 'aria-label': '上传大小限制' }" />
+              <NButton size="small" tertiary round :disabled="!ngxFile" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
+              <NButton size="small" tertiary round :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
             </NSpace>
-            <NText depth="3" style="font-size: var(--fs-2xs)">要求该域名 DNS A 记录已指向本机 IP。申请成功后自动切换为 HTTPS 反代并开启 80 → 443 跳转。</NText>
-            <NSpace>
-              <NInput v-model:value="sslEmail" placeholder="邮箱（可选，用于到期通知）" style="width: 300px" :input-props="{ 'aria-label': 'SSL 到期通知邮箱' }" />
-              <NButton type="primary" :disabled="!app.domain" :icon="ico('KeyOutline')" @click="ssl">申请 / 配置证书</NButton>
+            <NInput v-model:value="ngxContent" type="textarea" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
+            <NSpace justify="space-between" align="center" style="margin-top: var(--space-3)">
+              <div class="cp-help">保存将执行 nginx -t 校验，失败自动回滚并 reload 生效</div>
+              <NButton type="primary" size="small" round class="cp-press" :loading="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
             </NSpace>
+          </div>
+        </div>
+      </div>
+
+      <div v-else-if="tab === 'unit'">
+        <NSpace vertical :size="12" style="width: 100%">
+          <NAlert v-if="unitInfo && !unitInfo.managed" type="warning" :bordered="false" size="small">
+            该应用为纳管模式（unit {{ app.unit }} 由外部管理），面板只读展示，不会写入该文件。
+          </NAlert>
+          <div class="cp-help">
+            文件：<span class="mono-dim">{{ unitInfo?.path }}</span>。保存流程：写入 → systemd-analyze verify 校验 → daemon-reload，任一步失败自动回滚。修改后需重启服务才生效；面板生成模式下保存会同步更新部署模板，后续部署按此模板渲染。占位符 <code v-pre>{{name}} {{path}} {{start_cmd}} {{port}}</code> 可在模板中使用。
+          </div>
+          <NInput
+            v-model:value="unitContent"
+            type="textarea"
+            :autosize="{ minRows: 14, maxRows: 26 }"
+            :read-only="!!unitInfo && !unitInfo.managed"
+            :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: var(--fs-xs)' }"
+          />
+          <NSpace justify="space-between" align="center">
+            <NSpace size="small">
+              <NButton size="small" tertiary round :icon="ico('RefreshOutline')" @click="loadUnit">重新读取</NButton>
+              <NButton v-if="unitInfo?.managed" size="small" tertiary round @click="restoreDefaultTpl">恢复面板默认模板</NButton>
+              <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
+            </NSpace>
+            <NButton type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
           </NSpace>
-        </NTabPane>
-      </NTabs>
+        </NSpace>
+      </div>
+
+      <div v-else-if="tab === 'ssl'">
+        <NSpace vertical :size="16">
+          <NSpace align="center" :size="8">
+            <NIcon :component="icons.ShieldCheckmarkOutline" :size="20" color="var(--cp-brand-soft)" />
+            <NText style="font-size: var(--fs-sm)">{{ app.domain || '（未配置域名）' }}</NText>
+            <NTag v-if="app.domain" size="tiny" :bordered="false" type="info">Let's Encrypt</NTag>
+          </NSpace>
+          <div class="cp-help">要求该域名 DNS A 记录已指向本机 IP。申请成功后自动切换为 HTTPS 反代并开启 80 → 443 跳转。</div>
+          <NSpace>
+            <NInput v-model:value="sslEmail" placeholder="邮箱（可选，用于到期通知）" style="width: 300px" :input-props="{ 'aria-label': 'SSL 到期通知邮箱' }" />
+            <NButton type="primary" round :disabled="!app.domain" :icon="ico('KeyOutline')" @click="ssl">申请 / 配置证书</NButton>
+          </NSpace>
+        </NSpace>
+      </div>
     </NCard>
+
+    <ConfirmActionDialog ref="opRef" />
   </div>
 </template>
 
 <style scoped>
 .page-loading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5) 0; }
-.info-card :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
-.info-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: var(--space-2); }
-.info-v { color: var(--cp-text); font-weight: 500; }
-.repo-cell { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
-.repo-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  max-width: 100%;
-  color: var(--cp-brand-soft);
-  text-decoration: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color var(--dur) var(--ease);
+/* 1Panel 带返回的标题行：左组（返回 + 名称 + 状态）gap 8，右组（操作）gap 12 */
+.ad-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; min-width: 0; }
+.ad-head-left { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.ad-head-right { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; justify-content: flex-end; }
+/* .d-name .name 实测 18px/500 + clamp 宽度省略，长应用名不会把右侧按钮挤没 */
+.ad-title {
+  margin: 0; font-size: 18px; font-weight: 500; color: var(--cp-text-strong);
+  min-width: 0; max-width: clamp(140px, 22vw, 320px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.repo-link:hover { color: var(--cp-brand); text-decoration: underline; }
-.repo-ico { flex-shrink: 0; }
+.ad-status { margin-left: var(--space-1); flex-shrink: 0; }
+.ad-sub { margin: var(--space-1) 0 var(--space-4); font-size: var(--fs-xs); color: var(--cp-text-mute); overflow-wrap: anywhere; }
+.res-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-width: 0; }
 .split-view { display: flex; align-items: flex-start; gap: var(--space-3); }
 .dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
 .dep-item { padding: var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
@@ -552,9 +590,11 @@ watch(
    不然右侧状态标签会被挤出 300px 的列表外（裁半截的老症状） */
 .dep-item :deep(.n-space) { min-width: 0; }
 .dep-item :deep(.n-space > *:first-child) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dep-item :deep(.st) { flex-shrink: 0; }
+.dep-item :deep(.cp-status) { flex-shrink: 0; }
 .dep-item:hover { background: var(--cp-hover); }
 .dep-item.active { background: var(--cp-selected); }
+.dep-log { flex: 1; min-width: 0; min-height: 420px; max-height: calc(100vh - 320px); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03); }
+.dep-log-empty { color: var(--cp-text-mute); }
 .ngx-list { width: 260px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
 .ngx-item { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
 .ngx-item:hover { background: var(--cp-hover); }
@@ -562,11 +602,9 @@ watch(
 .ngx-item > div { min-width: 0; }
 .ngx-name { font-size: var(--fs-xs); color: var(--cp-text); font-weight: 550; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ngx-dom { font-size: var(--fs-2xs); color: var(--cp-text-mute); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.res-bar :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
-.res-item { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); color: var(--cp-text); }
-.res-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); }
 @media (max-width: 900px) {
   .split-view { flex-direction: column; }
   .dep-list, .ngx-list { width: 100%; border-right: 0; padding-right: 0; margin-bottom: var(--space-2); }
+  .ad-head-right { justify-content: flex-start; }
 }
 </style>

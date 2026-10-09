@@ -559,3 +559,36 @@ html.cp-vt *::after {
     scroll-behavior: auto !important;
   }
 }
+
+/* ===========================================================
+   1Panel 复刻的共用形态档（数值来自 SPEC-3 §C / SPEC-4 §D-8）
+   =========================================================== */
+/* .input-help：表单/条目下方 12px 说明，全站只有这一档，别再手写 depth=3 的 14px */
+.cp-help {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--cp-text-mute);
+  line-height: 1.6;
+  margin-top: 2px;
+}
+/* .card-interval：1Panel 的卡间距是 7px，不是间距标度上的任何一档 */
+.cp-card-gap { margin-top: 7px; }
+/* 图表卡标题不带竖条（.monitor-toolbar--card .title 实测 16px/500） */
+.cp-chart-title { font-size: 16px; font-weight: 500; color: var(--cp-text-strong); }
+/* 设置页内容列：桌面约 50%（1Panel :md=15 :lg=12），窄屏放回全宽 */
+.cp-set-form { max-width: 50%; }
+@media (max-width: 640px) {
+  .cp-set-form { max-width: 100%; }
+}
+.cp-divider { margin-top: 20px; border-top: 1px solid var(--cp-border); }
+/* 前置条件不满足时整页降能见度（1Panel 的 .mask + .mask-prompt 范式） */
+.cp-masked { opacity: 0.4; pointer-events: none; }
+.cp-mask-prompt {
+  position: absolute;
+  z-index: 1;
+  top: 220px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 400px;
+  max-width: calc(100% - 24px);
+}

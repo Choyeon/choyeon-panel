@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, h, ref, watch } from 'vue';
 import {
   NAlert, NCard, NDataTable, NIcon, NInput, NSelect, NSpace, NTag, NText, useMessage,
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { getRole, req } from '../api';
 import { icon, icons } from '../icons';
-import PageHeader from '../components/PageHeader.vue';
+import CpToolbarCard from '../components/CpToolbarCard.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import { invalidateCache, useCachedFetch } from '../composables/useCachedFetch';
 import { useTableHeight } from '../composables/useTableHeight';
-import { fmtAgo, fmtDateTime } from '../composables/useFormat';
+import { fmtDateTime } from '../composables/useFormat';
 
 type AlertRow = { id: number; ts: string; level: string; code: string; message: string; meta: string; acked: number };
 type OpenReport = { rows: AlertRow[]; counts: Record<string, number>; total: number };
@@ -22,12 +22,6 @@ const limit = ref(200);
 const kw = ref('');
 const acking = ref<number | null>(null);
 const running = ref('');
-
-// 相对时间得自己往前走：这一页常被开着当监控台，不重算的话「3 分钟前」会一路挂到下午。
-const nowTick = ref(Date.now());
-let tick: number | null = null;
-onMounted(() => { tick = window.setInterval(() => { nowTick.value = Date.now(); }, 30000); });
-onBeforeUnmount(() => { if (tick) clearInterval(tick); });
 
 const { data, loading, error, refresh } = useCachedFetch<{ rows: AlertRow[] }>({
   key: () => `alerts:history:${level.value}:${limit.value}`,
@@ -96,16 +90,16 @@ const cols: any[] = [
     title: '级别', key: 'level', width: 104,
     render: (r: AlertRow) => {
       const cfg = LEVEL[r.level] || { label: r.level, type: 'success' as const, ico: 'InformationCircleOutline' };
-      return h(NTag, { size: 'tiny', bordered: false, type: cfg.type }, {
+      return h(NTag, { size: 'small', bordered: false, round: true, type: cfg.type }, {
         icon: icon(cfg.ico, 12),
         default: () => cfg.label,
       });
     },
   },
   {
-    title: '时间', key: 'ts', width: 130,
-    render: (r: AlertRow) =>
-      h('span', { class: 'mono-dim', title: `${fmtDateTime(r.ts)} (UTC)` }, fmtAgo(r.ts, nowTick.value)),
+    // 1Panel 列表不用相对时间：绝对时间 + width 180（对齐 alert log createdAt 列）
+    title: '时间', key: 'ts', width: 180,
+    render: (r: AlertRow) => h('span', { class: 'mono-dim', title: `${fmtDateTime(r.ts)} (UTC)` }, fmtDateTime(r.ts)),
   },
   {
     title: '来源', key: 'code', width: 200,
@@ -116,10 +110,10 @@ const cols: any[] = [
   {
     title: '状态', key: 'acked', width: 92,
     render: (r: AlertRow) =>
-      h('span', { class: 'st ' + (r.acked ? 'idle' : (LEVEL[r.level]?.dot || 'idle')) }, [
-        h('span', { class: 'dot ' + (r.acked ? 'idle' : (LEVEL[r.level]?.dot || 'idle')) }),
-        r.acked ? '已确认' : '未确认',
-      ]),
+      h(NTag, {
+        size: 'small', bordered: false, round: true,
+        type: r.acked ? 'info' : (LEVEL[r.level]?.type || 'default'),
+      }, { default: () => (r.acked ? '已确认' : '未确认') }),
   },
   {
     title: '操作', key: 'ops', width: 110,
@@ -127,9 +121,9 @@ const cols: any[] = [
       // 只读账号既看不到按钮，也不该在 DOM 里留一个必然 403 的入口
       isAdmin.value && !r.acked
         ? h(NButton, {
-            size: 'tiny', tertiary: true, type: 'primary',
+            text: true, size: 'small', type: 'primary',
             loading: acking.value === r.id, disabled: !!acking.value,
-            icon: icon('CheckmarkCircleOutline', 14), onClick: () => ack(r),
+            onClick: () => ack(r),
           }, () => '确认')
         : h('span', { class: 'cell-sub' }, r.acked ? `#${r.id}` : '—'),
   },
@@ -184,13 +178,37 @@ async function runRound(kind: 'run' | 'probe') {
 
 <template>
   <div>
-    <PageHeader title="告警历史" sub="巡检与存活探测的每一轮结论都留痕：严重级为连不上/单元 failed/证书过期，恢复也会记一条">
-      <template #actions>
-        <NInput v-model:value="kw" placeholder="过滤来源/内容" size="small" clearable style="width: 170px">
+    <NCard size="small" style="margin-bottom: var(--space-4)">
+      <div class="al-summary">
+        <div class="al-side">
+          <NText strong class="cp-pop" style="font-size: var(--fs-sm)">未确认 {{ openTotal }} 条</NText>
+          <NSpace :size="12" class="al-levels">
+            <span class="st err"><span class="dot err"></span>严重 {{ counts.crit || 0 }}</span>
+            <span class="st warn"><span class="dot warn"></span>注意 {{ counts.warn || 0 }}</span>
+            <span class="st ok"><span class="dot ok"></span>恢复 {{ counts.ok || 0 }}</span>
+          </NSpace>
+        </div>
+        <p class="al-note">
+          巡检与存活探测的每一轮结论都留痕：严重级为连不上/单元 failed/证书过期，恢复也会记一条。
+          同一场持续中的告警只留一行，状态变了才会再多一行；未确认的历史不受过期裁剪影响，确认后才按保留策略清理。
+        </p>
+      </div>
+    </NCard>
+
+    <CpToolbarCard title="告警历史" class="cp-card-gap">
+      <template #left>
+        <template v-if="isAdmin">
+          <NButton size="small" tertiary :loading="running === 'run'" :icon="icon('PlayOutline', 14)" @click="runRound('run')">立即巡检</NButton>
+          <NButton size="small" tertiary :loading="running === 'probe'" :icon="icon('PulseOutline', 14)" @click="runRound('probe')">存活探测</NButton>
+          <NButton size="small" type="primary" :disabled="!openTotal" :loading="running === 'ack'" :icon="icon('CheckmarkCircleOutline', 14)" @click="ackAll">全部确认</NButton>
+        </template>
+      </template>
+      <template #right>
+        <NInput v-model:value="kw" placeholder="过滤来源/内容" size="small" clearable style="width: 200px">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
         <NSelect
-          :value="level" size="small" style="width: 120px" aria-label="按级别过滤"
+          :value="level" size="small" style="width: 200px" aria-label="按级别过滤"
           :options="[
             { label: '全部级别', value: '' },
             { label: '仅严重', value: 'crit' },
@@ -209,45 +227,24 @@ async function runRound(kind: 'run' | 'probe') {
           @update:value="(v: number) => { limit = v; }"
         />
         <NButton size="small" tertiary :loading="loading" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
-        <template v-if="isAdmin">
-          <NButton size="small" tertiary :loading="running === 'probe'" :icon="icon('PulseOutline', 14)" @click="runRound('probe')">存活探测</NButton>
-          <NButton size="small" tertiary :loading="running === 'run'" :icon="icon('PlayOutline', 14)" @click="runRound('run')">立即巡检</NButton>
-          <NButton size="small" type="primary" :disabled="!openTotal" :loading="running === 'ack'" :icon="icon('CheckmarkCircleOutline', 14)" @click="ackAll">全部确认</NButton>
+      </template>
+
+      <NAlert type="info" :bordered="false" size="small" class="al-tip">
+        存活探测只对本机 127.0.0.1 的应用端口发一次 GET：连不上或超时算严重，只要有 HTTP 应答（含 4xx/5xx）就算活着，不会因此推送通知。阈值与通知通道在「设置 · 告警」里配置。
+      </NAlert>
+
+      <NDataTable
+        ref="tableAnchor"
+        size="small" :bordered="false" :loading="loading" :scroll-x="1030"
+        :max-height="tableH"
+        :columns="cols" :data="rows"
+        :row-key="(r: AlertRow) => r.id"
+      >
+        <template #empty>
+          <EmptyBox :text="kw || level ? '没有符合筛选条件的告警记录' : '暂无告警历史，点「立即巡检」跑一轮'" />
         </template>
-      </template>
-    </PageHeader>
-
-    <NCard size="small" style="margin-bottom: var(--space-4)">
-      <div class="al-summary">
-        <div class="al-side">
-          <NText strong class="cp-pop" style="font-size: var(--fs-sm)">未确认 {{ openTotal }} 条</NText>
-          <NSpace :size="12" class="al-levels">
-            <span class="st err"><span class="dot err"></span>严重 {{ counts.crit || 0 }}</span>
-            <span class="st warn"><span class="dot warn"></span>注意 {{ counts.warn || 0 }}</span>
-            <span class="st ok"><span class="dot ok"></span>恢复 {{ counts.ok || 0 }}</span>
-          </NSpace>
-        </div>
-        <p class="al-note">
-          同一场持续中的告警只留一行，状态变了才会再多一行；未确认的历史不受过期裁剪影响，确认后才按保留策略清理。
-        </p>
-      </div>
-    </NCard>
-
-    <NAlert type="info" :bordered="false" size="small" class="al-tip">
-      存活探测只对本机 127.0.0.1 的应用端口发一次 GET：连不上或超时算严重，只要有 HTTP 应答（含 4xx/5xx）就算活着，不会因此推送通知。阈值与通知通道在「设置 · 告警」里配置。
-    </NAlert>
-
-    <NDataTable
-      ref="tableAnchor"
-      size="small" :bordered="false" :loading="loading" :scroll-x="1000"
-      :max-height="tableH"
-      :columns="cols" :data="rows"
-      :row-key="(r: AlertRow) => r.id"
-    >
-      <template #empty>
-        <EmptyBox :text="kw || level ? '没有符合筛选条件的告警记录' : '暂无告警历史，点「立即巡检」跑一轮'" />
-      </template>
-    </NDataTable>
+      </NDataTable>
+    </CpToolbarCard>
   </div>
 </template>
 
@@ -262,7 +259,7 @@ async function runRound(kind: 'run' | 'probe') {
   color: var(--cp-text-mute);
 }
 .al-levels { margin-top: var(--space-2); }
-.al-tip { margin-bottom: var(--space-4); }
+.al-tip { margin-bottom: var(--space-3); }
 @media (max-width: 640px) {
   .al-summary { gap: var(--space-3); }
 }

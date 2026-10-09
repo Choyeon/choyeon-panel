@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
-  NAlert, NDataTable, NForm, NFormItem, NInput, NModal, NPopconfirm, NSelect, NSpace, NSwitch, NTag, NText,
+  NAlert, NCard, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NSwitch, NTag, NText,
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { req } from '../api';
-import { icon } from '../icons';
-import PageHeader from '../components/PageHeader.vue';
+import { icon, icons } from '../icons';
+import CpToolbarCard from '../components/CpToolbarCard.vue';
+import CpRowActions from '../components/CpRowActions.vue';
+import ConfirmActionDialog from '../components/ConfirmActionDialog.vue';
+import DescriptionsCard from '../components/DescriptionsCard.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import { invalidateCache, useCachedFetch } from '../composables/useCachedFetch';
 import { useTableHeight } from '../composables/useTableHeight';
-import { fmtAgo, fmtDateTime } from '../composables/useFormat';
+import { fmtDateTime } from '../composables/useFormat';
 
 type Task = {
   id: number; name: string; expr: string; enabled: number; last_run: string; last_status: string;
@@ -57,6 +60,18 @@ async function reload() {
   invalidateCache('cron:list');
   return refresh().catch((e: any) => { err.value = e.message || String(e); });
 }
+
+// 1Panel TableSetting 自动刷新：0/5/10/30/60/120/300s，localStorage 记忆
+const AUTO_OPTS = [0, 5, 10, 30, 60, 120, 300].map((s) => ({ label: s ? `${s} 秒` : '关闭自动刷新', value: s }));
+const autoSec = ref(Math.max(0, Number(localStorage.getItem('cron-auto-refresh')) || 0));
+let autoTimer: number | null = null;
+function restartAuto() {
+  if (autoTimer) clearInterval(autoTimer);
+  autoTimer = autoSec.value > 0 ? window.setInterval(() => void reload(), autoSec.value * 1000) : null;
+}
+watch(autoSec, (v) => { localStorage.setItem('cron-auto-refresh', String(v)); restartAuto(); });
+onMounted(restartAuto);
+onBeforeUnmount(() => { if (autoTimer) clearInterval(autoTimer); });
 
 async function openCreate() {
   editing.value = null;
@@ -179,21 +194,36 @@ async function toggle(r: Task, val: boolean) {
   }
 }
 
-async function remove(r: Task) {
-  err.value = '';
-  try {
-    await req(`/cron/${r.id}`, { method: 'DELETE', timeout: 60000 });
-    await reload();
-  } catch (e: any) {
-    err.value = e.message || String(e);
-  }
+const delDialog = ref<InstanceType<typeof ConfirmActionDialog> | null>(null);
+function confirmDel(r: Task) {
+  delDialog.value?.acceptParams({
+    title: '确认删除定时任务',
+    names: [r.name],
+    msg: `删除后 ${r.timer} 会一起从 systemd 摘掉，操作不可撤销。`,
+    api: async () => {
+      await req(`/cron/${r.id}`, { method: 'DELETE', timeout: 60000 });
+      await reload();
+    },
+    successMsg: '已删除',
+  });
 }
 
 function statusTag(r: Task) {
   const s = r.last_status || '';
   if (!s) return h('span', { class: 'cell-sub' }, '未执行');
   const type = s === 'ok' ? 'success' : s === 'timeout' ? 'error' : 'warning';
-  return h(NTag, { size: 'tiny', bordered: false, type: type as any }, { default: () => s });
+  return h(NTag, { size: 'tiny', bordered: false, round: true, type: type as any }, { default: () => s });
+}
+
+// 1Panel cronjob 上次执行列：状态图标 + 绝对时间（无相对时间）
+function lastRunCell(r: Task) {
+  const s = r.last_status || '';
+  const icoName = !s ? 'InformationCircleOutline' : s === 'ok' ? 'CheckmarkCircleOutline' : 'CloseCircleOutline';
+  const color = !s ? 'var(--cp-text-mute)' : s === 'ok' ? 'var(--cp-node)' : 'var(--cp-err)';
+  return h('div', { class: 'cell-lastrun' }, [
+    h(NIcon, { component: icons[icoName], size: 14, color }),
+    h('span', { class: 'mono-dim', title: r.last_run ? `${r.last_run} (本地)` : '' }, r.last_run ? fmtDateTime(r.last_run) : '—'),
+  ]);
 }
 
 const cols: any[] = [
@@ -208,7 +238,7 @@ const cols: any[] = [
     title: '计划', key: 'expr', minWidth: 210,
     render: (r: Task) => h('div', { class: 'cell-stack' }, [
       r.expr_error
-        ? h(NTag, { size: 'tiny', bordered: false, type: 'error' }, { default: () => '表达式无法解析' })
+        ? h(NTag, { size: 'tiny', bordered: false, round: true, type: 'error' }, { default: () => '表达式无法解析' })
         : h('span', { class: 'cell-name', title: `${r.expr} → ${r.human}` }, r.human || r.expr),
       h('span', { class: 'cell-sub mono-dim cp-break' }, r.expr),
     ]),
@@ -220,11 +250,12 @@ const cols: any[] = [
     render: (r: Task) => h('span', { class: 'mono-dim cp-break', style: { fontSize: 'var(--fs-xs)' } }, r.cmd || '—'),
   },
   {
-    title: '启用', key: 'enabled', width: 76,
-    render: (r: Task) => h(NSwitch, {
-      size: 'small', value: !!r.enabled, disabled: runningId.value === r.id,
-      'onUpdate:value': (v: boolean) => toggle(r, v),
-    }),
+    // 1Panel Status operate 模式：启用/停用是可点的圆角小按钮，点击直发 PATCH
+    title: '启用', key: 'enabled', width: 90,
+    render: (r: Task) => h(NButton, {
+      size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
+      disabled: runningId.value === r.id, onClick: () => toggle(r, !r.enabled),
+    }, { default: () => (r.enabled ? '启用' : '停用') }),
   },
   {
     title: 'Timer', key: 'timer', width: 116,
@@ -233,30 +264,17 @@ const cols: any[] = [
       r.timer_active ? '已挂表' : (r.enabled ? '未挂表' : '已停用'),
     ]),
   },
-  {
-    title: '上次执行', key: 'last_run', width: 132,
-    render: (r: Task) => h('span', { class: 'mono-dim', title: r.last_run ? `${r.last_run} (本地)` : '' }, r.last_run ? fmtAgo(r.last_run) : '—'),
-  },
+  { title: '上次执行', key: 'last_run', width: 180, render: lastRunCell },
   { title: '结果', key: 'last_status', width: 96, render: statusTag },
   {
-    title: '操作', key: 'ops', width: 236,
-    render: (r: Task) => h(NSpace, { size: 6, wrap: false }, {
-      default: () => [
-        h(NButton, {
-          size: 'tiny', tertiary: true, type: 'primary', loading: runningId.value === r.id,
-          disabled: runningId.value !== null, icon: icon('PlayOutline', 12), onClick: () => runNow(r),
-        }, () => '立即执行'),
-        h(NButton, {
-          size: 'tiny', tertiary: true, disabled: !r.log_tail && !r.last_run,
-          icon: icon('DocumentTextOutline', 12), onClick: () => { logRow.value = r; },
-        }, () => '输出'),
-        h(NButton, {
-          size: 'tiny', tertiary: true, icon: icon('PencilOutline', 12), onClick: () => openEdit(r),
-        }, () => '编辑'),
-        h(NPopconfirm, { onPositiveClick: () => remove(r) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: icon('TrashOutline', 12), 'aria-label': `删除任务 ${r.name}` }),
-          default: () => `删除后 ${r.timer} 会一起从 systemd 摘掉，确认？`,
-        }),
+    title: '操作', key: 'ops', width: 200,
+    render: (r: Task) => h(CpRowActions, {
+      ellipsis: 3,
+      buttons: [
+        { label: runningId.value === r.id ? '执行中…' : '执行', run: () => runNow(r), disabled: runningId.value !== null },
+        { label: '输出', run: () => { logRow.value = r; }, disabled: !r.log_tail && !r.last_run },
+        { label: '编辑', run: () => openEdit(r) },
+        { label: '删除', danger: true, run: () => confirmDel(r) },
       ],
     }),
   },
@@ -265,106 +283,130 @@ const cols: any[] = [
 
 <template>
   <div>
-    <PageHeader title="定时任务" sub="表达式渲染成 systemd timer，由 systemd 按计划执行；命令只认白名单，且不经 shell">
-      <template #actions>
-        <NButton size="small" tertiary :loading="busy" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
-        <NButton size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建任务</NButton>
-      </template>
-    </PageHeader>
-
     <NAlert v-if="err" type="error" :bordered="false" size="small" role="alert" style="margin-bottom: var(--space-3)">{{ err }}</NAlert>
 
-    <NAlert type="info" :bordered="false" size="small" style="margin-bottom: var(--space-4)">
-      {{ options.note || '定时任务以 root 直接执行固定参数，不经过 shell；不在白名单内的命令不会被保存。' }}
-      与备份任务的 timer 互不影响：备份仍走「备份」页的 keep 自动裁剪。
-    </NAlert>
+    <CpToolbarCard title="定时任务">
+      <template #left>
+        <NButton size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建任务</NButton>
+      </template>
+      <template #right>
+        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px" aria-label="自动刷新间隔" />
+        <NButton size="small" tertiary :loading="busy" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
+      </template>
 
-    <NDataTable
-      ref="tableAnchor"
-      :columns="cols" :data="rows" size="small" :bordered="false" :loading="loading"
-      :scroll-x="1180" class="cp-tbl tbl-cron" :max-height="tableH"
-      :row-key="(r: Task) => r.id"
-    >
-      <template #empty><EmptyBox text="还没有定时任务，点「新建任务」加一条" /></template>
-    </NDataTable>
+      <NAlert type="info" :bordered="false" size="small" style="margin-bottom: var(--space-3)">
+        {{ options.note || '定时任务以 root 直接执行固定参数，不经过 shell；不在白名单内的命令不会被保存。' }}
+        表达式渲染成 systemd timer，由 systemd 按计划执行；与备份任务的 timer 互不影响：备份仍走「备份」页的 keep 自动裁剪。
+      </NAlert>
+
+      <NDataTable
+        ref="tableAnchor"
+        :columns="cols" :data="rows" size="small" :bordered="false" :loading="loading"
+        :scroll-x="1220" :max-height="tableH"
+        :row-key="(r: Task) => r.id"
+      >
+        <template #empty><EmptyBox text="还没有定时任务，点「新建任务」加一条" /></template>
+      </NDataTable>
+    </CpToolbarCard>
 
     <NModal v-model:show="showForm" preset="card" :title="editing ? `编辑任务：${editing.name}` : '新建定时任务'" style="width: 640px; max-width: 94vw">
       <NSpace vertical :size="12">
         <NForm label-placement="top" :show-feedback="false">
-          <NSpace :size="12" align="start" style="width: 100%">
-            <NFormItem label="任务名" style="flex: 1 1 220px; min-width: 0">
-              <NInput v-model:value="form.name" :disabled="!!editing" placeholder="small-dns-kebab" maxlength="39" />
+          <NCard size="small" title="基本信息" :bordered="true">
+            <NSpace :size="12" align="start" style="width: 100%">
+              <NFormItem label="任务名" style="flex: 1 1 220px; min-width: 0">
+                <NSpace vertical :size="2" style="width: 100%">
+                  <NInput v-model:value="form.name" :disabled="!!editing" placeholder="small-dns-kebab" maxlength="39" />
+                  <span class="cp-help">任务名保存后不可修改。</span>
+                </NSpace>
+              </NFormItem>
+              <NFormItem label="启用" style="flex: 0 0 90px">
+                <NSwitch v-model:value="form.enabled" size="small" />
+              </NFormItem>
+            </NSpace>
+          </NCard>
+          <NCard size="small" title="计划" :bordered="true">
+            <NFormItem label="计划表达式（分 时 日 月 周）">
+              <NSpace vertical :size="4" style="width: 100%">
+                <NInput v-model:value="form.expr" placeholder="0 4 * * 1" maxlength="80" />
+                <span class="cp-help">支持 *、数字、a-b、列表与 /步长；星期 0=周日，不支持 @daily 这类宏。</span>
+              </NSpace>
             </NFormItem>
-            <NFormItem label="启用" style="flex: 0 0 90px">
-              <NSwitch v-model:value="form.enabled" size="small" />
+            <div class="cr-preview" role="status">
+              <template v-if="preview?.error">
+                <NText type="error" style="font-size: var(--fs-xs)">{{ preview.error }}</NText>
+              </template>
+              <template v-else-if="preview">
+                <NText style="font-size: var(--fs-sm)">{{ preview.human }}</NText>
+                <NText class="mono-dim cp-break" style="font-size: var(--fs-xs)">OnCalendar: {{ preview.oncalendar || '—' }}</NText>
+              </template>
+              <NText v-else class="cell-sub" style="font-size: var(--fs-xs)">等待有效的计划表达式…</NText>
+            </div>
+          </NCard>
+          <NCard size="small" title="命令" :bordered="true">
+            <NFormItem label="白名单预设">
+              <NSpace vertical :size="2" style="width: 100%">
+                <NSelect
+                  v-model:value="form.preset" :options="presetOpts"
+                  :disabled="!presetOpts.length" placeholder="正在读取白名单…"
+                />
+                <span class="cp-help">白名单在服务端逐条校验（命令名、子命令、参数个数与取值范围），不合格会被拒绝且不会保存。</span>
+              </NSpace>
             </NFormItem>
-          </NSpace>
-          <NFormItem label="计划表达式（分 时 日 月 周）">
-            <NInput v-model:value="form.expr" placeholder="0 4 * * 1" maxlength="80" />
-          </NFormItem>
-          <div class="cr-preview" role="status">
-            <template v-if="preview?.error">
-              <NText type="error" style="font-size: var(--fs-xs)">{{ preview.error }}</NText>
-            </template>
-            <template v-else-if="preview">
-              <NText style="font-size: var(--fs-sm)">{{ preview.human }}</NText>
-              <NText class="mono-dim cp-break" style="font-size: var(--fs-xs)">OnCalendar: {{ preview.oncalendar || '—' }}</NText>
-            </template>
-            <NText v-else class="cell-sub" style="font-size: var(--fs-xs)">支持 *、数字、a-b、列表与 /步长；星期 0=周日，不支持 @daily 这类宏。</NText>
-          </div>
-          <NFormItem label="命令">
-            <NSelect
-              v-model:value="form.preset" :options="presetOpts"
-              :disabled="!presetOpts.length" placeholder="正在读取白名单…"
-            />
-          </NFormItem>
-          <NFormItem v-if="needUnit" label="要重启的 unit">
-            <NSelect v-model:value="form.unit" :options="unitOpts" filterable placeholder="只能选面板纳管的 unit" />
-          </NFormItem>
-          <NFormItem label="附加参数（可留空）">
-            <NInput v-model:value="form.args" placeholder="例如 --lines=500" maxlength="200" />
-          </NFormItem>
-          <NText class="cell-sub" style="font-size: var(--fs-xs); line-height: 1.6">
-            将执行：<span class="mono-dim">{{ buildArgv().join(' ') || '（命令不完整）' }}</span>
-            。白名单在服务端逐条校验（命令名、子命令、参数个数与取值范围），不合格会被拒绝且不会保存。
-          </NText>
+            <NFormItem v-if="needUnit" label="要重启的 unit">
+              <NSelect v-model:value="form.unit" :options="unitOpts" filterable placeholder="只能选面板纳管的 unit" />
+            </NFormItem>
+            <NFormItem label="附加参数（可留空）">
+              <NSpace vertical :size="2" style="width: 100%">
+                <NInput v-model:value="form.args" placeholder="例如 --lines=500" maxlength="200" />
+                <span class="cp-help">按空格拆分为多个参数。</span>
+              </NSpace>
+            </NFormItem>
+            <span class="cp-help">将执行：<span class="mono-dim">{{ buildArgv().join(' ') || '（命令不完整）' }}</span></span>
+          </NCard>
         </NForm>
         <NSpace justify="end" :size="8">
-          <NButton tertiary :disabled="saving" @click="showForm = false">取消</NButton>
+          <NButton tertiary :disabled="saving" @click="showForm = false">返回</NButton>
           <NButton
             type="primary" class="cp-press" :loading="saving"
             :disabled="saving || !form.name.trim() || !form.expr.trim() || (!!needUnit && !form.unit)"
             @click="save"
-          >{{ editing ? '保存修改' : '创建任务' }}</NButton>
+          >确定</NButton>
         </NSpace>
       </NSpace>
     </NModal>
 
-    <NModal
-      :show="!!logRow" preset="card" title="最近一次输出" style="width: 720px; max-width: 94vw"
-      @update:show="(v: boolean) => { if (!v) logRow = null; }"
-    >
-      <NSpace vertical :size="10">
-        <NText class="cell-sub" style="font-size: var(--fs-xs)">
-          {{ logRow?.name }} · {{ logRow?.last_run ? fmtDateTime(logRow.last_run) : '尚未执行' }} · 结果 {{ logRow?.last_status || '—' }}
-        </NText>
-        <NAlert type="warning" :bordered="false" size="small">服务端已对口令/连接串做脱敏，并且只保留最后 4KB。</NAlert>
-        <pre class="cr-log mono">{{ logRow?.log_tail || '（无输出）' }}</pre>
-      </NSpace>
-    </NModal>
+    <NDrawer :show="!!logRow" :width="'50%'" @update:show="(v: boolean) => { if (!v) logRow = null; }">
+      <NDrawerContent :title="`最近一次输出 - ${logRow?.name || ''}`" closable>
+        <NSpace vertical :size="10" style="width: 100%">
+          <DescriptionsCard
+            :items="[
+              { label: '开始时间', value: logRow?.last_run ? fmtDateTime(logRow.last_run) : '未执行' },
+              { label: '状态', value: logRow?.last_status || '未执行' },
+            ]"
+          />
+          <NAlert type="warning" :bordered="false" size="small">服务端已对口令/连接串做脱敏，并且只保留最后 4KB。</NAlert>
+          <pre class="cr-log mono">{{ logRow?.log_tail || '（无输出）' }}</pre>
+        </NSpace>
+      </NDrawerContent>
+    </NDrawer>
+
+    <ConfirmActionDialog ref="delDialog" />
   </div>
 </template>
 
 <style scoped>
+.cell-lastrun { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cr-preview {
   display: flex; flex-direction: column; gap: 4px; min-height: 44px;
   padding: var(--space-3); border: 1px solid var(--cp-border); border-radius: 8px;
   background: var(--cp-code-bg);
 }
+/* 1Panel LogFile：calc(100vh - 420px)、14px/16px、padding 5px、深色代码底 */
 .cr-log {
-  margin: 0; max-height: 46vh; overflow: auto; padding: var(--space-3);
+  margin: 0; height: calc(100vh - 420px); overflow: auto; padding: 5px;
   background: var(--cp-code-bg); color: var(--cp-code-text);
   border: 1px solid var(--cp-border); border-radius: 8px;
-  font-size: var(--fs-2xs); line-height: 1.6; white-space: pre-wrap; word-break: break-all;
+  font-size: 14px; line-height: 16px; white-space: pre-wrap; word-break: break-all;
 }
 </style>

@@ -1,17 +1,25 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import {
-  NAlert, NCard, NIcon, NProgress, NResult, NSpace, NText, NSkeleton, NTooltip, useMessage,
+  NAlert, NCard, NDataTable, NGrid, NGridItem, NIcon, NPopover, NResult, NSkeleton, NSpace, NText, useMessage,
 } from 'naive-ui';
 import { NButton } from '../ui';
 import PageHeader from '../components/PageHeader.vue';
+import CpToolbarCard from '../components/CpToolbarCard.vue';
+import CpStatusTag from '../components/CpStatusTag.vue';
+import CopyButton from '../components/CopyButton.vue';
+import DescriptionsCard from '../components/DescriptionsCard.vue';
+import StatGauge from '../components/StatGauge.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import { api } from '../api';
 import { icon, icons } from '../icons';
+import { useTableHeight } from '../composables/useTableHeight';
 
 type Item = { id: string; title: string; status: 'pass' | 'warn' | 'fail'; detail: string; fix: string; fixable?: boolean };
 type Report = { status: string; counts: { pass: number; warn: number; fail: number }; items: Item[] };
 
+const router = useRouter();
 const msg = useMessage();
 const loading = ref(true);
 const error = ref('');
@@ -20,6 +28,7 @@ const fixing = ref('');
 const filter = ref<'all' | 'warn' | 'fail'>('all');
 let readyTimer: number | null = null;
 onBeforeUnmount(() => { if (readyTimer) clearInterval(readyTimer); });
+const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
 
 const TYPE = {
   pass: { label: '正常', icon: 'CheckmarkCircleOutline', color: 'var(--cp-ok)' },
@@ -27,24 +36,84 @@ const TYPE = {
   fail: { label: '异常', icon: 'CloseCircleOutline', color: 'var(--cp-err)' },
 } as const;
 
+// CpStatusTag 的语义色来自 1Panel 的状态词表：healthy→success、degraded→warning、unhealthy→danger
+const TAG = { pass: 'healthy', warn: 'degraded', fail: 'unhealthy' } as const;
+const STATUS_LABEL: Record<string, string> = { pass: '全部通过', warn: '存在注意项', fail: '存在异常项' };
+
 const ico = (name: string, size = 14) => icon(name, size);
 
-const percent = computed(() => {
-  const r = report.value;
-  if (!r) return 0;
-  const total = r.counts.pass + r.counts.warn + r.counts.fail;
-  return total ? Math.round((r.counts.pass / total) * 100) : 0;
+// 概览读数条的 hover 明细在触屏上要能点出来，和 1Panel 的 hasFinePointer 判断等价
+const finePointer = typeof window !== 'undefined'
+  && !!window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
+
+const total = computed(() => {
+  const c = report.value?.counts;
+  return c ? c.pass + c.warn + c.fail : 0;
 });
+const pct = (n: number) => (total.value ? Math.round((n / total.value) * 100) : 0);
+
+const percent = computed(() => pct(report.value?.counts.pass ?? 0));
 
 const overallColor = computed(() =>
   report.value?.status === 'pass' ? 'var(--cp-ok)' : report.value?.status === 'warn' ? 'var(--cp-warn)' : 'var(--cp-err)',
 );
+
+const gauges = computed(() => {
+  const r = report.value;
+  if (!r) return [];
+  return [
+    { key: 'overall' as const, percent: percent.value, text: String(percent.value), unit: '%', label: '通过率', detail: r.status === 'pass' ? '全部检查通过' : '优先处理异常项', color: overallColor.value },
+    { key: 'pass' as const, percent: pct(r.counts.pass), text: String(r.counts.pass), unit: '项', label: '正常', detail: `共 ${total.value} 项检查`, color: 'var(--cp-ok)' },
+    { key: 'warn' as const, percent: pct(r.counts.warn), text: String(r.counts.warn), unit: '项', label: '注意', detail: '不阻断使用，建议处理', color: 'var(--cp-warn)' },
+    { key: 'fail' as const, percent: pct(r.counts.fail), text: String(r.counts.fail), unit: '项', label: '异常', detail: '直接影响可用性', color: 'var(--cp-err)' },
+  ];
+});
+
+const byStatus = (s: string) => (report.value?.items || []).filter((i) => i.status === s);
 
 const shown = computed(() => {
   const items = report.value?.items || [];
   if (filter.value === 'all') return items;
   return items.filter((i) => i.status === filter.value);
 });
+
+const columns: any[] = [
+  {
+    title: '项目', key: 'title', minWidth: 240,
+    render: (r: Item) =>
+      h('div', { class: 'cell-main' }, [
+        h('span', { class: 'cell-ico' }, [
+          h(NIcon, { component: icons[TYPE[r.status].icon], size: 17, color: TYPE[r.status].color }),
+        ]),
+        h('div', { class: 'cell-txt' }, [
+          h('div', { class: 'cell-name' }, r.title),
+          h('div', { class: 'cell-sub', title: r.detail }, r.detail),
+        ]),
+      ]),
+  },
+  {
+    title: '结果', key: 'status', width: 110,
+    render: (r: Item) => h(CpStatusTag, { status: TAG[r.status], text: TYPE[r.status].label }),
+  },
+  {
+    title: '操作', key: 'act', width: 160,
+    render: (r: Item) => {
+      if (r.status === 'pass' || (!r.fixable && !r.fix)) return h(NText, { depth: 3 }, () => '—');
+      const children: any[] = [];
+      if (r.fixable) {
+        children.push(h(NButton, {
+          text: true, type: 'primary', size: 'small',
+          loading: fixing.value === r.id, disabled: !!fixing.value, onClick: () => fix(r),
+        }, () => '一键修复'));
+      }
+      if (r.fix) {
+        if (!r.fixable) children.push(h('span', { class: 'vchip', title: r.fix }, r.fix));
+        children.push(h(CopyButton, { text: r.fix, label: `复制修复命令：${r.title}` }));
+      }
+      return h(NSpace, { size: 5, align: 'center', justify: 'end' }, () => children);
+    },
+  },
+];
 
 async function load() {
   loading.value = true;
@@ -55,15 +124,6 @@ async function load() {
     error.value = e?.message || '自检失败';
   } finally {
     loading.value = false;
-  }
-}
-
-async function copyFix(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    msg.success('修复命令已复制');
-  } catch {
-    msg.warning('浏览器拒绝了剪贴板访问，请手动复制');
   }
 }
 
@@ -114,11 +174,18 @@ onMounted(load);
 
 <template>
   <div>
-    <PageHeader title="安全自检" sub="只读检查，不改任何配置；可自动修复的项目直接点「一键修复」，其余给出可复制命令">
+    <PageHeader title="安全自检">
       <template #actions>
         <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">重新检查</NButton>
       </template>
     </PageHeader>
+
+    <div class="doc-prompt">
+      <NAlert type="info" :bordered="false" class="doc-alert">
+        只读检查，不改任何配置；可自动修复的项目点「一键修复」，其余项目给出可复制的修复命令
+      </NAlert>
+      <NButton text type="primary" size="small" :icon="ico('ArrowForwardOutline')" @click="router.push('/settings')">前往设置</NButton>
+    </div>
 
     <NAlert v-if="error" type="error" :title="error" style="margin-bottom: var(--space-4)" />
 
@@ -126,60 +193,56 @@ onMounted(load);
 
     <template v-if="report">
       <NCard size="small" style="margin-bottom: var(--space-4)">
-        <NSpace align="center" :size="16" wrap>
-          <NProgress type="circle" :percentage="percent" :height="76" :color="overallColor" />
-          <div>
-            <NText strong class="cp-pop" style="font-size: var(--fs-lg)">
-              通过 {{ report.counts.pass }} · 注意 {{ report.counts.warn }} · 异常 {{ report.counts.fail }}
-            </NText>
-            <div style="margin-top: var(--space-2); color: var(--cp-text-dim); font-size: var(--fs-sm)">
-              {{ report.status === 'pass' ? '全部检查通过' : '优先处理异常项，它们直接影响可用性' }}
-            </div>
-            <NSpace :size="8" style="margin-top: var(--space-3)">
-              <NButton size="tiny" :tertiary="filter !== 'all'" @click="filter = 'all'">全部</NButton>
-              <NButton size="tiny" :type="filter === 'fail' ? 'error' : 'default'" :tertiary="filter !== 'fail'" :disabled="!report.counts.fail" @click="filter = 'fail'">
-                异常 {{ report.counts.fail }}
-              </NButton>
-              <NButton size="tiny" :type="filter === 'warn' ? 'warning' : 'default'" :tertiary="filter !== 'warn'" :disabled="!report.counts.warn" @click="filter = 'warn'">
-                注意 {{ report.counts.warn }}
-              </NButton>
-            </NSpace>
-          </div>
-        </NSpace>
+        <div class="cp-chart-title" style="margin-bottom: var(--space-2)">检查汇总</div>
+        <NGrid cols="1 s:2 m:4" :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
+          <NGridItem v-for="g in gauges" :key="g.key" span="1">
+            <NPopover :trigger="finePointer ? 'hover' : 'click'" :width="320" :delay="150">
+              <template #trigger>
+                <div class="doc-band">
+                  <StatGauge :percent="g.percent" :text="g.text" :unit="g.unit" :label="g.label" :detail="g.detail" :color="g.color" :size="104" />
+                </div>
+              </template>
+              <DescriptionsCard
+                v-if="g.key === 'overall'"
+                :items="[
+                  { label: '总体状态', value: STATUS_LABEL[report.status] || report.status },
+                  { label: '检查项总数', value: String(total) },
+                  { label: '正常', value: `${report.counts.pass} 项` },
+                  { label: '注意', value: `${report.counts.warn} 项` },
+                  { label: '异常', value: `${report.counts.fail} 项` },
+                ]"
+              />
+              <div v-else class="doc-pop">
+                <div v-for="i in byStatus(g.key)" :key="i.id" class="doc-pop-item">{{ i.title }}</div>
+                <div v-if="!byStatus(g.key).length" class="doc-pop-empty">暂无条目</div>
+              </div>
+            </NPopover>
+          </NGridItem>
+        </NGrid>
       </NCard>
 
-      <NCard size="small" :content-style="{ padding: '0' }">
-        <div
-          v-for="(it, idx) in shown" :key="it.id"
-          class="doc-row cp-rise" :style="`--i:${idx}`"
-        >
-          <NIcon :size="18" :component="icons[TYPE[it.status].icon]" :color="TYPE[it.status].color" style="flex-shrink: 0" />
-          <div class="doc-txt">
-            <NText strong style="font-size: var(--fs-sm)">{{ it.title }}</NText>
-            <div class="doc-detail">{{ it.detail }}</div>
-            <code v-if="it.fix && it.status !== 'pass' && !it.fixable" class="mono-dim doc-cmd">{{ it.fix }}</code>
-          </div>
-          <div class="doc-act">
-            <span class="st" :class="it.status === 'pass' ? 'ok' : it.status === 'warn' ? 'warn' : 'err'">
-              <span class="dot" :class="it.status === 'pass' ? 'ok' : it.status === 'warn' ? 'warn' : 'err'"></span>{{ TYPE[it.status].label }}
-            </span>
-            <NButton
-              v-if="it.fixable && it.status !== 'pass'"
-              size="tiny" type="primary" :loading="fixing === it.id" :disabled="!!fixing"
-              :icon="ico('BuildOutline')" @click="fix(it)"
-            >
-              一键修复
+      <CpToolbarCard title="自检项目">
+        <template #right>
+          <NSpace :size="8">
+            <NButton size="tiny" :tertiary="filter !== 'all'" @click="filter = 'all'">全部</NButton>
+            <NButton size="tiny" :type="filter === 'fail' ? 'error' : 'default'" :tertiary="filter !== 'fail'" :disabled="!report.counts.fail" @click="filter = 'fail'">
+              异常 {{ report.counts.fail }}
             </NButton>
-            <NTooltip v-else-if="it.fix && it.status !== 'pass' && it.fixable" trigger="hover">
-              <template #trigger>
-                <NButton size="tiny" circle quaternary :aria-label="`复制修复命令：${it.title}`" :title="`复制修复命令：${it.title}`" :icon="ico('CopyOutline')" @click="copyFix(it.fix)" />
-              </template>
-              复制修复命令
-            </NTooltip>
-          </div>
-        </div>
-        <EmptyBox v-if="!shown.length" :text="filter === 'all' ? '暂无检查结果' : `没有${filter === 'fail' ? '异常' : '注意'}项，切换筛选查看其他`" />
-      </NCard>
+            <NButton size="tiny" :type="filter === 'warn' ? 'warning' : 'default'" :tertiary="filter !== 'warn'" :disabled="!report.counts.warn" @click="filter = 'warn'">
+              注意 {{ report.counts.warn }}
+            </NButton>
+          </NSpace>
+        </template>
+        <NDataTable
+          ref="tableAnchor"
+          :columns="columns" :data="shown" size="small" :bordered="false" :row-key="(i: Item) => i.id"
+          :scroll-x="510" :max-height="tableH" class="cp-tbl"
+        >
+          <template #empty>
+            <EmptyBox :text="filter === 'all' ? '暂无检查结果' : `没有${filter === 'fail' ? '异常' : '注意'}项，切换筛选查看其他`" />
+          </template>
+        </NDataTable>
+      </CpToolbarCard>
     </template>
 
     <NResult v-if="!loading && !report && !error" status="500" title="暂无自检结果" description="点击「重新检查」重试">
@@ -191,21 +254,16 @@ onMounted(load);
 </template>
 
 <style scoped>
-.doc-row {
-  display: flex; align-items: flex-start; gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--cp-border);
-  flex-wrap: wrap;
+.doc-prompt { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: var(--space-4); }
+.doc-alert { flex: 1 1 320px; min-width: 0; }
+/* 概览读数 160px 一档（1Panel home/status 的 v-charts height=160px），明细走 hover popover */
+.doc-band {
+  height: 160px; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius); cursor: default;
+  transition: background var(--dur) var(--ease);
 }
-.doc-row:last-child { border-bottom: 0; }
-.doc-row:hover { background: var(--cp-hover); }
-.doc-txt { flex: 1 1 260px; min-width: 0; }
-/* 右侧动作区：以前是 flex-shrink:0 的一整块，窄屏时把说明文字挤到容器外、
-   状态标签被裁成半截。改成可换行、靠右对齐，空间不足就整块落到下一行。 */
-.doc-act {
-  flex: 0 1 auto; margin-left: auto;
-  display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap;
-}
-.doc-detail { color: var(--cp-text-mute); font-size: var(--fs-xs); margin-top: 2px; overflow-wrap: anywhere; }
-.doc-cmd { display: block; margin-top: var(--space-2); word-break: break-all; }
+.doc-band:hover { background: var(--cp-hover); }
+.doc-pop { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.doc-pop-item { font-size: var(--fs-sm); color: var(--cp-text); }
+.doc-pop-empty { font-size: var(--fs-sm); color: var(--cp-text-mute); }
 </style>

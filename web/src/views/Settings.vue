@@ -1,16 +1,22 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch, h } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
-  NCard, NText, NSpace, useMessage, NInput, NForm, NFormItem,
-  NInputNumber, NIcon, NGrid, NGridItem, NTooltip, NSwitch,
+  NSpace, useMessage, NInput, NForm, NFormItem,
+  NInputNumber, NSwitch, NDrawer, NDrawerContent,
 } from 'naive-ui';
+import { useRoute, useRouter } from 'vue-router';
 import { NButton } from '../ui';
 import { api, getRole } from '../api';
-import { icon, icons } from '../icons';
+import { icon } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
+import PageTabBar from '../components/PageTabBar.vue';
+import CpToolbarCard from '../components/CpToolbarCard.vue';
+import CpSettingRow from '../components/CpSettingRow.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
 const msg = useMessage();
+const route = useRoute();
+const router = useRouter();
 const isAdmin = computed(() => getRole() === 'admin');
 const renewing = ref(false);
 const renewLog = ref('');
@@ -44,6 +50,24 @@ watch(alerts, (v) => {
 
 const ico = (name: string, size = 14) => icon(name, size);
 
+// 1Panel 设置页 <640px 时 label 从左侧改到顶上
+const mq = window.matchMedia('(max-width: 640px)');
+const isMobile = ref(mq.matches);
+const onMq = (e: MediaQueryListEvent) => { isMobile.value = e.matches; };
+
+const navTabs = computed(() => {
+  const t = [{ key: '/settings', label: '系统设置' }];
+  if (isAdmin.value) t.push({ key: '/users', label: '用户管理' }, { key: '/audit', label: '操作审计' });
+  t.push({ key: '/logs', label: '面板日志' });
+  return t;
+});
+
+// 敏感值只显示前 4 位，完整值只能在抽屉里看/改
+function mask(v: any) {
+  const s = String(v ?? '').trim();
+  return s ? `${s.slice(0, 4)}****` : '';
+}
+
 async function grab(fn: () => Promise<any>, set: (v: any) => void) {
   // 每个数据块各自兜错：以前是一条链，只读账号在第一步就收到 403，
   // 于是后面的防火墙状态根本没被请求，卡片永远停在"检测中…"。
@@ -53,7 +77,6 @@ async function grab(fn: () => Promise<any>, set: (v: any) => void) {
     msg.error(e.message);
   }
 }
-
 async function load() {
   if (isAdmin.value) await grab(() => api.alertSettings(), (v) => (alerts.value = normalizeAlerts(v)));
   await grab(() => api.firewall(), (v) => (fw.value = v));
@@ -70,12 +93,63 @@ async function renew() {
     renewing.value = false;
   }
 }
-async function saveAlerts() {
+// 保存即生效：单项失败把显示值回滚，不留一个"看起来存上了"的假状态
+async function saveOne(key: string, value: string, rollback: any) {
   try {
-    await api.saveAlerts(alerts.value);
-    msg.success('告警配置已保存');
+    await api.saveAlerts({ [key]: value });
+    msg.success('已保存');
+  } catch (e: any) {
+    alerts.value[key] = rollback;
+    msg.error(e.message);
+  }
+}
+async function commitNum(key: string, v: number | null) {
+  if (v === null || Number.isNaN(v)) return;
+  const prev = alerts.value[key];
+  alerts.value[key] = v;
+  await saveOne(key, String(v), prev);
+}
+async function commitProbe(v: boolean) {
+  const prev = alerts.value.alert_probe;
+  alerts.value.alert_probe = v ? '1' : '0';
+  await saveOne('alert_probe', alerts.value.alert_probe, prev);
+}
+// 文本项走 change（失焦/回车提交），避免逐字符打后端
+async function commitExpect(v: string) {
+  const prev = alerts.value.alert_probe_expect;
+  if (v === prev) return;
+  alerts.value.alert_probe_expect = v;
+  await saveOne('alert_probe_expect', v, prev);
+}
+
+const CHAN_META = {
+  alert_telegram_bot: { label: 'Telegram Bot Token', placeholder: '如 123456:ABC-DEF…' },
+  alert_telegram_chat: { label: 'Telegram Chat ID', placeholder: '如 987654321' },
+  alert_webhook_url: { label: '通用 Webhook URL', placeholder: 'POST {text}，兼容主流机器人网关' },
+} as const;
+type ChanKey = keyof typeof CHAN_META;
+const chanOpen = ref(false);
+const chanKey = ref<ChanKey>('alert_telegram_bot');
+const chanDraft = ref('');
+const chanSaving = ref(false);
+const chanMeta = computed(() => CHAN_META[chanKey.value]);
+function openChan(key: ChanKey) {
+  chanKey.value = key;
+  chanDraft.value = alerts.value[key] ?? '';
+  chanOpen.value = true;
+}
+async function saveChan() {
+  const key = chanKey.value;
+  chanSaving.value = true;
+  try {
+    await api.saveAlerts({ [key]: chanDraft.value });
+    alerts.value[key] = chanDraft.value;
+    msg.success('已保存');
+    chanOpen.value = false;
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    chanSaving.value = false;
   }
 }
 
@@ -121,7 +195,11 @@ async function testAlert() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  mq.addEventListener('change', onMq);
+  load();
+});
+onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 </script>
 
 <template>
@@ -132,38 +210,70 @@ onMounted(load);
       </template>
     </PageHeader>
 
-    <NGrid cols="1 s:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGridItem v-if="isAdmin" span="1 s:2">
-        <NCard size="small">
-          <template #header><span class="section-title"><NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-warn)" /> 告警通知</span></template>
-          <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">每 30 分钟自动巡检：磁盘、CPU、内存、负载、服务 failed、SSL 剩余天数，以及逐个应用的 HTTP 探活（只连 127.0.0.1 的端口，看它有没有应答）。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次；资源类阈值要连续两轮超标才推送，历史里当轮就留痕。</NText>
-          <NForm label-placement="top" size="small">
-            <NFormItem label="Telegram Bot Token"><NInput v-model:value="alerts.alert_telegram_bot" placeholder="如 123456:ABC-DEF…" :input-props="{ 'aria-label': 'Telegram Bot Token' }" /></NFormItem>
-            <NFormItem label="Telegram Chat ID"><NInput v-model:value="alerts.alert_telegram_chat" placeholder="如 987654321" :input-props="{ 'aria-label': 'Telegram Chat ID' }" /></NFormItem>
-            <NFormItem label="通用 Webhook URL"><NInput v-model:value="alerts.alert_webhook_url" placeholder="POST {text}，兼容主流机器人网关" :input-props="{ 'aria-label': '通用 Webhook URL' }" /></NFormItem>
-            <NSpace :size="16" wrap>
-              <NFormItem label="磁盘阈值 %" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_disk_pct" :min="50" :max="99" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" style="width: 118px" /></NFormItem>
-              <NFormItem label="SSL 剩余天数" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_ssl_days" :min="0" :max="60" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" style="width: 118px" /></NFormItem>
-              <NFormItem label="CPU 阈值 %" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_cpu_pct" :min="1" :max="99" :input-props="{ 'aria-label': 'CPU 使用率阈值百分比' }" style="width: 118px" /></NFormItem>
-              <NFormItem label="内存阈值 %" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_mem_pct" :min="1" :max="99" :input-props="{ 'aria-label': '内存使用率阈值百分比' }" style="width: 118px" /></NFormItem>
-              <NFormItem label="load1 ×核数" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_load1_x" :min="1" :max="32" :input-props="{ 'aria-label': '一分钟负载阈值倍数' }" style="width: 118px" /></NFormItem>
-            </NSpace>
-            <NSpace :size="16" wrap align="end" style="margin-top: var(--space-3)">
-              <NFormItem label="应用探活" style="margin-bottom: 0">
-                <NSwitch
-                  :value="String(alerts.alert_probe) !== '0'" size="small" aria-label="是否启用应用 HTTP 探活"
-                  @update:value="(v: boolean) => { alerts.alert_probe = v ? '1' : '0'; }"
-                />
-              </NFormItem>
-              <NFormItem label="期望状态码" style="margin-bottom: 0">
-                <NInput v-model:value="alerts.alert_probe_expect" placeholder="2xx/3xx" style="width: 130px" :input-props="{ 'aria-label': '全局探活期望状态码' }" />
-              </NFormItem>
-              <NFormItem label="历史保留天数" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_keep_days" :min="1" :max="365" :input-props="{ 'aria-label': '告警历史保留天数' }" style="width: 118px" /></NFormItem>
-              <NFormItem label="历史上限行" style="margin-bottom: 0"><NInputNumber v-model:value="alerts.alert_keep_rows" :min="100" :max="20000" :step="100" :input-props="{ 'aria-label': '告警历史最多保留行数' }" style="width: 118px" /></NFormItem>
-            </NSpace>
-            <NFormItem label="按应用覆写期望状态码" style="margin-top: var(--space-3); margin-bottom: 0">
+    <PageTabBar :tabs="navTabs" :value="route.path" @update="(k: string) => router.push(k)" />
+
+    <CpToolbarCard class="cp-card-gap">
+      <section v-if="isAdmin">
+        <div class="sec-head">
+          <h2 class="sec-title">告警通知</h2>
+          <NSpace :size="8">
+            <NButton round size="small" tertiary :icon="ico('PulseOutline')" @click="runChecks">立即巡检</NButton>
+            <NButton round size="small" tertiary :icon="ico('CloudUploadOutline')" @click="testAlert">发送测试通知</NButton>
+          </NSpace>
+        </div>
+        <span class="cp-help">每 30 分钟自动巡检：磁盘、CPU、内存、负载、服务 failed、SSL 剩余天数，以及逐个应用的 HTTP 探活（只连 127.0.0.1 的端口，看它有没有应答）。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次；资源类阈值要连续两轮超标才推送，历史里当轮就留痕。</span>
+        <NForm class="cp-set-form" size="small" :label-width="isMobile ? undefined : 150" :label-placement="isMobile ? 'top' : 'left'" style="margin-top: var(--space-3)">
+          <CpSettingRow label="Telegram Bot Token" :value="mask(alerts.alert_telegram_bot)" @edit="openChan('alert_telegram_bot')" />
+          <CpSettingRow label="Telegram Chat ID" :value="mask(alerts.alert_telegram_chat)" @edit="openChan('alert_telegram_chat')" />
+          <CpSettingRow label="通用 Webhook URL" :value="mask(alerts.alert_webhook_url)" @edit="openChan('alert_webhook_url')" />
+          <CpSettingRow label="磁盘阈值 %">
+            <template #control>
+              <NInputNumber :value="alerts.alert_disk_pct" :min="50" :max="99" style="width: 118px" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="SSL 剩余天数">
+            <template #control>
+              <NInputNumber :value="alerts.alert_ssl_days" :min="0" :max="60" style="width: 118px" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" @update:value="commitNum('alert_ssl_days', $event)" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="CPU 阈值 %">
+            <template #control>
+              <NInputNumber :value="alerts.alert_cpu_pct" :min="1" :max="99" style="width: 118px" :input-props="{ 'aria-label': 'CPU 使用率阈值百分比' }" @update:value="commitNum('alert_cpu_pct', $event)" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="内存阈值 %">
+            <template #control>
+              <NInputNumber :value="alerts.alert_mem_pct" :min="1" :max="99" style="width: 118px" :input-props="{ 'aria-label': '内存使用率阈值百分比' }" @update:value="commitNum('alert_mem_pct', $event)" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="load1 ×核数">
+            <template #control>
+              <NInputNumber :value="alerts.alert_load1_x" :min="1" :max="32" style="width: 118px" :input-props="{ 'aria-label': '一分钟负载阈值倍数' }" @update:value="commitNum('alert_load1_x', $event)" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="应用探活">
+            <template #control>
+              <NSwitch :value="String(alerts.alert_probe) !== '0'" size="small" aria-label="是否启用应用 HTTP 探活" @update:value="commitProbe" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="期望状态码" help="失焦或回车即保存">
+            <template #control>
+              <NInput :value="alerts.alert_probe_expect" size="small" style="width: 130px" placeholder="2xx/3xx" :input-props="{ 'aria-label': '全局探活期望状态码' }" @change="commitExpect" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="历史保留天数">
+            <template #control>
+              <NInputNumber :value="alerts.alert_keep_days" :min="1" :max="365" style="width: 118px" :input-props="{ 'aria-label': '告警历史保留天数' }" @update:value="commitNum('alert_keep_days', $event)" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="历史上限行">
+            <template #control>
+              <NInputNumber :value="alerts.alert_keep_rows" :min="100" :max="20000" :step="100" style="width: 118px" :input-props="{ 'aria-label': '告警历史最多保留行数' }" @update:value="commitNum('alert_keep_rows', $event)" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="按应用覆写期望状态码" help="探活只看端口是否应答：连不上或超时才算 crit，4xx/5xx 说明进程还在。覆写值留空即回落到上面的全局期望。">
+            <template #control>
               <NSpace vertical :size="6" style="width: 100%">
-                <NText depth="3" style="font-size: var(--fs-2xs)">探活只看端口是否应答：连不上或超时才算 crit，4xx/5xx 说明进程还在。覆写值留空即回落到上面的全局期望。</NText>
                 <NSpace v-for="row in probeList" :key="row.name" align="center" :size="8">
                   <span class="mono-dim cp-break" style="min-width: 148px">{{ row.name }}</span>
                   <NInput :value="row.expect" size="tiny" style="width: 132px" placeholder="200 204" :input-props="{ 'aria-label': `${row.name} 的期望状态码` }" @update:value="(v: string) => { row.expect = v; }" />
@@ -177,67 +287,58 @@ onMounted(load);
                   <NButton size="tiny" tertiary :icon="ico('AddOutline', 12)" @click="addProbeRow">新增覆写</NButton>
                 </NSpace>
               </NSpace>
-            </NFormItem>
-          </NForm>
-          <NSpace style="margin-top: var(--space-3)">
-            <NButton type="primary" size="small" :icon="ico('SaveOutline')" @click="saveAlerts">保存配置</NButton>
-            <NButton tertiary size="small" :icon="ico('CloudUploadOutline')" @click="testAlert">发送测试通知</NButton>
-            <NButton tertiary size="small" :icon="ico('PulseOutline')" @click="runChecks">立即巡检</NButton>
-          </NSpace>
-        </NCard>
-      </NGridItem>
+            </template>
+          </CpSettingRow>
+        </NForm>
+      </section>
 
-      <NGridItem span="1 s:2 m:1">
-        <NCard size="small">
-          <template #header><span class="section-title"><NIcon :component="icons.ShieldCheckmarkOutline" :size="15" color="var(--cp-ok)" /> 防火墙</span></template>
-          <NSpace vertical :size="12">
-            <NSpace align="center" :size="8">
-              <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? (fw.active ? 'ufw 已启用' : 'ufw 未启用') : '检测中…' }}</span>
-              <NText depth="3" style="font-size: var(--fs-xs)">面板对防火墙只读；开启/改规则请 SSH 手动操作，以免误锁 SSH。</NText>
-            </NSpace>
-            <div v-if="fw?.output" class="log-view" style="max-height: 220px">{{ fw.output }}</div>
-            <EmptyBox v-else-if="fw" text="ufw 未返回规则输出：未安装时属正常，规则请用 SSH 手动维护" />
-          </NSpace>
-        </NCard>
-      </NGridItem>
+      <div v-if="isAdmin" class="cp-divider"></div>
+      <section>
+        <div class="sec-head">
+          <h2 class="sec-title">防火墙</h2>
+          <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? (fw.active ? 'ufw 已启用' : 'ufw 未启用') : '检测中…' }}</span>
+        </div>
+        <span class="cp-help">面板对防火墙只读；开启/改规则请 SSH 手动操作，以免误锁 SSH。</span>
+        <NSpace vertical :size="12" style="margin-top: var(--space-3)">
+          <div v-if="fw?.output" class="log-view" style="max-height: 220px">{{ fw.output }}</div>
+          <EmptyBox v-else-if="fw" text="ufw 未返回规则输出：未安装时属正常，规则请用 SSH 手动维护" />
+        </NSpace>
+      </section>
 
-      <NGridItem v-if="isAdmin" span="1 s:2 m:1">
-        <NCard size="small">
-          <template #header><span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-brand-soft)" /> 证书维护</span></template>
-          <NSpace vertical :size="12">
-            <NText depth="3" style="font-size: var(--fs-xs)">certbot renew 检查所有已安装证书并自动续期。是否真的有人定时跑它，看安全自检页的「证书续期」一项（它会去查 certbot.timer 与 crontab，查不到就如实标 warn）；这里只用于手动触发验证。</NText>
-            <NButton type="primary" size="small" :loading="renewing" :icon="ico('SyncOutline')" style="align-self: flex-start" @click="renew">立即续期</NButton>
-            <div v-if="renewLog" class="log-view" style="max-height: 220px">{{ renewLog }}</div>
-            <EmptyBox v-else text="本次会话还没有执行过续期，点击上方按钮后即可看到 certbot 输出" />
-          </NSpace>
-        </NCard>
-      </NGridItem>
+      <div v-if="isAdmin" class="cp-divider"></div>
+      <section v-if="isAdmin">
+        <div class="sec-head">
+          <h2 class="sec-title">证书维护</h2>
+          <NButton round size="small" tertiary type="primary" :loading="renewing" :icon="ico('SyncOutline')" @click="renew">立即续期</NButton>
+        </div>
+        <span class="cp-help">certbot renew 检查所有已安装证书并自动续期。是否真的有人定时跑它，看安全自检页的「证书续期」一项（它会去查 certbot.timer 与 crontab，查不到就如实标 warn）；这里只用于手动触发验证。</span>
+        <NSpace vertical :size="12" style="margin-top: var(--space-3)">
+          <div v-if="renewLog" class="log-view" style="max-height: 220px">{{ renewLog }}</div>
+          <EmptyBox v-else text="本次会话还没有执行过续期，点击上方按钮后即可看到 certbot 输出" />
+        </NSpace>
+      </section>
+    </CpToolbarCard>
 
-      <NGridItem span="1 s:2">
-        <NCard size="small">
-          <template #header><span class="section-title"><NIcon :component="icons.LayersOutline" :size="15" color="var(--cp-text-mute)" /> 管理入口</span></template>
-          <NSpace :size="10" wrap>
-            <NTooltip v-if="isAdmin" trigger="hover">
-              <template #trigger>
-                <NButton size="small" tertiary :icon="ico('PeopleOutline')" @click="$router.push('/users')">用户管理</NButton>
-              </template>
-              账号、角色与密码
-            </NTooltip>
-            <NTooltip v-if="isAdmin" trigger="hover">
-              <template #trigger>
-                <NButton size="small" tertiary :icon="ico('GitNetworkOutline')" @click="$router.push('/audit')">操作审计</NButton>
-              </template>
-              所有写操作留痕
-            </NTooltip>
-            <NTooltip trigger="hover">
-              <template #trigger>
-                <NButton size="small" tertiary :icon="ico('CodeSlashOutline')" @click="$router.push('/logs')">面板日志</NButton>
-              </template>
-              journalctl 实时流
-            </NTooltip>
+    <NDrawer v-model:show="chanOpen" :width="'30%'">
+      <NDrawerContent :title="chanMeta.label" closable>
+        <NForm label-placement="top" size="small">
+          <NFormItem :label="chanMeta.label">
+            <NInput v-model:value="chanDraft" :type="'password'" show-password-on="click" :placeholder="chanMeta.placeholder" :input-props="{ 'aria-label': chanMeta.label }" />
+          </NFormItem>
+        </NForm>
+        <template #footer>
+          <NSpace justify="end" :size="8">
+            <NButton size="small" @click="chanOpen = false">取消</NButton>
+            <NButton size="small" type="primary" :disabled="chanSaving" @click="saveChan">确定</NButton>
           </NSpace>
-        </NCard>
-      </NGridItem>
-    </NGrid>
+        </template>
+      </NDrawerContent>
+    </NDrawer>
   </div>
 </template>
+
+<style scoped>
+/* 分区标题行：18px/400 左置，动作按钮右置（1Panel LayoutContent title 行） */
+.sec-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+.sec-title { margin: 0; font-size: 18px; font-weight: 400; line-height: 26px; color: var(--cp-text-strong); }
+</style>
