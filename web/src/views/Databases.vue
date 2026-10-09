@@ -326,7 +326,7 @@ async function delKeys(keys: string[]) {
                 <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="showDb = true">新建数据库</NButton>
               </NSpace>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []">
+            <NDataTable size="small" :bordered="false" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []" :scroll-x="520">
               <template #empty><EmptyBox text="无法读取数据库列表（PostgreSQL 未运行？）" /></template>
             </NDataTable>
 
@@ -334,7 +334,7 @@ async function delKeys(keys: string[]) {
               <span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-warn)" /> 用户 / 角色</span>
               <NButton size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320">
+            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320" :scroll-x="520">
               <template #empty><EmptyBox text="没有可读取的角色（PostgreSQL 未运行？）" /></template>
             </NDataTable>
           </NSpace>
@@ -363,7 +363,7 @@ async function delKeys(keys: string[]) {
               <NSelect v-model:value="brDb" :options="dbOptions" size="small" style="width: 200px" placeholder="选择数据库" aria-label="浏览的数据库" @update:value="loadTables" />
               <NText depth="3" style="font-size: var(--fs-xs)">共 {{ tables.length }} 张表</NText>
             </NSpace>
-            <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" max-height="calc(100vh - 400px)">
+            <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" max-height="calc(100vh - 400px)" :scroll-x="560">
               <template #empty><EmptyBox :text="brDb ? (tablesBusy ? '加载中…' : '这个库里没有表') : '先选择一个数据库'" /></template>
             </NDataTable>
             <template v-else>
@@ -374,7 +374,7 @@ async function delKeys(keys: string[]) {
                 <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" @click="loadTableData">刷新</NButton>
                 <NPagination v-model:page="tPage" :page-count="Math.max(1, Math.ceil(tTotal / tSize))" :page-size="tSize" size="small" :show-quick-jumper="false" @update:page="onPage" />
               </NSpace>
-              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" max-height="calc(100vh - 430px)" :row-key="(r: any) => r">
+              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" max-height="calc(100vh - 430px)" :row-key="(r: any) => r" :scroll-x="Math.max(560, tCols.length * 180)">
                 <template #empty><EmptyBox text="这张表没有数据" /></template>
               </NDataTable>
             </template>

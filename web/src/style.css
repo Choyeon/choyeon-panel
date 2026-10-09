@@ -121,6 +121,15 @@ html[data-theme='light'] {
   color-scheme: light;
 }
 
+/* 全站统一 border-box。缺这一条时 naive-ui 的 .n-tab-pane（width:100% + 自带 padding）
+   会比容器多出 padding×2 的实际宽度，而外层 .n-tabs-pane-wrapper 是 overflow:hidden：
+   右侧按钮和表格最后一列被裁掉且没有滚动条。 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
   background: var(--cp-bg);
