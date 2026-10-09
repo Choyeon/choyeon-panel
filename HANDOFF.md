@@ -84,7 +84,7 @@
 
 | 优先级 | 事项 | 说明 |
 | --- | --- | --- |
-| 中 | 前端组件抽象（本轮明确未做） | `ico()` 仍在 ~9 个视图里各自重声明（`icons.ts` 已导出 `icon()`）；`fmtBytes`/相对时间在 Dashboard 与各页重复；`RowActions`/`StatusDot`/`FormModal`/`DataToolbar` 四个共用组件尚未抽出。纯代码债，不影响功能 |
+| 中 | 前端组件抽象（部分完成） | `ico()` 的 9 处重复声明已收敛到 `icons.ts` 的 `icon()`（顺带补上未知图标名的兜底，原来会 `h(undefined)` 直接渲染失败）；仍待做：`fmtBytes`/相对时间在 Dashboard 与各页重复，`RowActions`/`StatusDot`/`FormModal`/`DataToolbar` 四个共用组件未抽出。纯代码债，不影响功能 |
 | 中 | `App.vue` 的 `:inline-theme-disabled="false"` | 计划里想改 `true` 省一次 cssr 注入，实测暗/亮切换在改动后仍有可感知闪烁风险，故保留原值未动 |
 | 中 | 浏览器返回时的滚动位置 | 路由切换后 `.cp-scroll` 归零已做；"后退回到原位置"（把 y 存进 `history.state`）未实现 |
 | 中 | 真实机验证 `scripts/install.sh` | 沙箱内无 systemd/nginx 全链路，建议在一台干净 Ubuntu/Debian 上跑一遍 |
