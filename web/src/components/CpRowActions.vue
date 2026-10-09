@@ -44,6 +44,6 @@ const restOptions = computed(() =>
 </template>
 
 <style scoped>
-.cp-ops { display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex-wrap: wrap; }
-.cp-op { padding-inline: 0; white-space: nowrap; }
+/* 版式规则在 style.css 的 .cp-ops / .cp-op（全局），这里不再重复：
+   行内需要 <a> 下载或 Popconfirm 的页面用不上本组件，但必须共用同一套间距。 */
 </style>

@@ -62,10 +62,10 @@ const dbCols: any[] = [
     render: (r: any) => h('span', { class: 'vchip' }, `${r.conns} conn`),
   },
   {
-    title: '操作', key: 'ops', width: 96,
+    title: '操作', key: 'ops', width: 70, align: 'center',
     render: (r: any) =>
       h(NPopconfirm, { onPositiveClick: () => manage('dropDb', r.name) }, {
-        trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除数据库 ${r.name}` }, { default: () => '删除' }),
+        trigger: () => h(NButton, { text: true, size: 'small', type: 'error', class: 'cp-op', title: `删除数据库 ${r.name}` }, { default: () => '删除' }),
         default: () => `确定删除数据库 ${r.name}？数据不可恢复`,
       }),
   },
@@ -82,12 +82,12 @@ const roleCols: any[] = [
   { title: '登录', key: 'login', width: 88, render: (r: any) => h('span', { class: 'st ' + (r.login ? 'ok' : 'idle') }, [h('span', { class: 'dot ' + (r.login ? 'ok' : 'idle') }), r.login ? '可登录' : '仅组']) },
   { title: 'Superuser', key: 'super', width: 92, render: (r: any) => (r.super ? h(NTag, { size: 'tiny', bordered: false, type: 'warning' }, () => 'SUPER') : h('span', { class: 'cell-sub' }, '—')) },
   {
-    title: '操作', key: 'ops', width: 172,
+    title: '操作', key: 'ops', width: 110, align: 'center',
     render: (r: any) =>
-      h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, icon: ico('PencilOutline'), onClick: () => openPwd(r.name) }, () => '改密'),
+      h('div', { class: 'cp-ops' }, [
+        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => openPwd(r.name) }, () => '改密'),
         h(NPopconfirm, { onPositiveClick: () => manage('dropRole', r.name) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除角色 ${r.name}` }, { default: () => '删除' }),
+          trigger: () => h(NButton, { text: true, size: 'small', type: 'error', class: 'cp-op', title: `删除角色 ${r.name}` }, { default: () => '删除' }),
           default: () => `删除角色 ${r.name} 及其拥有的所有对象？`,
         }),
       ]),
@@ -192,12 +192,12 @@ const browseCols: any[] = [
   { title: '表', key: 'name', render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub', title: r.schema }, r.schema)])]) },
   { title: '行数（估）', key: 'row_estimate', width: 110, render: (r: any) => h('span', { class: 'mono-dim' }, String(r.row_estimate ?? '—')) },
   { title: '大小', key: 'size', width: 100, render: (r: any) => h('span', { class: 'vchip' }, r.size ?? '—') },
-  { title: '操作', key: 'go', width: 80, render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => pickTable(r) }, () => '查看数据') },
+  { title: '操作', key: 'go', width: 80, align: 'center', render: (r: any) => h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => pickTable(r) }, () => '查看数据') },
 ];
 const dataCols = computed<any[]>(() => [
   {
-    title: '操作', key: 'go', width: 78, fixed: 'left' as const, className: 'row-ops',
-    render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => openRow(r, false) }, () => '查看'),
+    title: '操作', key: 'go', width: 60, fixed: 'left' as const, className: 'row-ops',
+    render: (r: any) => h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => openRow(r, false) }, () => '查看'),
   },
   ...tCols.value.map((c: string) => ({
     // tooltip:false 时超出 180px 的内容就永久看不见（没有 title 也没有浮层）
@@ -209,8 +209,8 @@ const keyCols: any[] = [
   { type: 'selection' },
   { title: 'Key', key: 'k', ellipsis: { tooltip: true }, render: (r: any) => h('span', { class: 'mono-dim' }, r.k) },
   {
-    title: '操作', key: 'go', width: 66, className: 'row-ops',
-    render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => inspectKey(r.k) }, () => '查看'),
+    title: '操作', key: 'go', width: 60, className: 'row-ops',
+    render: (r: any) => h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => inspectKey(r.k) }, () => '查看'),
   },
 ];
 

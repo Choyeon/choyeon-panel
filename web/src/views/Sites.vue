@@ -198,28 +198,30 @@ const siteColumns: any[] = [
   {
     title: '操作',
     key: 'ops',
-    width: 292,
+    width: 170,
+    align: 'center',
     render: (r: any) => {
       const href = siteHref(r.domain);
+      const txt = { text: true, size: 'small', class: 'cp-op' } as const;
       const btns: any[] = [
         href
-          ? h(NButton, { size: 'tiny', tertiary: true, tag: 'a', href, target: '_blank', rel: 'noopener noreferrer', icon: ico('OpenOutline'), title: `在新标签页打开 ${href}` }, { default: () => '打开' })
-          : h(NButton, { size: 'tiny', tertiary: true, disabled: true, title: '域名不合法，无法生成外链' }, { default: () => '打开' }),
+          ? h(NButton, { ...txt, type: 'primary', tag: 'a', href, target: '_blank', rel: 'noopener noreferrer', title: `在新标签页打开 ${href}` }, { default: () => '打开' })
+          : h(NButton, { ...txt, type: 'primary', disabled: true, title: '域名不合法，无法生成外链' }, { default: () => '打开' }),
       ];
-      if (isAdmin.value) btns.push(h(NButton, { size: 'tiny', tertiary: true, icon: ico('DocumentTextOutline'), onClick: () => openConfig(r) }, { default: () => '配置' }));
+      if (isAdmin.value) btns.push(h(NButton, { ...txt, type: 'primary', onClick: () => openConfig(r) }, { default: () => '配置' }));
       if (isAdmin.value && r.app_id != null) {
         btns.push(
           h(NPopconfirm, { onPositiveClick: () => applySite(r) }, {
-            trigger: () => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: onKey(r.app_id, 'apply'), icon: ico('SyncOutline'), title: '按应用当前的域名/端口重新渲染 vhost' }, { default: () => '套用' }),
+            trigger: () => h(NButton, { ...txt, type: 'primary', loading: onKey(r.app_id, 'apply'), title: '按应用当前的域名/端口重新渲染 vhost' }, { default: () => '套用' }),
             default: () => '会重写该域名的 vhost 并 reload nginx；nginx -t 不通过时面板自动回滚。',
           }),
           h(NPopconfirm, { onPositiveClick: () => removeSite(r) }, {
-            trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', loading: onKey(r.app_id, 'remove'), icon: ico('TrashOutline') }, { default: () => '移除' }),
+            trigger: () => h(NButton, { ...txt, type: 'error', loading: onKey(r.app_id, 'remove') }, { default: () => '移除' }),
             default: () => '移除此域名的 vhost（应用本身保留），nginx 校验通过后 reload。',
           }),
         );
       }
-      return h(NSpace, { size: 6 }, () => btns);
+      return h('div', { class: 'cp-ops' }, btns);
     },
   },
 ];
@@ -274,12 +276,13 @@ const certColumns: any[] = [
   {
     title: '操作',
     key: 'ops',
-    width: 110,
+    width: 90,
+    align: 'center',
     render: (c: any) =>
       isAdmin.value
         ? h(NPopconfirm, { onPositiveClick: () => renew(c) }, {
             trigger: () => h(NButton, {
-              size: 'tiny', tertiary: true, type: 'primary', icon: ico('RefreshCircleOutline'),
+              text: true, size: 'small', type: 'primary', class: 'cp-op',
               loading: busy.value?.key === `cert-${c.name}` && busy.value?.verb === 'renew',
               title: '执行 certbot renew（会检查全部证书，只续该续的）',
             }, { default: () => '续期' }),

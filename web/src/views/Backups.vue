@@ -129,7 +129,7 @@ const columns: any[] = [
     render: (r: any) =>
       r.files.length
         ? h('div', { class: 'cell-txt' }, [
-            h(NButton, { size: 'tiny', tertiary: true, onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files.length} 份`),
+            h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files.length} 份`),
             h('div', { class: 'cell-sub' }, `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)}`),
           ])
         : h('span', { class: 'cell-sub' }, '—'),

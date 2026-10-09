@@ -113,13 +113,14 @@ const cols: any[] = [
       ),
   },
   {
-    title: '操作', key: 'ops', width: 336,
+    title: '操作', key: 'ops', width: 190, align: 'center',
+    // 1Panel 的操作列是纯文字按钮 + 5px gap，不带图标；图标版留给工具栏。
     render: (u: any) =>
-      h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, icon: icon('SyncOutline', 12), onClick: () => toggleRole(u) }, () => (u.role === 'admin' ? '降为只读' : '升为管理')),
-        h(NButton, { size: 'tiny', tertiary: true, icon: icon('KeyOutline', 12), onClick: () => openReset(u) }, () => '重置密码'),
+      h('div', { class: 'cp-ops' }, [
+        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => toggleRole(u) }, () => (u.role === 'admin' ? '降为只读' : '升为管理')),
+        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => openReset(u) }, () => '重置密码'),
         h(NPopconfirm, { onPositiveClick: () => delUser(u) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: icon('TrashOutline', 12), title: `删除用户 ${u.username}` }, { default: () => '删除' }),
+          trigger: () => h(NButton, { text: true, size: 'small', type: 'error', class: 'cp-op', title: `删除用户 ${u.username}` }, { default: () => '删除' }),
           default: () => `删除用户 ${u.username}？其已登录会话将立即失效。`,
         }),
       ]),

@@ -581,6 +581,11 @@ html.cp-vt *::after {
   .cp-set-form { max-width: 100%; }
 }
 .cp-divider { margin-top: 20px; border-top: 1px solid var(--cp-border); }
+/* 表格操作列（1Panel FuTableOperationActions）：文字按钮 + 5px gap，前 2 个平铺其余收进「更多」。
+   全局而非组件内 scoped：行内需要 <a> 下载、loading、Popconfirm 的页面用不了那个组件，
+   但版式必须一致，所以形态做成公共类由 h(NButton) 直接挂。 */
+.cp-ops { display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex-wrap: wrap; }
+.cp-op { padding-inline: 0; white-space: nowrap; }
 /* 前置条件不满足时整页降能见度（1Panel 的 .mask + .mask-prompt 范式） */
 .cp-masked { opacity: 0.4; pointer-events: none; }
 .cp-mask-prompt {

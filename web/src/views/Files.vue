@@ -270,23 +270,27 @@ const columns: any[] = [
   { title: '大小', key: 'size', width: 90, render: (e: any) => h('span', { class: 'mono-dim' }, fmtSize(e.size, e.isDir)) },
   { title: '修改时间 (UTC)', key: 'mtime', width: 170, render: (e: any) => h('span', { class: 'mono-dim' }, fmtDateTime(e.mtime)) },
   {
-    title: '操作', key: 'ops', width: 330,
-    render: (e: any) =>
-      h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, tag: 'a', href: `${apiUrl('/files/download')}?path=${encodeURIComponent(join(e.name))}&token=${encodeURIComponent(getToken())}`, target: '_blank', rel: 'noopener', icon: icon('DownloadOutline', 12) }, () => '下载'),
-        ...(e.isDir ? [] : [h(NButton, { size: 'tiny', tertiary: true, icon: icon('PencilOutline', 12), onClick: () => open(e) }, () => '编辑')]),
+    title: '操作', key: 'ops', width: 220, align: 'center',
+    // 下载必须是 <a>（走浏览器下载管理器）、解压/删除要 Popconfirm，所以套不上
+    // CpRowActions 组件，但 .cp-ops + text/small 就是它那一套版式。
+    render: (e: any) => {
+      const txt = { text: true, size: 'small', class: 'cp-op' } as const;
+      return h('div', { class: 'cp-ops' }, [
+        h(NButton, { ...txt, type: 'primary', tag: 'a', href: `${apiUrl('/files/download')}?path=${encodeURIComponent(join(e.name))}&token=${encodeURIComponent(getToken())}`, target: '_blank', rel: 'noopener' }, () => '下载'),
+        ...(e.isDir ? [] : [h(NButton, { ...txt, type: 'primary', onClick: () => open(e) }, () => '编辑')]),
         ...(e.isDir || !ARCHIVE_RE.test(String(e.name)) ? [] : [
           h(NPopconfirm, { onPositiveClick: () => extract(e) }, {
-            trigger: () => h(NButton, { size: 'tiny', tertiary: true, loading: busyOp.value === 'extract', icon: icon('FolderOpenOutline', 12), title: `解压 ${e.name}` }, { default: () => '解压' }),
+            trigger: () => h(NButton, { ...txt, type: 'primary', loading: busyOp.value === 'extract', title: `解压 ${e.name}` }, { default: () => '解压' }),
             default: () => `把 ${e.name} 解压到当前目录？同名文件会被覆盖。`,
           }),
         ]),
-        h(NButton, { size: 'tiny', tertiary: true, icon: icon('OptionsOutline', 12), onClick: () => openRename(e) }, () => '改名'),
+        h(NButton, { ...txt, type: 'primary', onClick: () => openRename(e) }, () => '改名'),
         h(NPopconfirm, { onPositiveClick: () => del(e) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: icon('TrashOutline', 12), title: `删除 ${e.name}` }, { default: () => '删除' }),
+          trigger: () => h(NButton, { ...txt, type: 'error', title: `删除 ${e.name}` }, { default: () => '删除' }),
           default: () => `删除 ${e.name}${e.isDir ? '（含全部子文件）' : ''}？`,
         }),
-      ]),
+      ]);
+    },
   },
 ];
 
