@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn>=0.30",
     "websockets>=12",
     "PyJWT>=2.9",
+    "psutil>=6.0",
+    "python-multipart>=0.0.12",
 ]
 
 [tool.uv]

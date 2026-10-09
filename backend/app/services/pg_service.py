@@ -2,9 +2,11 @@ import asyncio
 import json
 import os
 import re
+import time
 
 from .. import database as dbm
 from ..util import kill_group, run
+from . import redis_client
 
 IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
@@ -208,7 +210,45 @@ def redis_password():
 
 
 async def redis_info() -> dict:
+    """Redis 概览（INFO + DBSIZE）。
+
+    优先用进程内 RESP 客户端：一次往返拿两条命令，不再为打开 Redis 标签页 fork 两个
+    redis-cli。只有 TCP 建不起来（Redis 只监听 unix socket、强制 TLS，或干脆没起）才
+    退回子进程路线——那条路能给出 redis-cli 自己的失败正文，对用户更有用。
+    """
     pass_ = redis_password()
+    try:
+        reps = await redis_client.pipeline([["INFO"], ["DBSIZE"]], **_conn_kw())
+    except redis_client.RedisConnectionError:
+        return await _redis_info_cli(pass_)
+    except redis_client.RedisError as e:
+        raise RuntimeError(str(e)) from None
+    info_rep, size_rep = reps[0], reps[1]
+    if isinstance(info_rep, redis_client.RedisError):
+        raise RuntimeError(_redis_auth_text(info_rep, pass_))
+    info: dict[str, str] = {}
+    # INFO 的回包是 bulk string（bytes），这里必须过 _text：直接 str() 会得到
+    # "b'# Server\\r\\nredis_version...'"，整段变成一行，除了第一个字段全解析不出来。
+    for line in _text(info_rep).replace("\r\n", "\n").split("\n"):
+        i = line.find(":")
+        if i > 0 and not line.startswith("#"):
+            info[line[:i]] = line[i + 1:].strip()
+    # DBSIZE 出错时返回 None 而不是错误正文：前端是 {{ redis.dbsize ?? '—' }}，
+    # 任何非空值都会被当成"Key 总数"原样显示，等于把报错渲染成一个数字。
+    dbsize = None if isinstance(size_rep, redis_client.RedisError) else size_rep
+    return {"info": info, "dbsize": dbsize, "authed": bool(pass_)}
+
+
+def _redis_auth_text(rep, pass_: str | None) -> str:
+    """INFO 的服务端错误回复 → 能看的中文；错误正文为空时兜底，不能让前端弹空框。"""
+    text = str(rep)
+    if text.startswith("NOAUTH") or "authentication" in text.lower():
+        return "Redis 需要密码，请在下方设置"
+    return text or "Redis 返回了错误（INFO 失败）"
+
+
+async def _redis_info_cli(pass_: str | None) -> dict:
+    """redis-cli 子进程路线，仅作 RESP 连不上 TCP 时的回退。口令只进环境变量。"""
     env = dict(os.environ)
     if pass_:
         env["REDISCLI_AUTH"] = pass_
@@ -226,8 +266,6 @@ async def redis_info() -> dict:
         if i > 0 and not line.startswith("#"):
             info[line[:i]] = line[i + 1:].strip()
     keys = await run("redis-cli", ["DBSIZE"], env=env)
-    # DBSIZE 失败时不能把错误正文当"Key 总数"显示：前端是 {{ redis.dbsize ?? '—' }}，
-    # 任何非空字符串都会被原样渲染成数字位置。失败就返回 None，让它显示成占位符。
     return {"info": info, "dbsize": keys["out"] if keys["code"] == 0 else None,
             "authed": bool(pass_)}
 
@@ -399,6 +437,26 @@ async def write_row(db: str, schema: str, table: str, action: str, key, values) 
     raise RuntimeError("未知操作")
 
 
+_ROW_COUNT_TTL = 15.0
+_row_counts: dict = {}
+
+
+async def _table_count(db: str, schema: str, table: str, quoted: str) -> int:
+    """count(*) 按表缓存 15 秒：翻页时总数不变，没必要每页重新全表扫描。
+
+    缓存只影响翻页显示的总数，误差上限就是一个刷新周期；
+    写入路径（insert/update/delete）会让前端重新拉第一页，最多多看 15 秒的旧总数。
+    """
+    key = (db, schema, table)
+    hit = _row_counts.get(key)
+    now = time.time()
+    if hit and now - hit[0] < _ROW_COUNT_TTL:
+        return hit[1]
+    total = int((await psql(f"SELECT count(*)::text FROM {quoted}", db)) or 0)
+    _row_counts[key] = (now, total)
+    return total
+
+
 async def table_data(db: str, schema: str, table: str, page: int, size: int) -> dict:
     meta = await table_meta(db, schema, table)
     names = [c["name"] for c in meta["columns"] if c.get("name")]
@@ -407,7 +465,7 @@ async def table_data(db: str, schema: str, table: str, page: int, size: int) -> 
     size = max(1, min(size, 200))
     page = max(1, page)
     quoted = f'"{schema}"."{table}"'
-    total_s = await psql(f"SELECT count(*)::text FROM {quoted}", db)
+    total = await _table_count(db, schema, table, quoted)
     # _ctid 随行返回：无主键的表靠它定位要改哪一行，前端只把它当标识、不渲染成列。
     # 有主键时显式 ORDER BY：不带排序的 LIMIT/OFFSET 翻页可能重复或漏行。
     order = f" ORDER BY {', '.join(_q(c) for c in meta['pk'])}" if meta["pk"] else ""
@@ -421,7 +479,7 @@ async def table_data(db: str, schema: str, table: str, page: int, size: int) -> 
         "cols": meta["columns"],
         "pk": meta["pk"],
         "rows": json.loads(rows_raw or "[]"),
-        "total": int(total_s or 0),
+        "total": total,
         "page": page,
         "size": size,
     }
@@ -490,21 +548,148 @@ def _check_key(k: str) -> str:
     return k
 
 
+# ---------- RESP 客户端接入：一次往返拿全，redis-cli 只作显式回退 ----------
+
+# 与不带 -h/-p/-n 的 redis-cli 默认目标一致。现有部署没有第二处连接配置可读，
+# 就不新增配置项；口令沿用 redis_password()（面板设置优先，其次 /etc/redis/redis.conf）。
+REDIS_HOST = redis_client.DEFAULT_HOST
+REDIS_PORT = redis_client.DEFAULT_PORT
+REDIS_DB = redis_client.DEFAULT_DB
+
+
+def _conn_kw() -> dict:
+    return {"host": REDIS_HOST, "port": REDIS_PORT, "db": REDIS_DB, "password": redis_password()}
+
+
+def _text(v) -> str:
+    """RESP 回复 → 旧 redis-cli 文本形态（非 UTF-8 用替换符，与 _rcli_exact 的解码一致）。"""
+    if v is None:
+        return ""
+    if isinstance(v, bytes):
+        return v.decode("utf-8", errors="replace")
+    return str(v)
+
+
+def _shape(v, kind: str):
+    """客户端回复 → kind 指定的形态；错误回复原样返回，由调用方决定抛还是忽略。"""
+    if isinstance(v, redis_client.RedisError):
+        return v
+    if kind == "int":
+        # 旧实现对非数字文本（"(nil)"、异常正文）一律给 None，这里保持同样的宽容度：
+        # 详情页的 TTL/内存是可选显示项，取值失败不该让整页报错。
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    if kind == "text":
+        return _text(v)
+    if kind == "lines":
+        return [_text(x) for x in (v or [])]
+    if kind == "scan":
+        head = v[0] if isinstance(v, (list, tuple)) and v else "0"
+        members = v[1] if isinstance(v, (list, tuple)) and len(v) > 1 else []
+        return _text(head), [_text(x) for x in (members or [])]
+    if kind == "scanlist":
+        # HSCAN/SSCAN 的回包是 [cursor, [成员...]]，上层只关心成员那一段。
+        members = v[1] if isinstance(v, (list, tuple)) and len(v) > 1 else []
+        return [_text(x) for x in (members or [])]
+    return v
+
+
+async def _r_cli(cmd: list, kind: str):
+    """redis-cli 子进程路线：把 stdout 文本还原成与客户端路径同样的形态。"""
+    if kind == "exact":
+        return await _rcli_exact(cmd)
+    out = await _rcli(cmd)
+    if kind == "int":
+        t = out.strip()
+        if t in ("", "(nil)"):
+            return None
+        return int(t) if t.lstrip("-").isdigit() else None
+    if kind == "lines":
+        return _lines(out)
+    if kind == "scan":
+        lines = out.split("\n")
+        return (lines[0].strip() if lines else "0"), _lines("\n".join(lines[1:]))
+    if kind == "scanlist":
+        return _lines(out)[1:]
+    return out
+
+
+async def _rp(cmds: list, kinds: list | None = None) -> list:
+    """一条流水线执行多条命令（一次往返）；套接字建不起来时逐条退回 redis-cli 子进程。
+
+    kinds 只服务回退路径——子进程只有文本输出，需要知道该还原成什么形态。
+    服务端错误正文原样抛 RuntimeError（旧 _rcli 的行为）：写入路径必须抛，
+    否则 HSET 失败会被当成成功、错误正文会被当成数据返回给上层。
+    """
+    if not cmds:
+        return []
+    kinds = list(kinds or ["value"] * len(cmds))
+    if len(kinds) != len(cmds):
+        raise RuntimeError("Redis 命令数量与回复形态数量不一致")
+    # 参数必须是标量、每条命令必须是参数列表：把整条命令当成一个参数传进来时，
+    # redis-cli 回退路径会把它拼成一条看着像空操作的怪命令（实测 SCAN 因此静默返回
+    # 空列表），客户端路径则抛 TypeError——两条路都会把"读不到数据"伪装成成功。
+    for cmd in cmds:
+        if not isinstance(cmd, (list, tuple)):
+            raise RuntimeError("Redis 命令必须是参数列表")
+        for a in cmd:
+            if isinstance(a, (list, tuple, dict)):
+                raise RuntimeError("Redis 命令参数不能是列表/字典")
+    try:
+        reps = await redis_client.pipeline([list(c) for c in cmds], **_conn_kw())
+    except redis_client.RedisError as e:
+        # 连得上、被拒绝（NOAUTH/WRONGPASS）：这不是"回退 redis-cli 能解决"的故障，
+        # 回退同样会卡在同一个口令上，直接把服务端原文给用户。
+        raise RuntimeError(str(e)) from None
+    except redis_client.RedisConnectionError:
+        return [await _r_cli([str(a) for a in cmd], kind) for cmd, kind in zip(cmds, kinds)]
+    for rep in reps:
+        if isinstance(rep, redis_client.RedisError):
+            raise RuntimeError(str(rep))
+    return [_shape(rep, kind) for rep, kind in zip(reps, kinds)]
+
+
+async def _r(cmd: list, kind: str = "value"):
+    """单条命令版的 _rp（错误照抛），给写入与扫描这类一步就够的调用用。"""
+    return (await _rp([list(cmd)], [kind]))[0]
+
+
+# key 详情的一条流水线：前 3 条是页面头部信息，中间 5 条算长度（判断 truncated），
+# 后 5 条取值。取值命令全部有界——GETRANGE 只读 64KB、*_RANGE/HSCAN/SSCAN 只读 200 条，
+# 所以对着百万元素的 key 也不会像 GET/SMEMBERS 那样把整个值搬回面板。
+# 类型不匹配的探测命令返回 WRONGTYPE，正好用同一次往返把 key 的真实类型判出来。
+def _detail_commands(k: str) -> tuple[list, list]:
+    cmds = [
+        ["TYPE", k], ["TTL", k], ["MEMORY", "USAGE", k],
+        ["STRLEN", k], ["HLEN", k], ["LLEN", k], ["SCARD", k], ["ZCARD", k],
+        ["GETRANGE", k, "0", "65535"], ["HSCAN", k, "0", "COUNT", "200"],
+        ["LRANGE", k, "0", "199"], ["SSCAN", k, "0", "COUNT", "200"],
+        ["ZRANGE", k, "0", "199", "WITHSCORES"],
+    ]
+    kinds = ["text", "int", "int",
+             "int", "int", "int", "int", "int",
+             "exact", "scanlist", "lines", "scanlist", "lines"]
+    return cmds, kinds
+
+
 async def redis_scan(cursor: str = "0", pattern: str = "*", count: int = 200) -> dict:
     c = cursor if str(cursor).isdigit() else "0"
     n = max(10, min(int(count) if str(count).isdigit() else 200, 1000))
-    out = await _rcli(["SCAN", str(c), "MATCH", (pattern or "*")[:200], "COUNT", str(n)])
-    lines = out.split("\n")
-    return {"cursor": (lines[0].strip() if lines and lines[0].strip().isdigit() else "0"),
-            "keys": _lines("\n".join(lines[1:]))[:n]}
+    cur, keys = await _r(["SCAN", str(c), "MATCH", (pattern or "*")[:200], "COUNT", str(n)],
+                         kind="scan")
+    return {"cursor": cur if cur.isdigit() else "0", "keys": [k for k in keys if k][:n]}
 
 
 def _pairs(flat: list) -> list:
     return [{"field": flat[i], "value": flat[i + 1] if i + 1 < len(flat) else ""} for i in range(0, len(flat) - len(flat) % 2, 2)]
 
 
-async def redis_key(k: str) -> dict:
-    k = _check_key(k)
+async def _redis_key_cli(k: str) -> dict:
+    """redis-cli 子进程路线的 key 详情：连不上 TCP（只开 unix socket、强制 TLS、
+    bind 到别的地址）时用，行为与引入客户端之前逐字一致——包括按类型只发必要命令、
+    string 走 _rcli_exact 保住值末尾的换行。"""
     ktype = (await _rcli(["TYPE", k])).strip()
     ttl = (await _rcli(["TTL", k])).strip()
     mem = (await _rcli(["MEMORY", "USAGE", k])).strip()
@@ -542,15 +727,65 @@ async def redis_key(k: str) -> dict:
     }
 
 
+async def redis_key(k: str) -> dict:
+    k = _check_key(k)
+    cmds, kinds = _detail_commands(k)
+    try:
+        raw = await redis_client.pipeline(cmds, **_conn_kw())
+    except redis_client.RedisConnectionError:
+        return await _redis_key_cli(k)
+    except redis_client.RedisError as e:
+        raise RuntimeError(str(e)) from None
+    reps = [_shape(r, kind) for r, kind in zip(raw, kinds)]
+    if isinstance(reps[0], redis_client.RedisError):
+        raise RuntimeError(str(reps[0]))
+    ktype = reps[0]
+
+    def pick(i: int):
+        v = reps[i]
+        # 类型不匹配的探测命令返回 WRONGTYPE：这不是故障，是"这个 key 不是那种类型"，
+        # 让一条探测把整页打挂的话，用户就再也看不到 key 的内容了。
+        return None if isinstance(v, redis_client.RedisError) else v
+
+    ttl = pick(1)
+    mem = pick(2)
+    truncated = False
+    if ktype == "string":
+        slen = int(pick(3) or 0)
+        truncated = slen > 65536
+        # GETRANGE 的 0..65535 在长度 ≤64KB 时就是全值，且客户端按协议长度取字节、
+        # 不经任何 strip，因此不再需要旧实现里 GET（保原样）/GETRANGE（会被 strip）两套取法。
+        data: object = _text(pick(8))
+    elif ktype == "hash":
+        n = int(pick(4) or 0)
+        truncated = n > 200
+        data = _pairs(pick(9) or [])
+    elif ktype == "list":
+        n = int(pick(5) or 0)
+        truncated = n > 200
+        data = pick(10) or []
+    elif ktype == "set":
+        n = int(pick(6) or 0)
+        truncated = n > 200
+        data = pick(11) or []
+    elif ktype == "zset":
+        n = int(pick(7) or 0)
+        truncated = n > 200
+        data = _pairs(pick(12) or [])
+    else:
+        data = None
+    return {
+        "key": k, "type": ktype,
+        "ttl": ttl if isinstance(ttl, int) else None,
+        "mem": mem if isinstance(mem, int) else None,
+        "value": data, "truncated": truncated,
+    }
+
+
 async def redis_del(keys: list) -> dict:
-    deleted = 0
-    for k in [str(x) for x in keys[:200] if x]:
-        if len(k) > 512:
-            continue
-        out = await _rcli(["UNLINK", k])
-        if out.strip().startswith("1"):
-            deleted += 1
-    return {"deleted": deleted}
+    ks = [k for k in (str(x) for x in keys[:200] if x) if len(k) <= 512]
+    reps = await _rp([["UNLINK", k] for k in ks], ["int"] * len(ks))
+    return {"deleted": sum(1 for r in reps if isinstance(r, int) and r > 0)}
 
 
 # ---------- Redis 在线写入 ----------
@@ -565,15 +800,14 @@ async def redis_set(k: str, value: str) -> dict:
     if len(value) > MAX_CELL_CHARS:
         raise RuntimeError(f"值超过 {MAX_CELL_CHARS // 1048576}MB 上限")
     # SET 会无条件覆盖 key：不先确认类型，用户在 string 编辑器里点一次保存就能把
-    # 一个 hash/list 整个换成字符串。
-    ktype = (await _rcli(["TYPE", k])).strip()
+    # 一个 hash/list 整个换成字符串。TYPE+PTTL 同一条往返读回。
+    ktype, pttl = await _rp([["TYPE", k], ["PTTL", k]], ["text", "int"])
     if ktype not in ("string", "none"):
         raise RuntimeError(f"该 key 是 {ktype}，不能用字符串编辑器覆盖")
-    pttl = (await _rcli(["PTTL", k])).strip()
-    keep = int(pttl) if pttl.lstrip("-").isdigit() and int(pttl) > 0 else 0
-    await _rcli(["SET", k, value])
-    if keep:
-        await _rcli(["PEXPIRE", k, str(keep)])
+    keep = pttl if isinstance(pttl, int) and pttl > 0 else 0
+    # SET 与补 TTL 的 PEXPIRE 也在同一条往返里：中间不能插入别的请求，
+    # 否则两条命令之间 key 被别人改写就会补错对象。
+    await _rp([["SET", k, value]] + ([["PEXPIRE", k, str(keep)]] if keep else []), ["text", "int"])
     return {"ok": True, "ttl_kept": bool(keep)}
 
 
@@ -599,8 +833,7 @@ async def redis_member(k: str, typ: str, op: str, value: str = "", field: str = 
         if op == "add" and not re.match(r"^-?\d+(\.\d+)?$", s):
             raise RuntimeError("score 必须是数字")
         args = ["ZADD", k, s, value] if op == "add" else ["ZREM", k, value]
-    out = (await _rcli(args)).strip()
-    n = int(out) if out.lstrip("-").isdigit() else None
+    n = await _r(args, kind="int")
     if op == "del" and n == 0:
         raise RuntimeError("没有找到要删除的条目（值需完全一致）")
     return {"ok": True, "n": n}
@@ -615,5 +848,6 @@ async def redis_ttl(k: str, ttl) -> dict:
     if t < -1 or t > 31536000000:
         raise RuntimeError("TTL 范围：-1（永久）到 1000 年")
     # EXPIRE 传负数会直接删 key，永久只能走 PERSIST
-    out = (await _rcli(["PERSIST", k] if t == -1 else ["EXPIRE", k, str(t)])).strip()
-    return {"ok": True, "applied": out.startswith("1"), "ttl": t}
+    applied = await _r(["PERSIST", k] if t == -1 else ["EXPIRE", k, str(t)], kind="int")
+    return {"ok": True, "applied": applied == 1, "ttl": t}
+

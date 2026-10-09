@@ -47,6 +47,24 @@ server {
     #     proxy_pass http://127.0.0.1:3210;
     # }
 
+    # ---- 凭证只能走查询串的三类端点：SSE 日志流、文件下载、终端 WebSocket ----
+    # EventSource / <a download> / WebSocket 都带不上 Authorization 头，所以后端接受
+    # ?token=。这些 URL 一旦写进访问日志，会话 token 就长期躺在磁盘上（AGENTS.md §7
+    # 禁止），因此单独用正则 location 命中并关闭访问日志；其余请求照常记录。
+    location ~ ^/api/(files/download|terminal|system/services/[^/]+/logs|apps/[0-9]+/logs)$ {
+        access_log off;
+        proxy_pass http://127.0.0.1:3210;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:3210;
         proxy_set_header Host $host;

@@ -16,6 +16,8 @@
 
   /* 圆角与阴影 */
   --radius-sm: 6px;
+  /* --radius-md 是标度上的名字，--radius 是默认值：两者同值，改一处即可（不要各自维护） */
+  --radius-md: var(--radius);
   --radius: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
@@ -42,14 +44,36 @@
   --fs-2xl: 27px;
   --fs-3xl: 34px;
 
+  /* 等宽字体族：多处一直写 var(--font-mono, ui-monospace)，此前从未定义过，
+     等于全站靠回退值，各浏览器落到不同的 mono 字体上（宽度不同 → 裁切位置也不同） */
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+
+  /* 层级标度：浮层之间只靠这一处排序，散落的 z-index 会让新组件互相压不住 */
+  --z-raised: 1;
+  --z-sticky: 10;
+  --z-overlay: 400;
+  --z-drawer: 900;
+  --z-modal: 1000;
+  --z-toast: 1100;
+  --z-popover: 1200;
+
   /* 动效 */
   --dur-fast: 0.12s;
   --dur: 0.2s;
+  --dur-page: 0.24s;
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
 
   /* 布局 */
   --sidebar-w: 208px;
   --header-h: 54px;
+
+  /* ---------- 表格高度（唯一机制，见下文 --table-h） ---------- */
+  /* 以前每个页面各写一个 calc(100vh - <魔数>px)：8 个互不相同的魔数，断点一变全错。
+     现在全站只有一个变量 --table-h，页面只写 :max-height="'var(--table-h)'"。
+     --chrome-head 是 PageHeader 块（标题+副标题+下边距）的公共占用，
+     --chrome-extra 是各页自己的工具条 / 筛选行 / 卡片内边距（集中在 .tbl-* 里给值）。 */
+  --page-pad: 32px;
+  --chrome-head: 108px;
 }
 
 /* 暗色（默认） */
@@ -57,11 +81,14 @@ html[data-theme='dark'] {
   --cp-bg: #101014;
   --cp-bg-1: #141419;
   --cp-bg-2: #16161c;
+  --cp-bg-soft: #1c1c23;
   --cp-elevated: #18181f;
   --cp-text: #dcdce4;
   --cp-text-strong: #ececf2;
   --cp-text-dim: #9d9da8;
-  --cp-text-mute: #70707a;
+  /* mute 用于表格副行、时间戳等小号正文：旧值 #70707a 在深底上只有 3.7:1，
+     低于 WCAG AA 小字 4.5:1（实测全站最低项），这里提到 5.3:1 仍保持比 dim 更弱一级 */
+  --cp-text-mute: #8b8b95;
   --cp-border: rgba(255, 255, 255, 0.07);
   --cp-border-strong: rgba(255, 255, 255, 0.14);
   --cp-hover: rgba(255, 255, 255, 0.05);
@@ -90,11 +117,13 @@ html[data-theme='light'] {
   --cp-bg: #f5f6fa;
   --cp-bg-1: #ffffff;
   --cp-bg-2: #ffffff;
+  --cp-bg-soft: #f2f4fa;
   --cp-elevated: #ffffff;
   --cp-text: #1f2430;
   --cp-text-strong: #0f172a;
   --cp-text-dim: #5a6478;
-  --cp-text-mute: #7c869c;
+  /* 12px 副行文字在白底上必须 >=4.5:1（实测 #6a7488 只有 4.35:1） */
+  --cp-text-mute: #5f6a7d;
   --cp-border: #e3e6ef;
   --cp-border-strong: #cfd5e4;
   --cp-hover: rgba(79, 124, 255, 0.08);
@@ -107,16 +136,18 @@ html[data-theme='light'] {
   --shadow-glow: 0 4px 18px rgba(79, 124, 255, 0.22);
   --shadow-pop: 0 20px 60px rgba(15, 23, 42, 0.12);
 
-  /* 语义色（亮色：加深保证白底对比度，不沿用暗色增强值） */
-  --cp-brand: #3d66e8;
+  /* 语义色（亮色：加深保证白底对比度，不沿用暗色增强值）
+     实测旧值作正文色时最低只有 3.76:1（ok/brand 在 10% 淡底标签上）、idle 3.65:1，
+     这里全部按 >=5:1 重取，暗色主题不受影响。 */
+  --cp-brand: #2f52c0;
   --cp-brand-soft: #4f7cff;
   --cp-brand-accent: #6b4fd0;
-  --cp-ok: #188a52;
-  --cp-warn: #9a6508;
+  --cp-ok: #146c41;
+  --cp-warn: #7a5006;
   --cp-err: #c62f3a;
   --cp-node: #4f7a1f;
   --cp-python: #3a5fd0;
-  --cp-idle: #7c869c;
+  --cp-idle: #5f6a7d;
   --cp-selected: rgba(79, 124, 255, 0.14);
   color-scheme: light;
 }
@@ -177,7 +208,7 @@ a:focus-visible,
 .log-view {
   background: var(--cp-code-bg);
   color: var(--cp-code-text);
-  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
   line-height: 1.55;
   padding: var(--space-3) var(--space-4);
@@ -193,7 +224,25 @@ a:focus-visible,
   letter-spacing: -0.02em;
 }
 .mono {
-  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-family: var(--font-mono);
+}
+
+/* 表格/列表行里只占一行的等宽值（文件名、命令、commit）：给一个可复用的截断类，
+   避免各处再手写 nowrap 时漏掉 overflow，最后一列被 td 裁半截。 */
+.mono-1l {
+  font-family: var(--font-mono);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 长等宽串（哈希、URL、JSON、SQL）换行而不是裁掉：nowrap 会撑破 td，
+   不给 break-all 就只能看到一个截半截的字符串。 */
+.cp-break {
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 /* 状态点 */
@@ -220,35 +269,74 @@ a:focus-visible,
 }
 
 /* shared render-cell styles（DataTable h() 渲染器复用，非 scoped） */
-.cell-main { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+/* 表格单元格里所有 flex 子项默认 min-width:auto（= 内容宽度），父级收缩不下去，
+   于是"文字被裁半截"。规则：链路上每一层都要 min-width:0，末端自己 ellipsis。 */
+.cell-main { display: flex; align-items: center; gap: var(--space-3); min-width: 0; max-width: 100%; }
 .cell-ico { flex-shrink: 0; display: flex; align-items: center; }
 .cell-avatar { flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%; overflow: hidden; display: flex; align-items: center; justify-content: center; background: var(--cp-hover); }
-/* 紧凑表（审计）用小一档头像；圆角跟着 img 一起给，缩放后不会是方图 */
+/* 紧凑表（审计等）用小一档头像；圆角跟着 img 一起给，缩放后不会是方图 */
 .cell-avatar.sm { width: 20px; height: 20px; }
 .cell-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
-/* 紧凑表（审计等）用的小号头像，保持与 32px 版同一套外观 */
-.cell-avatar.sm { width: 20px; height: 20px; }
-.cell-txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.cell-name { font-size: var(--fs-sm); font-weight: 550; color: var(--cp-text); text-align: left; padding: 0 !important; }
+.cell-txt { min-width: 0; max-width: 100%; display: flex; flex-direction: column; gap: 1px; }
+.cell-name {
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  color: var(--cp-text);
+  text-align: left;
+  padding: 0 !important;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--dur) var(--ease);
+}
+/* 名字即入口的两种写法都要成立：<span class="cell-name"> 与 <button class="cell-name">。
+   非 <button> 时上面的 ellipsis 生效；<button> 还多一层 naive 的居中与内边距，见下。 */
+button.cell-name { cursor: pointer; background: none; border: 0; }
+button.cell-name:hover { color: var(--cp-brand); }
 /* .n-button 根节点是 justify-content: center（naive-ui es/button/src/styles/index.cssr.mjs:27）。
    文字按钮放在 .cell-txt（列向 flex）里会被拉伸到与下方描述行等宽，于是名字在自身宽度里
    居中，图标与文字之间出现一段随描述长度变化的空白。用 button. 提高优先级压过它——
-   naive-ui 运行时注入样式排在本站全局样式之后，同权重的 class 规则会输。 */
-button.cell-name { justify-content: flex-start; }
-.cell-sub { font-size: var(--fs-2xs); color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+   naive-ui 运行时注入样式排在本站全局样式之后，同权重的 class 规则会输。
+   并且 naive 的文本在 .n-button__content 子层里，ellipsis 必须给到那一层，
+   否则 button 自己 overflow:hidden 只会把末字裁成半截（正是线上反馈的症状）。 */
+button.cell-name { justify-content: flex-start; min-width: 0; max-width: 100%; overflow: hidden; }
+button.cell-name > .n-button__content {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cell-sub { font-size: var(--fs-2xs); color: var(--cp-text-mute); min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vchip {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px var(--space-2); border-radius: var(--radius-pill); font-size: var(--fs-xs); line-height: 18px;
   background: var(--cp-hover); color: var(--cp-text-dim);
+  min-width: 0; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
 .vchip.node { background: color-mix(in srgb, var(--cp-node) 14%, transparent); color: var(--cp-node); }
 .vchip.python { background: color-mix(in srgb, var(--cp-python) 14%, transparent); color: var(--cp-python); }
-.st { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--fs-xs); }
+.st {
+  display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--fs-xs);
+  min-width: 0; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.st .dot { flex-shrink: 0; }
 .st.ok { color: var(--cp-ok); }
 .st.err { color: var(--cp-err); }
 .st.warn { color: var(--cp-warn); }
 .st.idle { color: var(--cp-idle); }
-.mono-dim { font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; font-size: var(--fs-xs); color: var(--cp-text-dim); }
+.mono-dim {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--cp-text-dim);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* 数据浏览器（PG 行 / Redis key）用的全局类：这些元素由 NDataTable 的 columns.render
    创建，scoped 样式落不到它们身上，只能放全局。 */
@@ -257,12 +345,13 @@ button.cell-name { justify-content: flex-start; }
   display: inline-flex; align-items: center; padding: 1px 7px; cursor: pointer;
   border: 1px dashed var(--cp-border, rgba(128, 128, 128, 0.3)); border-radius: var(--radius-pill);
   background: transparent; color: var(--cp-text-dim);
-  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; font-size: var(--fs-2xs);
+  font-family: var(--font-mono); font-size: var(--fs-2xs);
+  min-width: 0; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
 .json-chip:hover { border-style: solid; color: var(--cp-brand-soft); }
 .json-tip {
   margin: 0; max-width: 420px; max-height: 320px; overflow: auto;
-  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; font-size: var(--fs-2xs);
+  font-family: var(--font-mono); font-size: var(--fs-2xs);
   white-space: pre-wrap; word-break: break-all; line-height: 1.5;
 }
 .n-data-table-tr.row-active > .n-data-table-td { background: var(--cp-selected) !important; }
@@ -272,15 +361,47 @@ button.cell-name { justify-content: flex-start; }
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
   font-size: var(--fs-md);
   font-weight: 600;
   color: var(--cp-text);
 }
+.section-title > * { flex-shrink: 0; }
+
+/* ---------- 表格：行内操作按钮的可点面积 ---------- */
+/* naive 的 tiny 按钮高 22px，触屏按不准；表格单元格里统一到 26px（flex 居中，
+   不会把文字挤到顶部）。只作用于 td 内，不动分页器与工具条的原有尺寸。 */
+.n-data-table-td .n-button { min-height: 26px; }
+/* 纯图标按钮补上可点宽度，配合 aria-label（见各页）才有可用的触控目标 */
+.n-data-table-td .n-button--icon-only,
+.n-data-table-td .n-button-circle { min-width: 26px; }
+
+/* ---------- 表格高度：变量名全站只有一个 --table-h ---------- */
+/* 消费方永远写 :max-height="'var(--table-h)'"，生产方有两种，按可用性覆盖，不各算各的：
+   1) 本页下方的 calc 兜底（无需 JS，也是首屏第一帧就能用的值）；
+   2) composables/useTableHeight() 量出真实可用高度后，把同一个 --table-h 写在 .cp-scroll 上。
+   注意：.cp-tbl 声明在表格元素上，比 .cp-scroll 更靠近使用处，两者同时存在时以本类的 calc 为准；
+   已接入 useTableHeight 的页面不要再往同一张表上加 .cp-tbl。 */
+.cp-tbl {
+  --table-h: calc(100vh - var(--header-h) - var(--page-pad) * 2 - var(--chrome-head) - var(--chrome-extra, 0px));
+}
+.tbl-apps { --chrome-extra: 0px; }
+.tbl-services { --chrome-extra: 44px; }
+.tbl-users { --chrome-extra: 44px; }
+.tbl-files { --chrome-extra: 144px; }
+.tbl-backup-files { --chrome-extra: 108px; }
+.tbl-audit { --chrome-extra: 72px; }
+/* 数据库页的表格在 NCard + NTabs 里：页签条与 pane 内边距要扣，三个层级的表格
+   之上还各有工具行，所以给三档。 */
+.tbl-dbs-list { --chrome-extra: 96px; }
+.tbl-dbs-browse { --chrome-extra: 136px; }
+.tbl-dbs-data { --chrome-extra: 176px; }
+.tbl-dbs-keys { --chrome-extra: 136px; }
 
 /* 页面切换动效（Shell 中 transition name="page"） */
 .page-enter-active,
 .page-leave-active {
-  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+  transition: opacity var(--dur-page) var(--ease), transform var(--dur-page) var(--ease);
 }
 .page-enter-from {
   opacity: 0;
@@ -339,6 +460,23 @@ html.cp-vt *::after {
 /* 小屏适配：正文收到标度上的 --fs-sm */
 @media (max-width: 640px) {
   body { font-size: var(--fs-sm); }
+}
+
+/* ---------- 表格高度机制的断点修正 ---------- */
+/* .cp-scroll 的内边距与 PageHeader 的换行行为都随断点变化，这里跟着调，
+   页面侧只需要再补自己的 --chrome-extra（工具条/卡片内边距），不用再算 100vh。 */
+@media (max-width: 900px) {
+  :root {
+    --page-pad: 24px;
+    --chrome-head: 128px;
+  }
+}
+@media (max-width: 640px) {
+  :root {
+    --page-pad: 16px;
+    /* 操作区换到标题下方，副标题也更常折行 */
+    --chrome-head: 172px;
+  }
 }
 
 /* 尊重系统「减少动效」设置 */

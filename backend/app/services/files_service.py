@@ -1,3 +1,4 @@
+import contextlib
 import datetime as _dt
 import errno
 import os
@@ -97,6 +98,120 @@ def write_text(p: str, content: str | bytes) -> dict:
     with os.fdopen(fd, "wb") as f:
         f.write(data)
     return {"path": abs_, "size": len(data)}
+
+
+def safe_name(name: str) -> str:
+    """上传文件名只留 basename，并拒绝任何点号目录与隐藏的路径分隔。"""
+    base = os.path.basename((name or "").replace("\\", "/")).strip()
+    if not base or base in {".", ".."} or "/" in base or base.startswith("."):
+        raise RuntimeError(f"文件名不合法：{base[:40] or '空'}")
+    if len(base) > 180:
+        raise RuntimeError("文件名过长")
+    return base
+
+
+def save_upload(dir_path: str, filename: str, data: bytes, overwrite: bool = False) -> dict:
+    """把 multipart 的一个字段写进白名单目录。
+
+    和 write_text 一样拒绝跟随最后一层符号链接；文件名先净化，否则
+    `../../etc/cron.d/x` 会绕过 safe_path 的目录检查。
+    """
+    target_dir = safe_path(dir_path)
+    if not os.path.isdir(target_dir):
+        raise RuntimeError("目标不是目录")
+    abs_ = os.path.join(target_dir, safe_name(filename))
+    if os.path.islink(abs_) and not overwrite:
+        raise RuntimeError("目标是符号链接，拒绝覆盖")
+    if os.path.exists(abs_) and not overwrite:
+        raise RuntimeError(f"同名文件已存在：{os.path.basename(abs_)}")
+    if len(data) > MAX_FILE_BYTES:
+        raise RuntimeError(f"单个文件超过 {MAX_FILE_BYTES // 1024 // 1024}MB 上限")
+    existed = os.path.lexists(abs_)
+    return write_text(abs_, data) | {"overwrote": existed}
+
+
+def _check_member(name: str, real_dest: str) -> str:
+    """压缩包成员名要能在目标目录内落地，否则整包先拒绝。"""
+    if not name or name.startswith(("/", "\\")) or ".." in name.replace("\\", "/").split("/"):
+        raise RuntimeError(f"压缩包路径越界，已拒绝：{name[:60]}")
+    out = os.path.realpath(os.path.join(real_dest, name))
+    if out != real_dest and not out.startswith(real_dest + os.sep):
+        raise RuntimeError(f"压缩包路径越界，已拒绝：{name[:60]}")
+    return out
+
+
+def extract_archive(p: str, into: str | None = None) -> dict:
+    """解压 zip/tar(.gz/.bz2/.xz) 到目标目录，只接受落在目标内的常规文件。
+
+    先整体验证成员再动手写：半途抛错会留下已经解压出来的一半文件，
+    用户看到失败却以为目录还是干净的。
+    """
+    src = safe_path(p)
+    if not os.path.isfile(src):
+        raise RuntimeError("不是文件")
+    dest = safe_path(into) if into else os.path.dirname(src)
+    os.makedirs(dest, exist_ok=True)
+    real_dest = os.path.realpath(dest)
+    names: list[str] = []
+    if src.lower().endswith(".zip"):
+        import zipfile
+
+        with zipfile.ZipFile(src) as z:
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                mode = info.external_attr >> 16
+                if stat.S_ISLNK(mode):
+                    raise RuntimeError(f"压缩包内含符号链接，已拒绝：{info.filename[:60]}")
+                _check_member(info.filename, real_dest)
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                out = _check_member(info.filename, real_dest)
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with z.open(info) as fp, open(out, "wb") as fo:
+                    shutil.copyfileobj(fp, fo, 1024 * 256)
+                names.append(info.filename)
+    else:
+        import tarfile
+
+        try:
+            tf = tarfile.open(src)
+        except tarfile.ReadError:
+            raise RuntimeError("只支持 .zip 与 .tar/.tar.gz/.tar.bz2/.tar.xz") from None
+        with tf:
+            for m in tf.getmembers():
+                if not (m.isfile() or m.isdir()):
+                    raise RuntimeError(f"压缩包内含特殊文件（链接/设备），已拒绝：{m.name[:60]}")
+                _check_member(m.name, real_dest)
+            # filter='data' 是标准库自带的越界/权限防护（3.12+），双保险
+            tf.extractall(dest, filter="data")
+            names = [m.name for m in tf.getmembers() if m.isfile()]
+    return {"ok": True, "dest": dest, "files": len(names), "names": names[:50]}
+
+
+def make_archive(paths: list[str], out_name: str = "archive.tar.gz") -> dict:
+    """把选中的若干条目打成一个 tar.gz，返回落盘位置供下载。"""
+    import tarfile
+
+    picked = [safe_path(x) for x in paths if x]
+    if not picked:
+        raise RuntimeError("没有选择要打包的路径")
+    common = os.path.commonpath([os.path.dirname(x) for x in picked])
+    if not any(common == r or common.startswith(r + "/") for r in ROOTS):
+        raise RuntimeError("路径超出允许范围")
+    tmp = os.path.join(common, f".{safe_name(out_name)}.{os.getpid()}.tmp")
+    try:
+        with tarfile.open(tmp, "w:gz") as tf:
+            for x in picked:
+                tf.add(x, arcname=os.path.basename(x), recursive=True)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise RuntimeError(f"打包失败：{e.strerror or e}") from e
+    final = os.path.join(common, safe_name(out_name))
+    os.replace(tmp, final)
+    return {"path": final, "size": os.path.getsize(final), "items": [os.path.basename(x) for x in picked]}
 
 
 def fs_action(action: str, p: str, p2: str | None = None) -> dict:

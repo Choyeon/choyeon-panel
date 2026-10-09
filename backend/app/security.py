@@ -1,7 +1,9 @@
+import asyncio
 import hashlib
 import hmac
 import secrets
 import time
+from weakref import WeakKeyDictionary
 
 import jwt
 
@@ -10,6 +12,32 @@ from .database import jwt_secret
 from .database import token_epoch as _global_epoch
 
 ALGO = "HS256"
+
+# scrypt 的参数是 32MB 临时内存/次。放到线程池后并行度不再受事件循环限制，
+# 不加约束的话一次登录风暴就能占掉几百 MB（实测 6 并发把 cgroup 顶到 108MB）。
+# 2 个并发既保住了"登录不冻结全站"，也把峰值压在 64MB 以内。
+# 信号量按事件循环绑定缓存：测试里每个用例各自 asyncio.run，共用一个会报跨循环错误。
+_SCRYPT_CONCURRENCY = 2
+_sem_by_loop: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def _scrypt_sem() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _sem_by_loop.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_SCRYPT_CONCURRENCY)
+        _sem_by_loop[loop] = sem
+    return sem
+
+
+async def hash_pass_async(password: str) -> str:
+    async with _scrypt_sem():
+        return await asyncio.to_thread(hash_pass, password)
+
+
+async def check_pass_async(password: str, stored: str) -> bool:
+    async with _scrypt_sem():
+        return await asyncio.to_thread(check_pass, password, stored)
 
 
 def hash_pass(password: str) -> str:

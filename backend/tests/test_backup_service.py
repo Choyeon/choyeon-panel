@@ -88,8 +88,8 @@ class TestTargetPairValidation(unittest.TestCase):
         """必须是 RuntimeError，不是未捕获的 sqlite3.IntegrityError。"""
         bid = self._mk()
         with self.assertRaises(RuntimeError) as cm:
-            asyncio.run(B.update_backup(bid, {"kind": "sqlite"}))
-        self.assertIn("kind 必须是 pg 或 app", str(cm.exception))
+            asyncio.run(B.update_backup(bid, {"kind": "mysql"}))
+        self.assertIn("kind 必须是 pg/app/sqlite", str(cm.exception))
         self.assertEqual(dbm.query_one("SELECT kind FROM backups WHERE id=?", (bid,))["kind"], "pg")
 
     def test_update_kind_switch_uses_merged_pair(self):
@@ -234,7 +234,7 @@ class TestBackupFilename(unittest.TestCase):
         self.addCleanup(_drop, self.bid)
 
     def test_stamp_has_seconds(self):
-        stamp = R._stamp()
+        stamp = R.stamp()
         self.assertRegex(stamp, r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$")
         self.assertNotIn(":", stamp)
 
@@ -258,7 +258,7 @@ class TestBackupFilename(unittest.TestCase):
     def test_two_runs_same_second_keep_both_files(self):
         """把时间戳钉死，模拟同一秒内跑两次（连点两次"立即备份"）。"""
         bk = dbm.query_one("SELECT * FROM backups WHERE id=?", (self.bid,))
-        with mock.patch.object(R, "_stamp", lambda: "2026-01-01-00-00-00"):
+        with mock.patch.object(R, "stamp", lambda: "2026-01-01-00-00-00"):
             R.main(bk)
             with open(f"{self.app}/a.txt", "w") as f:
                 f.write("V2")
@@ -279,12 +279,12 @@ class TestBackupFilename(unittest.TestCase):
         self.assertIn(b"V2", payload2)
 
     def test_every_producer_uses_free_path(self):
-        """三类产物（pg all / pg 单库 / app）都得走 _free_path，漏一个就还是会被覆盖。
+        """四类产物（pg all / pg 单库 / app / sqlite）都得走 _free_path，漏一个就还是会被覆盖。
 
         守卫矩阵用源码断言，和 test_apps_service 里部署守卫同一套写法。
         """
         src = inspect.getsource(R.main)
-        self.assertEqual(src.count("_free_path("), 3, src)
+        self.assertEqual(src.count("_free_path("), 4, src)
         self.assertNotIn('f"{BACKUP_DIR}/bk', src, "还有分支在手工拼备份文件名")
 
 
@@ -330,9 +330,10 @@ class TestHttpContract(unittest.TestCase):
         self.assertIn("error", r2.json())
 
     def test_bad_kind_on_create_is_400(self):
-        r = self.client.post("/api/backups", json={"kind": "sqlite", "target": "appdb"}, headers=self.headers)
+        # sqlite 现在是一等类型，"坏 kind" 得用一个真不在 KINDS 里的值
+        r = self.client.post("/api/backups", json={"kind": "mysql", "target": "appdb"}, headers=self.headers)
         self.assertEqual(r.status_code, 400, r.text)
-        self.assertIn("kind 必须是 pg 或 app", r.json()["error"])
+        self.assertIn("kind 必须是 pg/app/sqlite", r.json()["error"])
 
     def test_enabled_zero_roundtrip(self):
         r = self.client.post("/api/backups", json={"kind": "pg", "target": "appdb", "enabled": 0}, headers=self.headers)

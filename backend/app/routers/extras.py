@@ -4,22 +4,33 @@ import sqlite3
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from .. import aio_db
 from .. import database as dbm
 from .. import security
 from ..deps import need_admin as _need_admin
 from ..services import alerts_service, nginx_ops
 from ..util import is_http_url
+from ..errors import err_json
 
 router = APIRouter()
 
-ALLOWED_ALERT_KEYS = re.compile(r"^alert_(telegram_bot|telegram_chat|webhook_url|disk_pct|ssl_days)$")
+ALLOWED_ALERT_KEYS = re.compile(
+    r"^alert_(telegram_bot|telegram_chat|webhook_url|disk_pct|ssl_days"
+    r"|cpu_pct|mem_pct|load1_x|probe|probe_expect|keep_days|keep_rows)$"
+)
+# 每应用覆写探活期望状态码：key 里带应用名，所以单独一条规则，且只允许安全字符
+PROBE_OVERRIDE_KEY = re.compile(r"^probe_expect:([\w.@-]{1,64})$")
 
 # 各 key 的取值约束：None 表示只做长度限制。
 # 必须在保存时就校验——`int(dbm.get_setting("alert_disk_pct") or 85)` 在巡检里，
 # 存进 "abc" 之后每次巡检都抛 ValueError，被循环吞掉，表现为「告警从此不再触发」，
 # 而网页端一切正常，最难查的那种坏法。
-ALERT_INT_RANGE = {"alert_disk_pct": (50, 99), "alert_ssl_days": (0, 60)}
-ALERT_MAX_LEN = {"alert_telegram_bot": 128, "alert_telegram_chat": 64, "alert_webhook_url": 512}
+ALERT_INT_RANGE = {"alert_disk_pct": (50, 99), "alert_ssl_days": (0, 60),
+                   "alert_cpu_pct": (1, 99), "alert_mem_pct": (1, 99),
+                   "alert_load1_x": (1, 32), "alert_probe": (0, 1),
+                   "alert_keep_days": (1, 365), "alert_keep_rows": (100, 20000)}
+ALERT_MAX_LEN = {"alert_telegram_bot": 128, "alert_telegram_chat": 64, "alert_webhook_url": 512,
+                 "alert_probe_expect": 32}
 
 
 async def _body(req: Request) -> dict:
@@ -49,10 +60,12 @@ async def users_create(req: Request):
     if not password or len(password) < 8:
         return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
     role = "viewer" if body.get("role") == "viewer" else "admin"
+    # scrypt 放线程里：async 处理函数里直接算会卡住整个事件循环（见 main.py 登录）
+    pw_hash = await security.hash_pass_async(password)
     try:
         dbm.execute(
             "INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)",
-            (username, security.hash_pass(password), role),
+            (username, pw_hash, role),
         )
     except sqlite3.IntegrityError:
         # 只把「唯一约束冲突」解释成用户名已存在。
@@ -60,7 +73,7 @@ async def users_create(req: Request):
         # 「用户名已存在」（实测），管理员反复换个名字还是这句，日志里也查不到，
         # 属于最难排查的一类误报。其余异常交给全局处理器变 500。
         return JSONResponse(status_code=400, content={"error": "用户名已存在"})
-    dbm.audit(req.state.cp_sub, "user:create", f"{username}({role})")
+    await aio_db.audit(req.state.cp_sub, "user:create", f"{username}({role})")
     return {"ok": True}
 
 
@@ -92,7 +105,7 @@ async def users_update(uid: str, req: Request):
     if body.get("password"):
         if len(body["password"]) < 8:
             return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
-        new_hash = security.hash_pass(body["password"])
+        new_hash = await security.hash_pass_async(body["password"])
     new_nickname = None
     if "nickname" in body:
         new_nickname = str(body["nickname"] or "").strip()[:32]
@@ -101,7 +114,7 @@ async def users_update(uid: str, req: Request):
         new_avatar = str(body["avatar"] or "").strip()[:256]
 
     if new_role is None and new_hash is None and new_nickname is None and new_avatar is None:
-        dbm.audit(req.state.cp_sub, "user:update", f"{u['username']}(无变更)")
+        await aio_db.audit(req.state.cp_sub, "user:update", f"{u['username']}(无变更)")
         return {"ok": True}
 
     if new_role is not None:
@@ -117,7 +130,7 @@ async def users_update(uid: str, req: Request):
     # 对方手上的旧 token 在 TTL 内（最长 72h）依旧是 admin——连写操作都拦不住（实测）。
     # 改密本来就要吊销；这里合并成「任何一次实际变更都吊销」。
     security.bump_user_epoch(u["username"])
-    dbm.audit(req.state.cp_sub, "user:update", u["username"])
+    await aio_db.audit(req.state.cp_sub, "user:update", u["username"])
     return {"ok": True}
 
 
@@ -135,25 +148,42 @@ async def users_delete(uid: str, req: Request):
         return JSONResponse(status_code=400, content={"error": "不能删除自己"})
     dbm.execute("DELETE FROM users WHERE id=?", (u["id"],))
     security.bump_user_epoch(u["username"])
-    dbm.audit(req.state.cp_sub, "user:delete", u["username"])
+    await aio_db.audit(req.state.cp_sub, "user:delete", u["username"])
     return {"ok": True}
 
 
-ALERT_KEYS = ["alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url", "alert_disk_pct", "alert_ssl_days"]
+ALERT_KEYS = ["alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url", "alert_disk_pct", "alert_ssl_days",
+              "alert_cpu_pct", "alert_mem_pct", "alert_load1_x", "alert_probe", "alert_probe_expect",
+              "alert_keep_days", "alert_keep_rows"]
 
 
 @router.get("/api/settings/alerts")
 async def alerts_get(req: Request):
     # 通知通道含密钥，仅管理员可读；只读账号返回空值以免泄露
     secret_keys = ("alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url")
-    if req.state.cp_role != "admin":
-        return {k: ("" if k in secret_keys else (dbm.get_setting(k) or "")) for k in ALERT_KEYS}
-    return {k: dbm.get_setting(k) or "" for k in ALERT_KEYS}
+    rows = await aio_db.query(
+        "SELECT key,value FROM settings WHERE key IN ({}) OR key LIKE 'probe_expect:%'".format(
+            ",".join("?" * len(ALERT_KEYS))),
+        ALERT_KEYS,
+    )
+    stored = {r["key"]: (r["value"] or "") for r in rows}
+    out = {k: ("" if req.state.cp_role != "admin" and k in secret_keys else stored.get(k, ""))
+           for k in ALERT_KEYS}
+    # 按应用覆写的期望状态码：值里没有秘密，两种角色都可以看到当前覆写了哪些应用。
+    out["probe_overrides"] = {key[len("probe_expect:"):]: val
+                              for key, val in stored.items() if key.startswith("probe_expect:")}
+    return out
 
 
 def _validate_alert(k: str, val: str) -> str | None:
     """返回错误信息；None 表示通过。空值等于关闭该项，直接放行。"""
     if val == "":
+        return None
+    if k.startswith("probe_expect:"):
+        # 期望状态码只有 "2xx/3xx"、"200 204" 这一种形状，值短到 32 就够；
+        # 内容看不懂不影响主机健康（服务侧会回落 2xx/3xx），所以不在这里做语义校验。
+        if len(val) > 32:
+            return f"{k} 超过 32 字符"
         return None
     if (maxlen := ALERT_MAX_LEN.get(k)) and len(val) > maxlen:
         return f"{k} 超过 {maxlen} 字符"
@@ -178,9 +208,17 @@ async def alerts_save(req: Request):
     accepted: dict[str, str] = {}
     errors: list[str] = []
     for k, v in body.items():
-        if not ALLOWED_ALERT_KEYS.match(k):
+        m = PROBE_OVERRIDE_KEY.match(k)
+        if not ALLOWED_ALERT_KEYS.match(k) and not m:
             continue
         val = "" if v is None else str(v).strip()
+        if m and val:
+            # 应用名写错了这条覆写永远不会生效（服务侧按名字取），当场拒绝比留下幽灵键好
+            name = m.group(1)
+            known = await aio_db.query_one("SELECT 1 ok FROM apps WHERE name=?", (name,))
+            if not known:
+                errors.append(f"探活覆写的应用不存在：{name}")
+                continue
         if err := _validate_alert(k, val):
             errors.append(err)
             continue
@@ -189,10 +227,10 @@ async def alerts_save(req: Request):
     if errors:
         # 校验不过时一个字段都没写，也就没有"变更"可记。旧写法先落一条
         # settings:alerts 审计再返回 400，事后翻审计会以为配置真的改过。
-        return JSONResponse(status_code=400, content={"error": "；".join(errors)})
+        return JSONResponse(status_code=400, content={"error": "；".join(errors), "code": "bad_input"})
     for k, val in accepted.items():
         dbm.set_setting(k, val)
-    dbm.audit(req.state.cp_sub, "settings:alerts", ",".join(accepted.keys()) or "-")
+    await aio_db.audit(req.state.cp_sub, "settings:alerts", ",".join(accepted.keys()) or "-")
     return {"ok": True}
 
 
@@ -241,7 +279,7 @@ async def certbot_renew(req: Request):
     try:
         log = await nginx_ops.renew_certs()
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
     # 审计写在执行之后：续期失败也先记一条"已执行"，事后无法区分成功与失败。
-    dbm.audit(req.state.cp_sub, "certbot:renew")
+    await aio_db.audit(req.state.cp_sub, "certbot:renew")
     return {"ok": True, "log": log}

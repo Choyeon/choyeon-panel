@@ -129,11 +129,12 @@ function appCell(r: any) {
       ]),
       h('div', { class: 'cell-txt' }, [
         h(NSpace, { size: 6, align: 'center', wrap: false }, () => [
-          h(NButton, { text: true, type: 'primary', class: 'cell-name', onClick: () => router.push(`/apps/${r.id}`) }, () => r.name),
+          h(NButton, { text: true, type: 'primary', class: 'cell-name', title: r.name, onClick: () => router.push(`/apps/${r.id}`) }, () => r.name),
           ...(kids.length ? [h(NTag, { size: 'tiny', bordered: false, type: 'info' }, { default: () => `组合 ${kids.length + 1} 件` })] : []),
           repoLink(r.repo_url),
         ]),
-        h('div', { class: 'cell-sub' }, r.domain || r.unit || r.path || '—'),
+        // 名称与描述都会被 ellipsis 裁掉，title 是唯一还能看到全文的地方
+        h('div', { class: 'cell-sub', title: r.domain || r.unit || r.path || '—' }, r.domain || r.unit || r.path || '—'),
       ]),
     ]),
   ];
@@ -145,7 +146,7 @@ function appCell(r: any) {
         ]),
         h('div', { class: 'cell-txt' }, [
           h(NSpace, { size: 6, align: 'center', wrap: false }, () => [
-            h(NButton, { text: true, type: 'primary', class: 'cell-name', style: 'font-size:var(--fs-sm)', onClick: () => router.push(`/apps/${c.id}`) }, () => c.name),
+            h(NButton, { text: true, type: 'primary', class: 'cell-name', style: 'font-size:var(--fs-sm)', title: c.name, onClick: () => router.push(`/apps/${c.id}`) }, () => c.name),
             h(NTag, { size: 'tiny', bordered: false, type: c.component_role === 'frontend' ? 'success' : 'warning' }, { default: () => roleLabel(c) }),
             ...(!c.running && !c.deploying ? [h('span', { class: 'st idle' }, [h('span', { class: 'dot idle' }), '已停止'])] : []),
             // 组合项目的每个组件是独立仓库/独立服务，同步得分别触发
@@ -190,7 +191,7 @@ const columns: any[] = [
             NTag,
             href
               ? { size: 'small', bordered: false, type: r.domain ? 'default' : 'info', tag: 'a', href, target: '_blank', rel: 'noopener noreferrer', class: 'dom-tag', title: `在新标签页打开 ${href}` }
-              : { size: 'small', bordered: false, type: r.domain ? 'default' : 'info' },
+              : { size: 'small', bordered: false, type: r.domain ? 'default' : 'info', class: 'dom-tag', title: d },
             { default: () => d },
           );
         }),
@@ -381,7 +382,7 @@ onMounted(() => {
       </template>
     </PageHeader>
 
-    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1280" :max-height="'calc(100vh - 268px)'">
+    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1280" class="cp-tbl tbl-apps" :max-height="'var(--table-h)'">
       <template #empty>
         <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
       </template>
@@ -450,7 +451,7 @@ onMounted(() => {
               <NCollapseItem name="be">
                 <template #header>
                   <NSpace align="center" :size="8">
-                    <NIcon :component="icons.ServerOutline" size="15" color="var(--cp-warning)" />
+                    <NIcon :component="icons.ServerOutline" size="15" color="var(--cp-warn)" />
                     <span style="font-size: var(--fs-sm)">后端（入口应用）</span>
                     <NTag size="tiny" :bordered="false" type="warning">{{ form.name ? `${form.name}-backend` : '—' }}</NTag>
                   </NSpace>
@@ -476,7 +477,7 @@ onMounted(() => {
               <NCollapseItem name="fe">
                 <template #header>
                   <NSpace align="center" :size="8">
-                    <NIcon :component="icons.GlobeOutline" size="15" color="var(--cp-success)" />
+                    <NIcon :component="icons.GlobeOutline" size="15" color="var(--cp-ok)" />
                     <span style="font-size: var(--fs-sm)">前端（对外站点）</span>
                     <NTag size="tiny" :bordered="false" type="success">{{ form.name ? `${form.name}-frontend` : '—' }}</NTag>
                   </NSpace>
@@ -536,4 +537,8 @@ onMounted(() => {
 /* 域标签即站点入口：可点击时用品牌色给出反馈，不可点击时保持原样 */
 :deep(.dom-tag) { cursor: pointer; transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
 :deep(.dom-tag:hover) { color: var(--cp-brand-soft); background: color-mix(in srgb, var(--cp-brand) 14%, transparent); }
+/* NTag 默认不收缩：域名比列宽长时会被推到列外、末字裁半截。给内容层做 ellipsis，
+   整标签作为 flex 项允许收缩（title 里是完整域名）。 */
+:deep(.dom-tag) { max-width: 100%; min-width: 0; }
+:deep(.dom-tag .n-tag__content) { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

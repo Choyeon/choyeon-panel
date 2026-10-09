@@ -29,6 +29,9 @@ function later(fn: () => void, ms: number) {
 onBeforeUnmount(() => timers.forEach(clearTimeout));
 const saving = ref(false);
 const acting = ref('');
+// 标签受控是必要的：show:lazy 只解决"没点开不挂载"，解决不了"点开过一次就一直挂着"。
+// 运行日志那条 SSE 只有在当前标签时才挂载，切走就随组件销毁，不会在背后白占一个 journalctl -f。
+const tab = ref('config');
 const loadErr = ref('');
 const sslEmail = ref('');
 
@@ -379,7 +382,7 @@ watch(
     </NCard>
 
     <NCard size="small" :content-style="{ padding: '0' }">
-      <NTabs type="line" animated :tabs-padding="16" pane-style="padding: var(--space-4); padding-top: var(--space-2)">
+      <NTabs v-model:value="tab" type="line" animated display-directive="show:lazy" :tabs-padding="16" pane-style="padding: var(--space-4); padding-top: var(--space-2)">
         <NTabPane name="config" tab="基本配置">
           <NForm label-placement="left" label-width="100" style="max-width: 660px; margin-top: var(--space-3)">
             <NSpace vertical :size="12">
@@ -433,7 +436,7 @@ watch(
         </NTabPane>
 
         <NTabPane name="logs" tab="运行日志">
-          <LogStream :key="app.id" :url-path="`/apps/${app.id}/logs`" />
+          <LogStream v-if="tab === 'logs'" :key="app.id" :url-path="`/apps/${app.id}/logs`" />
         </NTabPane>
 
         <NTabPane name="nginx" tab="域名 / Nginx">
@@ -547,14 +550,20 @@ watch(
 .split-view { display: flex; align-items: flex-start; gap: var(--space-3); }
 .dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
 .dep-item { padding: var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
+/* 部署记录行是 space-between 的两段文字：时间戳比列宽长时先收缩自己，
+   不然右侧状态标签会被挤出 300px 的列表外（裁半截的老症状） */
+.dep-item :deep(.n-space) { min-width: 0; }
+.dep-item :deep(.n-space > *:first-child) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dep-item :deep(.st) { flex-shrink: 0; }
 .dep-item:hover { background: var(--cp-hover); }
 .dep-item.active { background: var(--cp-selected); }
 .ngx-list { width: 260px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
 .ngx-item { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
 .ngx-item:hover { background: var(--cp-hover); }
 .ngx-item.active { background: var(--cp-selected); }
-.ngx-name { font-size: var(--fs-xs); color: var(--cp-text); font-weight: 550; }
-.ngx-dom { font-size: var(--fs-2xs); color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ngx-item > div { min-width: 0; }
+.ngx-name { font-size: var(--fs-xs); color: var(--cp-text); font-weight: 550; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ngx-dom { font-size: var(--fs-2xs); color: var(--cp-text-mute); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .res-bar :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
 .res-item { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); color: var(--cp-text); }
 .res-k { font-size: var(--fs-2xs); color: var(--cp-text-mute); }

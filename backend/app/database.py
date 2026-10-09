@@ -68,6 +68,37 @@ CREATE TABLE IF NOT EXISTS backups(
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now'))
 );
+-- 告警历史：run_checks 每轮都把结论写进来（含恢复 ok），面板重启后不再失忆。
+CREATE TABLE IF NOT EXISTS alerts_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  level TEXT NOT NULL CHECK(level IN ('ok','warn','crit')),
+  code TEXT NOT NULL,
+  message TEXT NOT NULL,
+  meta TEXT NOT NULL DEFAULT '',
+  acked INTEGER NOT NULL DEFAULT 0
+);
+-- 定时任务中心：表达式只存 cron 五段，渲染成 systemd timer 由 cron_service 负责。
+CREATE TABLE IF NOT EXISTS cron_task(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  expr TEXT NOT NULL,
+  argv TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_run TEXT,
+  last_status TEXT NOT NULL DEFAULT '',
+  log_tail TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+-- 指标历史：ts 是 unix 秒；gran=raw 为 30 秒采样（留 24h），hour 为小时降采样（留 7d）。
+CREATE TABLE IF NOT EXISTS metrics(
+  ts INTEGER NOT NULL,
+  gran TEXT NOT NULL DEFAULT 'raw',
+  cpu REAL, mem_used INTEGER, mem_total INTEGER,
+  net_rx INTEGER, net_tx INTEGER, disk_used INTEGER, disk_total INTEGER,
+  load1 REAL, io_r INTEGER, io_w INTEGER, procs INTEGER,
+  PRIMARY KEY(gran, ts)
+);
 """
 
 MAX_DEPLOY_LOG = 256 * 1024  # 单条部署日志上限，防止失控增长
@@ -127,7 +158,18 @@ def migrate() -> None:
                 """
             )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_deployments_app ON deployments(app_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit(id)")
+        # audit.id 是 INTEGER PRIMARY KEY，本身就是 rowid：`ORDER BY id DESC LIMIT n` 走的是
+        # B-tree 反向遍历，再建一个 (id) 索引只会拖慢写入。全仓没有按 created_at 过滤审计的
+        # 查询（保留策略 database.py 也是按 id 删），所以这里只留 (username, id) 这个真被用的。
+        conn.execute("DROP INDEX IF EXISTS idx_audit_created")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit(username, id)")
+        # deployments 的 running 查询是应用列表每 15 秒都要做的，用**部分索引**只装 running
+        # 那几行，比全量 (app_id,status) 小一个数量级。
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_deployments_running ON deployments(app_id) WHERE status='running'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_backups_enabled ON backups(enabled, id)")
+        # 告警历史只按时间倒序翻页，metrics 只按 (gran, ts) 区间取窗口——两个都是覆盖查询的入口。
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts_log(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_open ON alerts_log(acked, ts)")
         conn.commit()
 
 
@@ -148,7 +190,7 @@ def execute(sql: str, params=()):
         return cur.lastrowid
 
 
-def get_setting(key: str) -> str | None:
+def _read_setting(key: str) -> str | None:
     row = query_one("SELECT value FROM settings WHERE key=?", (key,))
     return row["value"] if row and row["value"] is not None else None
 
@@ -158,14 +200,43 @@ def set_setting(key: str, value) -> None:
         "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, "" if value is None else str(value)),
     )
+    with _lock:
+        _auth_cache.pop(key, None)
+
+
+# 认证路径（每个 /api 请求都要验 token）读的这几个 key 走进程内缓存。
+# 以前每请求两次带全局锁的 SELECT，仪表盘 3 秒轮询把它放大成常驻开销；
+# 这些行只有本进程写（backup_runner 从不碰 settings 表），且 set_setting 精确失效，
+# 所以不存在读到跨进程陈旧值的路径。缓存与 DB 共用同一把可重入锁——两把锁会因
+# jwt_secret（先缓存锁后 DB 锁）与 set_setting（先 DB 锁后缓存锁）反序而死锁。
+_AUTH_KEYS = ("jwt_secret", "token_epoch")
+_auth_cache: dict[str, str | None] = {}
+
+
+def _auth_key(key: str) -> bool:
+    return key in _AUTH_KEYS or key.startswith("token_epoch:")
+
+
+def get_setting(key: str) -> str | None:
+    if not _auth_key(key):
+        return _read_setting(key)
+    with _lock:
+        if key in _auth_cache:
+            return _auth_cache[key]
+        val = _read_setting(key)
+        _auth_cache[key] = val
+        return val
 
 
 def jwt_secret() -> str:
-    s = get_setting("jwt_secret")
-    if not s:
-        s = secrets.token_hex(32)
-        set_setting("jwt_secret", s)
-    return s
+    # 生成也在锁内：并发首次调用若各自生成再各自写库，先写那个签发的 token
+    # 会被后写入的密钥判为无效，用户表现为「刚登录就掉线」。
+    with _lock:
+        s = get_setting("jwt_secret")
+        if not s:
+            s = secrets.token_hex(32)
+            set_setting("jwt_secret", s)
+        return s
 
 
 def new_epoch() -> str:
@@ -234,6 +305,31 @@ def prune_deployments(keep_per_app: int = 20) -> int:
         )
         conn.commit()
         return cur.rowcount or 0
+
+
+def prune_alerts(days: int = 30, keep: int = 2000) -> int:
+    """告警历史按时间过期，但未确认的告警一律留着（清了就等于把待办藏起来）。"""
+    with _lock:
+        cur = conn.execute(
+            "DELETE FROM alerts_log WHERE acked=0 AND id NOT IN ("
+            "  SELECT id FROM alerts_log WHERE acked=0 ORDER BY id DESC LIMIT ?)",
+            (keep,),
+        )
+        cur2 = conn.execute(
+            "DELETE FROM alerts_log WHERE acked=1 AND ts < datetime('now', ?)",
+            (f"-{int(days)} days",),
+        )
+        conn.commit()
+        return (cur.rowcount or 0) + (cur2.rowcount or 0)
+
+
+def prune_metrics(raw_seconds: int = 86400, hour_seconds: int = 7 * 86400) -> int:
+    with _lock:
+        now = int(time.time())
+        a = conn.execute("DELETE FROM metrics WHERE gran='raw' AND ts < ?", (now - raw_seconds,))
+        b = conn.execute("DELETE FROM metrics WHERE gran='hour' AND ts < ?", (now - hour_seconds,))
+        conn.commit()
+        return (a.rowcount or 0) + (b.rowcount or 0)
 
 
 def db_path() -> str:

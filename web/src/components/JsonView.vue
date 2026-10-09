@@ -67,7 +67,7 @@ const bracket = computed(() => (Array.isArray(props.value) ? '[' : '{'));
 </template>
 
 <style scoped>
-.jv { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-xs); line-height: 1.7; }
+.jv { font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.7; }
 .jv-line { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
 .jv-caret {
   border: 0; background: none; padding: 0 2px; cursor: pointer; color: var(--cp-text-mute);

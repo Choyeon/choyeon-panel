@@ -182,7 +182,7 @@ onBeforeUnmount(() => {
       </template>
     </PageHeader>
 
-    <div class="term-wrap">
+    <div class="term-wrap cp-tbl">
       <div class="term-bar">
         <span class="tdot" aria-hidden="true" style="background: var(--cp-err)"></span>
         <span class="tdot" aria-hidden="true" style="background: var(--cp-warn)"></span>
@@ -195,7 +195,8 @@ onBeforeUnmount(() => {
       <div class="term-cmd">
         <NInput
           v-model:value="cmd"
-          placeholder="命令输入框：粘贴/输入命令后回车提交到终端（↑ ↓ 翻历史，中文与多行内容不会乱码）"
+          placeholder="粘贴或输入命令，回车提交（↑ ↓ 翻历史）"
+          title="粘贴/输入命令后回车提交到终端，中文与多行内容不会乱码"
           :input-props="{ class: 'mono', 'aria-label': '终端命令输入框' }"
           @keyup.enter="submitCmd"
           @keydown.up.prevent="histMove(-1)"
@@ -234,7 +235,8 @@ onBeforeUnmount(() => {
 }
 .tdot { width: 11px; height: 11px; border-radius: 50%; margin-right: var(--space-2); display: inline-block; }
 .term-host {
-  height: calc(100vh - 322px);
+  /* 外壳用 .cp-tbl 算好的 --table-h，这里再扣掉标题栏（36）与命令输入行（58）+ 边框 */
+  height: calc(var(--table-h) - 96px);
   min-height: 280px;
   padding: var(--space-3) var(--space-2) var(--space-3) var(--space-3);
 }
@@ -242,8 +244,5 @@ onBeforeUnmount(() => {
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--cp-border);
   background: var(--cp-bg-1);
-}
-@media (max-width: 640px) {
-  .term-host { height: calc(100vh - 350px); min-height: 240px; }
 }
 </style>

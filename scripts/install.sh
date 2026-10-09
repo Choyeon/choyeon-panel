@@ -126,6 +126,18 @@ else
         "    access_log /var/log/nginx/choyeon-panel.access.log;" \
         "    error_log  /var/log/nginx/choyeon-panel.error.log warn;" \
         "    location ^~ /.well-known/acme-challenge/ { root /var/www/html; }" \
+        "    location ~ ^/api/(files/download|terminal|system/services/[^/]+/logs|apps/[0-9]+/logs)$ {" \
+        "        access_log off;" \
+        "        proxy_pass http://127.0.0.1:$PORT;" \
+        "        proxy_set_header Host \$host;" \
+        "        proxy_set_header X-Real-IP \$remote_addr;" \
+        "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" \
+        "        proxy_set_header X-Forwarded-Proto \$scheme;" \
+        '        proxy_set_header Connection "upgrade";' \
+        "        proxy_http_version 1.1;" \
+        "        proxy_buffering off;" \
+        "        proxy_read_timeout 24h;" \
+        "    }" \
         "    location / {" \
         "        proxy_pass http://127.0.0.1:$PORT;" \
         "        proxy_set_header Host \$host;" \

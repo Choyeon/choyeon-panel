@@ -1,4 +1,5 @@
 import gzip
+import errno
 import os
 import re
 import shutil
@@ -25,6 +26,14 @@ PYTHON_BIN = _VENV_PY if os.path.exists(_VENV_PY) else sys.executable
 # 与 backups.kind 的 CHECK 约束保持一致（database.py 建表 + 迁移都按这份）
 KINDS = ("pg", "app", "sqlite")
 
+# 手工上传产物时各类型接受的扩展名，必须与 _restoreable 一一对齐：
+# 传了恢复不了的文件只会躺在备份目录里占名额，前端只能把按钮置灰。
+_UPLOAD_SUFFIXES = {
+    "pg": (".dump.gz",),
+    "sqlite": (".sqlite.gz",),
+    "app": (".tar.gz", ".tgz"),
+}
+
 
 def _unit_base(bid: int) -> str:
     return f"panel-backup-{bid}"
@@ -39,48 +48,53 @@ def _unit_dir() -> str:
     return config.UNIT_DIR
 
 
-def _target_missing(b: dict) -> bool:
+def _target_missing(b: dict, app_ids: set, app_names: set) -> bool:
     """app / sqlite 类备份的目标必须还在 apps 表里。
 
     应用被删除后备份行不会跟着走，timer 每晚跑一次 backup_runner 就 SystemExit 一次，
     而面板上这条任务依旧显示"已启用"——只有翻 journalctl 才发现备份早就不产出了。
     """
-    if b["kind"] == "app":
-        return not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (b["target"],))
-    if b["kind"] == "sqlite":
-        t = str(b["target"] or "")
-        if t.isdigit():
-            return not dbm.query_one("SELECT 1 FROM apps WHERE id=?", (int(t),))
-        return not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (t,))
-    return False
+    if b["kind"] not in ("app", "sqlite"):
+        return False
+    t = str(b["target"] or "")
+    if b["kind"] == "sqlite" and t.isdigit():
+        return int(t) not in app_ids
+    return t not in app_names
 
 
 def list_backups() -> list:
     rows = dbm.query("SELECT * FROM backups ORDER BY id")
+    # 目标存在性一次取回集合，取代每行 1-2 条 SELECT（备份任务多时列表就是 N 次查询）
+    apps = dbm.query("SELECT id, name FROM apps")
+    app_ids = {r["id"] for r in apps}
+    app_names = {r["name"] for r in apps}
+    listing = []
+    if os.path.isdir(BACKUP_DIR):
+        try:
+            listing = sorted(os.listdir(BACKUP_DIR))
+        except OSError:
+            listing = []
     out = []
     for b in rows:
         b["dir"] = BACKUP_DIR
-        b["target_missing"] = _target_missing(b)
-        if os.path.isdir(BACKUP_DIR):
-            files = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith(f"bk{b['id']}-"))
-            files = list(reversed(files))[:30]
-            entries = []
-            for f in files:
-                try:
-                    st = os.stat(f"{BACKUP_DIR}/{f}")
-                    entries.append({
-                        "name": f,
-                        "size": st.st_size,
-                        "mtime": iso_ms(st.st_mtime),
-                        # 面板数据目录的备份（bk0-/panel-）与 .sql.gz 走不了自动恢复，
-                        # 前端据此把"恢复"按钮置灰，而不是让人点了才知道不行。
-                        "restoreable": _restoreable(b["kind"], f),
-                    })
-                except OSError:
-                    continue
-            b["files"] = entries
-        else:
-            b["files"] = []
+        b["target_missing"] = _target_missing(b, app_ids, app_names)
+        prefix = f"bk{b['id']}-"
+        files = list(reversed([f for f in listing if f.startswith(prefix)]))[:30]
+        entries = []
+        for f in files:
+            try:
+                st = os.stat(f"{BACKUP_DIR}/{f}")
+                entries.append({
+                    "name": f,
+                    "size": st.st_size,
+                    "mtime": iso_ms(st.st_mtime),
+                    # 面板数据目录的备份（bk0-/panel-）与 .sql.gz 走不了自动恢复，
+                    # 前端据此把"恢复"按钮置灰，而不是让人点了才知道不行。
+                    "restoreable": _restoreable(b["kind"], f),
+                })
+            except OSError:
+                continue
+        b["files"] = entries
         out.append(b)
     return out
 
@@ -335,6 +349,45 @@ async def delete_backup(bid: int):
     dbm.execute("DELETE FROM backups WHERE id=?", (bid,))
 
 
+def save_upload(bid: int, filename: str, data: bytes, overwrite: bool = False) -> dict:
+    """把外部产物（从另一台机器拷来的 dump）登记进某个备份任务名下。
+
+    文件名必须补上 `bk<id>-` 前缀：恢复与删除都靠这个前缀判断归属（见 _backup_file_path），
+    原样保存用户上传的名字会让文件躺在目录里却点不动恢复按钮。
+    """
+    job = dbm.query_one("SELECT id, kind, target FROM backups WHERE id=?", (bid,))
+    if not job:
+        raise RuntimeError("备份任务不存在")
+    suffixes = _UPLOAD_SUFFIXES.get(job["kind"]) or ()
+    if not suffixes:
+        raise RuntimeError(f"不支持给 {job['kind']} 类任务上传产物")
+    base = os.path.basename(str(filename or "")).strip()
+    if not base or base.startswith(".") or base in (".", ".."):
+        raise RuntimeError("文件名不合法")
+    name = base if base.startswith(f"bk{bid}-") else f"bk{bid}-manual-{base}"
+    if not name.endswith(suffixes):
+        raise RuntimeError(f"{job['kind']} 类备份文件名要以 {'、'.join(suffixes)} 结尾")
+    if len(data) > config.MAX_UPLOAD_BYTES:
+        raise RuntimeError(f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB，请走服务器拷贝")
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    dest = os.path.join(BACKUP_DIR, name)
+    existed = os.path.lexists(dest)
+    if os.path.islink(dest) and not overwrite:
+        raise RuntimeError("目标是符号链接，拒绝覆盖")
+    if existed and not overwrite:
+        raise RuntimeError(f"同名文件已存在：{name}")
+    # 与 files_service.write_text 同一套理由：检查与写入之间换一个链接就能把内容写到目录外
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o640)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise RuntimeError("目标是符号链接，为避免写到别处已拒绝") from None
+        raise RuntimeError(f"写入失败：{e.strerror or e}") from e
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return {"name": name, "size": len(data), "overwrote": existed}
+
+
 async def delete_file(bid: int, filename: str) -> dict:
     """只删一个备份产物，不动任务、不动 timer。
 
@@ -359,7 +412,7 @@ def _restoreable(kind: str, name: str) -> bool:
     if kind == "sqlite":
         return name.endswith(".sqlite.gz")
     if kind == "app":
-        return name.endswith(".tar.gz")
+        return name.endswith((".tar.gz", ".tgz"))
     if kind == "pg":
         return name.endswith(".dump.gz")
     return False

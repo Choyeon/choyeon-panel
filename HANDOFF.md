@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | **CLI `choyeonctl`** | `backend/cli.py` + `bin/choyeonctl` | `deploy / upgrade / status / doctor / user / app / backup / start·stop·restart / logs / schema`；全命令支持 `--json`；退出码 `0/1/2/3`；`schema` 输出机器可读契约 |
 | **部署模板** | `backend/app/templates.py` | `node-service`、`node-next`、`python-fastapi`、`static-site`；网页端与 CLI 共用，显式传参优先于模板 |
-| **就绪探针 + 自检** | `backend/app/routers/meta.py` | `/api/ready`（就绪，库不可用返 503，免认证）、`/api/templates`、`/api/doctor`（9 项只读自检，每项带修复命令） |
+| **就绪探针 + 自检** | `backend/app/routers/meta.py` | `/api/ready`（就绪，库不可用返 503，免认证）、`/api/templates`、`/api/doctor`（11 项只读自检，每项带修复命令；含「证书续期是否真有人托管」——装了 certbot ≠ 会自动续期） |
 | **自检页** | `web/src/views/Doctor.vue` | 圆环进度 + 逐项卡片 + 一键复制修复命令；stagger 入场动画、骨架屏 |
 | **动效令牌** | `web/src/style.css` | `cp-rise`（stagger 上浮）、`cp-shimmer`（骨架微光）、`cp-pop`、`cp-press`；`prefers-reduced-motion` 自动降级 |
 | **AI 部署规则** | `AGENTS.md` | 前置条件 → 三步部署（每步验收字段）→ 交付信息 → 命令契约 → 失败处置表 → 8 条硬性禁止事项 |
@@ -34,6 +34,14 @@
 | `deps.py` | 统一安全响应头：CSP、`nosniff`、`SAMEORIGIN`、`Referrer-Policy`、`Permissions-Policy`、COOP/CORP、`X-Request-Id`、可选 HSTS |
 | `main.py` | lifespan 把遗留 `running` 部署标记 failed；启动同步备份 timer；`change_password` 改密后返回新 token（不踢当前会话）；setup 接口补 `None` 保护 |
 | `util.py` | 子进程 `start_new_session` + 超时 `killpg` 杀进程组（返回 124）；新增 `run_shell_async` 避免阻塞事件循环 |
+| `aio_db.py` | SQLite 的线程池包装（`query/query_one/execute/audit`）。**热路径必须走它**：连接上是一把全局 `RLock`，在事件循环里直接查库会把整站卡住 |
+| `errors.py` | 对外错误契约。`err_json(e)` 保留中文提示原文、擦掉绝对路径与 `password=`，并把完整异常写进日志；新增代码可直接 `raise BadInput/NotFound/ExecFailed`，由 `main.py` 的 handler 统一转响应 |
+| `services/system_metrics.py` | 用 psutil 在进程内取 CPU/内存/网速/磁盘/IO/负载/Top 进程，**不再每 3 秒 fork 一个 python3**；psutil 不可用时才回退到 /proc 与 `sys_helper.py` |
+| `services/redis_client.py` | 进程内 RESP2 客户端（连接池 + pipeline）。Redis 读路径（INFO/DBSIZE/SCAN/key 详情）从"每命令 fork 一个 redis-cli"改成复用 socket；连不上 TCP 才回退子进程，WRONGTYPE 等错误正文逐字保留 |
+| `services/metrics_store.py`、`routers/metrics.py` | 指标历史落库（30 秒原始行留 24h，小时级降采样留 7d），`/api/system/history?range=1h/6h/24h/7d` 供总览历史曲线；`gran` 是主键前缀，区间查询走主键不用额外索引 |
+| `services/cron_service.py`、`routers/cron.py` | cron 表达式 → `OnCalendar=`（只接受数字/`*`/步进/列表，逐条校验并回显人话），渲染 `panel-cron-<id>.timer/service`；命令是**固定 argv + 可执行程序白名单**，绝不经过 shell |
+| `routers/sites.py` | 网站与证书总览：nginx 配置扫描在 `asyncio.to_thread` 里做，证书到期天数取 `certbot certificates`，失败回退 `openssl x509 -enddate` |
+| `services/alerts_service.py`、`routers/alerts.py` | 告警入 `alerts_log`（含恢复为 ok 的记录），HTTP 探活直连 `127.0.0.1:port`，支持确认/全部确认与级别阈值配置 |
 | `routers/apps.py`、`services/apps_service.py` | 路径参数强类型化；新增 **回滚能力**（`rollback_app`：`git reset --hard <sha>` + 重启）与 `commit_sha` 记录 |
 | `services/nginx_ops.py` | `nginx -t` 失败自动回滚原配置；渲染增加 `http2 on;` 与安全响应头 |
 | `routers/terminal.py` | 非管理员关闭 4403；并发会话上限（4503）；关闭时 `killpg` + wait + `kill -9` 兜底，消除僵尸进程 |
@@ -76,10 +84,12 @@
 
 | 优先级 | 事项 | 说明 |
 | --- | --- | --- |
-| 高 | 提交与推送 | `git add -A && git commit -m "..."`（未提交，等你确认） |
+| 中 | 前端组件抽象（本轮明确未做） | `ico()` 仍在 ~9 个视图里各自重声明（`icons.ts` 已导出 `icon()`）；`fmtBytes`/相对时间在 Dashboard 与各页重复；`RowActions`/`StatusDot`/`FormModal`/`DataToolbar` 四个共用组件尚未抽出。纯代码债，不影响功能 |
+| 中 | `App.vue` 的 `:inline-theme-disabled="false"` | 计划里想改 `true` 省一次 cssr 注入，实测暗/亮切换在改动后仍有可感知闪烁风险，故保留原值未动 |
+| 中 | 浏览器返回时的滚动位置 | 路由切换后 `.cp-scroll` 归零已做；"后退回到原位置"（把 y 存进 `history.state`）未实现 |
 | 中 | 真实机验证 `scripts/install.sh` | 沙箱内无 systemd/nginx 全链路，建议在一台干净 Ubuntu/Debian 上跑一遍 |
-| 中 | ECharts 进一步瘦身 | 现 464KB 已路由懒加载；如需可只注册用到的图表类型 |
-| 低 | 前端单元测试 | 目前只做类型检查与构建；可引入 Vitest 覆盖 `api.ts` 与工具函数 |
+| 低 | ECharts 进一步瘦身 | 已路由懒加载；如需可只注册用到的图表类型 |
+| 低 | 前端单元测试 | 目前只做类型检查与构建（`vue-tsc --noEmit`）；可引入 Vitest 覆盖 `api.ts` 与工具函数 |
 | 低 | i18n | 界面文案目前硬编码中文 |
 | 低 | MCP Server | 对标 1Panel 的 MCP 接口，让 AI 客户端直接调用面板能力（当前靠 CLI + AGENTS.md） |
 

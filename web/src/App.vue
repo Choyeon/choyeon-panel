@@ -1,12 +1,28 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, defineComponent, nextTick, onMounted, onScopeDispose, ref } from 'vue';
 import {
-  NConfigProvider, NMessageProvider, NDialogProvider, NNotificationProvider,
-  zhCN, dateZhCN, darkTheme,
+  NConfigProvider, NMessageProvider, NDialogProvider, NNotificationProvider, NLoadingBarProvider,
+  useLoadingBar, zhCN, dateZhCN, darkTheme,
 } from 'naive-ui';
 import { darkOverrides, lightOverrides } from './theme';
 import { revealThemeSwitch, type ThemeOrigin } from './themeReveal';
+import { bindLoadingBar } from './composables/useAppProgress';
 import Shell from './Shell.vue';
+
+/**
+ * 进度条只在 provider 作用域内可取（useLoadingBar），而计数器的唯一持有者是
+ * composables/useAppProgress（api.ts 直接调用，不需要 inject）。这个空渲染的
+ * 组件只负责在挂载时把自己交给它、卸载时收回。
+ */
+const LoadingBarBridge = defineComponent({
+  name: 'LoadingBarBridge',
+  setup() {
+    const bar = useLoadingBar();
+    bindLoadingBar({ start: () => bar.start(), finish: () => bar.finish(), error: () => bar.error() });
+    onScopeDispose(() => bindLoadingBar(null));
+    return () => null;
+  },
+});
 
 type Mode = 'dark' | 'light';
 const STORE_KEY = 'cp_theme';
@@ -54,9 +70,12 @@ defineExpose({ setMode, mode });
   >
     <NMessageProvider :duration="3000" :max="3" placement="top">
       <NNotificationProvider :max="3" placement="bottom-right">
-        <NDialogProvider>
-          <Shell :theme-mode="mode" @update:theme-mode="setMode" />
-        </NDialogProvider>
+        <NLoadingBarProvider :delay="180" :duration="240" placement="top">
+          <LoadingBarBridge />
+          <NDialogProvider>
+            <Shell :theme-mode="mode" @update:theme-mode="setMode" />
+          </NDialogProvider>
+        </NLoadingBarProvider>
       </NNotificationProvider>
     </NMessageProvider>
   </NConfigProvider>

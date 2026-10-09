@@ -272,8 +272,8 @@ class TestCredentialRedaction(unittest.IsolatedAsyncioTestCase):
         )
         app_id = res if isinstance(res, int) else res.lastrowid
         self.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (app_id,))
-        with mock.patch.object(apps_service.systemd_ops, "is_active",
-                               lambda *_: asyncio.sleep(0, False)), \
+        with mock.patch.object(apps_service.systemd_ops, "unit_states",
+                               lambda *_: asyncio.sleep(0, {})), \
              mock.patch.object(apps_service.nginx_ops, "domains_by_port", lambda: {}):
             viewer = await apps_router.apps_list(_req(role="viewer"))
             admin = await apps_router.apps_list(_req(role="admin"))
@@ -783,13 +783,17 @@ class TestDropdownActionsWired(unittest.TestCase):
 
     def test_every_dropdown_listens_for_select(self):
         missing = []
+        # `@select="fn"` 与 `:on-select="fn"` 都算接上：naive-ui 的 Dropdown.mjs 里
+        # onSelect 是声明过的 prop，并在选中时 `if (onSelect) call(onSelect, key, node)`，
+        # 所以两种写法等价；漏掉后一种会把已经能用的菜单判成坏的。
+        wired = re.compile(r"(@|:|v-on:)on?[-_]?select", re.I)
         for f in sorted(self.WEB_SRC.rglob("*.vue")):
             text = f.read_text(encoding="utf-8")
             for tag in re.finditer(r"<NDropdown\b[^>]*>", text, re.S):
-                if "@select" not in tag.group(0):
+                if not wired.search(tag.group(0)):
                     line = text[: tag.start()].count("\n") + 1
                     missing.append(f"{f.relative_to(self.WEB_SRC.parent)}:{line}")
-        self.assertEqual(missing, [], f"以下 NDropdown 没有 @select，菜单项点了不会有任何动作：{missing}")
+        self.assertEqual(missing, [], f"以下 NDropdown 没有 select 处理函数，菜单项点了不会有任何动作：{missing}")
 
     def test_option_lists_do_not_carry_onClick(self):
         # 只查传给 NDropdown 的那类选项字面量：`{ label: '…', key: '…', onClick: … }`
@@ -799,6 +803,59 @@ class TestDropdownActionsWired(unittest.TestCase):
                 line = m.string[: m.start()].count("\n") + 1
                 bad.append(f"{f.relative_to(self.WEB_SRC.parent)}:{line}")
         self.assertEqual(bad, [], f"下拉选项上的 onClick 不生效，请改用 NDropdown @select：{bad}")
+
+
+class TestScryptOffLoop(unittest.IsolatedAsyncioTestCase):
+    """口令哈希必须既不出现在事件循环上、也不无限并行。
+
+    两个方向都真坏过：
+    - 直接在 async 里算 scrypt：两三人同时登录把整站轮询拖死；
+    - 无脑扔线程池：每次 scrypt 要 32MB 临时内存，实测 6 并发把 cgroup 顶到 108MB。
+    """
+
+    async def test_capped_concurrency_and_free_loop(self):
+        import time
+
+        from app import security as sec
+
+        inflight = []
+        peak = []
+
+        def slow_hash(pw):
+            inflight.append(1)
+            peak.append(len(inflight))
+            time.sleep(0.02)
+            inflight.pop()
+            return f"fake:{pw}"
+
+        ticks = []
+
+        async def ticker(stop):
+            prev = time.perf_counter()
+            while not stop.is_set():
+                await asyncio.sleep(0.005)
+                now = time.perf_counter()
+                ticks.append(now - prev)
+                prev = now
+
+        stop = asyncio.Event()
+        tick_task = asyncio.create_task(ticker(stop))
+        with mock.patch.object(sec, "hash_pass", slow_hash):
+            await asyncio.gather(*(sec.hash_pass_async(f"pw-{i}") for i in range(8)))
+        stop.set()
+        await tick_task
+
+        self.assertLessEqual(max(peak), sec._SCRYPT_CONCURRENCY, "scrypt 并发没压住，内存会被顶飞")
+        # 事件循环最大间隔不该被 8 次哈希拉长（阈值远大于 5ms 调度抖动，小于一次哈希）
+        self.assertLess(max(ticks), 0.02, "哈希仍在事件循环上跑")
+
+    def test_sync_helpers_still_available(self):
+        # CLI（choyeonctl user create）是同步进程，走的是 hash_pass/check_pass
+        from app import security as sec
+
+        stored = sec.hash_pass("abcdefghijkl")
+        self.assertTrue(sec.check_pass("abcdefghijkl", stored))
+        self.assertFalse(sec.check_pass("abcabcdefghijk", stored))
 
 
 if __name__ == "__main__":

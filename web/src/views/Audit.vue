@@ -1,31 +1,37 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, h } from 'vue';
-import { NCard, NSpace, NDataTable, NInput, NSelect, NIcon, NTag, NText, useMessage } from 'naive-ui';
+import { computed, ref, watch, h } from 'vue';
+import { NCard, NDataTable, NInput, NSelect, NIcon, NTag, NText, useMessage } from 'naive-ui';
 import { NButton } from '../ui';
 import { api } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
+import { useCachedFetch } from '../composables/useCachedFetch';
+import { useTableHeight } from '../composables/useTableHeight';
+import { fmtDateTime } from '../composables/useFormat';
 
 const msg = useMessage();
-const rows = ref<any[]>([]);
-const loading = ref(false);
 const kw = ref('');
 const limit = ref(200);
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+// 审计只由面板写操作追加，20s 内再次进这一页直接画上一次的结果，
+// 不再出现「整表空白 + 转圈」；点刷新才是强制回源。
+const { data, error, loading, busy, refresh } = useCachedFetch<any[]>({
+  key: () => `audit:${limit.value}`,
+  loader: () => api.audit(limit.value),
+  maxAge: 20000,
+});
 
-async function load() {
-  loading.value = true;
-  try {
-    rows.value = await api.audit(limit.value);
-  } catch (e: any) {
-    msg.error(e.message);
-  } finally {
-    loading.value = false;
-  }
+// 原实现是 onMounted(load) 里 msg.error(e.message)；错误经 error ref 出来，提示口径不变
+watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+// 接口只认 limit（没有 offset/page），服务端还把它 clamp 在 500，
+// 所以做不了真分页；500 行改用虚拟滚动，DOM 里只保留可见范围的行。
+const rows = computed<any[]>(() => data.value ?? []);
+const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
+
+function reload() {
+  return refresh().catch(() => undefined);
 }
 
 const ACTION_TYPE: [RegExp, 'success' | 'error' | 'warning' | 'default'][] = [
@@ -45,7 +51,7 @@ const filtered = computed(() => {
 });
 
 const cols: any[] = [
-  { title: '时间 (UTC)', key: 'created_at', width: 165, render: (r: any) => h('span', { class: 'mono-dim' }, r.created_at) },
+  { title: '时间 (UTC)', key: 'created_at', width: 165, render: (r: any) => h('span', { class: 'mono-dim' }, fmtDateTime(r.created_at)) },
   {
     title: '用户', key: 'username', width: 150,
     render: (r: any) =>
@@ -60,8 +66,6 @@ const cols: any[] = [
   { title: '操作', key: 'action', width: 190, render: (r: any) => h(NTag, { size: 'tiny', bordered: false, type: actionType(r.action) }, () => r.action) },
   { title: '详情', key: 'detail', minWidth: 220, ellipsis: { tooltip: true }, render: (r: any) => h('span', { class: 'mono-dim' }, r.detail || '—') },
 ];
-
-onMounted(load);
 </script>
 
 <template>
@@ -72,11 +76,11 @@ onMounted(load);
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
         <NSelect
-          :value="limit" size="small" style="width: 110px" aria-label="加载条数"
+          :value="limit" size="small" style="width: 126px" aria-label="加载条数"
           :options="[{ label: '最近 100 条', value: 100 }, { label: '最近 200 条', value: 200 }, { label: '最近 500 条', value: 500 }]"
-          @update:value="(v: number) => { limit = v; load(); }"
+          @update:value="(v: number) => { limit = v; }"
         />
-        <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
+        <NButton size="small" tertiary :loading="busy" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
       </template>
     </PageHeader>
 
@@ -85,8 +89,10 @@ onMounted(load);
         共 {{ filtered.length }} 条{{ kw ? `（已过滤，加载 ${rows.length} 条）` : '' }}。审计按保留策略自动裁剪，仅管理员可见。
       </NText>
       <NDataTable
+        ref="tableAnchor"
         size="small" :bordered="false" :loading="loading" :scroll-x="800"
-        :max-height="'calc(100vh - 330px)'" :columns="cols" :data="filtered"
+        :max-height="tableH" :min-row-height="40" virtual-scroll :pagination="false"
+        :columns="cols" :data="filtered"
         :row-key="(r: any) => r.id"
       >
         <template #empty><EmptyBox text="暂无操作记录" /></template>

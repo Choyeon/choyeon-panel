@@ -272,21 +272,24 @@ async function delRow() {
 </template>
 
 <style scoped>
+/* 抽屉标题（表名/新增行）在 nowrap 的 NSpace 里，长表名会被挤出 header-extra 的按钮区：
+   给它收缩 + ellipsis，两个标签固定不塌。 */
+.dr-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .ro { display: flex; flex-direction: column; gap: 2px; }
 .ro-row {
   display: flex; flex-direction: column; gap: 4px; padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--cp-border, rgba(128, 128, 128, 0.14));
+  border-bottom: 1px solid var(--cp-border);
 }
 .ro-label { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.ro-name { font-weight: 600; font-size: var(--fs-sm); color: var(--cp-text); }
-.ro-type { font-size: var(--fs-2xs); color: var(--cp-text-mute); font-family: var(--font-mono, ui-monospace, monospace); }
+.ro-name { font-weight: 600; font-size: var(--fs-sm); color: var(--cp-text); min-width: 0; overflow-wrap: anywhere; }
+.ro-type { font-size: var(--fs-2xs); color: var(--cp-text-mute); font-family: var(--font-mono); }
 .ro-value { min-width: 0; }
-.ro-val { font-size: var(--fs-sm); color: var(--cp-text); word-break: break-all; }
+.ro-val { font-size: var(--fs-sm); color: var(--cp-text); word-break: break-all; overflow-wrap: anywhere; }
 .ro-wide {
-  display: block; font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-xs);
+  display: block; font-family: var(--font-mono); font-size: var(--fs-xs);
   white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto;
-  padding: var(--space-2); border-radius: var(--radius-md, 8px);
-  background: var(--cp-bg-soft, rgba(128, 128, 128, 0.07));
+  padding: var(--space-2); border-radius: var(--radius-md);
+  background: var(--cp-bg-soft);
 }
 .ro-null, .fm-skip { font-size: var(--fs-xs); font-style: italic; color: var(--cp-text-mute); }
 .fm { display: flex; flex-direction: column; gap: var(--space-3); }

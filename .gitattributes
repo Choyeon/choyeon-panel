@@ -1,0 +1,9 @@
+# 本地在 Windows 上编辑、经 tar 同步到 Linux 服务器：CRLF 会让 shell 脚本直接报
+# "$'\r': command not found"（choyeonctl source scripts/common.sh 即挂），所以全仓锁 LF。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

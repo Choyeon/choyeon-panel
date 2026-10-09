@@ -71,16 +71,19 @@ systemctl daemon-reload && systemctl enable --now choyeon-panel
 | --- | --- |
 | 应用管理 | Git 拉取 → 安装依赖 → systemd 托管部署 Node/Python 应用；环境变量、自定义启动命令、unit 模板、**一键回滚到上一次成功部署** |
 | 一键模板 | 建应用时选预设（`node-service` / `node-next` / `python-fastapi` / `static-site`），自动填运行时、安装与启动命令、端口 |
-| **安全自检** | 网页「安全自检」页与 `choyeonctl doctor`：监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI 等只读检查，每项给可复制的修复命令 |
+| **安全自检** | 网页「安全自检」页与 `choyeonctl doctor`：监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI、**证书续期是否真有人托管**共 11 项只读检查，每项给可复制的修复命令 |
 | Nginx 集成 | 按域名/端口生成反代配置，开关 WebSocket 升级、请求体大小、重定向；`nginx -t` 校验后热加载，**校验失败自动回滚原文件** |
-| SSL | certbot 签发/续期，到期天数告警 |
-| 系统监控 | CPU/内存/磁盘/网速实时曲线；systemd 服务启停；journalctl 实时日志（SSE） |
-| 数据库 | PostgreSQL 库/角色管理 + SQL 控制台；Redis INFO 面板 |
-| 备份 | pg_dump / 目录打包，daily/weekly 调度、保留份数 |
-| 文件管理 | 白名单根目录内浏览/编辑/上传/下载/重命名/删除，带体积上限 |
+| SSL | certbot 签发/续期，到期天数告警；证书清单与「最早到期 N 天」在总览可见 |
+| 系统监控 | psutil 进程内采集（无 fork）：CPU/内存/网速实时曲线 + **1h/6h/24h/7d 历史曲线**（磁盘、负载、磁盘 IO）、Top 进程；systemd 服务启停；journalctl 实时日志（SSE）与关键词检索 |
+| 数据库 | PostgreSQL 库/角色管理 + SQL 控制台 + **表/行数据浏览（可编辑）**；Redis 键浏览器（string/hash/list/set/zset，含 TTL 与内存），读路径走进程内 RESP 客户端，不 fork redis-cli |
+| 备份 | pg_dump / 目录打包 / SQLite 在线备份，daily/weekly 调度由 **systemd timer** 托管（列表直接显示下次触发时间），支持在线恢复、上传与下载备份文件 |
+| 网站与证书 | 域名 × 应用 × 端口的反代总览（HTTPS/跳转/WebSocket 开关与配置文件名），证书清单含剩余天数与最早到期提醒，一键套用/移除 vhost、手动续期 |
+| 日志中心 | 系统日志按 unit/时间/级别/正则关键词检索（journalctl 固定 argv），应用与面板日志尾读，命中高亮 |
+| 文件管理 | 白名单根目录内浏览/编辑/**多文件上传**/下载/打包下载/解压/重命名/删除，带体积上限；上传按字节落盘，解压拒绝越界路径与符号链接 |
 | Web 终端 | pty + xterm.js，仅管理员，带并发会话上限 |
-| 用户与审计 | admin/viewer 两级（viewer 只读），全量操作审计日志 |
-| 告警 | 磁盘水位、SSL 到期、服务掉线 → Telegram / Webhook |
+| 用户与审计 | admin/viewer 两级（viewer 只读），全量操作审计日志（自动裁剪与脱敏） |
+| 告警 | 磁盘水位、SSL 到期、服务掉线、CPU/内存/负载阈值、**应用 HTTP 探活** → Telegram / Webhook；告警入库可追溯、可确认 |
+| 定时任务 | cron 表达式在面板里登记（渲染成 systemd timer），命令走固定 argv 白名单，可立即执行并留下末段日志 |
 
 ---
 

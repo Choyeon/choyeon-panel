@@ -6,6 +6,7 @@ import shutil
 import time
 from pathlib import Path
 
+from .. import aio_db
 from .. import config
 from .. import database as dbm
 from ..util import (
@@ -159,33 +160,37 @@ async def detect_port(unit: str):
         main = 0
     if main <= 0:
         return None
+    return await _port_for_pid(main, await _listen_lines())
 
-    def _tree() -> set:
-        pids = {main}
-        queue = [main]
-        while queue:
-            p = queue.pop(0)
-            try:
-                for t in os.listdir(f"/proc/{p}/task"):
+
+def _pid_tree(main: int) -> set:
+    pids = {main}
+    queue = [main]
+    while queue:
+        p = queue.pop(0)
+        try:
+            for t in os.listdir(f"/proc/{p}/task"):
+                try:
+                    kids = Path(f"/proc/{p}/task/{t}/children").read_text().split()
+                except OSError:
+                    continue
+                for k in kids:
                     try:
-                        kids = Path(f"/proc/{p}/task/{t}/children").read_text().split()
-                    except OSError:
+                        kid = int(k)
+                    except ValueError:
                         continue
-                    for k in kids:
-                        try:
-                            kid = int(k)
-                        except ValueError:
-                            continue
-                        if kid and kid not in pids:
-                            pids.add(kid)
-                            queue.append(kid)
-            except OSError:
-                pass
-        return pids
+                    if kid and kid not in pids:
+                        pids.add(kid)
+                        queue.append(kid)
+        except OSError:
+            pass
+    return pids
 
-    pids = await asyncio.to_thread(_tree)
+
+async def _port_for_pid(main: int, lines: list) -> int | None:
+    pids = await asyncio.to_thread(_pid_tree, main)
     ports = set()
-    for line in await _listen_lines():
+    for line in lines:
         pm = re.search(r"pid=(\d+)", line)
         if not pm or int(pm.group(1)) not in pids:
             continue
@@ -198,17 +203,24 @@ async def detect_port(unit: str):
 
 
 async def list_apps() -> list:
-    rows = dbm.query("SELECT * FROM apps ORDER BY name")
-    dom_map = nginx_ops.domains_by_port()
+    rows = await aio_db.query("SELECT * FROM apps ORDER BY name")
+    units = [unit_name(a) for a in rows]
+    # 一次 systemctl show 取代每 app 两次子进程；一次 deployments 查询取代 N 次
+    states, dom_map, deploying = await asyncio.gather(
+        systemd_ops.unit_states(units),
+        asyncio.to_thread(nginx_ops.domains_by_port),
+        aio_db.query("SELECT app_id FROM deployments WHERE status='running'"),
+    )
+    busy = {r["app_id"] for r in deploying}
 
     async def _one(a: dict):
-        running = await systemd_ops.is_active(unit_name(a))
-        detected = await detect_port(unit_name(a)) if a["port"] is None and running else None
+        st = states.get(unit_name(a)) or {"active": False, "mainPid": 0}
+        running = st["active"]
+        detected = None
+        if a["port"] is None and running and st["mainPid"] > 0:
+            detected = await _port_for_pid(st["mainPid"], await _listen_lines())
         port = a["port"] if a["port"] is not None else detected
         domains = [a["domain"]] if a["domain"] else (dom_map.get(port, []) if port is not None else [])
-        deploying = bool(
-            dbm.query_one("SELECT id FROM deployments WHERE app_id=? AND status='running'", (a["id"],))
-        )
         out = {k: v for k, v in a.items() if k != "env"}
         out.update(
             running=running,
@@ -216,7 +228,7 @@ async def list_apps() -> list:
             port=port,
             portAuto=a["port"] is None and detected is not None,
             domains=domains,
-            deploying=deploying,
+            deploying=a["id"] in busy,
         )
         return out
 

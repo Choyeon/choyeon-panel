@@ -17,6 +17,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .. import config
+from .. import aio_db
 from .. import database as dbm
 from ..services import systemd_ops
 from ..templates import list_templates
@@ -147,7 +148,12 @@ async def _check_backup() -> dict:
         return {
             "status": "warn",
             "detail": f"最近一次备份已是 {days:.0f} 天前（共 {count} 份）",
-            "fix": f"配置定时备份：crontab 加 0 4 * * * {config.BASE}/scripts/backup.sh",
+            # 面板自带 systemd timer（备份页给任务开启定时即渲染 panel-backup-<id>.timer，
+            # 且备份列表会显示下次触发时间）；crontab + backup.sh 是脱离面板的备选，
+            # 不能再当成首选建议——那是"备份"功能还不存在时写下的话。
+            "fix": "在「备份」页给备份任务开启定时（systemd timer），"
+                   f"或先手动补一份：choyeonctl backup run；"
+                   f"也可 crontab 加 0 4 * * * {config.BASE}/scripts/backup.sh",
         }
     return {"status": "pass", "detail": f"共 {count} 份备份，最近 {days:.1f} 天前", "fix": ""}
 
@@ -202,6 +208,33 @@ async def _check_cli() -> dict:
     return {"status": "pass", "detail": "choyeonctl 已链接到 PATH", "fix": ""}
 
 
+async def _check_cert_renewal() -> dict:
+    """证书装了不代表会自动续期——面板 UI 曾写着"每日定时任务已托管"，而机器上并没有 timer。
+
+    这里只回答一个问题：有没有人（系统 timer / cron / 面板自建 timer）会按期续期。
+    查不到就如实 warn，不猜、也不算 pass。
+    """
+    if not shutil.which("certbot"):
+        return {"status": "pass", "detail": "未安装 certbot，无续期需求", "fix": ""}
+    live = Path("/etc/letsencrypt/live")
+    certs = sorted(live.glob("*/fullchain.pem")) if live.is_dir() else []
+    if not certs:
+        return {"status": "pass", "detail": "certbot 已装但暂无证书", "fix": ""}
+    names = ", ".join(p.parent.name for p in certs[:5])
+    for unit in ("certbot.timer", "certbot-renew.timer", "choyeon-certbot.timer"):
+        r = await run("systemctl", ["is-enabled", unit], timeout=10)
+        if (r["out"] or "").strip() == "enabled":
+            return {"status": "pass", "detail": f"{len(certs)} 张证书由 {unit} 续期（{names}）", "fix": ""}
+    cron = await run("crontab", ["-l"], timeout=10)
+    if "certbot" in (cron["out"] or ""):
+        return {"status": "pass", "detail": f"{len(certs)} 张证书由 crontab 续期（{names}）", "fix": ""}
+    return {
+        "status": "warn",
+        "detail": f"{len(certs)} 张证书没有任何自动续期入口，到期会直接失效",
+        "fix": "choyeonctl app ... 或 systemctl enable --now certbot.timer",
+    }
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -213,6 +246,7 @@ _CHECKS = [
     ("disk", "磁盘余量", _check_disk),
     ("permissions", "文件权限", _check_permissions),
     ("cli", "全局 CLI", _check_cli),
+    ("cert-renew", "证书续期", _check_cert_renewal),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
@@ -283,7 +317,7 @@ async def doctor_fix(req: Request):
             return JSONResponse(status_code=400, content={"error": f"前端构建失败：{r['out'][-400:]}"})
         msg = "前端已重新构建"
     else:  # service：重启自己——响应必须赶在进程退出前发出去
-        dbm.audit(req.state.cp_sub, "doctor:fix", fid)
+        await aio_db.audit(req.state.cp_sub, "doctor:fix", fid)
 
         async def _restart():
             # 延迟 1s：先把 JSON 响应发完再 kill，否则客户端只会收到连接中断
@@ -295,7 +329,7 @@ async def doctor_fix(req: Request):
         asyncio.create_task(_restart())
         return {"ok": True, "restarting": True, "message": "面板服务正在重启，约 5 秒后自动恢复"}
 
-    dbm.audit(req.state.cp_sub, "doctor:fix", fid)
+    await aio_db.audit(req.state.cp_sub, "doctor:fix", fid)
     check = next((fn for cid, _, fn in _CHECKS if cid == fid), None)
     item = None
     if check:

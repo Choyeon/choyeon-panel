@@ -59,7 +59,7 @@ const memberCols = computed<any[]>(() => {
   if (type.value === 'hash') {
     cols.push({ title: 'field', key: 'field', width: 140, ellipsis: { tooltip: true }, render: (r: any) => hText(r.field) });
     cols.push({
-      title: 'value', key: 'value', ellipsis: { tooltip: true },
+      title: 'value', key: 'value', minWidth: 240, ellipsis: { tooltip: true },
       render: (r: any) =>
         editField.value === r.field
           ? h(NInput, {
@@ -103,7 +103,8 @@ const memberCols = computed<any[]>(() => {
 });
 
 function hText(s: string) {
-  return h('span', { class: 'mono-dim', style: 'word-break:break-all' }, s.slice(0, 500));
+  // 单元格里是 nowrap + ellipsis（列宽所限），全文靠 ellipsis:{tooltip:true} 的浮层看
+  return h('span', { class: 'mono-dim', title: s.slice(0, 500) }, s.slice(0, 500));
 }
 
 watch(() => props.detail?.key, () => {
@@ -194,7 +195,7 @@ async function saveTtl() {
 
       <template v-else-if="isMember">
         <NDataTable
-          size="small" :bordered="false" :max-height="300" :scroll-x="340"
+          size="small" :bordered="false" :max-height="300" :scroll-x="520"
           :columns="memberCols" :data="memberData" :row-key="(r: any) => `${r.i ?? ''}|${r.field ?? ''}|${r.v ?? ''}`"
         >
           <template #empty><EmptyBox text="这个 key 里还没有条目" /></template>
@@ -244,12 +245,17 @@ async function saveTtl() {
 </template>
 
 <style scoped>
+/* 卡片标题就是 redis key 本体，动辄上百字符：naive 的 header 不收缩时会把末字裁半截，
+   这里给标题 ellipsis（完整 key 在 title 浮层里），并让右侧标签区固定不被挤扁。 */
+.rk-detail :deep(.n-card-header) { flex-wrap: wrap; }
+.rk-detail :deep(.n-card-header__main) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rk-detail :deep(.n-card-header__extra) { flex-shrink: 0; max-width: 100%; }
 .mono-pre {
   margin: 0; padding: var(--space-3); max-height: 300px; overflow: auto;
-  background: var(--cp-bg-soft, rgba(128, 128, 128, 0.08));
-  border: 1px solid var(--cp-border, rgba(128, 128, 128, 0.18));
-  border-radius: var(--radius-md, 8px);
-  font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-xs);
+  background: var(--cp-bg-soft);
+  border: 1px solid var(--cp-border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono); font-size: var(--fs-xs);
   white-space: pre-wrap; word-break: break-all; color: var(--cp-text);
 }
 .ttl-row {

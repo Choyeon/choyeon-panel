@@ -1,5 +1,10 @@
+"""主机指标采样：全部在面板进程内完成。
+
+旧实现每 3 秒轮询就 fork 一个 python3 跑 sys_helper.py（进程创建 + 解释器启动是面板
+最大的固定 CPU 开销），而它的兜底路径又在事件循环上同步读 /proc。现在 psutil 优先、
+/proc 兜底，两者都放线程里执行；顺带把每核占用、磁盘 IO、进程数一起采出来给仪表盘用。
+"""
 import asyncio
-import json
 import os
 import platform
 import shutil
@@ -7,43 +12,37 @@ import socket
 import time
 from collections import deque
 
-from .. import config
+try:  # 缺 psutil 也不能让监控整页挂掉，兜底走 /proc
+    import psutil
+except ImportError:  # pragma: no cover
+    psutil = None
 
 _history: deque = deque(maxlen=240)
-_prev_cpu = None  # (idle, total)
-_prev_net = None  # (rx, tx)
-_prev_at = 0.0
-_python_healthy = platform.system() == "Linux"
+_prev: dict | None = None  # 上一次的累计量，用于算差值（占用率/网速/IO 速率）
+_proc_objs: dict[int, object] = {}
+_top_cache: tuple[float, list] = (0.0, [])
+_TOP_TTL = 3.0
 
 
-async def _python_snapshot() -> dict:
-    proc = await asyncio.create_subprocess_exec(
-        config.PYTHON, str(config.SYS_HELPER), "snapshot",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-    )
-    out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-    j = json.loads(out)
-    if j.get("error"):
-        raise RuntimeError(j["error"])
-    return {
-        "idle": j["idle"], "total": j["total"],
-        "memTotal": j["mem"]["total"], "memAvailable": j["mem"]["available"],
-        "rx": j["net"]["rx"], "tx": j["net"]["tx"],
-        "diskTotal": j["disk"]["total"], "diskUsed": j["disk"]["used"],
-        "load": j["load"], "uptime": j["uptime"], "source": "python",
-    }
-
-
-def _read(path):
+def _read(path: str) -> str:
     with open(path, encoding="utf-8", errors="replace") as f:
         return f.read()
 
 
-def _node_snapshot() -> dict:
-    parts = _read("/proc/stat").split("\n")[0].split()[1:]
-    nums = [int(x) for x in parts]
-    idle_total = nums[3] + (nums[4] if len(nums) > 4 else 0)
+def _proc_raw() -> dict:
+    """无 psutil 时的 /proc 兜底（仍在线程里跑，不碰事件循环）。"""
+    stat_lines = [ln for ln in _read("/proc/stat").split("\n") if ln]
+    nums = [int(x) for x in stat_lines[0].split()[1:]]
+    idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
     total = sum(nums)
+    per_core = []
+    for ln in stat_lines[1:]:
+        if not ln.startswith("cpu"):
+            break
+        n = [int(x) for x in ln.split()[1:]]
+        if not n:
+            continue
+        per_core.append((n[3] + (n[4] if len(n) > 4 else 0), sum(n)))
     mem = {}
     for line in _read("/proc/meminfo").split("\n"):
         if ":" in line:
@@ -60,68 +59,120 @@ def _node_snapshot() -> dict:
         rx += f[0]
         tx += f[8]
     du = shutil.disk_usage("/")
-    load = [round(x, 2) for x in os.getloadavg()]
-    with open("/proc/uptime") as uptime_file:
-        uptime = float(uptime_file.read().split()[0])
+    io_r = io_w = 0
+    for line in _read("/proc/diskstats").split("\n"):
+        p = line.split()
+        if len(p) < 10 or not p[2].startswith(("sd", "nvme", "vd", "xvd", "mmcblk")):
+            continue
+        if "." in p[2] or p[2][-1].isdigit():  # 只要整盘，不要分区
+            continue
+        io_r += int(p[6]) * 512
+        io_w += int(p[10]) * 512
+    try:
+        load = [round(x, 2) for x in os.getloadavg()]
+    except OSError:
+        load = [0.0, 0.0, 0.0]
+    procs = sum(1 for d in os.listdir("/proc") if d.isdigit())
     return {
-        "idle": idle_total, "total": total,
+        "idle": idle, "total": total, "perCore": per_core,
         "memTotal": mem.get("MemTotal", 0), "memAvailable": mem.get("MemAvailable", 0),
         "rx": rx, "tx": tx,
         "diskTotal": du.total, "diskUsed": du.used,
-        "load": load, "uptime": uptime, "source": "node",
+        "ioRead": io_r, "ioWrite": io_w,
+        "load": load, "uptime": _uptime(), "procs": procs, "source": "proc",
     }
 
 
-async def _raw() -> dict:
-    global _python_healthy
-    if _python_healthy:
-        try:
-            return await _python_snapshot()
-        except Exception:  # noqa: BLE001
-            _python_healthy = False
-    return _node_snapshot()
+def _psutil_raw() -> dict:
+    ct = psutil.cpu_times()
+    idle = ct.idle + getattr(ct, "iowait", 0.0)
+    total = sum(getattr(ct, k) for k in ct._fields)
+    per_core = [
+        (c.idle + getattr(c, "iowait", 0.0), sum(getattr(c, k) for k in c._fields))
+        for c in psutil.cpu_times(percpu=True)
+    ]
+    vm = psutil.virtual_memory()
+    rx = tx = 0
+    for name, st in psutil.net_io_counters(pernic=True).items():
+        if name != "lo":
+            rx += st.bytes_recv
+            tx += st.bytes_sent
+    du = shutil.disk_usage("/")
+    dio = psutil.disk_io_counters()
+    try:
+        load = [round(x, 2) for x in psutil.getloadavg()]
+    except (AttributeError, OSError):
+        load = [0.0, 0.0, 0.0]
+    return {
+        "idle": idle, "total": total, "perCore": per_core,
+        "memTotal": vm.total, "memAvailable": vm.available,
+        "rx": rx, "tx": tx,
+        "diskTotal": du.total, "diskUsed": du.used,
+        "ioRead": getattr(dio, "read_bytes", 0) if dio else 0,
+        "ioWrite": getattr(dio, "write_bytes", 0) if dio else 0,
+        "load": load, "uptime": time.time() - psutil.boot_time(),
+        "procs": len(psutil.pids()), "source": "psutil",
+    }
+
+
+def _rate(cur, prev, dt_s: float) -> int:
+    """累计字节 → 每秒字节数。计数器回绕（重启/换网卡）时按 0 处理而不是报负数。"""
+    if dt_s <= 0:
+        return 0
+    delta = cur - prev
+    return max(0, round(delta / dt_s)) if delta >= 0 else 0
 
 
 async def snapshot() -> dict:
-    global _prev_cpu, _prev_net, _prev_at
+    global _prev
     now_ms = int(time.time() * 1000)
-    raw = await _raw()
+    raw = await asyncio.to_thread(_psutil_raw if psutil else _proc_raw)
 
     cpu = 0.0
-    if _prev_cpu:
-        dt = raw["total"] - _prev_cpu[1]
-        di = raw["idle"] - _prev_cpu[0]
+    per_core = [0.0] * len(raw["perCore"])
+    net_rx = net_tx = io_r = io_w = 0
+    if _prev:
+        dt = raw["total"] - _prev["total"]
+        di = raw["idle"] - _prev["idle"]
         if dt > 0:
-            cpu = round((1 - di / dt) * 1000) / 10
-    _prev_cpu = (raw["idle"], raw["total"])
-
-    net_rx = net_tx = 0
-    if _prev_net and _prev_at:
-        dt = (now_ms - _prev_at) / 1000
-        if dt > 0:
-            net_rx = max(0, round((raw["rx"] - _prev_net[0]) / dt))
-            net_tx = max(0, round((raw["tx"] - _prev_net[1]) / dt))
-    _prev_net = (raw["rx"], raw["tx"])
-    _prev_at = now_ms
+            cpu = max(0.0, round((1 - di / dt) * 1000) / 10)
+        prev_core = _prev["perCore"]
+        for i, (idl, tot) in enumerate(raw["perCore"]):
+            if i < len(prev_core):
+                pdt = tot - prev_core[i][1]
+                if pdt > 0:
+                    per_core[i] = max(0.0, round((1 - (idl - prev_core[i][0]) / pdt) * 1000) / 10)
+        elapsed = (now_ms - _prev["at"]) / 1000
+        net_rx = _rate(raw["rx"], _prev["rx"], elapsed)
+        net_tx = _rate(raw["tx"], _prev["tx"], elapsed)
+        io_r = _rate(raw["ioRead"], _prev["ioRead"], elapsed)
+        io_w = _rate(raw["ioWrite"], _prev["ioWrite"], elapsed)
+    _prev = {
+        "idle": raw["idle"], "total": raw["total"], "perCore": raw["perCore"],
+        "rx": raw["rx"], "tx": raw["tx"], "ioRead": raw["ioRead"], "ioWrite": raw["ioWrite"],
+        "at": now_ms,
+    }
 
     mem_used = raw["memTotal"] - raw["memAvailable"]
-    _history.append({
-        "t": now_ms,
-        "cpu": cpu,
-        "memUsed": mem_used,
-        "memTotal": raw["memTotal"],
-        "netRx": net_rx,
-        "netTx": net_tx,
-    })
+    point = {
+        "t": now_ms, "cpu": cpu, "memUsed": mem_used, "memTotal": raw["memTotal"],
+        "netRx": net_rx, "netTx": net_tx,
+    }
+    _history.append(point)
 
     return {
         "cpu": cpu,
+        "cpuPerCore": per_core,
+        "cpuCores": len(per_core) or (os.cpu_count() or 0),
         "memUsed": mem_used,
         "memTotal": raw["memTotal"],
         "diskUsed": raw["diskUsed"],
         "diskTotal": raw["diskTotal"],
         "netRx": net_rx,
         "netTx": net_tx,
+        "ioRead": io_r,
+        "ioWrite": io_w,
+        "procs": raw["procs"],
         "load": raw["load"],
         "uptime": raw["uptime"],
         "source": raw["source"],
@@ -129,42 +180,45 @@ async def snapshot() -> dict:
     }
 
 
+def _os_pretty() -> str | None:
+    try:
+        for line in _read("/etc/os-release").split("\n"):
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip('"')
+    except OSError:
+        return None
+    return None
+
+
+def _cpu_model() -> str:
+    try:
+        for line in _read("/proc/cpuinfo").split("\n"):
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "unknown"
+
+
 async def info() -> dict:
-    base = {
+    """主机信息。原来为拿一个 PRETTY_NAME 也要 fork 解释器，这里改成一次文件读取。"""
+    core = await asyncio.to_thread(lambda: (_os_pretty(), _cpu_model(), _uptime()))
+    pretty, model, up = core
+    return {
         "hostname": socket.gethostname(),
         "platform": f"{platform.system()} {platform.release()}",
         "arch": platform.machine(),
-        "cpuModel": "unknown",
-        "cpuCores": os.cpu_count() or 0,
+        "cpuModel": model,
+        "cpuCores": (psutil.cpu_count(logical=True) if psutil else os.cpu_count()) or 0,
         "node": f"python {platform.python_version()}",
-        "uptime": _uptime(),
-        "prettyName": None,
+        "uptime": up,
+        "prettyName": pretty,
     }
-    if platform.system() == "Linux":
-        try:
-            for line in _read("/proc/cpuinfo").split("\n"):
-                if line.startswith("model name"):
-                    base["cpuModel"] = line.split(":", 1)[1].strip()
-                    break
-        except OSError:
-            pass
-    if _python_healthy:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                config.PYTHON, str(config.SYS_HELPER), "info",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-            j = json.loads(out)
-            if not j.get("error"):
-                base.update(j)
-                base["prettyName"] = j.get("prettyName")
-        except Exception:  # noqa: BLE001
-            pass
-    return base
 
 
 def _uptime() -> float:
+    if psutil:
+        return time.time() - psutil.boot_time()
     try:
         with open("/proc/uptime") as f:
             return float(f.read().split()[0])
@@ -174,3 +228,55 @@ def _uptime() -> float:
 
 def ps_boot_time() -> float:
     return float(os.stat("/proc/1" if os.path.exists("/proc/1") else "/").st_mtime)
+
+
+def _top_sync(limit: int) -> list:
+    """按 CPU、内存排序的前 N 个进程。
+
+    psutil 的 cpu_percent 是**两次调用之间的增量**，所以要跨请求留住 Process 对象；
+    第一次见到某个 pid 时它是 0，这是 psutil 的固有语义，不是 bug。
+    """
+    if psutil is None:
+        return []
+    ncpu = os.cpu_count() or 1
+    rows = []
+    alive = set()
+    for proc in psutil.process_iter():
+        try:
+            pid = proc.pid
+            alive.add(pid)
+            obj = _proc_objs.get(pid)
+            if obj is not None and obj.create_time() == proc.create_time():
+                cpu = obj.cpu_percent(None)
+            else:
+                _proc_objs[pid] = proc
+                cpu = proc.cpu_percent(None)
+            info = proc.as_dict(attrs=["name", "username", "memory_info", "num_threads"])
+            rss = info.get("memory_info")
+            rows.append({
+                "pid": pid,
+                "name": (info.get("name") or "")[:48],
+                "user": (info.get("username") or "")[:24],
+                # psutil 的单进程 CPU 可以超过 100%（多线程），除以核数才好和整机占用对齐
+                "cpu": round(cpu / ncpu, 1),
+                "memMb": round(rss.rss / 1048576, 1) if rss else 0.0,
+                "threads": info.get("num_threads") or 0,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    for pid in list(_proc_objs):
+        if pid not in alive:
+            del _proc_objs[pid]
+    rows.sort(key=lambda r: (r["cpu"], r["memMb"]), reverse=True)
+    return rows[:limit]
+
+
+async def top_processes(limit: int = 12) -> list:
+    """带 TTL 缓存：进程表是整表扫描，多个标签页同时轮询时不该各扫一遍。"""
+    global _top_cache
+    now = time.time()
+    if _top_cache[1] and now - _top_cache[0] < _TOP_TTL:
+        return _top_cache[1][:limit]
+    rows = await asyncio.to_thread(_top_sync, max(1, min(limit, 50)))
+    _top_cache = (now, rows)
+    return rows[:limit]

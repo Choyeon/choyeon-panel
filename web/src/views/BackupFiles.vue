@@ -140,6 +140,63 @@ async function delChecked() {
   load();
 }
 
+// ---------- 上传产物 ----------
+const showUpload = ref(false);
+const uploadJob = ref<number | null>(null);
+const uploadFile = ref<File | null>(null);
+const uploadOverwrite = ref(false);
+const uploading = ref(false);
+const uploadJobs = ref<{ label: string; value: number }[]>([]);
+
+async function openUpload() {
+  uploadJob.value = null;
+  uploadFile.value = null;
+  uploadOverwrite.value = false;
+  showUpload.value = true;
+  try {
+    const jobs = await api.backups();
+    // 没有产物的任务在 jobOpts（由文件列表推导）里根本不出现，所以上传要用完整任务表
+    uploadJobs.value = (jobs || []).map((j: any) => ({
+      label: `#${j.id} ${j.target} · ${KIND_LABEL[j.kind] || j.kind}`,
+      value: j.id,
+    }));
+  } catch (e: any) {
+    msg.error(e.message);
+  }
+}
+function pickUploadFile() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.onchange = () => { uploadFile.value = inp.files?.[0] || null; };
+  inp.click();
+}
+async function doUpload() {
+  const f = uploadFile.value;
+  const job = uploadJob.value;
+  if (!f || !job) return;
+  uploading.value = true;
+  try {
+    const form = new FormData();
+    form.append('file', f, f.name);
+    if (uploadOverwrite.value) form.append('overwrite', '1');
+    // 走原始 fetch：api.ts 的 req() 固定带 JSON Content-Type，会让服务端解析不到 multipart 边界
+    const res = await fetch(apiUrl(`/backups/${job}/upload`), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getToken()}` },
+      body: form,
+    });
+    const data = await res.json().catch(() => ({}) as any);
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    msg.success(`已登记 ${data.name}（${fmt(data.size)}）`);
+    showUpload.value = false;
+    load();
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    uploading.value = false;
+  }
+}
+
 // ---------- 恢复 ----------
 const showRestore = ref(false);
 const restoreTarget = ref<any>(null);
@@ -182,8 +239,10 @@ const columns: any[] = [
           h(NIcon, { component: icons[KIND_ICON[f.kind] || 'DocumentOutline'], size: 17, color: f.job_missing ? 'var(--cp-warn)' : f.kind === 'pg' ? 'var(--cp-brand-soft)' : 'var(--cp-node)' }),
         ]),
         h('div', { class: 'cell-txt' }, [
-          h('span', { class: 'mono', style: 'font-size:var(--fs-sm); color:var(--cp-text)' }, f.name),
-          h('div', { class: 'cell-sub' }, jobLabel(f)),
+          // 备份文件名是长等宽串（库名+时间戳），必须走 .cell-name 的 ellipsis，
+          // 只用 .mono 的话在窄列里被 td 裁成半截、还看不到全名
+          h('span', { class: 'cell-name mono', title: f.name }, f.name),
+          h('div', { class: 'cell-sub', title: jobLabel(f) }, jobLabel(f)),
         ]),
       ]),
   },
@@ -191,7 +250,7 @@ const columns: any[] = [
     title: '类型', key: 'kind', width: 110,
     render: (f: any) => h(NTag, { size: 'small', bordered: false, type: f.job_missing ? 'warning' : 'default' }, () => KIND_LABEL[f.kind] || '未知'),
   },
-  { title: '生成时间', key: 'mtime', width: 190, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim' }, when(f.mtime)) },
+  { title: '生成时间', key: 'mtime', width: 210, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim', title: when(f.mtime) }, when(f.mtime)) },
   { title: '大小', key: 'size', width: 100, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim' }, fmt(f.size)) },
   {
     title: '状态', key: 'state', width: 130,
@@ -210,7 +269,7 @@ const columns: any[] = [
         h(
           NButton,
           href
-            ? { size: 'tiny', tertiary: true, tag: 'a', href, target: '_blank', icon: ico('DownloadOutline', 12) }
+            ? { size: 'tiny', tertiary: true, tag: 'a', href, target: '_blank', rel: 'noopener noreferrer', title: `下载 ${f.name}`, icon: ico('DownloadOutline', 12) }
             : { size: 'tiny', tertiary: true, disabled: true, icon: ico('DownloadOutline', 12), title: isAdmin.value ? '备份目录未知，无法下载' : '仅管理员可下载备份文件' },
           { default: () => '下载' },
         ),
@@ -257,6 +316,7 @@ onMounted(() => {
           逐个删除选中的 {{ checked.length }} 个备份文件？删除后不可找回。
         </NPopconfirm>
         <NButton size="small" tertiary :icon="ico('ArrowBackOutline')" @click="router.push('/backups')">返回备份任务</NButton>
+        <NButton v-if="isAdmin" size="small" tertiary :icon="ico('CloudUploadOutline')" @click="openUpload">上传产物</NButton>
         <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
       </template>
     </PageHeader>
@@ -284,8 +344,9 @@ onMounted(() => {
       size="small"
       :bordered="false"
       :loading="loading"
-      :scroll-x="1180"
-      :max-height="'calc(100vh - 330px)'"
+      :scroll-x="1240"
+      class="cp-tbl tbl-backup-files"
+      :max-height="'var(--table-h)'"
       :row-key="(f: any) => f.name"
     >
       <template #empty><EmptyBox :text="files.length ? '没有匹配当前筛选的备份文件' : '还没有任何备份产物，先到备份任务页立即备份一次'" /></template>
@@ -297,7 +358,7 @@ onMounted(() => {
           {{ RESTORE_WARN[restoreTarget?.kind] || '恢复会用备份内容覆盖当前数据，操作不可撤销。' }}
         </NAlert>
         <NForm label-placement="left" label-width="76" :show-feedback="false">
-          <NFormItem label="文件"><NText class="mono" style="font-size: var(--fs-sm)">{{ restoreTarget?.name }}</NText></NFormItem>
+          <NFormItem label="文件"><NText class="mono cp-break" style="font-size: var(--fs-sm); min-width: 0">{{ restoreTarget?.name }}</NText></NFormItem>
           <NFormItem label="所属任务"><NText style="font-size: var(--fs-sm)">{{ restoreTarget ? jobLabel(restoreTarget) : '' }}</NText></NFormItem>
           <NFormItem label="生成时间"><NText style="font-size: var(--fs-sm)">{{ when(restoreTarget?.mtime) }} · {{ fmt(restoreTarget?.size || 0) }}</NText></NFormItem>
         </NForm>
@@ -316,9 +377,41 @@ onMounted(() => {
         </NSpace>
       </NSpace>
     </NModal>
+
+    <NModal v-model:show="showUpload" preset="card" title="上传备份产物" style="width: 520px; max-width: 94vw">
+      <NSpace vertical :size="12">
+        <NText depth="3" style="font-size: var(--fs-xs)">
+          把在别处生成的产物登记进某个任务名下：服务端会补 bk&lt;任务号&gt;- 前缀，恢复与按名清理才认得它。pg 要 .dump.gz、SQLite 要 .sqlite.gz、应用目录要 .tar.gz/.tgz（其它格式恢复逻辑读不了，传进来也只能干放着，所以服务端会直接拒绝）。
+        </NText>
+        <NForm label-placement="left" label-width="88" :show-feedback="false">
+          <NFormItem label="目标任务">
+            <NSelect v-model:value="uploadJob" :options="uploadJobs" size="small" placeholder="选择备份任务" aria-label="上传到哪个备份任务" />
+          </NFormItem>
+          <NFormItem label="文件">
+            <NSpace :size="8" align="center" style="min-width: 0">
+              <NButton size="small" tertiary :icon="ico('CloudUploadOutline')" @click="pickUploadFile">选择文件</NButton>
+              <NText v-if="uploadFile" class="mono cp-break" style="font-size: var(--fs-xs); min-width: 0">
+                {{ uploadFile.name }} · {{ fmt(uploadFile.size) }}
+              </NText>
+              <NText v-else depth="3" style="font-size: var(--fs-xs)">尚未选择</NText>
+            </NSpace>
+          </NFormItem>
+          <NFormItem label="同名时">
+            <NSpace align="center" :size="6">
+              <NSwitch v-model:value="uploadOverwrite" size="small" aria-label="覆盖同名产物" />
+              <NText depth="3" style="font-size: var(--fs-xs)">覆盖任务目录里的同名产物（原文件不可找回）</NText>
+            </NSpace>
+          </NFormItem>
+        </NForm>
+        <NSpace justify="end" :size="8">
+          <NButton tertiary :disabled="uploading" @click="showUpload = false">取消</NButton>
+          <NButton type="primary" class="cp-press" :loading="uploading" :disabled="!uploadFile || !uploadJob" @click="doUpload">上传</NButton>
+        </NSpace>
+      </NSpace>
+    </NModal>
   </div>
 </template>
 
 <style scoped>
-.mono-pre { margin: 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-xs); white-space: pre-wrap; word-break: break-all; }
+.mono-pre { margin: 0; font-family: var(--font-mono); font-size: var(--fs-xs); white-space: pre-wrap; word-break: break-all; }
 </style>

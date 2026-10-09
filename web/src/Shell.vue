@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NLayout, NLayoutSider, NMenu, NSpace, NText, NModal, NInput, NDrawer, NDrawerContent, NIcon, NDropdown, useMessage,
@@ -29,6 +29,14 @@ const editAvatar = ref('');
 const avatarBusy = ref(false);
 const renewing = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
+
+// .cp-scroll 是常驻容器，不跟着路由重置的话，新页面会继承上一页的滚动位置，
+// 用户看到的是"点进去从半截开始"。
+const scrollEl = ref<HTMLElement | null>(null);
+watch(
+  () => route.fullPath,
+  () => nextTick(() => { if (scrollEl.value) scrollEl.value.scrollTop = 0; }),
+);
 
 const isMobile = ref(false);
 const drawer = ref(false);
@@ -79,8 +87,12 @@ const MENU_ICON: Record<string, string> = {
   '/apps': 'ApplicationsOutline',
   '/services': 'ServerOutline',
   '/db': 'CloudOutline',
+  '/sites': 'GlobeOutline',
   '/backups': 'TimeOutline',
+  '/alerts': 'AlertCircleOutline',
+  '/cron': 'SyncOutline',
   '/logs': 'CodeSlashOutline',
+  '/logsearch': 'DocumentTextOutline',
   '/files': 'FolderOpenOutline',
   '/terminal': 'TerminalOutline',
   '/doctor': 'ShieldCheckmarkOutline',
@@ -90,8 +102,8 @@ const MENU_ICON: Record<string, string> = {
 };
 
 const menuOptions = computed(() => {
-  const keys = ['/dashboard', '/apps', '/services', '/db', '/backups', '/logs'];
-  if (isAdmin.value) keys.push('/users', '/audit', '/files', '/terminal', '/doctor');
+  const keys = ['/dashboard', '/apps', '/services', '/db', '/sites', '/backups', '/alerts', '/logs'];
+  if (isAdmin.value) keys.push('/users', '/audit', '/cron', '/files', '/terminal', '/doctor', '/logsearch');
   keys.push('/settings');
   return keys.map((k) => ({ label: TITLES[k], key: k, icon: ico(MENU_ICON[k], 18) }));
 });
@@ -319,9 +331,11 @@ function toggleTheme(ev: MouseEvent) {
         </NSpace>
       </header>
 
-      <div class="cp-scroll">
+      <div ref="scrollEl" class="cp-scroll">
         <router-view v-slot="{ Component }">
-          <transition name="page" mode="out-in"><component :is="Component" /></transition>
+          <!-- 不用 mode="out-in"：那会让旧页面先播完再进新页面，切页固定多等一拍（约 200ms 空白）。
+               叠层淡出期间旧页面绝对定位，不占高度，新页面立刻接管布局。 -->
+          <transition name="page"><component :is="Component" /></transition>
         </router-view>
       </div>
     </div>
@@ -449,17 +463,30 @@ function toggleTheme(ev: MouseEvent) {
   background: var(--cp-bg-1);
 }
 .cp-scroll {
+  /* 内边距抽成变量：淡出中的旧页面绝对定位时，要用同一个值对齐新页面的起点
+     （绝对定位的 inset:0 落在 padding box 上，直接写 inset:0 会偏移一个 padding）。 */
+  --pad-scroll: var(--space-6);
   flex: 1;
   overflow: auto;
-  padding: var(--space-6);
+  position: relative;
+  padding: var(--pad-scroll);
+}
+/* 切页叠层：旧页面绝对定位后不占高度，新页面立即接管布局，中间没有空窗期。
+   动效本身（opacity/transform）定义在 style.css 的 .page-* 全局块里。 */
+.page-leave-active {
+  position: absolute;
+  top: var(--pad-scroll);
+  left: var(--pad-scroll);
+  right: var(--pad-scroll);
+  pointer-events: none;
 }
 @media (max-width: 900px) {
   .cp-header { padding: 0 var(--space-4); }
-  .cp-scroll { padding: var(--space-5); }
+  .cp-scroll { --pad-scroll: var(--space-5); }
 }
 @media (max-width: 640px) {
   .cp-title { font-size: var(--fs-sm); font-weight: 600; }
-  .cp-scroll { padding: var(--space-4); }
+  .cp-scroll { --pad-scroll: var(--space-4); }
 }
 .cp-title { font-size: var(--fs-xs); letter-spacing: 0.02em; }
 

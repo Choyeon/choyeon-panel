@@ -192,7 +192,8 @@ class TestPgParsing(unittest.TestCase):
             self.assertEqual(self._run(pg_service.list_dbs()), [])
 
     def _fake(self, out):
-        async def fake_psql(sql):
+        # psql_json 会传 (sql, db)，桩函数必须收下第二个参数
+        async def fake_psql(sql, db=None):
             fake_psql.sqls.append(sql)
             return out
         fake_psql.sqls = []
@@ -320,6 +321,14 @@ class TestPgParsing(unittest.TestCase):
 
 # ------------------------------------------------------------------ Redis
 class TestRedisInfo(unittest.TestCase):
+    """redis_info 有两条路线：进程内 RESP（默认，不 fork）与 redis-cli 子进程（回退）。
+    CLI 那几个用例必须先掐断 TCP，否则会真连本机 Redis。"""
+
+    def _no_tcp(self):
+        async def boom(*_a, **_kw):
+            raise pg_service.redis_client.RedisConnectionError("tcp down")
+        return mock.patch.object(pg_service.redis_client, "pipeline", boom)
+
     def _fake_run(self, replies):
         calls = []
 
@@ -333,7 +342,7 @@ class TestRedisInfo(unittest.TestCase):
     def test_noauth_message(self):
         rep = {"INFO": {"code": 0, "out": "NOAUTH Authentication required."}}
         f = self._fake_run(rep)
-        with (mock.patch.object(pg_service, "run", f),
+        with (self._no_tcp(), mock.patch.object(pg_service, "run", f),
               mock.patch.object(pg_service, "redis_password", lambda: None), self.assertRaises(RuntimeError) as cm):
             asyncio.run(pg_service.redis_info())
         self.assertIn("需要密码", str(cm.exception))
@@ -342,7 +351,7 @@ class TestRedisInfo(unittest.TestCase):
         """redis-cli 不存在/连不上：code=127 且输出里没有错误正文时也要报错。"""
         rep = {"INFO": {"code": 127, "out": "[Errno 2] No such file or directory: 'redis-cli'"}}
         f = self._fake_run(rep)
-        with (mock.patch.object(pg_service, "run", f),
+        with (self._no_tcp(), mock.patch.object(pg_service, "run", f),
               mock.patch.object(pg_service, "redis_password", lambda: None), self.assertRaises(RuntimeError)):
             asyncio.run(pg_service.redis_info())
 
@@ -351,7 +360,7 @@ class TestRedisInfo(unittest.TestCase):
         前端会渲染出一个完全没有原因的红色错误框。"""
         rep = {"INFO": {"code": 1, "out": ""}}
         f = self._fake_run(rep)
-        with (mock.patch.object(pg_service, "run", f),
+        with (self._no_tcp(), mock.patch.object(pg_service, "run", f),
               mock.patch.object(pg_service, "redis_password", lambda: None), self.assertRaises(RuntimeError) as cm):
             asyncio.run(pg_service.redis_info())
         self.assertTrue(str(cm.exception).strip(), "错误信息为空")
@@ -364,7 +373,7 @@ class TestRedisInfo(unittest.TestCase):
             "DBSIZE": {"code": 1, "out": "Unrecognized database number"},
         }
         f = self._fake_run(rep)
-        with (mock.patch.object(pg_service, "run", f),
+        with (self._no_tcp(), mock.patch.object(pg_service, "run", f),
               mock.patch.object(pg_service, "redis_password", lambda: None)):
             info = asyncio.run(pg_service.redis_info())
         self.assertIsNone(info["dbsize"], "DBSIZE 失败时不该把错误正文当数字返回")
@@ -377,7 +386,7 @@ class TestRedisInfo(unittest.TestCase):
             "DBSIZE": {"code": 0, "out": "12"},
         }
         f = self._fake_run(rep)
-        with (mock.patch.object(pg_service, "run", f),
+        with (self._no_tcp(), mock.patch.object(pg_service, "run", f),
               mock.patch.object(pg_service, "redis_password", lambda: "s3cret")):
             info = asyncio.run(pg_service.redis_info())
         self.assertEqual(info["info"]["redis_version"], "7.2.4")
@@ -385,6 +394,51 @@ class TestRedisInfo(unittest.TestCase):
         for _cmd, args, kw in f.calls:
             self.assertNotIn("s3cret", args, f"密码泄漏进命令行参数：{args}")
             self.assertEqual(kw["env"]["REDISCLI_AUTH"], "s3cret")
+
+    def test_resp_path_parses_crlf_and_never_forks(self):
+        """默认路线：一次往返拿 INFO+DBSIZE，不碰 run()。
+        INFO 是 bulk string，客户端给回来的是 **bytes**（CRLF 分隔）——早先用 str() 直接
+        拼会把整段当成一行，只剩第一个字段，页面上除版本全是占位符。"""
+        seen = []
+
+        async def fake_pipeline(cmds, **kw):
+            seen.append((cmds, kw))
+            return [b"# Server\r\nredis_version:7.2.4\r\nused_memory:1024\r\n", 12]
+
+        f = self._fake_run({})
+        with (mock.patch.object(pg_service.redis_client, "pipeline", fake_pipeline),
+              mock.patch.object(pg_service, "run", f),
+              mock.patch.object(pg_service, "redis_password", lambda: None)):
+            info = asyncio.run(pg_service.redis_info())
+        self.assertEqual(info["info"]["redis_version"], "7.2.4")
+        self.assertEqual(info["dbsize"], 12)
+        self.assertEqual(seen[0][0], [["INFO"], ["DBSIZE"]])
+        self.assertEqual(len(seen[0][0]), 2, "两条命令必须合并成一次往返")
+        self.assertEqual(f.calls, [], "RESP 可用时不该再 fork redis-cli")
+
+    def test_resp_error_reply_is_not_silently_shown_as_data(self):
+        """WRONGTYPE/NOPERM 这类错误回复：INFO 上抛，DBSIZE 上退化成占位符。"""
+        err = pg_service.redis_client.RedisError("NOPERM", "NOPERM this user has no permissions to run the 'info' command")
+
+        async def fake_pipeline(cmds, **kw):
+            return [err, err]
+
+        with (mock.patch.object(pg_service.redis_client, "pipeline", fake_pipeline),
+              mock.patch.object(pg_service, "redis_password", lambda: None),
+              self.assertRaises(RuntimeError) as cm):
+            asyncio.run(pg_service.redis_info())
+        self.assertIn("NOPERM", str(cm.exception))
+
+    def test_resp_noauth_maps_to_password_hint(self):
+        async def fake_pipeline(cmds, **kw):
+            return [pg_service.redis_client.RedisError("NOAUTH", "NOAUTH Authentication required."), 0]
+
+        with (mock.patch.object(pg_service.redis_client, "pipeline", fake_pipeline),
+              mock.patch.object(pg_service, "redis_password", lambda: None),
+              self.assertRaises(RuntimeError) as cm):
+            asyncio.run(pg_service.redis_info())
+        self.assertIn("需要密码", str(cm.exception))
+
 
 
 if __name__ == "__main__":

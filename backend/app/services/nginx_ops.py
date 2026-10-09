@@ -1,5 +1,7 @@
 import os
 import re
+import threading
+import time
 from contextlib import suppress
 from pathlib import Path
 
@@ -92,6 +94,7 @@ async def apply_vhost(spec: dict):
     reload = await run("systemctl", ["reload", "nginx"])
     if reload["code"] != 0:
         raise RuntimeError(f"nginx reload failed: {reload['out']}")
+    invalidate_domain_cache()
 
 
 async def remove_vhost(name: str):
@@ -101,6 +104,7 @@ async def remove_vhost(name: str):
     check = await run("nginx", ["-t"])
     if check["code"] == 0:
         await run("systemctl", ["reload", "nginx"])
+        invalidate_domain_cache()
 
 
 async def issue_cert(domain: str, email: str | None = None) -> str:
@@ -177,7 +181,7 @@ def find_app_configs(port, domain) -> list:
     return out
 
 
-def domains_by_port() -> dict:
+def _scan_domains_by_port() -> dict:
     mapping: dict[int, list[str]] = {}
     for p, _f in _iter_conf_files():
         try:
@@ -191,6 +195,32 @@ def domains_by_port() -> dict:
                 if n not in arr:
                     arr.append(n)
     return {k: v for k, v in mapping.items() if v}
+
+
+# 应用列表每次刷新都会读端口→域名映射，而它来自全量 nginx 配置扫描（十几个文件 + 正则）。
+# 配置只在面板的几个写路径里变化，所以做 TTL 缓存 + 写完即失效：
+# 失效点漏掉时 10 秒也会自愈，用户不会看到永久过期的域名。
+_DOMAIN_TTL = 10.0
+_domain_cache: tuple[float, dict] | None = None
+_domain_lock = threading.Lock()
+
+
+def invalidate_domain_cache() -> None:
+    global _domain_cache
+    with _domain_lock:
+        _domain_cache = None
+
+
+def domains_by_port() -> dict:
+    global _domain_cache
+    now = time.time()
+    with _domain_lock:
+        if _domain_cache and now - _domain_cache[0] < _DOMAIN_TTL:
+            return _domain_cache[1]
+    data = _scan_domains_by_port()
+    with _domain_lock:
+        _domain_cache = (now, data)
+    return data
 
 
 def _safe_conf_path(p: str) -> str:
@@ -238,6 +268,7 @@ async def save_app_config(path: str, content: str) -> dict:
     reload = await run("systemctl", ["reload", "nginx"])
     if reload["code"] != 0:
         raise RuntimeError(f"nginx reload 失败：{reload['out']}")
+    invalidate_domain_cache()
     return {"ok": True, "file": real}
 
 

@@ -2,9 +2,10 @@ import { createRouter, createWebHashHistory } from 'vue-router';
 import { getToken, getRole, onUnauthorized } from './api';
 
 export const TITLES: Record<string, string> = {
-  '/dashboard': '总览', '/apps': '应用', '/services': '系统服务', '/db': '数据库',
-  '/backups': '备份', '/backups/files': '备份文件', '/files': '文件', '/terminal': '终端', '/doctor': '安全自检',
-  '/users': '用户管理', '/audit': '操作审计', '/logs': '面板日志', '/settings': '设置',
+  '/dashboard': '总览', '/apps': '应用', '/services': '系统服务', '/db': '数据库', '/sites': '网站与证书',
+  '/backups': '备份', '/backups/files': '备份文件', '/alerts': '告警中心', '/cron': '定时任务',
+  '/files': '文件', '/terminal': '终端', '/doctor': '安全自检',
+  '/users': '用户管理', '/audit': '操作审计', '/logs': '面板日志', '/logsearch': '日志中心', '/settings': '设置',
 };
 
 export const router = createRouter({
@@ -17,14 +18,18 @@ export const router = createRouter({
     { path: '/apps/:id', component: () => import('./views/AppDetail.vue'), meta: { title: '应用详情' } },
     { path: '/services', component: () => import('./views/Services.vue') },
     { path: '/db', component: () => import('./views/Databases.vue') },
+    { path: '/sites', component: () => import('./views/Sites.vue') },
     { path: '/backups', component: () => import('./views/Backups.vue') },
     { path: '/backups/files', component: () => import('./views/BackupFiles.vue') },
+    { path: '/alerts', component: () => import('./views/Alerts.vue') },
+    { path: '/cron', component: () => import('./views/CronTasks.vue') },
     { path: '/files', component: () => import('./views/Files.vue') },
     { path: '/terminal', component: () => import('./views/Terminal.vue') },
     { path: '/doctor', component: () => import('./views/Doctor.vue') },
     { path: '/users', component: () => import('./views/Users.vue') },
     { path: '/audit', component: () => import('./views/Audit.vue') },
     { path: '/logs', component: () => import('./views/PanelLogs.vue') },
+    { path: '/logsearch', component: () => import('./views/LogCenter.vue') },
     { path: '/settings', component: () => import('./views/Settings.vue') },
     { path: '/:pathMatch(.*)*', component: () => import('./views/NotFound.vue'), meta: { title: '页面不存在' } },
   ],
@@ -32,7 +37,9 @@ export const router = createRouter({
 
 // 只有管理员能看到/用得上的页面：菜单里已隐藏，但地址栏直达同样要拦，
 // 否则只读账号会停在一个只会报 403 的空页面上。
-const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/users', '/audit'];
+// cron 与 logsearch 的每一个端点（连列表和候选项）在服务端都是 need_admin，
+// 少了这一条，只读账号会停在一片"加载失败"的空表格上。
+const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/users', '/audit', '/cron', '/logsearch'];
 
 router.beforeEach((to) => {
   if (to.path !== '/login' && !getToken()) return '/login';

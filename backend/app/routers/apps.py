@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from .. import aio_db
 from .. import database as dbm
 from ..services import apps_service, nginx_ops, systemd_ops
 from ..templates import apply_template
 from ..util import parse_lines, redact_creds
+from ..errors import err_json
 from .system import log_stream_response
 
 router = APIRouter()
@@ -69,10 +71,10 @@ async def app_create(req: Request):
             return await _create_group(req, comps)
         # 先套用一键部署模板默认值，再走统一的 create_app 校验
         a = apps_service.create_app(body)
-        dbm.audit(req.state.cp_sub, "app:create", a["name"])
+        await aio_db.audit(req.state.cp_sub, "app:create", a["name"])
         return a
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 async def _create_group(req: Request, comps: list):
@@ -86,7 +88,7 @@ async def _create_group(req: Request, comps: list):
             item = dict(c)
             item["parent_id"] = parent["id"]
             created.append(apps_service.create_app(item))
-        dbm.audit(req.state.cp_sub, "app:group-create", parent["name"])
+        await aio_db.audit(req.state.cp_sub, "app:group-create", parent["name"])
         return {"ok": True, "group": parent["id"], "apps": created}
     except Exception as e:  # noqa: BLE001
         # 半途失败要把已建的组件清掉，否则留下没有父的孤儿应用
@@ -95,7 +97,7 @@ async def _create_group(req: Request, comps: list):
                 await apps_service.delete_app(a["id"], False)
             except Exception:  # noqa: BLE001
                 pass
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.delete("/api/apps/{app_id}")
@@ -104,10 +106,10 @@ async def app_delete(app_id: int, req: Request):
         await apps_service.delete_app(app_id, req.query_params.get("purge") == "1")
         # 父被删后子组件解除归属而不是连带删除：它们是各自独立的服务
         dbm.execute("UPDATE apps SET parent_id=NULL WHERE parent_id=?", (app_id,))
-        dbm.audit(req.state.cp_sub, "app:delete", str(app_id))
+        await aio_db.audit(req.state.cp_sub, "app:delete", str(app_id))
         return {"ok": True}
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.patch("/api/apps/{app_id}")
@@ -116,10 +118,10 @@ async def app_update(app_id: int, req: Request):
         old = apps_service.get_app(app_id)
         a = apps_service.update_app(app_id, await _body(req))
         await apps_service.cleanup_renamed(old, a)
-        dbm.audit(req.state.cp_sub, "app:update", a["name"])
+        await aio_db.audit(req.state.cp_sub, "app:update", a["name"])
         return a
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.post("/api/apps/{app_id}/action")
@@ -127,22 +129,22 @@ async def app_action(app_id: int, req: Request):
     verb = (await _body(req)).get("verb", "")
     try:
         result = await apps_service.app_action(app_id, verb)
-        dbm.audit(req.state.cp_sub, f"app:{verb}", str(app_id))
+        await aio_db.audit(req.state.cp_sub, f"app:{verb}", str(app_id))
         # 服务层已经统一返回 {"ok": true, ...}：rollback 带 commit/deployment/from，
         # start/stop/restart 带 active。这里不再重复包装，避免出现 ok 语义两套算法。
         return result
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.post("/api/apps/{app_id}/deploy")
 async def app_deploy(app_id: int, req: Request):
     try:
         dep_id = await apps_service.deploy_app(app_id)
-        dbm.audit(req.state.cp_sub, "app:deploy", str(app_id))
+        await aio_db.audit(req.state.cp_sub, "app:deploy", str(app_id))
         return {"deployment": dep_id}
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.post("/api/apps/{app_id}/sync")
@@ -151,10 +153,10 @@ async def app_sync(app_id: int, req: Request):
         # 同步会动工作区并重启服务，属于写操作（viewer 已被中间件挡在 POST 之外），
         # 失败也要留下记录，所以审计写在服务层返回之后、只记动作与 commit。
         r = await apps_service.sync_app(app_id)
-        dbm.audit(req.state.cp_sub, "app:sync", f"{app_id}({r.get('commit') or '-'})")
+        await aio_db.audit(req.state.cp_sub, "app:sync", f"{app_id}({r.get('commit') or '-'})")
         return r
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.get("/api/apps/{app_id}/deployments")
@@ -182,12 +184,12 @@ async def app_deployment(app_id: int, dep_id: int):
 async def app_ssl(app_id: int, req: Request):
     try:
         out = await apps_service.attach_ssl(app_id, (await _body(req)).get("email"))
-        dbm.audit(req.state.cp_sub, "app:ssl", str(app_id))
+        await aio_db.audit(req.state.cp_sub, "app:ssl", str(app_id))
         return {"ok": True, "log": out}
     except Exception as e:  # noqa: BLE001
         # 与其它 app 路由一致返回 400：certbot 未安装、端口未填、nginx -t 不过
         # 都是用户可修正的配置问题，返 500 时前端只能显示"服务器内部错误"。
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.get("/api/apps/{app_id}/nginx")
@@ -206,10 +208,10 @@ async def app_nginx_save(app_id: int, req: Request):
     body = await _body(req)
     try:
         r = await nginx_ops.save_app_config(body.get("file", ""), body.get("content", ""))
-        dbm.audit(req.state.cp_sub, "app:nginx-save", body.get("file"))
+        await aio_db.audit(req.state.cp_sub, "app:nginx-save", body.get("file"))
         return r
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.post("/api/apps/{app_id}/nginx/quick")
@@ -225,10 +227,10 @@ async def app_nginx_quick(app_id: int, req: Request):
         return JSONResponse(status_code=400, content={"error": "未知的快捷操作类型"})
     try:
         r = await nginx_ops.quick_edit_config(file, kind, body.get("value"))
-        dbm.audit(req.state.cp_sub, f"app:nginx-{kind}", file)
+        await aio_db.audit(req.state.cp_sub, f"app:nginx-{kind}", file)
         return r
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.get("/api/apps/{app_id}/unit")
@@ -236,17 +238,17 @@ async def app_unit_read(app_id: int):
     try:
         return apps_service.read_unit(app_id)
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=404, content={"error": str(e)})
+        return err_json(e, 404)
 
 
 @router.put("/api/apps/{app_id}/unit")
 async def app_unit_save(app_id: int, req: Request):
     try:
         r = await apps_service.save_unit(app_id, (await _body(req)).get("content", ""))
-        dbm.audit(req.state.cp_sub, "app:unit", str(app_id))
+        await aio_db.audit(req.state.cp_sub, "app:unit", str(app_id))
         return r
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.get("/api/apps/{app_id}/proc")
@@ -254,7 +256,7 @@ async def app_proc(app_id: int):
     try:
         return await apps_service.app_proc(app_id)
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.get("/api/apps/{app_id}/logs")

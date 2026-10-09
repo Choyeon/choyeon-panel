@@ -1134,10 +1134,20 @@ class TestFailedUnitParsing(unittest.TestCase):
         async def failing_run(cmd, args, **kw):
             return {"code": 1, "out": "  nginx.service loaded failed failed nginx\n"}
 
+        async def idle_snapshot():
+            # CPU 是"距上一次 snapshot 的差值"，全量跑时上一用例刚压过 CPU，
+            # 这里会读到 100% 并发的告警和被测路径无关。
+            return {"cpu": 1.0, "memUsed": 1.0, "memTotal": 10.0, "load": [0.0, 0.0, 0.0], "cpuCores": 2}
+
+        async def no_probes():
+            return []
+
         with (mock.patch.object(alerts_service, "run", failing_run),
               mock.patch.object(alerts_service, "notify", fake_notify),
               mock.patch.object(alerts_service, "disk_usage_pct", lambda p: 10),
               mock.patch.object(alerts_service, "parse_certbot", lambda o: []),
+              mock.patch.object(alerts_service.system_metrics, "snapshot", idle_snapshot),
+              mock.patch.object(alerts_service, "run_probes", no_probes),
               mock.patch.object(dbm, "get_setting", lambda k: None)):
             asyncio.run(alerts_service.run_checks())
         self.assertEqual(sent, [], "systemctl 失败时不该发任何告警")

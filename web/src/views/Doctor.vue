@@ -161,7 +161,7 @@ onMounted(load);
             <div class="doc-detail">{{ it.detail }}</div>
             <code v-if="it.fix && it.status !== 'pass' && !it.fixable" class="mono-dim doc-cmd">{{ it.fix }}</code>
           </div>
-          <NSpace align="center" :size="8" style="flex-shrink: 0">
+          <div class="doc-act">
             <span class="st" :class="it.status === 'pass' ? 'ok' : it.status === 'warn' ? 'warn' : 'err'">
               <span class="dot" :class="it.status === 'pass' ? 'ok' : it.status === 'warn' ? 'warn' : 'err'"></span>{{ TYPE[it.status].label }}
             </span>
@@ -178,7 +178,7 @@ onMounted(load);
               </template>
               复制修复命令
             </NTooltip>
-          </NSpace>
+          </div>
         </div>
         <EmptyBox v-if="!shown.length" :text="filter === 'all' ? '暂无检查结果' : `没有${filter === 'fail' ? '异常' : '注意'}项，切换筛选查看其他`" />
       </NCard>
@@ -197,10 +197,17 @@ onMounted(load);
   display: flex; align-items: flex-start; gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--cp-border);
+  flex-wrap: wrap;
 }
 .doc-row:last-child { border-bottom: 0; }
 .doc-row:hover { background: var(--cp-hover); }
-.doc-txt { flex: 1; min-width: 0; }
-.doc-detail { color: var(--cp-text-mute); font-size: var(--fs-xs); margin-top: 2px; }
+.doc-txt { flex: 1 1 260px; min-width: 0; }
+/* 右侧动作区：以前是 flex-shrink:0 的一整块，窄屏时把说明文字挤到容器外、
+   状态标签被裁成半截。改成可换行、靠右对齐，空间不足就整块落到下一行。 */
+.doc-act {
+  flex: 0 1 auto; margin-left: auto;
+  display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap;
+}
+.doc-detail { color: var(--cp-text-mute); font-size: var(--fs-xs); margin-top: 2px; overflow-wrap: anywhere; }
 .doc-cmd { display: block; margin-top: var(--space-2); word-break: break-all; }
 </style>

@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .. import database as dbm
+from .. import aio_db
 from ..services import pg_service
+from ..errors import err_json
 
 router = APIRouter()
 
@@ -20,7 +21,7 @@ async def pg_databases():
     try:
         return await pg_service.list_dbs()
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=502, content={"error": str(e)})
+        return err_json(e, 502)
 
 
 @router.get("/api/db/pg/roles")
@@ -28,7 +29,7 @@ async def pg_roles():
     try:
         return await pg_service.list_roles()
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=502, content={"error": str(e)})
+        return err_json(e, 502)
 
 
 @router.post("/api/db/pg/manage")
@@ -51,10 +52,10 @@ async def pg_manage(req: Request):
             await pg_service.grant(name, body.get("db") or "")
         else:
             raise RuntimeError("未知操作")
-        dbm.audit(req.state.cp_sub, f"db:{action}", name)
+        await aio_db.audit(req.state.cp_sub, f"db:{action}", name)
         return {"ok": True}
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.post("/api/db/pg/query")
@@ -63,10 +64,10 @@ async def pg_query(req: Request):
     sql = body.get("sql") or ""
     try:
         out = await pg_service.query_sql(sql)
-        dbm.audit(req.state.cp_sub, "db:sql", sql[:80])
+        await aio_db.audit(req.state.cp_sub, "db:sql", sql[:80])
         return {"result": out}
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.get("/api/db/redis")
@@ -74,7 +75,7 @@ async def redis():
     try:
         return await pg_service.redis_info()
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=502, content={"error": str(e)})
+        return err_json(e, 502)
 
 
 @router.post("/api/db/redis/password")
@@ -84,9 +85,9 @@ async def redis_password(req: Request):
     try:
         r = pg_service.set_redis_password(pw)
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
     # 只记事件不记内容：口令进审计表等于把凭据抄进一份谁都能翻的日志
-    dbm.audit(req.state.cp_sub, "db:redis-password", "已清空" if not pw else "已更新")
+    await aio_db.audit(req.state.cp_sub, "db:redis-password", "已清空" if not pw else "已更新")
     return r
 
 
@@ -97,7 +98,7 @@ async def pg_tables(db: str):
     try:
         return await pg_service.list_tables(db)
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=502, content={"error": str(e)})
+        return err_json(e, 502)
 
 
 @router.get("/api/db/pg/{db}/table")
@@ -111,7 +112,7 @@ async def pg_table(db: str, req: Request):
     try:
         return await pg_service.table_data(db, q.get("schema") or "public", q.get("name") or "", page, size)
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.get("/api/db/redis/keys")
@@ -120,7 +121,7 @@ async def redis_keys(req: Request):
     try:
         return await pg_service.redis_scan(q.get("cursor") or "0", q.get("pattern") or "*", int(q.get("count") or 200))
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.get("/api/db/redis/key")
@@ -128,7 +129,7 @@ async def redis_key_detail(req: Request):
     try:
         return await pg_service.redis_key(req.query_params.get("k") or "")
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.post("/api/db/redis/del")
@@ -140,9 +141,9 @@ async def redis_key_del(req: Request):
     try:
         r = await pg_service.redis_del([str(k) for k in keys])
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
     # 不记录 key 内容：业务 key 名本身可能带敏感信息，只记删了几个
-    dbm.audit(req.state.cp_sub, "db:redis-del", f"{r['deleted']} 个 key")
+    await aio_db.audit(req.state.cp_sub, "db:redis-del", f"{r['deleted']} 个 key")
     return r
 
 
@@ -161,11 +162,11 @@ async def pg_row_write(db: str, req: Request):
     table = str(body.get("table") or "")
     try:
         r = await pg_service.write_row(db, schema, table, action, body.get("key"), body.get("values"))
-        dbm.audit(req.state.cp_sub, f"db:row-{action}", f"{db}.{schema}.{table} ×{r['affected']}")
+        await aio_db.audit(req.state.cp_sub, f"db:row-{action}", f"{db}.{schema}.{table} ×{r['affected']}")
         return r
     except Exception as e:  # noqa: BLE001
-        dbm.audit(req.state.cp_sub, f"db:row-{action}", f"{db}.{schema}.{table}(失败: {str(e)[:120]})")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        await aio_db.audit(req.state.cp_sub, f"db:row-{action}", f"{db}.{schema}.{table}(失败: {str(e)[:120]})")
+        return err_json(e)
 
 
 @router.post("/api/db/redis/set")
@@ -173,10 +174,10 @@ async def redis_key_set(req: Request):
     body = await _body(req)
     try:
         r = await pg_service.redis_set(str(body.get("key") or ""), str(body.get("value") or ""))
-        dbm.audit(req.state.cp_sub, "db:redis-set", f"string key（TTL {'保留' if r['ttl_kept'] else '未变'}）")
+        await aio_db.audit(req.state.cp_sub, "db:redis-set", f"string key（TTL {'保留' if r['ttl_kept'] else '未变'}）")
         return r
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.post("/api/db/redis/member")
@@ -189,10 +190,10 @@ async def redis_key_member(req: Request):
             str(body.get("key") or ""), typ, op,
             str(body.get("value") or ""), str(body.get("field") or ""), str(body.get("score") or ""),
         )
-        dbm.audit(req.state.cp_sub, f"db:redis-{typ}-{op}", f"{str(body.get('key') or '')[:80]}")
+        await aio_db.audit(req.state.cp_sub, f"db:redis-{typ}-{op}", f"{str(body.get('key') or '')[:80]}")
         return r
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)
 
 
 @router.post("/api/db/redis/ttl")
@@ -200,7 +201,7 @@ async def redis_key_ttl(req: Request):
     body = await _body(req)
     try:
         r = await pg_service.redis_ttl(str(body.get("key") or ""), body.get("ttl"))
-        dbm.audit(req.state.cp_sub, "db:redis-ttl", f"{str(body.get('key') or '')[:80]} → {r['ttl']}s")
+        await aio_db.audit(req.state.cp_sub, "db:redis-ttl", f"{str(body.get('key') or '')[:80]} → {r['ttl']}s")
         return r
     except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return err_json(e)

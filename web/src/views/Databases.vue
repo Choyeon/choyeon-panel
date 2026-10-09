@@ -55,7 +55,7 @@ const dbCols: any[] = [
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.CubeOutline, size: 17, color: 'var(--cp-brand-soft)' })]),
-        h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name), h('div', { class: 'cell-sub' }, `owner: ${r.owner}`)]),
+        h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub', title: `owner: ${r.owner}` }, `owner: ${r.owner}`)]),
       ]),
   },
   { title: '大小', key: 'size', width: 96, render: (r: any) => h('span', { class: 'mono-dim' }, r.size) },
@@ -78,7 +78,7 @@ const roleCols: any[] = [
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.KeyOutline, size: 16, color: r.super ? 'var(--cp-warn)' : 'var(--cp-text-mute)' })]),
-        h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name)]),
+        h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name)]),
       ]),
   },
   { title: '登录', key: 'login', width: 88, render: (r: any) => h('span', { class: 'st ' + (r.login ? 'ok' : 'idle') }, [h('span', { class: 'dot ' + (r.login ? 'ok' : 'idle') }), r.login ? '可登录' : '仅组']) },
@@ -190,26 +190,27 @@ const rowInsert = ref(false);
 
 const dbOptions = computed(() => (Array.isArray(dbs.value) ? dbs.value : []).map((d: any) => ({ label: d.name, value: d.name })));
 const browseCols: any[] = [
-  { title: '表', key: 'name', render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name), h('div', { class: 'cell-sub' }, r.schema)])]) },
+  { title: '表', key: 'name', render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub', title: r.schema }, r.schema)])]) },
   { title: '行数（估）', key: 'row_estimate', width: 110, render: (r: any) => h('span', { class: 'mono-dim' }, String(r.row_estimate ?? '—')) },
   { title: '大小', key: 'size', width: 100, render: (r: any) => h('span', { class: 'vchip' }, r.size ?? '—') },
-  { title: '', key: 'go', width: 80, render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => pickTable(r) }, () => '查看数据') },
+  { title: '操作', key: 'go', width: 80, render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => pickTable(r) }, () => '查看数据') },
 ];
 const dataCols = computed<any[]>(() => [
   {
-    title: '行', key: 'go', width: 78, fixed: 'left' as const, className: 'row-ops',
+    title: '操作', key: 'go', width: 78, fixed: 'left' as const, className: 'row-ops',
     render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => openRow(r, false) }, () => '查看'),
   },
   ...tCols.value.map((c: string) => ({
-    title: c, key: c, ellipsis: { tooltip: false }, width: 180,
+    // tooltip:false 时超出 180px 的内容就永久看不见（没有 title 也没有浮层）
+    title: c, key: c, ellipsis: { tooltip: true }, width: 180,
     render: (r: any) => fmtCell(r[c], c),
   })),
 ]);
 const keyCols: any[] = [
   { type: 'selection' },
-  { title: 'Key', key: 'k', render: (r: any) => h('span', { class: 'mono-dim', style: 'word-break:break-all' }, r.k) },
+  { title: 'Key', key: 'k', ellipsis: { tooltip: true }, render: (r: any) => h('span', { class: 'mono-dim' }, r.k) },
   {
-    title: '', key: 'go', width: 66, className: 'row-ops',
+    title: '操作', key: 'go', width: 66, className: 'row-ops',
     render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => inspectKey(r.k) }, () => '查看'),
   },
 ];
@@ -359,7 +360,8 @@ async function delKeys(keys: string[]) {
     </PageHeader>
 
     <NCard size="small" :content-style="{ padding: '0' }">
-      <NTabs type="line" animated :tabs-padding="16" pane-style="padding: var(--space-4)">
+      <!-- show:lazy：五个标签各有一张大表，进页就全挂载等于一次性建五份 DOM；没点开的标签等点击时再挂。 -->
+      <NTabs type="line" animated display-directive="show:lazy" :tabs-padding="16" pane-style="padding: var(--space-4)">
         <NTabPane name="pg" tab="PostgreSQL">
           <NSpace vertical size="medium">
             <NSpace justify="space-between" align="center" style="width: 100%">
@@ -369,7 +371,8 @@ async function delKeys(keys: string[]) {
                 <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="showDb = true">新建数据库</NButton>
               </NSpace>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []" :scroll-x="520">
+            <!-- 两个列表同屏，这里不用 --table-h 撑满视口（角色表已有 320 固定上限），保持自然高度 -->
+            <NDataTable size="small" :bordered="false" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []" :row-key="(r: any) => r.name" :scroll-x="520">
               <template #empty><EmptyBox text="无法读取数据库列表（PostgreSQL 未运行？）" /></template>
             </NDataTable>
 
@@ -377,7 +380,7 @@ async function delKeys(keys: string[]) {
               <span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-warn)" /> 用户 / 角色</span>
               <NButton size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :max-height="320" :scroll-x="520">
+            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :row-key="(r: any) => r.name" :max-height="320" :scroll-x="520">
               <template #empty><EmptyBox text="没有可读取的角色（PostgreSQL 未运行？）" /></template>
             </NDataTable>
           </NSpace>
@@ -406,7 +409,7 @@ async function delKeys(keys: string[]) {
               <NSelect v-model:value="brDb" :options="dbOptions" size="small" style="width: 200px" placeholder="选择数据库" aria-label="浏览的数据库" @update:value="loadTables" />
               <NText depth="3" style="font-size: var(--fs-xs)">共 {{ tables.length }} 张表</NText>
             </NSpace>
-            <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" max-height="calc(100vh - 400px)" :scroll-x="560">
+            <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" :row-key="(r: any) => `${r.schema}.${r.name}`" class="cp-tbl tbl-dbs-browse" max-height="var(--table-h)" :scroll-x="560">
               <template #empty><EmptyBox :text="brDb ? (tablesBusy ? '加载中…' : '这个库里没有表') : '先选择一个数据库'" /></template>
             </NDataTable>
             <template v-else>
@@ -418,7 +421,7 @@ async function delKeys(keys: string[]) {
                 <NButton size="tiny" type="primary" tertiary :icon="ico('AddOutline')" :disabled="!tColMeta.length" @click="openRow(null, true)">新增行</NButton>
                 <NPagination v-model:page="tPage" :page-count="Math.max(1, Math.ceil(tTotal / tSize))" :page-size="tSize" size="small" :show-quick-jumper="false" @update:page="onPage" />
               </NSpace>
-              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" max-height="calc(100vh - 430px)" :row-key="(r: any) => r._ctid" :row-props="rowProps" :scroll-x="Math.max(560, 78 + tCols.length * 180)">
+              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" class="cp-tbl tbl-dbs-data" :max-height="'var(--table-h)'" :row-key="(r: any) => r._ctid" :row-props="rowProps" :scroll-x="Math.max(560, 78 + tCols.length * 180)">
                 <template #empty><EmptyBox text="这张表没有数据" /></template>
               </NDataTable>
             </template>
@@ -451,6 +454,7 @@ async function delKeys(keys: string[]) {
                   :row-props="keyRowProps"
                   :row-class-name="(r: any) => (r.k === rDetail?.key ? 'row-active' : '')"
                   :max-height="380"
+                  :scroll-x="440"
                 >
                   <template #empty><EmptyBox :text="rBusy ? '扫描中…' : '没有匹配的 key（SCAN 从 0 开始，可换模式再试）'" /></template>
                 </NDataTable>
@@ -481,9 +485,12 @@ async function delKeys(keys: string[]) {
               <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">累计命令</div><div class="rv">{{ redis.info?.total_commands_processed ?? '—' }}</div></NCard></NGridItem>
               <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
             </NGrid>
-            <NSpace align="center" style="margin-top: var(--space-4)">
-              <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码（留空保存＝清除，改读 redis.conf）" style="width: 320px" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />
+            <NSpace align="center" :size="12" wrap style="margin-top: var(--space-4)">
+              <!-- 输入框里的 placeholder 不滚动也不换行：24 个中文字在 320px 里必然被裁成半截。
+                   说明挪到框外用文字写清楚，框内只留能看全的短提示。 -->
+              <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码" style="width: 240px" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />
               <NButton size="small" :icon="ico('SaveOutline')" @click="saveRedisPass">保存</NButton>
+              <NText depth="3" style="font-size: var(--fs-xs)">留空保存＝清除面板密码，改回读取 redis.conf</NText>
             </NSpace>
           </template>
           <NSpace v-else vertical :size="12" style="width: 100%">
@@ -536,10 +543,10 @@ async function delKeys(keys: string[]) {
 .rv { font-size: var(--fs-lg); font-weight: 600; color: var(--cp-text); }
 .mono-pre {
   margin: 0; padding: var(--space-3); max-height: 300px; overflow: auto;
-  background: var(--cp-bg-soft, rgba(128, 128, 128, 0.08));
-  border: 1px solid var(--cp-border, rgba(128, 128, 128, 0.18));
-  border-radius: var(--radius-md, 8px);
-  font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-xs);
+  background: var(--cp-bg-soft);
+  border: 1px solid var(--cp-border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono); font-size: var(--fs-xs);
   white-space: pre-wrap; word-break: break-all; color: var(--cp-text);
 }
 /* 窄容器（侧栏展开/窗口收窄）下 key 列表与详情上下堆叠，避免横向溢出裁切 */

@@ -9,12 +9,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, security
+from . import config, errors, security
 from . import database as dbm
 from .deps import AuthMiddleware
 from .log import warn
-from .routers import apps, backups, dbops, extras, files, meta, system, terminal
-from .services import alerts_service
+from .routers import (
+    alerts, apps, backups, cron, dbops, extras, files, meta, metrics, sites, system, terminal,
+)
+from .services import alerts_service, metrics_store
 
 START = time.time()
 
@@ -36,9 +38,15 @@ async def lifespan(_app: FastAPI):
 
     alerts_service.start_checker()
     hk = asyncio.create_task(_housekeeping())
+    # 指标采样单独成任务：历史曲线是"越多越有用"的数据，一次偶发异常不能把
+    # 清理任务一起拖停，反之亦然。
+    sampler = asyncio.create_task(metrics_store.loop())
     try:
         yield
     finally:
+        sampler.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await sampler
         hk.cancel()
         alerts_service.stop_checker()
 
@@ -52,6 +60,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(AuthMiddleware)
+errors.install_handlers(app)
 
 
 @app.exception_handler(RequestValidationError)
@@ -66,10 +75,13 @@ async def not_found(_req: Request, _exc):
 
 @app.exception_handler(Exception)
 async def unhandled(_req: Request, exc: Exception):
-    if config.LOG:
-        warn("unhandled", type(exc).__name__, exc)
-    msg = str(exc) if config.LOG else "服务器内部错误"
-    return JSONResponse(status_code=500, content={"error": msg})
+    # 原文一律只进日志：CP_LOG 打开时把 traceback 贴给浏览器，等于向任何登录用户
+    # （以及他们截图里的会话）公开内部路径与依赖结构。
+    warn("unhandled", type(exc).__name__, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"error": errors.public_message(exc, fallback="服务器内部错误"), "code": "internal"},
+    )
 
 
 # ---------- public auth ----------
@@ -105,7 +117,7 @@ async def setup(req: Request):
         return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
     dbm.execute(
         "INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)",
-        (username, security.hash_pass(password), "admin"),
+        (username, await security.hash_pass_async(password), "admin"),
     )
     dbm.audit(username, "setup", "创建管理员")
     security.clear_attempts(ip)
@@ -121,7 +133,10 @@ async def login(req: Request):
     username = (body.get("username") or "").strip()
     user = dbm.query_one("SELECT * FROM users WHERE username=?", (username,))
     password = body.get("password") or ""
-    if not user or not password or not security.check_pass(password, user["pass_hash"]):
+    # scrypt(n=2^14) 单次约 16MB/几十毫秒：直接在 async 里跑会冻住整个事件循环，
+    # 两三个人同时登录就能把仪表盘轮询一起拖死。
+    ok = bool(user) and bool(password) and await security.check_pass_async(password, user["pass_hash"])
+    if not ok:
         dbm.audit(username or "?", "login_failed", ip)
         return JSONResponse(status_code=401, content={"error": "用户名或密码错误"})
     dbm.audit(user["username"], "login")
@@ -163,12 +178,15 @@ def client_ip(req: Request) -> str:
 async def change_password(req: Request):
     me = dbm.query_one("SELECT * FROM users WHERE username=?", (req.state.cp_sub,))
     body = await _json_body(req)
-    if not me or not body.get("old") or not security.check_pass(body["old"], me["pass_hash"]):
+    old = body.get("old") or ""
+    ok = bool(me) and bool(old) and await security.check_pass_async(old, me["pass_hash"])
+    if not ok:
         return JSONResponse(status_code=400, content={"error": "原密码错误"})
     if not body.get("new") or len(body["new"]) < 8:
         return JSONResponse(status_code=400, content={"error": "新密码至少 8 位"})
     role = me["role"] or "admin"
-    dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (security.hash_pass(body["new"]), me["username"]))
+    new_hash = await security.hash_pass_async(body["new"])
+    dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (new_hash, me["username"]))
     # 仅让当前用户的旧 token 失效，并立即签发新 token，避免用户被踢下线
     security.bump_user_epoch(me["username"])
     dbm.audit(me["username"], "password_change")
@@ -276,6 +294,10 @@ app.include_router(dbops.router)
 app.include_router(backups.router)
 app.include_router(files.router)
 app.include_router(extras.router)
+app.include_router(alerts.router)
+app.include_router(cron.router)
+app.include_router(sites.router)
+app.include_router(metrics.router)
 
 
 # ---------- background housekeeping ----------
@@ -286,6 +308,8 @@ async def _housekeeping():
             security.cleanup_attempts()
             dbm.prune_audit()
             dbm.prune_deployments()
+            dbm.prune_alerts()
+            dbm.prune_metrics()
         except Exception as e:  # noqa: BLE001
             warn("housekeeping failed:", e)
 

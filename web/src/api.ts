@@ -1,4 +1,6 @@
 import { ref } from 'vue';
+import { clearCache } from './composables/useCachedFetch';
+import { beginRequest, endRequest } from './composables/useAppProgress';
 
 const base = '/api';
 const TOKEN_KEY = 'cp_token';
@@ -57,6 +59,9 @@ let redirecting = false;
 
 function notifyUnauthorized() {
   clearSession();
+  // 缓存里可能装着刚才那个账号（管理员）拉到的用户表/审计/文件目录，
+  // 换会话时必须一起丢掉，否则新登录的只读账号能短暂看见旧数据。
+  clearCache();
   if (redirecting) return;
   redirecting = true;
   onUnauthorized.forEach((fn) => fn());
@@ -66,13 +71,21 @@ function notifyUnauthorized() {
 async function request(path: string, init: RequestInit, timeoutMs = 15000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  beginRequest();
+  let ok = true;
   try {
-    return await fetch(base + path, { ...init, signal: ctrl.signal });
+    const res = await fetch(base + path, { ...init, signal: ctrl.signal });
+    // 401 的会话过期由 parse() 统一处理；进度条只对非 2xx 亮红，
+    // 否则登录失效那一刻会同时出现"跳登录 + 顶部报错条"两重提示。
+    ok = res.ok || res.status === 401;
+    return res;
   } catch (e: any) {
+    ok = false;
     if (e?.name === 'AbortError') throw new Error('请求超时，请稍后重试');
     throw new Error('网络错误，无法连接面板');
   } finally {
     clearTimeout(timer);
+    endRequest(ok);
   }
 }
 

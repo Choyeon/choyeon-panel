@@ -12,7 +12,7 @@ import threading
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .. import config
-from .. import database as dbm
+from .. import aio_db
 from ..log import warn
 
 router = APIRouter()
@@ -93,7 +93,7 @@ async def terminal(ws: WebSocket):
         # 反复几次后 TERMINAL_MAX_SESSIONS 被占满，终端整个功能永久不可用直到重启。
         await ws.accept()
         opened = True
-        dbm.audit(user, "terminal:open")
+        await aio_db.audit(user, "terminal:open")
 
         loop = asyncio.get_running_loop()
         master, slave = pty.openpty()
@@ -178,6 +178,6 @@ async def terminal(ws: WebSocket):
             threading.Thread(target=_reap_process, args=(proc,), daemon=True).start()
         if opened:
             try:
-                dbm.audit(user, "terminal:close")
+                await aio_db.audit(user, "terminal:close")
             except Exception as e:  # noqa: BLE001
                 warn("terminal audit failed:", e)

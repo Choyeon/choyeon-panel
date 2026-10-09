@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, h } from 'vue';
+import { computed, ref, watch, h } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   NDataTable, NSpace, NTag, NModal, NForm, NFormItem, NInput, NInputNumber,
@@ -7,19 +7,45 @@ import {
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { api } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
+import { useCachedFetch, invalidateCache } from '../composables/useCachedFetch';
+import { fmtBytes, fmtDateTime } from '../composables/useFormat';
 
 const msg = useMessage();
 const router = useRouter();
-const rows = ref<any[]>([]);
-const apps = ref<any[]>([]);
 const show = ref(false);
 const busy = ref<number | null>(null);
 const submitting = ref(false);
 const editingId = ref<number | null>(null);
 const form = ref<any>({ kind: 'pg', target: 'rosetta', schedule: 'daily', hour: 3, minute: 30, keep: 7, enabled: true });
+
+// 备份任务表几乎不变（只有改计划/删除会变），30s 缓存让这一页秒开；
+// 应用列表只用于下拉建议与目标名展示，缓存 60s。
+const { data, error, loading, refreshing, refresh } = useCachedFetch<any[]>({
+  key: () => 'backups',
+  loader: () => api.backups(),
+  maxAge: 30000,
+});
+const { data: appsData, load: loadApps } = useCachedFetch<any[]>({
+  key: () => 'apps',
+  loader: () => api.apps(),
+  maxAge: 60000,
+});
+watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+// 原实现在 onMounted 里吞掉应用列表的错误（列表只影响下拉建议），保持一致
+void loadApps().catch(() => undefined);
+
+const rows = computed<any[]>(() => data.value ?? []);
+const apps = computed<any[]>(() => appsData.value ?? []);
+
+function reload() {
+  invalidateCache('backups');
+  // 立即备份/删除任务都会写审计，审计页的缓存一起作废
+  invalidateCache('audit:');
+  return refresh().catch(() => undefined);
+}
 
 const kindOpts = [
   { label: 'PostgreSQL 数据库', value: 'pg' },
@@ -38,18 +64,6 @@ const KIND_DESC: Record<string, string> = {
   sqlite: 'SQLite 在线备份 API 快照（自动发现目录内 *.db）',
 };
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
-
-function fmt(n: number) {
-  let i = 0;
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
-}
-
 const appOpts = computed(() => apps.value.map((a: any) => ({ label: a.name, value: a.name })));
 // sqlite 的 target 存 app_id：应用改名后按名的 target 会指向不存在的目录
 const sqliteOpts = computed(() => apps.value.map((a: any) => ({ label: a.name, value: String(a.id) })));
@@ -64,7 +78,7 @@ const columns: any[] = [
           h(NIcon, { component: icons[KIND_ICON[r.kind] || 'FolderOutline'], size: 18, color: r.kind === 'pg' ? 'var(--cp-brand-soft)' : 'var(--cp-node)' }),
         ]),
         h('div', { class: 'cell-txt' }, [
-          h('span', { class: 'cell-name' }, r.kind === 'sqlite' ? sqliteTargetName(r.target) : r.target),
+          h('span', { class: 'cell-name', title: r.kind === 'sqlite' ? sqliteTargetName(r.target) : r.target }, r.kind === 'sqlite' ? sqliteTargetName(r.target) : r.target),
           r.target_missing
             ? h(NTag, { size: 'tiny', type: 'warning', bordered: false, class: 'cell-sub' }, () => '目标应用已删除，备份将失败')
             : h('div', { class: 'cell-sub' }, KIND_DESC[r.kind] || ''),
@@ -88,8 +102,8 @@ const columns: any[] = [
     render: (r: any) =>
       r.files.length
         ? h('div', { class: 'cell-txt' }, [
-            h('span', { style: 'font-size:var(--fs-sm); color:var(--cp-text)' }, `${r.files.length} 份 · 合计 ${fmt(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))}`),
-            h('div', { class: 'cell-sub' }, `最近 ${String(r.files[0].mtime || '').replace('T', ' ').slice(0, 19)}`),
+            h('span', { style: 'font-size:var(--fs-sm); color:var(--cp-text)' }, `${r.files.length} 份 · 合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))}`),
+            h('div', { class: 'cell-sub' }, `最近 ${fmtDateTime(r.files[0].mtime)}`),
           ])
         : h('span', { class: 'cell-sub' }, '尚无产物'),
   },
@@ -97,16 +111,16 @@ const columns: any[] = [
     title: '操作', key: 'ops', width: 336,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
-        h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busy.value === r.id, icon: ico('PlayOutline'), onClick: () => run(r.id) }, () => '立即备份'),
-        h(NButton, { size: 'tiny', tertiary: true, disabled: busy.value === r.id, icon: ico('PencilOutline'), title: '编辑计划与保留份数', onClick: () => openEdit(r) }, () => '编辑'),
+        h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busy.value === r.id, icon: icon('PlayOutline', 14), onClick: () => run(r.id) }, () => '立即备份'),
+        h(NButton, { size: 'tiny', tertiary: true, disabled: busy.value === r.id, icon: icon('PencilOutline', 14), title: '编辑计划与保留份数', onClick: () => openEdit(r) }, () => '编辑'),
         h(NButton, {
           size: 'tiny', tertiary: true, type: 'warning',
           disabled: !r.files.length,
           title: r.files.length ? '查看/下载/恢复/清理该任务的备份文件' : '还没有备份产物可管理',
-          icon: ico('FolderOpenOutline'), onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }),
+          icon: icon('FolderOpenOutline', 14), onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }),
         }, () => '备份文件'),
         h(NPopconfirm, { onPositiveClick: () => del(r.id) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: '删除备份任务' }, { default: () => '删除' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: icon('TrashOutline', 14), title: '删除备份任务' }, { default: () => '删除' }),
           default: () => '删除任务及其 systemd timer（已生成的备份文件保留）',
         }),
       ]),
@@ -119,25 +133,13 @@ function sqliteTargetName(target: any) {
   return hit ? `${hit.name} · SQLite` : `应用 #${t} · SQLite`;
 }
 
-const loading = ref(false);
-
-async function load() {
-  loading.value = true;
-  try {
-    rows.value = await api.backups();
-  } catch (e: any) {
-    msg.error(e.message);
-  } finally {
-    loading.value = false;
-  }
-}
 async function run(id: number) {
   busy.value = id;
   try {
     const r = await api.runBackup(id);
     if (r.code === 0) msg.success('备份完成');
     else msg.error(`备份失败 (exit ${r.code})`);
-    load();
+    reload();
   } catch (e: any) {
     msg.error(e.message);
   } finally {
@@ -148,7 +150,7 @@ async function del(id: number) {
   try {
     await api.deleteBackup(id);
     msg.success('已删除');
-    load();
+    reload();
   } catch (e: any) {
     msg.error(e.message);
   }
@@ -186,29 +188,22 @@ async function submit() {
       msg.success('已保存');
     }
     show.value = false;
-    load();
+    reload();
   } catch (e: any) {
     msg.error(e.message);
   } finally {
     submitting.value = false;
   }
 }
-
-onMounted(async () => {
-  await load();
-  try {
-    apps.value = await api.apps();
-  } catch { /* 应用列表仅用于下拉建议与目标名展示 */ }
-});
 </script>
 
 <template>
   <div>
     <PageHeader title="备份" sub="systemd timer 驱动的定时备份；产物在「备份文件」页统一查看、下载、恢复与清理">
       <template #actions>
-        <NButton size="small" tertiary :icon="ico('FolderOpenOutline')" @click="router.push('/backups/files')">备份文件</NButton>
-        <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
-        <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="openCreate">新建备份任务</NButton>
+        <NButton size="small" tertiary :icon="icon('FolderOpenOutline', 14)" @click="router.push('/backups/files')">备份文件</NButton>
+        <NButton size="small" tertiary :loading="loading || refreshing" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
+        <NButton size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建备份任务</NButton>
       </template>
     </PageHeader>
 
@@ -216,7 +211,7 @@ onMounted(async () => {
       调度由 systemd timer 独立完成，面板进程停止不影响备份执行。PG 用 pg_dump 自定义格式；应用目录打包自动排除 node_modules / .venv / .next / .output；SQLite 走在线备份 API，热备份不会写出页不一致的库。
     </NAlert>
 
-    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading" :scroll-x="1000" :row-key="(r: any) => r.id">
+    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading" :scroll-x="1210" :row-key="(r: any) => r.id">
       <template #empty><EmptyBox text="还没有备份任务，点击右上角新建" /></template>
     </NDataTable>
 
@@ -250,7 +245,7 @@ onMounted(async () => {
             <NSwitch v-model:value="form.enabled" size="small" aria-labelledby="bk-schedule-enabled" />
           </NSpace>
           <NFormItem label="保留份数"><NInputNumber v-model:value="form.keep" :min="1" :max="60" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px" /></NFormItem>
-          <NButton type="primary" block class="cp-press" :loading="submitting" :icon="ico(editingId == null ? 'AddOutline' : 'SaveOutline')" @click="submit">
+          <NButton type="primary" block class="cp-press" :loading="submitting" :icon="icon(editingId == null ? 'AddOutline' : 'SaveOutline', 14)" @click="submit">
             {{ editingId == null ? '创建任务' : '保存修改' }}
           </NButton>
         </NSpace>
