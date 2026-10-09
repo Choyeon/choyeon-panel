@@ -265,7 +265,7 @@ async def table_data(db: str, schema: str, table: str, page: int, size: int) -> 
         db,
     )
     rows_raw = await psql(
-        "SELECT coalesce(json_agg(row_to_json(t))::text,'[]'::json)::text FROM ("
+        "SELECT coalesce(json_agg(row_to_json(t))::text,'[]'::text) FROM ("
         f"SELECT * FROM {quoted} LIMIT {size} OFFSET {(page - 1) * size}) t",
         db,
     )
