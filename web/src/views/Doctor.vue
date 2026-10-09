@@ -174,7 +174,7 @@ onMounted(load);
             </NButton>
             <NTooltip v-else-if="it.fix && it.status !== 'pass' && it.fixable" trigger="hover">
               <template #trigger>
-                <NButton size="tiny" circle quaternary :aria-label="`复制修复命令：${it.title}`" :icon="ico('CopyOutline')" @click="copyFix(it.fix)" />
+                <NButton size="tiny" circle quaternary :aria-label="`复制修复命令：${it.title}`" :title="`复制修复命令：${it.title}`" :icon="ico('CopyOutline')" @click="copyFix(it.fix)" />
               </template>
               复制修复命令
             </NTooltip>

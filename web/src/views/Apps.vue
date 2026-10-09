@@ -106,19 +106,18 @@ function repoLink(url: any, size = 13) {
   }, [h(NIcon, { component: icons.OpenOutline, size })]);
 }
 
-function syncBtn(r: any, iconOnly = false) {
+function syncBtn(r: any) {
   if (!r.repo_url) return null;
   // 同步只在配了仓库时可用；这里不重装依赖、不改 unit/nginx，几分钟的部署换成几秒的拉取+重启。
   return h(NButton, {
     size: 'tiny',
     tertiary: true,
     title: '一键同步：拉取最新代码并重启（不重装依赖）',
-    'aria-label': `同步 ${r.name}`,
     loading: busyOn(r.id, 'sync'),
     disabled: rowBusy(r.id) || r.deploying,
-    icon: ico('CloudDownloadOutline', iconOnly ? 13 : 14),
+    icon: ico('CloudDownloadOutline', 14),
     onClick: () => sync(r),
-  }, { default: () => (iconOnly ? '' : '同步') });
+  }, { default: () => '同步' });
 }
 
 function appCell(r: any) {
@@ -150,7 +149,7 @@ function appCell(r: any) {
             h(NTag, { size: 'tiny', bordered: false, type: c.component_role === 'frontend' ? 'success' : 'warning' }, { default: () => roleLabel(c) }),
             ...(!c.running && !c.deploying ? [h('span', { class: 'st idle' }, [h('span', { class: 'dot idle' }), '已停止'])] : []),
             // 组合项目的每个组件是独立仓库/独立服务，同步得分别触发
-            syncBtn(c, true),
+            syncBtn(c),
             repoLink(c.repo_url, 12),
           ]),
         ]),
@@ -210,7 +209,7 @@ const columns: any[] = [
           : h('span', { class: 'st idle' }, [h('span', { class: 'dot idle' }), '已停止']),
   },
   {
-    title: '操作', key: 'ops', width: 360,
+    title: '操作', key: 'ops', width: 452,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busyOn(r.id, 'deploy'), disabled: rowBusy(r.id), icon: ico('CloudUploadOutline'), onClick: () => act(r.id, 'deploy') }, () => '部署'),
@@ -221,9 +220,9 @@ const columns: any[] = [
           icon: ico(r.running ? 'StopOutline' : 'PlayOutline'), onClick: () => act(r.id, r.running ? 'stop' : 'start'),
         }, () => (r.running ? '停止' : '启动')),
         h(NButton, { size: 'tiny', tertiary: true, disabled: !r.running || rowBusy(r.id), loading: busyOn(r.id, 'restart'), icon: ico('SyncOutline'), onClick: () => act(r.id, 'restart') }, () => '重启'),
-        h(NButton, { size: 'tiny', quaternary: true, title: '回滚到上一次成功部署', 'aria-label': '回滚', loading: busyOn(r.id, 'rollback'), disabled: rowBusy(r.id), icon: ico('ArrowBackOutline'), onClick: () => rollback(r) }),
+        h(NButton, { size: 'tiny', quaternary: true, title: '回滚到上一次成功部署', loading: busyOn(r.id, 'rollback'), disabled: rowBusy(r.id), icon: ico('ArrowBackOutline'), onClick: () => rollback(r) }, () => '回滚'),
         h(NPopconfirm, { onPositiveClick: () => del(r) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除应用 ${r.name}`, 'aria-label': `删除应用 ${r.name}` }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除应用 ${r.name}` }, { default: () => '删除' }),
           default: () => '仅删除面板配置，服务器文件保留。彻底清理请到应用详情页操作。',
         }),
       ]),
@@ -382,7 +381,7 @@ onMounted(() => {
       </template>
     </PageHeader>
 
-    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1180" :max-height="'calc(100vh - 268px)'">
+    <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1280" :max-height="'calc(100vh - 268px)'">
       <template #empty>
         <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
       </template>

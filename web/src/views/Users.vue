@@ -109,13 +109,13 @@ const cols: any[] = [
       ),
   },
   {
-    title: '操作', key: 'ops', width: 280,
+    title: '操作', key: 'ops', width: 336,
     render: (u: any) =>
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('SyncOutline', 12), onClick: () => toggleRole(u) }, () => (u.role === 'admin' ? '降为只读' : '升为管理')),
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('KeyOutline', 12), onClick: () => openReset(u) }, () => '重置密码'),
         h(NPopconfirm, { onPositiveClick: () => delUser(u) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline', 12), title: `删除用户 ${u.username}`, 'aria-label': `删除用户 ${u.username}` }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline', 12), title: `删除用户 ${u.username}` }, { default: () => '删除' }),
           default: () => `删除用户 ${u.username}？其已登录会话将立即失效。`,
         }),
       ]),
@@ -144,7 +144,7 @@ onMounted(load);
     </PageHeader>
 
     <NCard size="small">
-      <NDataTable size="small" :bordered="false" :loading="loading" :scroll-x="820" :columns="cols" :data="filtered()">
+      <NDataTable size="small" :bordered="false" :loading="loading" :scroll-x="880" :columns="cols" :data="filtered()">
         <template #empty><EmptyBox text="暂无用户" /></template>
       </NDataTable>
     </NCard>

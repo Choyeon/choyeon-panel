@@ -164,14 +164,14 @@ const columns: any[] = [
   { title: '大小', key: 'size', width: 90, render: (e: any) => h('span', { class: 'mono-dim' }, fmt(e.size, e.isDir)) },
   { title: '修改时间', key: 'mtime', width: 170, render: (e: any) => h('span', { class: 'mono-dim' }, e.mtime?.replace('T', ' ').slice(0, 19) || '—') },
   {
-    title: '操作', key: 'ops', width: 210,
+    title: '操作', key: 'ops', width: 258,
     render: (e: any) =>
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, tag: 'a', href: `${apiUrl('/files/download')}?path=${encodeURIComponent(join(e.name))}&token=${encodeURIComponent(getToken())}`, target: '_blank', icon: ico('DownloadOutline', 12) }, () => '下载'),
         ...(e.isDir ? [] : [h(NButton, { size: 'tiny', tertiary: true, icon: ico('PencilOutline', 12), onClick: () => open(e) }, () => '编辑')]),
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('OptionsOutline', 12), onClick: () => openRename(e) }, () => '改名'),
         h(NPopconfirm, { onPositiveClick: () => del(e) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline', 12), title: `删除 ${e.name}`, 'aria-label': `删除 ${e.name}` }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline', 12), title: `删除 ${e.name}` }, { default: () => '删除' }),
           default: () => `删除 ${e.name}${e.isDir ? '（含全部子文件）' : ''}？`,
         }),
       ]),
@@ -222,7 +222,7 @@ onMounted(() => load());
       可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑。
     </NText>
 
-    <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :loading="listing" :scroll-x="760" :max-height="'calc(100vh - 368px)'" :row-key="(e: any) => e.name">
+    <NDataTable :columns="columns" :data="entries" size="small" :bordered="false" :loading="listing" :scroll-x="820" :max-height="'calc(100vh - 368px)'" :row-key="(e: any) => e.name">
       <template #empty><EmptyBox text="空目录" /></template>
     </NDataTable>
 

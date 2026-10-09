@@ -302,7 +302,7 @@ watch(
         <NButton size="small" tertiary :disabled="!app.running || !!acting" :loading="acting === 'restart'" :icon="ico('SyncOutline')" @click="act('restart')">重启</NButton>
         <NPopconfirm @positive-click="purge">
           <template #trigger>
-            <NButton size="small" quaternary type="error" :icon="ico('TrashOutline')" title="彻底删除应用与文件" aria-label="彻底删除应用与文件" />
+            <NButton size="small" quaternary type="error" :icon="ico('TrashOutline')" title="彻底删除应用与文件">彻底删除</NButton>
           </template>
           将同时删除 {{ app.path }} 目录文件与 systemd unit，不可恢复！
         </NPopconfirm>

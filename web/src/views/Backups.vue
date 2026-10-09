@@ -109,19 +109,19 @@ const columns: any[] = [
         : h('span', { class: 'cell-sub' }, '尚无产物'),
   },
   {
-    title: '操作', key: 'ops', width: 232,
+    title: '操作', key: 'ops', width: 336,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, type: 'primary', loading: busy.value === r.id, icon: ico('PlayOutline'), onClick: () => run(r.id) }, () => '立即备份'),
-        h(NButton, { size: 'tiny', tertiary: true, disabled: busy.value === r.id, icon: ico('PencilOutline'), title: '编辑计划与保留份数', 'aria-label': '编辑备份任务', onClick: () => openEdit(r) }),
+        h(NButton, { size: 'tiny', tertiary: true, disabled: busy.value === r.id, icon: ico('PencilOutline'), title: '编辑计划与保留份数', onClick: () => openEdit(r) }, () => '编辑'),
         h(NButton, {
           size: 'tiny', tertiary: true, type: 'warning',
           disabled: busy.value === r.id || !isAdmin.value || !(r.files || []).some((f: any) => f.restoreable),
-          icon: ico('RefreshCircleOutline'), title: isAdmin.value ? '从备份文件恢复' : '仅管理员可恢复', 'aria-label': '从备份恢复',
+          icon: ico('RefreshCircleOutline'), title: isAdmin.value ? '从备份文件恢复' : '仅管理员可恢复',
           onClick: () => openRestore(r),
-        }),
+        }, () => '恢复'),
         h(NPopconfirm, { onPositiveClick: () => del(r.id) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: '删除备份任务', 'aria-label': '删除备份任务' }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: '删除备份任务' }, { default: () => '删除' }),
           default: () => '删除任务及其 systemd timer（已生成的备份文件保留）',
         }),
       ]),
@@ -276,7 +276,7 @@ onMounted(async () => {
       调度由 systemd timer 独立完成，面板进程停止不影响备份执行。PG 用 pg_dump 自定义格式；应用目录打包自动排除 node_modules / .venv / .next / .output；SQLite 走在线备份 API，热备份不会写出页不一致的库。
     </NAlert>
 
-    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading" :scroll-x="1040" :row-key="(r: any) => r.id">
+    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading" :scroll-x="1160" :row-key="(r: any) => r.id">
       <template #empty><EmptyBox text="还没有备份任务，点击右上角新建" /></template>
     </NDataTable>
 

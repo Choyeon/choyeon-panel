@@ -229,7 +229,7 @@ window.addEventListener('resize', onResize);
         <span v-else-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
         <span v-else class="st err"><span class="dot err"></span>{{ failedUnits.length }} 个服务异常</span>
         <!-- 统计每 3s 自动刷，这里的手动刷新是为了立刻确认刚做过的操作（部署/改配置）生效 -->
-        <NButton size="small" tertiary :loading="refreshing" :icon="icon('RefreshOutline')" aria-label="立即刷新状态" @click="refresh" />
+        <NButton size="small" tertiary :loading="refreshing" :icon="icon('RefreshOutline')" title="立即刷新状态" @click="refresh">刷新</NButton>
         <NDropdown trigger="click" :options="quickMenu" :on-select="quickGo">
           <NButton type="primary" round size="small" class="cp-press">快捷操作</NButton>
         </NDropdown>

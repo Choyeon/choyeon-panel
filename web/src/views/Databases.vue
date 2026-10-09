@@ -62,10 +62,10 @@ const dbCols: any[] = [
     render: (r: any) => h('span', { class: 'vchip' }, `${r.conns} conn`),
   },
   {
-    title: '操作', key: 'ops', width: 64,
+    title: '操作', key: 'ops', width: 96,
     render: (r: any) =>
       h(NPopconfirm, { onPositiveClick: () => manage('dropDb', r.name) }, {
-        trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除数据库 ${r.name}`, 'aria-label': `删除数据库 ${r.name}` }, { default: () => '' }),
+        trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除数据库 ${r.name}` }, { default: () => '删除' }),
         default: () => `确定删除数据库 ${r.name}？数据不可恢复`,
       }),
   },
@@ -82,12 +82,12 @@ const roleCols: any[] = [
   { title: '登录', key: 'login', width: 88, render: (r: any) => h('span', { class: 'st ' + (r.login ? 'ok' : 'idle') }, [h('span', { class: 'dot ' + (r.login ? 'ok' : 'idle') }), r.login ? '可登录' : '仅组']) },
   { title: 'Superuser', key: 'super', width: 92, render: (r: any) => (r.super ? h(NTag, { size: 'tiny', bordered: false, type: 'warning' }, () => 'SUPER') : h('span', { class: 'cell-sub' }, '—')) },
   {
-    title: '操作', key: 'ops', width: 136,
+    title: '操作', key: 'ops', width: 172,
     render: (r: any) =>
       h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'tiny', tertiary: true, icon: ico('PencilOutline'), onClick: () => openPwd(r.name) }, () => '改密'),
         h(NPopconfirm, { onPositiveClick: () => manage('dropRole', r.name) }, {
-          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除角色 ${r.name}`, 'aria-label': `删除角色 ${r.name}` }, { default: () => '' }),
+          trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: `删除角色 ${r.name}` }, { default: () => '删除' }),
           default: () => `删除角色 ${r.name} 及其拥有的所有对象？`,
         }),
       ]),
