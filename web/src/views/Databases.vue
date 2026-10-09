@@ -7,7 +7,7 @@ import {
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { api } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import RowEditor from '../components/RowEditor.vue';
@@ -29,9 +29,7 @@ const showPwd = ref(false);
 const pwdTarget = ref('');
 const pwdValue = ref('');
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+const ico = (name: string, size = 14) => icon(name, size);
 
 async function load() {
   try {

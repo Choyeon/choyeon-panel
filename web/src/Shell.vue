@@ -6,7 +6,7 @@ import {
 } from 'naive-ui';
 import { NButton } from './ui';
 import { setToken, getRole, getUsername, getNickname, setNickname, getAvatar, setAvatar, clearSession, api } from './api';
-import { icons } from './icons';
+import { icon, icons } from './icons';
 import { TITLES } from './router';
 import type { ThemeOrigin } from './themeReveal';
 
@@ -56,9 +56,7 @@ const active = computed(() => {
   const top = `/${route.path.split('/')[1] || ''}`;
   return top === '/apps' || top === '/backups' ? top : route.path;
 });
-function ico(name: string, size = 18) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name] || icons.SettingsOutline) });
-}
+const ico = (name: string, size = 18) => icon(name, size);
 
 function onResize() {
   isMobile.value = window.innerWidth < 900;

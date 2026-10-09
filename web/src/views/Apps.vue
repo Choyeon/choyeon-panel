@@ -8,7 +8,7 @@ import {
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, repoHref, siteHref } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
@@ -84,9 +84,7 @@ const filtered = computed(() => {
   });
 });
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+const ico = (name: string, size = 14) => icon(name, size);
 
 function roleLabel(c: any) {
   return c.component_role === 'frontend' ? '前端' : c.component_role === 'backend' ? '后端' : '组件';

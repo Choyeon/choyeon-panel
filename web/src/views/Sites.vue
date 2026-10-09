@@ -5,7 +5,7 @@ import {
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { getRole, req, siteHref } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
@@ -39,9 +39,7 @@ const showConfig = ref(false);
 const cfg = ref<any>(null);
 const cfgLoading = ref(false);
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+const ico = (name: string, size = 14) => icon(name, size);
 
 const SITE_STATUS: Record<string, { type: any; text: string }> = {
   ok: { type: 'success', text: '正常' },

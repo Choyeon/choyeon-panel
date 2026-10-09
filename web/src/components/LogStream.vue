@@ -3,11 +3,9 @@ import { onBeforeUnmount, onMounted, ref, nextTick, h, computed } from 'vue';
 import { NSpace, NInputNumber, NSwitch, NText, NIcon, NTooltip, useMessage } from 'naive-ui';
 import { NButton } from '../ui';
 import { logUrl } from '../api';
-import { icons } from '../icons';
+import { icon } from '../icons';
 
-function ico(name: string, size = 13) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+const ico = (name: string, size = 13) => icon(name, size);
 
 const props = defineProps<{ urlPath: string; height?: number }>();
 

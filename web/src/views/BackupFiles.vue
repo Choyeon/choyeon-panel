@@ -7,7 +7,7 @@ import {
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, apiUrl, getRole, getToken } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 import EmptyBox from '../components/EmptyBox.vue';
 import PageHeader from '../components/PageHeader.vue';
 
@@ -35,9 +35,7 @@ const RESTORE_WARN: Record<string, string> = {
 const KIND_LABEL: Record<string, string> = { pg: 'PostgreSQL', app: '应用目录', sqlite: 'SQLite' };
 const KIND_ICON: Record<string, string> = { pg: 'CubeOutline', app: 'FolderOutline', sqlite: 'ServerOutline' };
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+const ico = (name: string, size = 14) => icon(name, size);
 
 function fmt(n: number) {
   let i = 0;

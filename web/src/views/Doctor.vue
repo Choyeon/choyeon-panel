@@ -7,7 +7,7 @@ import { NButton } from '../ui';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import { api } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 
 type Item = { id: string; title: string; status: 'pass' | 'warn' | 'fail'; detail: string; fix: string; fixable?: boolean };
 type Report = { status: string; counts: { pass: number; warn: number; fail: number }; items: Item[] };
@@ -27,9 +27,7 @@ const TYPE = {
   fail: { label: '异常', icon: 'CloseCircleOutline', color: 'var(--cp-err)' },
 } as const;
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+const ico = (name: string, size = 14) => icon(name, size);
 
 const percent = computed(() => {
   const r = report.value;

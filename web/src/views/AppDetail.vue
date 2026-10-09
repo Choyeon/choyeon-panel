@@ -7,7 +7,7 @@ import {
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, repoHref, siteHref } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 import LogStream from '../components/LogStream.vue';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
@@ -130,9 +130,7 @@ async function loadPg() {
   } catch {}
 }
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+const ico = (name: string, size = 14) => icon(name, size);
 
 async function load() {
   loadErr.value = '';

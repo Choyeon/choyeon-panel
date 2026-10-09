@@ -6,7 +6,7 @@ import {
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, getRole } from '../api';
-import { icons } from '../icons';
+import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
@@ -42,9 +42,7 @@ watch(alerts, (v) => {
   probeList.value = Object.entries(v?.probe_overrides || {}).map(([name, expect]) => ({ name, expect: String(expect) }));
 });
 
-function ico(name: string, size = 14) {
-  return () => h(NIcon, { size }, { default: () => h(icons[name]) });
-}
+const ico = (name: string, size = 14) => icon(name, size);
 
 async function grab(fn: () => Promise<any>, set: (v: any) => void) {
   // 每个数据块各自兜错：以前是一条链，只读账号在第一步就收到 403，
