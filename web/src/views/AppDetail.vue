@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch, h } from 'vue';
+import { onBeforeUnmount, onMounted, ref, watch, h } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NCard, NTabs, NTabPane, NSpace, NButton, NText, NTag, NInput, NDynamicInput,
@@ -14,7 +14,7 @@ import EmptyBox from '../components/EmptyBox.vue';
 const route = useRoute();
 const router = useRouter();
 const msg = useMessage();
-const id = computed(() => Number(route.params.id));
+let id = Number(route.params.id);
 const app = ref<any>(null);
 const env = ref<{ k: string; v: string }[]>([]);
 const edit = ref<any>({});
@@ -231,19 +231,23 @@ async function purge() {
 
 onMounted(load);
 // 组合项目组件条在 /apps/1 ↔ /apps/2 之间跳转时路由复用本组件：
-// 不重置状态、不重新加载的话，页面会停在旧应用上，看起来就像"点了没反应"。
-watch(id, () => {
-  app.value = null;
-  ngx.value = null;
-  ngxFile.value = null;
-  ngxContent.value = '';
-  unitInfo.value = null;
-  unitContent.value = '';
-  proc.value = null;
-  depLog.value = null;
-  deps.value = [];
-  load();
-});
+// 不重新取 id、不重置状态的话，页面会停在旧应用上，看起来就像"点了没反应"。
+watch(
+  () => Number(route.params.id),
+  (n) => {
+    id = n;
+    app.value = null;
+    ngx.value = null;
+    ngxFile.value = null;
+    ngxContent.value = '';
+    unitInfo.value = null;
+    unitContent.value = '';
+    proc.value = null;
+    depLog.value = null;
+    deps.value = [];
+    load();
+  },
+);
 </script>
 
 <template>
@@ -398,7 +402,7 @@ watch(id, () => {
         </NTabPane>
 
         <NTabPane name="logs" tab="运行日志">
-          <LogStream :key="id" :url-path="`/apps/${id}/logs`" />
+          <LogStream :key="app.id" :url-path="`/apps/${app.id}/logs`" />
         </NTabPane>
 
         <NTabPane name="nginx" tab="域名 / Nginx">
