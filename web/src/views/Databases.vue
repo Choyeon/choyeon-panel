@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, h } from 'vue';
 import {
-  NTabs, NTabPane, NDataTable, NButton, NSpace, NModal, NInput, NForm, NFormItem,
+  NTabs, NTabPane, NDataTable, NSpace, NModal, NInput, NForm, NFormItem,
   NPopconfirm, NCard, NText, NTag, useMessage, NIcon, NGrid, NGridItem, NSkeleton,
   NSelect, NPagination,
 } from 'naive-ui';
+import { NButton } from '../ui';
 import { api } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';

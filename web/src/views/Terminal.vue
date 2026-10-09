@@ -2,7 +2,8 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { NButton, NIcon, NInput, NSpace, useMessage } from 'naive-ui';
+import { NIcon, NInput, NSpace, useMessage } from 'naive-ui';
+import { NButton } from '../ui';
 import '@xterm/xterm/css/xterm.css';
 import { getToken } from '../api';
 import { icons } from '../icons';

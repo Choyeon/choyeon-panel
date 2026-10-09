@@ -2,9 +2,9 @@
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
-  NLayout, NLayoutSider, NMenu, NSpace, NText, NButton,
-  NModal, NInput, NDrawer, NDrawerContent, NIcon, NDropdown, useMessage,
+  NLayout, NLayoutSider, NMenu, NSpace, NText, NModal, NInput, NDrawer, NDrawerContent, NIcon, NDropdown, useMessage,
 } from 'naive-ui';
+import { NButton } from './ui';
 import { setToken, getRole, getUsername, getNickname, setNickname, getAvatar, setAvatar, clearSession, api } from './api';
 import { icons } from './icons';
 import { TITLES } from './router';

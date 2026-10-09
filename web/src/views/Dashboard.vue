@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, h } from 'vue';
 import { useRouter } from 'vue-router';
-import { NCard, NGrid, NGridItem, NSpace, NText, NIcon, NProgress, NTag, NButton, NDropdown, NSkeleton } from 'naive-ui';
+import { NCard, NGrid, NGridItem, NSpace, NText, NIcon, NProgress, NTag, NDropdown, NSkeleton } from 'naive-ui';
+import { NButton } from '../ui';
 import * as echarts from 'echarts/core';
 import { LineChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent } from 'echarts/components';

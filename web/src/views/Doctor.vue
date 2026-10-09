@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue';
 import {
-  NAlert, NButton, NCard, NIcon, NProgress, NResult, NSpace, NText, NSkeleton, NTooltip, useMessage,
+  NAlert, NCard, NIcon, NProgress, NResult, NSpace, NText, NSkeleton, NTooltip, useMessage,
 } from 'naive-ui';
+import { NButton } from '../ui';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import { api } from '../api';

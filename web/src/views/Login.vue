@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { NInput, NButton, NSpace, NIcon, NAlert } from 'naive-ui';
+import { NInput, NSpace, NIcon, NAlert } from 'naive-ui';
+import { NButton } from '../ui';
 import { api, saveLoginData } from '../api';
 import { icons } from '../icons';
 

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, h } from 'vue';
 import {
-  NCard, NText, NSpace, NButton, useMessage, NInput, NForm, NFormItem,
+  NCard, NText, NSpace, useMessage, NInput, NForm, NFormItem,
   NInputNumber, NIcon, NGrid, NGridItem, NTooltip,
 } from 'naive-ui';
+import { NButton } from '../ui';
 import { api, getRole } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';

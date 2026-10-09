@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, nextTick, h, computed } from 'vue';
-import { NButton, NSpace, NInputNumber, NSwitch, NText, NIcon, NTooltip, useMessage } from 'naive-ui';
+import { NSpace, NInputNumber, NSwitch, NText, NIcon, NTooltip, useMessage } from 'naive-ui';
+import { NButton } from '../ui';
 import { logUrl } from '../api';
 import { icons } from '../icons';
 

@@ -2,10 +2,11 @@
 import { onBeforeUnmount, onMounted, ref, h, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import {
-  NButton, NSpace, NDataTable, NModal, NForm, NFormItem, NInput, NInputNumber, NSelect,
+  NSpace, NDataTable, NModal, NForm, NFormItem, NInput, NInputNumber, NSelect,
   NRadioGroup, NRadioButton, NPopconfirm, NIcon, NAlert, NTag, NCollapse, NCollapseItem,
   useMessage,
 } from 'naive-ui';
+import { NButton } from '../ui';
 import { api, repoHref, siteHref } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, h, computed } from 'vue';
-import { NDataTable, NButton, NSpace, NInput, NCard, useMessage, NIcon } from 'naive-ui';
+import { NDataTable, NSpace, NInput, NCard, useMessage, NIcon } from 'naive-ui';
+import { NButton } from '../ui';
 import { api } from '../api';
 import { icons } from '../icons';
 import LogStream from '../components/LogStream.vue';

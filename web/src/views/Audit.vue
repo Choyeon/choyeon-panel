@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, h } from 'vue';
-import { NCard, NSpace, NDataTable, NButton, NInput, NSelect, NIcon, NTag, NText, useMessage } from 'naive-ui';
+import { NCard, NSpace, NDataTable, NInput, NSelect, NIcon, NTag, NText, useMessage } from 'naive-ui';
+import { NButton } from '../ui';
 import { api } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';

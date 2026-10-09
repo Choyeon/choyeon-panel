@@ -2,9 +2,10 @@
 import { onBeforeUnmount, onMounted, ref, watch, h, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
-  NCard, NTabs, NTabPane, NSpace, NButton, NText, NTag, NInput, NDynamicInput,
+  NCard, NTabs, NTabPane, NSpace, NText, NTag, NInput, NDynamicInput,
   useMessage, NPopconfirm, NIcon, NForm, NFormItem, NSkeleton, NGrid, NGridItem, NSelect, NAlert,
 } from 'naive-ui';
+import { NButton } from '../ui';
 import { api, repoHref, siteHref } from '../api';
 import { icons } from '../icons';
 import LogStream from '../components/LogStream.vue';
