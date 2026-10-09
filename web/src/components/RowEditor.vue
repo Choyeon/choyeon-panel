@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from 'vue';
+import { computed, h, nextTick, ref, watch } from 'vue';
 import {
   NDrawer, NDrawerContent, NSpace, NTag, NCheckbox, NInput, NPopconfirm, NText, useMessage,
 } from 'naive-ui';
@@ -21,7 +21,9 @@ const props = withDefaults(defineProps<{
   pk: string[];
   row: any | null;
   insert?: boolean;
-}>(), { insert: false });
+  /** 打开后要高亮并滚到该列（从 JSON 摘要芯片点进来时给） */
+  focus?: string | null;
+}>(), { insert: false, focus: null });
 const emit = defineEmits<{ 'update:show': [v: boolean]; saved: [] }>();
 
 const msg = useMessage();
@@ -78,12 +80,27 @@ function buildForm() {
   form.value = f;
 }
 // 抽屉开着时也能点表格里的另一行：只 watch show 会让表单停在上一次的行上
+const roRefs = new Map<string, HTMLElement>();
+function keepRoRef(name: string, el: unknown) {
+  if (el) roRefs.set(name, el as HTMLElement);
+  else roRefs.delete(name);
+}
+// 从 JSON 摘要芯片点进来的话，把那一列滚进视野：字段按列序排，长表里让人
+// 自己找到那一列不如直接送过去。等两帧是因为抽屉内容在过渡里才挂上。
+async function scrollToFocus() {
+  const f = props.focus;
+  if (!f) return;
+  await nextTick();
+  await nextTick();
+  roRefs.get(f)?.scrollIntoView({ block: 'center' });
+}
 watch(
-  [() => props.show, () => props.row, () => props.insert],
+  [() => props.show, () => props.row, () => props.insert, () => props.focus],
   ([open]) => {
     if (!open) return;
     editing.value = props.insert;
     buildForm();
+    scrollToFocus();
   },
   { immediate: true },
 );
@@ -202,7 +219,11 @@ async function delRow() {
         <NText depth="3" style="font-size: var(--fs-xs)">{{ rowLabel }}</NText>
 
         <div v-if="!editing" class="ro">
-          <div v-for="c in cols" :key="c.name" class="ro-row">
+          <div
+            v-for="c in cols" :key="c.name"
+            :class="['ro-row', focus === c.name ? 'ro-focus' : '']"
+            :ref="(el: any) => keepRoRef(c.name, el)"
+          >
             <div class="ro-label">
               <span class="ro-name">{{ c.name }}</span>
               <span class="ro-type">{{ c.type }}</span>
@@ -279,6 +300,12 @@ async function delRow() {
 .ro-row {
   display: flex; flex-direction: column; gap: 4px; padding: var(--space-2) 0;
   border-bottom: 1px solid var(--cp-border);
+}
+/* 芯片点进来的那一列：左边一道重音色 + 极浅底，滚动位置也落在它身上 */
+.ro-focus {
+  box-shadow: inset 2px 0 0 var(--cp-brand-soft);
+  background: var(--cp-bg-soft);
+  padding-left: var(--space-2);
 }
 .ro-label { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ro-name { font-weight: 600; font-size: var(--fs-sm); color: var(--cp-text); min-width: 0; overflow-wrap: anywhere; }

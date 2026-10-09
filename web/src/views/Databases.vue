@@ -185,6 +185,7 @@ const tBusy = ref(false);
 const showRow = ref(false);
 const rowModel = ref<any>(null);
 const rowInsert = ref(false);
+const rowFocus = ref<string | null>(null);
 
 const dbOptions = computed(() => (Array.isArray(dbs.value) ? dbs.value : []).map((d: any) => ({ label: d.name, value: d.name })));
 const browseCols: any[] = [
@@ -201,7 +202,7 @@ const dataCols = computed<any[]>(() => [
   ...tCols.value.map((c: string) => ({
     // tooltip:false 时超出 180px 的内容就永久看不见（没有 title 也没有浮层）
     title: c, key: c, ellipsis: { tooltip: true }, width: 180,
-    render: (r: any) => fmtCell(r[c], c),
+    render: (r: any) => fmtCell(r[c], c, r),
   })),
 ]);
 const keyCols: any[] = [
@@ -218,7 +219,7 @@ function jsonBrief(v: any) {
   return `{ ${Object.keys(v || {}).length} 项 }`;
 }
 
-function fmtCell(v: any, col = '') {
+function fmtCell(v: any, col = '', row?: any) {
   if (v === null || v === undefined) return h('span', { class: 'cell-sub' }, 'NULL');
   if (typeof v === 'object') {
     // 字典/数组在 180px 网格里只会糊成一串引号：单元格给摘要芯片，
@@ -226,8 +227,14 @@ function fmtCell(v: any, col = '') {
     return h(NTooltip, { trigger: 'hover', placement: 'top' }, {
       trigger: () =>
         h('button', {
-          type: 'button', class: 'json-chip', 'aria-label': `查看 ${col} 列的完整内容`,
-          onClick: (e: MouseEvent) => { e.stopPropagation(); },
+          type: 'button', class: 'json-chip', 'aria-haspopup': 'dialog',
+          'aria-label': `查看 ${col} 列的完整内容`,
+          // stopPropagation 拦下整行点击，否则一次点击开两次抽屉；
+          // 真正打开的动作在这里做，并把这一列作为焦点交给抽屉。
+          onClick: (e: MouseEvent) => {
+            e.stopPropagation();
+            if (row) openRow(row, false, col);
+          },
         }, jsonBrief(v)),
       default: () => h('pre', { class: 'json-tip' }, JSON.stringify(v, null, 2).slice(0, 3000)),
     });
@@ -249,9 +256,10 @@ function rowProps(r: any) {
 function keyRowProps(r: any) {
   return { class: 'cp-row-click', onClick: () => inspectKey(r.k) };
 }
-function openRow(r: any, insert: boolean) {
+function openRow(r: any, insert: boolean, focus: string | null = null) {
   rowInsert.value = insert;
   rowModel.value = insert ? null : r;
+  rowFocus.value = focus;
   showRow.value = true;
 }
 
@@ -529,7 +537,7 @@ async function delKeys(keys: string[]) {
     <RowEditor
       v-if="brDb && curTable" v-model:show="showRow" :db="brDb"
       :schema="curTable.schema" :table="curTable.name"
-      :cols="tColMeta" :pk="tPk" :row="rowModel" :insert="rowInsert"
+      :cols="tColMeta" :pk="tPk" :row="rowModel" :insert="rowInsert" :focus="rowFocus"
       @saved="loadTableData"
     />
   </div>
