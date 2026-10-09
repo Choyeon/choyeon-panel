@@ -4,7 +4,7 @@
  * 单位与精度极易走偏。这里的输出与原来各页保持一致（含 1 位小数、`B/KB/MB/GB/TB`）。
  */
 
-const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
 
 /** 十进制字节：0 → `0 B`，1536 → `1.5 KB`；非数字/负数（stat 失败时的常态）→ `—` */
 export function fmtBytes(n: number | null | undefined): string {

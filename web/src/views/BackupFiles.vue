@@ -10,6 +10,7 @@ import { api, apiUrl, getRole, getToken } from '../api';
 import { icon, icons } from '../icons';
 import EmptyBox from '../components/EmptyBox.vue';
 import PageHeader from '../components/PageHeader.vue';
+import { fmtBytes } from '../composables/useFormat';
 
 const msg = useMessage();
 const route = useRoute();
@@ -36,14 +37,6 @@ const KIND_LABEL: Record<string, string> = { pg: 'PostgreSQL', app: '应用目�
 const KIND_ICON: Record<string, string> = { pg: 'CubeOutline', app: 'FolderOutline', sqlite: 'ServerOutline' };
 
 const ico = (name: string, size = 14) => icon(name, size);
-
-function fmt(n: number) {
-  let i = 0;
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
-}
 
 function when(iso: string) {
   return (iso || '').replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
@@ -185,7 +178,7 @@ async function doUpload() {
     });
     const data = await res.json().catch(() => ({}) as any);
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    msg.success(`已登记 ${data.name}（${fmt(data.size)}）`);
+    msg.success(`已登记 ${data.name}（${fmtBytes(data.size)}）`);
     showUpload.value = false;
     load();
   } catch (e: any) {
@@ -249,7 +242,7 @@ const columns: any[] = [
     render: (f: any) => h(NTag, { size: 'small', bordered: false, type: f.job_missing ? 'warning' : 'default' }, () => KIND_LABEL[f.kind] || '未知'),
   },
   { title: '生成时间', key: 'mtime', width: 210, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim', title: when(f.mtime) }, when(f.mtime)) },
-  { title: '大小', key: 'size', width: 100, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim' }, fmt(f.size)) },
+  { title: '大小', key: 'size', width: 100, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim' }, fmtBytes(f.size)) },
   {
     title: '状态', key: 'state', width: 130,
     render: (f: any) =>
@@ -302,7 +295,7 @@ onMounted(() => {
   <div>
     <PageHeader
       title="备份文件"
-      :sub="`共 ${totals.count} 个 · 合计 ${fmt(totals.size)}；当前筛选 ${shown.length} 个 · ${fmt(totals.shownSize)}。产物目录 ${dir || '—'}`"
+      :sub="`共 ${totals.count} 个 · 合计 ${fmtBytes(totals.size)}；当前筛选 ${shown.length} 个 · ${fmtBytes(totals.shownSize)}。产物目录 ${dir || '—'}`"
     >
       <template #actions>
         <NPopconfirm v-if="isAdmin && checked.length" @positive-click="delChecked">
@@ -358,7 +351,7 @@ onMounted(() => {
         <NForm label-placement="left" label-width="76" :show-feedback="false">
           <NFormItem label="文件"><NText class="mono cp-break" style="font-size: var(--fs-sm); min-width: 0">{{ restoreTarget?.name }}</NText></NFormItem>
           <NFormItem label="所属任务"><NText style="font-size: var(--fs-sm)">{{ restoreTarget ? jobLabel(restoreTarget) : '' }}</NText></NFormItem>
-          <NFormItem label="生成时间"><NText style="font-size: var(--fs-sm)">{{ when(restoreTarget?.mtime) }} · {{ fmt(restoreTarget?.size || 0) }}</NText></NFormItem>
+          <NFormItem label="生成时间"><NText style="font-size: var(--fs-sm)">{{ when(restoreTarget?.mtime) }} · {{ fmtBytes(restoreTarget?.size || 0) }}</NText></NFormItem>
         </NForm>
         <NAlert v-if="restoreErr" type="error" :bordered="false" size="small" role="alert">{{ restoreErr }}</NAlert>
         <NAlert v-if="restoreLog" type="success" :bordered="false" size="small" role="status">
@@ -389,7 +382,7 @@ onMounted(() => {
             <NSpace :size="8" align="center" style="min-width: 0">
               <NButton size="small" tertiary :icon="ico('CloudUploadOutline')" @click="pickUploadFile">选择文件</NButton>
               <NText v-if="uploadFile" class="mono cp-break" style="font-size: var(--fs-xs); min-width: 0">
-                {{ uploadFile.name }} · {{ fmt(uploadFile.size) }}
+                {{ uploadFile.name }} · {{ fmtBytes(uploadFile.size) }}
               </NText>
               <NText v-else depth="3" style="font-size: var(--fs-xs)">尚未选择</NText>
             </NSpace>

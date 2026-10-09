@@ -5,7 +5,7 @@ import { NCard, NDropdown, NGrid, NGridItem, NIcon, NProgress, NSpace, NTag, NTe
 import { NButton } from '../ui';
 import { api, getRole, req } from '../api';
 import { icons, icon } from '../icons';
-import { fmtAgo } from '../composables/useFormat';
+import { fmtAgo, fmtBytes } from '../composables/useFormat';
 import EmptyBox from '../components/EmptyBox.vue';
 import MetricChart from '../components/MetricChart.vue';
 
@@ -23,13 +23,6 @@ const rtLoading = ref(true);
 let disposed = false;
 let timer: number | null = null;
 
-function fmtBytes(n: number) {
-  if (n == null || Number.isNaN(n)) return '-';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  let i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
-}
 // 卡片宽度装不下 "8.0 GB / 49.0 GB"（会折成两行且把 GB 单独甩下去）。同单位时
 // 把单位只写一次，交给小号 .unit 显示，主数字保持一行。
 function usedTotal(used: number, total: number) {
