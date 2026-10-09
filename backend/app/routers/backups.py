@@ -21,6 +21,39 @@ async def backups_list():
     return backup_service.list_backups()
 
 
+@router.get("/api/backups/files")
+async def backups_files():
+    """全部备份产物平铺（备份文件管理页）。放在 /{bid} 之前，避免被当成 id。"""
+    return backup_service.list_files()
+
+
+@router.post("/api/backups/{bid}/restore")
+async def backups_restore(bid: str, req: Request):
+    """用指定备份文件覆盖目标（不可逆），恢复前服务端会自动留存当前副本。"""
+    if r := need_admin(req):
+        return r
+    body = await _body(req)
+    name = str(body.get("file") or "")
+    try:
+        return await backup_service.restore_backup(int(bid), name, actor=req.state.cp_sub)
+    except Exception as e:  # noqa: BLE001
+        # 只记任务与文件名，备份内容本身不进审计
+        dbm.audit(req.state.cp_sub, "backup:restore", f"{bid}:{name}(失败: {e})")
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.delete("/api/backups/{bid}/files/{name}")
+async def backups_file_delete(bid: str, name: str, req: Request):
+    if r := need_admin(req):
+        return r
+    try:
+        r = await backup_service.delete_file(int(bid), name)
+        dbm.audit(req.state.cp_sub, "backup:delete-file", f"{bid}:{r['name']}")
+        return r
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
 @router.post("/api/backups")
 async def backups_create(req: Request):
     body = await _body(req)

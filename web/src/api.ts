@@ -181,6 +181,10 @@ export const api = {
   // 恢复在服务端最长 3600s（pg 的 drop/create/restore），前端超时必须更长，
   // 否则本地 abort 之后远端还在写库，用户会以为没执行又点一次。
   restoreBackup: (id: number, file: string) => req(`/backups/${id}/restore`, { body: { file }, timeout: 3700000 }),
+  // 备份产物的平铺列表（{dir, files}）：任务表里只给前 30 个，按时间清理要这一份
+  backupFiles: () => req('/backups/files'),
+  deleteBackupFile: (id: number, name: string) =>
+    req(`/backups/${id}/files/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   files: (path: string) => req(`/files?path=${encodeURIComponent(path)}`),
   fileContent: (path: string) => req(`/files/content?path=${encodeURIComponent(path)}`),
   saveFile: (path: string, content: string | ArrayBuffer) =>

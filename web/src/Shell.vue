@@ -42,7 +42,11 @@ const avatarUrl = computed(() => (profileTick.value, getAvatar()));
 const pageTitle = computed(() =>
   route.path.startsWith('/apps/') ? '应用详情' : TITLES[route.path] || 'choyeon panel',
 );
-const active = computed(() => (route.path.startsWith('/apps') ? '/apps' : route.path));
+// 二级页高亮所属一级菜单：/apps/3 -> 应用，/backups/files -> 备份
+const active = computed(() => {
+  const top = `/${route.path.split('/')[1] || ''}`;
+  return top === '/apps' || top === '/backups' ? top : route.path;
+});
 function ico(name: string, size = 18) {
   return () => h(NIcon, { size }, { default: () => h(icons[name] || icons.SettingsOutline) });
 }

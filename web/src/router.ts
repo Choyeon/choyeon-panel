@@ -3,7 +3,7 @@ import { getToken, getRole, onUnauthorized } from './api';
 
 export const TITLES: Record<string, string> = {
   '/dashboard': '总览', '/apps': '应用', '/services': '系统服务', '/db': '数据库',
-  '/backups': '备份', '/files': '文件', '/terminal': '终端', '/doctor': '安全自检',
+  '/backups': '备份', '/backups/files': '备份文件', '/files': '文件', '/terminal': '终端', '/doctor': '安全自检',
   '/users': '用户管理', '/audit': '操作审计', '/logs': '面板日志', '/settings': '设置',
 };
 
@@ -18,6 +18,7 @@ export const router = createRouter({
     { path: '/services', component: () => import('./views/Services.vue') },
     { path: '/db', component: () => import('./views/Databases.vue') },
     { path: '/backups', component: () => import('./views/Backups.vue') },
+    { path: '/backups/files', component: () => import('./views/BackupFiles.vue') },
     { path: '/files', component: () => import('./views/Files.vue') },
     { path: '/terminal', component: () => import('./views/Terminal.vue') },
     { path: '/doctor', component: () => import('./views/Doctor.vue') },

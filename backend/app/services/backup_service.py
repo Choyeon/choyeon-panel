@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import tarfile
 from contextlib import suppress
@@ -82,6 +83,57 @@ def list_backups() -> list:
             b["files"] = []
         out.append(b)
     return out
+
+
+_BELONGS_RE = re.compile(r"^bk(\d+)-")
+
+
+def list_files() -> dict:
+    """所有任务的产物平铺成一页（备份文件管理页用），按时间倒序。
+
+    任务列表里的 files 是"每条任务前 30 个"，看总量、按时间清理都不方便；
+    这里反过来：以文件为主体，任务只是它的一个属性。
+    任务行已被删除但文件还在的（job_missing）也列出来——那些正是没人管、
+    只能靠手动删才腾得出来的空间。
+    """
+    files: list[dict] = []
+    if not os.path.isdir(BACKUP_DIR):
+        return {"dir": BACKUP_DIR, "files": files}
+    jobs = {b["id"]: b for b in dbm.query("SELECT * FROM backups")}
+    for name in os.listdir(BACKUP_DIR):
+        m = _BELONGS_RE.match(name)
+        if not m:
+            continue
+        bid = int(m.group(1))
+        try:
+            st = os.stat(f"{BACKUP_DIR}/{name}")
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        bk = jobs.get(bid)
+        kind = bk["kind"] if bk else ""
+        files.append({
+            "name": name,
+            "job_id": bid,
+            "job_missing": bk is None,
+            "kind": kind,
+            "target": (_sqlite_target_label(bk["target"]) if kind == "sqlite" else bk["target"]) if bk else "",
+            "size": st.st_size,
+            "mtime": iso_ms(st.st_mtime),
+            "restoreable": _restoreable(kind, name) if bk else False,
+        })
+    files.sort(key=lambda f: (f["mtime"], f["name"]), reverse=True)
+    return {"dir": BACKUP_DIR, "files": files}
+
+
+def _sqlite_target_label(target) -> str:
+    """sqlite 的 target 存的是 app_id（也可能是历史遗留的应用名），统一显示成应用名。"""
+    t = str(target or "")
+    row = dbm.query_one("SELECT name FROM apps WHERE id=?", (int(t),)) if t.isdigit() else None
+    if not row:
+        row = dbm.query_one("SELECT name FROM apps WHERE name=?", (t,))
+    return row["name"] if row else f"#{t}"
 
 
 def _write_if_changed(path: str, content: str):
@@ -281,6 +333,18 @@ async def delete_backup(bid: int):
             os.unlink(f)
     await run("systemctl", ["daemon-reload"])
     dbm.execute("DELETE FROM backups WHERE id=?", (bid,))
+
+
+async def delete_file(bid: int, filename: str) -> dict:
+    """只删一个备份产物，不动任务、不动 timer。
+
+    prune 是按文件名排序删最旧的，手动删掉旧的一份等于给下一轮腾出名额；
+    备份目录不在 data/ 下，也没有别的接口能删它，所以这里必须自己把名字记进审计，
+    事后才查得到是谁在什么时候清了哪一份。
+    """
+    path = _backup_file_path(bid, filename)
+    os.unlink(path)
+    return {"ok": True, "name": os.path.basename(path)}
 
 
 _SQLITE_NAME_RE = re.compile(r"^bk\d+-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}(?:-\d+)?-(.+)\.sqlite\.gz$")
@@ -508,7 +572,7 @@ async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
     log.append(f"==> 库 {db} 已从 {os.path.basename(src_file)} 恢复（属主 {owner}）")
 
 
-async def restore_backup(bid: int, filename: str) -> dict:
+async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict:
     """用指定备份文件把目标覆盖回备份当时的状态（admin 手动触发，不可逆操作）。"""
     bk = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
     if not bk:
@@ -523,7 +587,8 @@ async def restore_backup(bid: int, filename: str) -> dict:
         await _restore_app(bk, path, log)
     else:
         await _restore_pg(bk, path, log)
-    dbm.audit("system", "backup:restore", f"{bid}:{os.path.basename(path)}")
+    # actor 由路由传当前登录用户：覆盖线上数据这种事记成 "system" 等于没记
+    dbm.audit(actor, "backup:restore", f"{bid}:{os.path.basename(path)}")
     return {"ok": True, "log": "\n".join(log)}
 
 

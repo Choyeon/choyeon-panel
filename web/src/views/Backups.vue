@@ -1,17 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, h } from 'vue';
+import { useRouter } from 'vue-router';
 import {
   NDataTable, NSpace, NTag, NModal, NForm, NFormItem, NInput, NInputNumber,
   NSelect, NPopconfirm, useMessage, NIcon, NAlert, NSwitch, NText,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { api, apiUrl, getRole, getToken } from '../api';
+import { api } from '../api';
 import { icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
 const msg = useMessage();
-const isAdmin = computed(() => getRole() === 'admin');
+const router = useRouter();
 const rows = ref<any[]>([]);
 const apps = ref<any[]>([]);
 const show = ref(false);
@@ -49,14 +50,6 @@ function fmt(n: number) {
   return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
 }
 
-// 文件名芯片：去掉 bk<id>- 前缀与压缩后缀，只留人看得懂的时间戳/库名
-function fileLabel(r: any, f: any) {
-  return f.name
-    .replace(`bk${r.id}-`, '')
-    .replace(/\.(dump|tar|sqlite)(\.gz)?$/i, '')
-    + (f.size ? ` · ${fmt(f.size)}` : '');
-}
-
 const appOpts = computed(() => apps.value.map((a: any) => ({ label: a.name, value: a.name })));
 // sqlite 的 target 存 app_id：应用改名后按名的 target 会指向不存在的目录
 const sqliteOpts = computed(() => apps.value.map((a: any) => ({ label: a.name, value: String(a.id) })));
@@ -90,22 +83,14 @@ const columns: any[] = [
   },
   { title: '保留', key: 'keep', width: 70, render: (r: any) => h('span', { class: 'mono-dim' }, `${r.keep} 份`) },
   {
-    title: '备份文件', key: 'files',
+    // 文件明细挪到二级页：这里堆芯片既看不清总量，也没法按时间挑一份出来恢复
+    title: '产物', key: 'files', width: 250,
     render: (r: any) =>
       r.files.length
-        ? h(NSpace, { size: 4 }, () =>
-            r.files.slice(0, 5).map((f: any) =>
-              h(
-                NButton,
-                // 下载走 /api/files/download，该接口现在只允许管理员：
-                // 只读账号点开的是一张 JSON 错误页，不如直接不给这个入口。
-                // 没有 dir（还没产出过备份文件）时同样不给，否则链接指向 /<文件名>，必报路径超范围。
-                isAdmin.value && r.dir
-                  ? { size: 'tiny', tertiary: true, tag: 'a', href: `${apiUrl('/files/download')}?path=${encodeURIComponent(`${r.dir}/${f.name}`)}&token=${encodeURIComponent(getToken())}`, target: '_blank' }
-                  : { size: 'tiny', tertiary: true, title: isAdmin.value ? '备份目录未知，无法下载' : '仅管理员可下载备份文件' },
-                { icon: ico('DownloadOutline', 12), default: () => fileLabel(r, f) },
-              ),
-            ))
+        ? h('div', { class: 'cell-txt' }, [
+            h('span', { style: 'font-size:var(--fs-sm); color:var(--cp-text)' }, `${r.files.length} 份 · 合计 ${fmt(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))}`),
+            h('div', { class: 'cell-sub' }, `最近 ${String(r.files[0].mtime || '').replace('T', ' ').slice(0, 19)}`),
+          ])
         : h('span', { class: 'cell-sub' }, '尚无产物'),
   },
   {
@@ -116,10 +101,10 @@ const columns: any[] = [
         h(NButton, { size: 'tiny', tertiary: true, disabled: busy.value === r.id, icon: ico('PencilOutline'), title: '编辑计划与保留份数', onClick: () => openEdit(r) }, () => '编辑'),
         h(NButton, {
           size: 'tiny', tertiary: true, type: 'warning',
-          disabled: busy.value === r.id || !isAdmin.value || !(r.files || []).some((f: any) => f.restoreable),
-          icon: ico('RefreshCircleOutline'), title: isAdmin.value ? '从备份文件恢复' : '仅管理员可恢复',
-          onClick: () => openRestore(r),
-        }, () => '恢复'),
+          disabled: !r.files.length,
+          title: r.files.length ? '查看/下载/恢复/清理该任务的备份文件' : '还没有备份产物可管理',
+          icon: ico('FolderOpenOutline'), onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }),
+        }, () => '备份文件'),
         h(NPopconfirm, { onPositiveClick: () => del(r.id) }, {
           trigger: () => h(NButton, { size: 'tiny', quaternary: true, type: 'error', icon: ico('TrashOutline'), title: '删除备份任务' }, { default: () => '删除' }),
           default: () => '删除任务及其 systemd timer（已生成的备份文件保留）',
@@ -209,52 +194,6 @@ async function submit() {
   }
 }
 
-// ---------- 恢复 ----------
-const showRestore = ref(false);
-const restoreJob = ref<any>(null);
-const restoreFile = ref('');
-const restoring = ref(false);
-const restoreLog = ref('');
-const restoreErr = ref('');
-
-const restoreFiles = computed(() =>
-  (restoreJob.value?.files || [])
-    .filter((f: any) => f.restoreable)
-    .map((f: any) => ({ label: `${f.name.replace(`bk${restoreJob.value.id}-`, '')} · ${fmt(f.size)} · ${f.mtime?.slice?.(0, 19).replace('T', ' ') || ''}`.trim(), value: f.name })),
-);
-
-const RESTORE_WARN: Record<string, string> = {
-  sqlite: '会先自动留存当前库，然后停止对应服务、用快照覆盖数据库文件、再启动服务。当前库里备份之后写入的数据会全部丢失。',
-  app: '会停止对应服务，并用归档覆盖应用目录下的文件（当前 .panel.env 环境变量会被保留）。',
-  pg: '会先 pg_dump 留存当前库，然后 DROP 并重建该库、用 pg_restore 导入。库里现有的表与数据全部替换。',
-};
-
-function openRestore(r: any) {
-  restoreJob.value = r;
-  restoreLog.value = '';
-  restoreErr.value = '';
-  const first = (r.files || []).find((f: any) => f.restoreable);
-  restoreFile.value = first ? first.name : '';
-  showRestore.value = true;
-}
-
-async function doRestore() {
-  if (!restoreFile.value) return;
-  restoring.value = true;
-  restoreErr.value = '';
-  try {
-    const r = await api.restoreBackup(restoreJob.value.id, restoreFile.value);
-    restoreLog.value = r.log || '恢复完成';
-    msg.success('恢复完成');
-    load();
-  } catch (e: any) {
-    restoreErr.value = e.message;
-    msg.error(e.message);
-  } finally {
-    restoring.value = false;
-  }
-}
-
 onMounted(async () => {
   await load();
   try {
@@ -265,8 +204,9 @@ onMounted(async () => {
 
 <template>
   <div>
-    <PageHeader title="备份" sub="systemd timer 驱动的定时备份，产物存放于备份目录，点击文件名即可下载，选中版本可一键恢复">
+    <PageHeader title="备份" sub="systemd timer 驱动的定时备份；产物在「备份文件」页统一查看、下载、恢复与清理">
       <template #actions>
+        <NButton size="small" tertiary :icon="ico('FolderOpenOutline')" @click="router.push('/backups/files')">备份文件</NButton>
         <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
         <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="openCreate">新建备份任务</NButton>
       </template>
@@ -276,7 +216,7 @@ onMounted(async () => {
       调度由 systemd timer 独立完成，面板进程停止不影响备份执行。PG 用 pg_dump 自定义格式；应用目录打包自动排除 node_modules / .venv / .next / .output；SQLite 走在线备份 API，热备份不会写出页不一致的库。
     </NAlert>
 
-    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading" :scroll-x="1160" :row-key="(r: any) => r.id">
+    <NDataTable :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading" :scroll-x="1000" :row-key="(r: any) => r.id">
       <template #empty><EmptyBox text="还没有备份任务，点击右上角新建" /></template>
     </NDataTable>
 
@@ -316,38 +256,5 @@ onMounted(async () => {
         </NSpace>
       </NForm>
     </NModal>
-
-    <NModal v-model:show="showRestore" preset="card" title="从备份恢复" style="width: 480px; max-width: 94vw">
-      <NSpace vertical :size="12">
-        <NAlert type="warning" :bordered="false" size="small" role="alert">
-          {{ RESTORE_WARN[restoreJob?.kind] || '恢复会用备份内容覆盖当前数据，操作不可撤销。' }}
-        </NAlert>
-        <NFormItem label="任务" :show-feedback="false">
-          <NText style="font-size: var(--fs-sm)">
-            {{ restoreJob ? `${restoreJob.kind} · ${restoreJob.kind === 'sqlite' ? sqliteTargetName(restoreJob.target) : restoreJob.target}` : '' }}
-          </NText>
-        </NFormItem>
-        <NFormItem label="选择版本" :show-feedback="false">
-          <NSelect v-model:value="restoreFile" :options="restoreFiles" placeholder="选择要恢复的备份文件" aria-label="备份文件" />
-        </NFormItem>
-        <NAlert v-if="restoreErr" type="error" :bordered="false" size="small" role="alert">{{ restoreErr }}</NAlert>
-        <NAlert v-if="restoreLog" type="success" :bordered="false" size="small" role="status">
-          <pre class="mono-pre">{{ restoreLog }}</pre>
-        </NAlert>
-        <NSpace justify="end" :size="8">
-          <NButton tertiary @click="showRestore = false">关闭</NButton>
-          <NPopconfirm @positive-click="doRestore">
-            <template #trigger>
-              <NButton type="warning" class="cp-press" :loading="restoring" :disabled="!restoreFile || restoring" :icon="ico('RefreshCircleOutline')">恢复覆盖</NButton>
-            </template>
-            覆盖后当前数据不可找回（仅能再退回本次自动留存的 pre-restore 快照），确认执行？
-          </NPopconfirm>
-        </NSpace>
-      </NSpace>
-    </NModal>
   </div>
 </template>
-
-<style scoped>
-.mono-pre { margin: 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-xs); white-space: pre-wrap; word-break: break-all; }
-</style>
