@@ -221,6 +221,11 @@ a:focus-visible,
 .cell-avatar.sm { width: 20px; height: 20px; }
 .cell-txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .cell-name { font-size: var(--fs-sm); font-weight: 550; color: var(--cp-text); text-align: left; padding: 0 !important; }
+/* .n-button 根节点是 justify-content: center（naive-ui es/button/src/styles/index.cssr.mjs:27）。
+   文字按钮放在 .cell-txt（列向 flex）里会被拉伸到与下方描述行等宽，于是名字在自身宽度里
+   居中，图标与文字之间出现一段随描述长度变化的空白。用 button. 提高优先级压过它——
+   naive-ui 运行时注入样式排在本站全局样式之后，同权重的 class 规则会输。 */
+button.cell-name { justify-content: flex-start; }
 .cell-sub { font-size: var(--fs-2xs); color: var(--cp-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vchip {
   display: inline-flex; align-items: center; gap: 5px;
