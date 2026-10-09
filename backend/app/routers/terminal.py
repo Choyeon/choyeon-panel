@@ -100,6 +100,12 @@ async def terminal(ws: WebSocket):
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 100, 0, 0))
         env = dict(os.environ)
         env.update({"TERM": "xterm-256color", "PS1": "[choyeon-panel \\W]\\# "})
+        # systemd 环境默认没有 LANG：bash 里 echo 中文、git log 中文作者、
+        # vim 状态栏都会变成乱码问号——网页终端"编码有问题"的真正根因
+        # 不在 WebSocket/JSON 层（那里全程 UTF-8），而在 shell 侧没有 UTF-8 locale。
+        env.setdefault("LANG", "C.UTF-8")
+        env.setdefault("LC_ALL", "C.UTF-8")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         proc = subprocess.Popen(
             ["/bin/bash"], stdin=slave, stdout=slave, stderr=slave,
             cwd=_shell_cwd(), env=env, start_new_session=True, close_fds=True,

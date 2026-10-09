@@ -104,6 +104,8 @@ export const api = {
   status: () => req('/auth/status'),
   ready: () => req('/ready'),
   doctor: () => req('/doctor'),
+  // 一键修复：前端构建项在服务端最长跑 900s，超时会让人误以为失败又点一次
+  doctorFix: (id: string) => req('/doctor/fix', { body: { id }, timeout: 960000 }),
   templates: () => req('/templates'),
   setup: (username: string, password: string) => req('/auth/setup', { body: { username, password } }),
   login: (username: string, password: string) => req('/auth/login', { body: { username, password } }),
@@ -148,7 +150,14 @@ export const api = {
   // 服务端 psql 自己在 30s 放弃，前端必须比它慢一点：
   // 定成默认 15s 时用户看到的是"请求超时"，而真实结果（错误原因/成功）已经丢了。
   pgQuery: (sql: string) => req('/db/pg/query', { body: { sql }, timeout: 40000 }),
+  pgTables: (db: string) => req(`/db/pg/${encodeURIComponent(db)}/tables`),
+  pgTable: (db: string, schema: string, name: string, page: number, size: number) =>
+    req(`/db/pg/${encodeURIComponent(db)}/table?schema=${encodeURIComponent(schema)}&name=${encodeURIComponent(name)}&page=${page}&size=${size}`),
   redis: () => req('/db/redis'),
+  redisKeys: (cursor: string, pattern: string) =>
+    req(`/db/redis/keys?cursor=${encodeURIComponent(cursor)}&pattern=${encodeURIComponent(pattern)}`),
+  redisKey: (k: string) => req(`/db/redis/key?k=${encodeURIComponent(k)}`),
+  redisDel: (keys: string[]) => req('/db/redis/del', { body: { keys } }),
   redisPassword: (p: string) => req('/db/redis/password', { body: { password: p } }),
   backups: () => req('/backups'),
   createBackup: (b: any) => req('/backups', { body: b }),

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted, ref, h } from 'vue';
+import { computed, onMounted, ref, h } from 'vue';
 import {
   NTabs, NTabPane, NDataTable, NButton, NSpace, NModal, NInput, NForm, NFormItem,
   NPopconfirm, NCard, NText, NTag, useMessage, NIcon, NGrid, NGridItem, NSkeleton,
+  NSelect, NPagination,
 } from 'naive-ui';
 import { api } from '../api';
 import { icons } from '../icons';
@@ -166,6 +167,143 @@ const hitRate = () => {
 };
 
 onMounted(load);
+
+/* ---------- PG 数据浏览 ---------- */
+const brDb = ref<string | null>(null);
+const tables = ref<any[]>([]);
+const tablesBusy = ref(false);
+const curTable = ref<any>(null);
+const tRows = ref<any[]>([]);
+const tCols = ref<string[]>([]);
+const tTotal = ref(0);
+const tPage = ref(1);
+const tSize = ref(50);
+const tBusy = ref(false);
+
+const dbOptions = computed(() => (Array.isArray(dbs.value) ? dbs.value : []).map((d: any) => ({ label: d.name, value: d.name })));
+const browseCols: any[] = [
+  { title: '表', key: 'name', render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name' }, r.name), h('div', { class: 'cell-sub' }, r.schema)])]) },
+  { title: '行数（估）', key: 'row_estimate', width: 110, render: (r: any) => h('span', { class: 'mono-dim' }, String(r.row_estimate ?? '—')) },
+  { title: '大小', key: 'size', width: 100, render: (r: any) => h('span', { class: 'vchip' }, r.size ?? '—') },
+  { title: '', key: 'go', width: 80, render: (r: any) => h(NButton, { size: 'tiny', tertiary: true, type: 'primary', onClick: () => pickTable(r) }, () => '查看数据') },
+];
+const dataCols = computed<any[]>(() => tCols.value.map((c: string) => ({
+  title: c, key: c, ellipsis: { tooltip: false }, width: 180,
+  render: (r: any) => fmtCell(r[c]),
+})));
+const pairCols: any[] = [
+  { title: 'Field / Member', key: 'field', ellipsis: { tooltip: false } },
+  { title: 'Value / Score', key: 'value', ellipsis: { tooltip: false } },
+];
+const idxCols: any[] = [
+  { title: '#', key: 'i', width: 70 },
+  { title: 'Value', key: 'v', ellipsis: { tooltip: false } },
+];
+const keyCols: any[] = [
+  { type: 'selection' },
+  { title: 'Key', key: 'k', render: (r: any) => h('span', { class: 'mono-dim', style: 'word-break:break-all' }, r.k) },
+];
+
+function fmtCell(v: any) {
+  if (v === null || v === undefined) return h('span', { class: 'cell-sub' }, 'NULL');
+  if (typeof v === 'object') return h('span', { class: 'mono-dim', style: 'font-size:var(--fs-2xs)' }, JSON.stringify(v));
+  return String(v);
+}
+
+async function loadTables() {
+  curTable.value = null;
+  tRows.value = [];
+  tCols.value = [];
+  if (!brDb.value) return;
+  tablesBusy.value = true;
+  try {
+    tables.value = await api.pgTables(brDb.value);
+  } catch (e: any) {
+    tables.value = [];
+    msg.error(e.message);
+  } finally {
+    tablesBusy.value = false;
+  }
+}
+async function pickTable(t: any) {
+  curTable.value = t;
+  tPage.value = 1;
+  await loadTableData();
+}
+async function loadTableData() {
+  if (!brDb.value || !curTable.value) return;
+  tBusy.value = true;
+  try {
+    const r = await api.pgTable(brDb.value, curTable.value.schema, curTable.value.name, tPage.value, tSize.value);
+    tCols.value = r.columns || [];
+    tRows.value = r.rows || [];
+    tTotal.value = r.total || 0;
+  } catch (e: any) {
+    tRows.value = [];
+    msg.error(e.message);
+  } finally {
+    tBusy.value = false;
+  }
+}
+function onPage(p: number) {
+  tPage.value = p;
+  loadTableData();
+}
+
+/* ---------- Redis 浏览器 ---------- */
+const rPattern = ref('*');
+const rKeys = ref<string[]>([]);
+const rCursor = ref('0');
+const rBusy = ref(false);
+const rDetail = ref<any>(null);
+const rSel = ref<string[]>([]);
+const rDetailBusy = ref(false);
+const jsonValue = computed(() => {
+  const v = rDetail.value?.value;
+  if (rDetail.value?.type !== 'string' || typeof v !== 'string') return '';
+  try {
+    return JSON.stringify(JSON.parse(v), null, 2);
+  } catch {
+    return '';
+  }
+});
+
+async function scanKeys(more = false) {
+  rBusy.value = true;
+  try {
+    const r = await api.redisKeys(more ? rCursor.value : '0', rPattern.value || '*');
+    rKeys.value = more ? [...rKeys.value, ...(r.keys || [])] : (r.keys || []);
+    rCursor.value = r.cursor || '0';
+    if (!more && rDetail.value) rDetail.value = null;
+  } catch (e: any) {
+    if (!more) rKeys.value = [];
+    msg.error(e.message);
+  } finally {
+    rBusy.value = false;
+  }
+}
+async function inspectKey(k: string) {
+  rDetailBusy.value = true;
+  try {
+    rDetail.value = await api.redisKey(k);
+  } catch (e: any) {
+    rDetail.value = null;
+    msg.error(e.message);
+  } finally {
+    rDetailBusy.value = false;
+  }
+}
+async function delKeys(keys: string[]) {
+  try {
+    const r = await api.redisDel(keys);
+    msg.success(`已删除 ${r.deleted} 个 key`);
+    rSel.value = [];
+    if (rDetail.value && keys.includes(rDetail.value.key)) rDetail.value = null;
+    scanKeys(false);
+  } catch (e: any) {
+    msg.error(e.message);
+  }
+}
 </script>
 
 <template>
@@ -177,7 +315,7 @@ onMounted(load);
     </PageHeader>
 
     <NCard size="small" :content-style="{ padding: '0' }">
-      <NTabs type="line" animated pane-style="padding: var(--space-4)">
+      <NTabs type="line" animated :tabs-padding="16" pane-style="padding: var(--space-4)">
         <NTabPane name="pg" tab="PostgreSQL">
           <NSpace vertical size="medium">
             <NSpace justify="space-between" align="center" style="width: 100%">
@@ -212,6 +350,100 @@ onMounted(load);
               <NText depth="3" style="font-size: var(--fs-xs)">Ctrl+Enter 快速执行 · 以 postgres 超级用户运行，请谨慎操作</NText>
             </NSpace>
             <div class="log-view" style="max-height: 380px" role="region" aria-live="polite" aria-label="SQL 执行结果">{{ sqlOut || '结果将显示在这里…' }}</div>
+          </NSpace>
+        </NTabPane>
+
+        <NTabPane name="browse" tab="PG 数据浏览">
+          <NSpace vertical :size="12">
+            <NSpace align="center" :size="10" wrap>
+              <NText depth="3" style="font-size: var(--fs-xs)">数据库</NText>
+              <NSelect v-model:value="brDb" :options="dbOptions" size="small" style="width: 200px" placeholder="选择数据库" aria-label="浏览的数据库" @update:value="loadTables" />
+              <NText depth="3" style="font-size: var(--fs-xs)">共 {{ tables.length }} 张表</NText>
+            </NSpace>
+            <NDataTable v-if="!curTable" size="small" :bordered="false" :scroll-x="640" :columns="browseCols" :data="tables" :loading="tablesBusy" max-height="calc(100vh - 400px)">
+              <template #empty><EmptyBox :text="brDb ? (tablesBusy ? '加载中…' : '这个库里没有表') : '先选择一个数据库'" /></template>
+            </NDataTable>
+            <template v-else>
+              <NSpace align="center" :size="10" wrap>
+                <NButton size="tiny" tertiary :icon="ico('ArrowBackOutline')" @click="curTable = null">表列表</NButton>
+                <NTag size="small" :bordered="false" type="info">{{ curTable.schema }}.{{ curTable.name }}</NTag>
+                <NText depth="3" style="font-size: var(--fs-xs)">{{ tTotal }} 行 · {{ tCols.length }} 列</NText>
+                <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" @click="loadTableData">刷新</NButton>
+                <NPagination v-model:page="tPage" :page-count="Math.max(1, Math.ceil(tTotal / tSize))" :page-size="tSize" size="small" :show-quick-jumper="false" @update:page="onPage" />
+              </NSpace>
+              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" :scroll-x="Math.max(600, tCols.length * 180)" max-height="calc(100vh - 430px)" :row-key="(r: any) => r">
+                <template #empty><EmptyBox text="这张表没有数据" /></template>
+              </NDataTable>
+            </template>
+          </NSpace>
+        </NTabPane>
+
+        <NTabPane name="rbr" tab="Redis 浏览器">
+          <NSpace vertical :size="12">
+            <NSpace align="center" :size="8" wrap>
+              <NInput v-model:value="rPattern" size="small" placeholder="匹配模式，如 session:*" style="width: 220px" :input-props="{ 'aria-label': 'Redis key 匹配模式', class: 'mono' }" @keyup.enter="scanKeys(false)" />
+              <NButton size="small" type="primary" :loading="rBusy" :icon="ico('SearchOutline')" @click="scanKeys(false)">扫描</NButton>
+              <NButton v-if="rCursor !== '0'" size="small" tertiary :loading="rBusy" :icon="ico('RefreshCircleOutline')" @click="scanKeys(true)">加载更多</NButton>
+              <NText depth="3" style="font-size: var(--fs-xs)">已加载 {{ rKeys.length }} 个 key</NText>
+              <NPopconfirm v-if="rSel.length" @positive-click="delKeys(rSel)">
+                <template #trigger>
+                  <NButton size="small" tertiary type="error" :icon="ico('TrashOutline')">删除选中（{{ rSel.length }}）</NButton>
+                </template>
+                删除这 {{ rSel.length }} 个 key？UNLINK 异步回收，不可恢复。
+              </NPopconfirm>
+            </NSpace>
+            <NSpace :size="12" align="start" wrap>
+              <div class="rk-list">
+                <NDataTable
+                  size="small" :bordered="false"
+                  :columns="keyCols"
+                  :data="rKeys.map((k) => ({ k }))"
+                  :row-key="(r: any) => r.k"
+                  v-model:checked-row-keys="rSel"
+                  :loading="rBusy"
+                  :max-height="380"
+                  style="width: 420px"
+                >
+                  <template #empty><EmptyBox :text="rBusy ? '扫描中…' : '没有匹配的 key（SCAN 从 0 开始，可换模式再试）'" /></template>
+                </NDataTable>
+              </div>
+              <NCard v-if="rDetail" size="small" style="flex: 1; min-width: 320px; max-width: 640px" :title="rDetail.key">
+                <template #header-extra>
+                  <NSpace :size="6">
+                    <NTag size="tiny" :bordered="false" type="warning">{{ rDetail.type }}</NTag>
+                    <NTag size="tiny" :bordered="false">{{ rDetail.ttl === -1 ? '永不过期' : rDetail.ttl === -2 || rDetail.ttl == null ? '—' : `${rDetail.ttl}s 剩余` }}</NTag>
+                    <NTag size="tiny" :bordered="false">{{ rDetail.mem == null ? '—' : `${rDetail.mem} B` }}</NTag>
+                  </NSpace>
+                </template>
+                <NSpace vertical :size="8">
+                  <NText v-if="rDetail.truncated" depth="3" style="font-size: var(--fs-xs)">内容过长，仅显示前部分（截断）</NText>
+                  <pre v-if="jsonValue" class="mono-pre">{{ jsonValue }}</pre>
+                  <pre v-else-if="rDetail.type === 'string'" class="mono-pre">{{ rDetail.value }}</pre>
+                  <NDataTable
+                    v-else-if="rDetail.type === 'hash' || rDetail.type === 'zset'"
+                    size="small" :bordered="false" :max-height="280"
+                    :columns="pairCols"
+                    :data="rDetail.value || []" :row-key="(r: any) => r"
+                  />
+                  <NDataTable
+                    v-else-if="Array.isArray(rDetail.value)"
+                    size="small" :bordered="false" :max-height="280"
+                    :columns="idxCols"
+                    :data="(rDetail.value || []).map((v: any, i: number) => ({ i, v }))" :row-key="(r: any) => r.i"
+                  />
+                  <NText v-else depth="3" style="font-size: var(--fs-xs)">该类型暂不支持在线查看（{{ rDetail.type }}）</NText>
+                  <NSpace justify="end">
+                    <NPopconfirm @positive-click="delKeys([rDetail.key])">
+                      <template #trigger>
+                        <NButton size="tiny" tertiary type="error" :icon="ico('TrashOutline')">删除此 key</NButton>
+                      </template>
+                      UNLINK {{ rDetail.key }}？
+                    </NPopconfirm>
+                  </NSpace>
+                </NSpace>
+              </NCard>
+              <NText v-else-if="rKeys.length" depth="3" style="font-size: var(--fs-xs); align-self: center">点击左侧 key 查看内容</NText>
+            </NSpace>
           </NSpace>
         </NTabPane>
 
@@ -274,4 +506,12 @@ onMounted(load);
 .rstat :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
 .rk { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: var(--space-1); }
 .rv { font-size: var(--fs-lg); font-weight: 600; color: var(--cp-text); }
+.mono-pre {
+  margin: 0; padding: var(--space-3); max-height: 300px; overflow: auto;
+  background: var(--cp-bg-soft, rgba(128, 128, 128, 0.08));
+  border: 1px solid var(--cp-border, rgba(128, 128, 128, 0.18));
+  border-radius: var(--radius-md, 8px);
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-xs);
+  white-space: pre-wrap; word-break: break-all; color: var(--cp-text);
+}
 </style>

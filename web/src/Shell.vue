@@ -36,7 +36,6 @@ const pageTitle = computed(() =>
   route.path.startsWith('/apps/') ? '应用详情' : TITLES[route.path] || 'choyeon panel',
 );
 const active = computed(() => (route.path.startsWith('/apps') ? '/apps' : route.path));
-
 function ico(name: string, size = 18) {
   return () => h(NIcon, { size }, { default: () => h(icons[name] || icons.SettingsOutline) });
 }
@@ -69,15 +68,18 @@ const MENU_ICON: Record<string, string> = {
   '/services': 'ServerOutline',
   '/db': 'CloudOutline',
   '/backups': 'TimeOutline',
+  '/logs': 'CodeSlashOutline',
   '/files': 'FolderOpenOutline',
   '/terminal': 'TerminalOutline',
   '/doctor': 'ShieldCheckmarkOutline',
+  '/users': 'PeopleOutline',
+  '/audit': 'GitNetworkOutline',
   '/settings': 'SettingsOutline',
 };
 
 const menuOptions = computed(() => {
-  const keys = ['/dashboard', '/apps', '/services', '/db', '/backups'];
-  if (isAdmin.value) keys.push('/files', '/terminal', '/doctor');
+  const keys = ['/dashboard', '/apps', '/services', '/db', '/backups', '/logs'];
+  if (isAdmin.value) keys.push('/users', '/audit', '/files', '/terminal', '/doctor');
   keys.push('/settings');
   return keys.map((k) => ({ label: TITLES[k], key: k, icon: ico(MENU_ICON[k], 18) }));
 });

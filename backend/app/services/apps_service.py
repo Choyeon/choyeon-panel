@@ -317,10 +317,15 @@ def _ensure_no_deployment(app_id: int, action: str):
 def create_app(i: dict) -> dict:
     _validate(i)
     path = _app_path(i)
+    parent_id = None
+    if i.get("parent_id"):
+        parent_id = int(i["parent_id"])
+        if not get_app(parent_id):
+            raise RuntimeError("组合项目的父应用不存在")
     res = dbm.execute(
         "INSERT INTO apps(name,type,repo_url,branch,path,port,domain,install_cmd,"
-        "start_cmd,env,unit_override,db_names,unit_template)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "start_cmd,env,unit_override,db_names,unit_template,parent_id,component_role)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             i["name"],
             i["type"],
@@ -335,6 +340,8 @@ def create_app(i: dict) -> dict:
             i.get("unit_override") or None,
             i.get("db_names") or None,
             i.get("unit_template") or None,
+            parent_id,
+            str(i.get("component_role") or "")[:16],
         ),
     )
     return get_app(res)
@@ -351,7 +358,7 @@ def update_app(app_id: int, i: dict) -> dict:
     vars_ = i["env"] if "env" in i and i["env"] is not None else json.loads(cur["env"] or "[]")
     dbm.execute(
         "UPDATE apps SET name=?,type=?,repo_url=?,branch=?,path=?,port=?,domain=?,install_cmd=?,start_cmd=?,env=?,"
-        "unit_override=?,db_names=?,unit_template=?,updated_at=datetime('now') WHERE id=?",
+        "unit_override=?,db_names=?,unit_template=?,parent_id=?,component_role=?,updated_at=datetime('now') WHERE id=?",
         (
             merged["name"],
             merged["type"],
@@ -368,6 +375,8 @@ def update_app(app_id: int, i: dict) -> dict:
             merged.get("unit_override") or None,
             merged.get("db_names") or None,
             merged.get("unit_template") or None,
+            merged.get("parent_id") or None,
+            str(merged.get("component_role") or "")[:16],
             app_id,
         ),
     )

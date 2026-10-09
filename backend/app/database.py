@@ -92,6 +92,10 @@ def migrate() -> None:
             conn.execute("ALTER TABLE apps ADD COLUMN db_names TEXT")
         if "unit_template" not in acols:
             conn.execute("ALTER TABLE apps ADD COLUMN unit_template TEXT")
+        if "parent_id" not in acols:
+            conn.execute("ALTER TABLE apps ADD COLUMN parent_id INTEGER")
+        if "component_role" not in acols:
+            conn.execute("ALTER TABLE apps ADD COLUMN component_role TEXT NOT NULL DEFAULT ''")
         dcols = _columns("deployments")
         if "commit_sha" not in dcols:
             conn.execute("ALTER TABLE deployments ADD COLUMN commit_sha TEXT")

@@ -22,8 +22,8 @@ def _quote_pass(p: str) -> str:
 PSQL_BASE = "psql -X -A -t -v ON_ERROR_STOP=1"
 
 
-async def psql(sql: str) -> str:
-    """执行 SQL，返回 stdout。
+async def psql(sql: str, db: str | None = None) -> str:
+    """执行 SQL，返回 stdout。db 必须由调用方先过 is_ident 校验。
 
     ON_ERROR_STOP=1 是这里的关键：psql 默认对每条语句独立报错但整体退出码仍是 0，
     实测 `SELECT 1; SELECT * FROM nope; SELECT 2` 在不加该参数时
@@ -31,8 +31,9 @@ async def psql(sql: str) -> str:
     "drop_role 目标不存在""SQL 控制台中途报错"一律显示为成功（假成功）。
     加上之后出错语句之后的内容不再执行，退出码 3，错误能真正上抛。
     """
+    base = PSQL_BASE + (f" -d {db}" if db else "")
     proc = await asyncio.create_subprocess_exec(
-        "su", "-s", "/bin/sh", "postgres", "-c", PSQL_BASE,
+        "su", "-s", "/bin/sh", "postgres", "-c", base,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -83,9 +84,9 @@ async def psql(sql: str) -> str:
     raise RuntimeError(text or f"psql exit {proc.returncode}")
 
 
-async def psql_json(sql: str) -> list:
+async def psql_json(sql: str, db: str | None = None) -> list:
     """sql 必须是 `SELECT json_agg(...)::text`，返回解析后的数组。"""
-    out = await psql(sql)
+    out = await psql(sql, db)
     if not out:
         return []
     try:
@@ -231,3 +232,129 @@ def set_redis_password(p: str):
         raise RuntimeError("Redis 口令不能包含空白字符，且不超过 512 位")
     dbm.set_setting("redis_password", p)
     return {"ok": True}
+
+
+# ---------- 网页数据浏览（数据库页的表/行浏览器与 Redis key 浏览器） ----------
+
+async def list_tables(db: str) -> list:
+    if not is_ident(db):
+        raise RuntimeError("库名不合法")
+    return await psql_json(_json_agg(
+        "SELECT c.relname::text AS name, n.nspname::text AS schema,\n"
+        "        coalesce(s.n_live_tup,0)::bigint AS row_estimate,\n"
+        "        pg_size_pretty(pg_total_relation_size(c.oid)) AS size\n"
+        "   FROM pg_class c\n"
+        "   JOIN pg_namespace n ON n.oid=c.relnamespace\n"
+        "   LEFT JOIN pg_stat_user_tables s ON s.relid=c.oid\n"
+        "  WHERE c.relkind='r' AND n.nspname NOT IN ('pg_catalog','information_schema')",
+        "t.schema, t.name",
+    ), db=db)
+
+
+async def table_data(db: str, schema: str, table: str, page: int, size: int) -> dict:
+    for v, what in ((db, "数据库"), (schema, "schema"), (table, "表")):
+        if not is_ident(v):
+            raise RuntimeError(f"{what}名不合法（仅支持小写字母/数字/下划线）")
+    size = max(1, min(size, 200))
+    page = max(1, page)
+    quoted = f'"{schema}"."{table}"'
+    total_s = await psql(f"SELECT count(*)::text FROM {quoted}", db)
+    cols_raw = await psql(
+        "SELECT coalesce(json_agg(column_name ORDER BY ordinal_position)::text,'[]')\n"
+        f"  FROM information_schema.columns WHERE table_schema='{schema}' AND table_name='{table}'",
+        db,
+    )
+    rows_raw = await psql(
+        "SELECT coalesce(json_agg(row_to_json(t))::text,'[]'::json)::text FROM ("
+        f"SELECT * FROM {quoted} LIMIT {size} OFFSET {(page - 1) * size}) t",
+        db,
+    )
+    return {
+        "columns": json.loads(cols_raw or "[]"),
+        "rows": json.loads(rows_raw or "[]"),
+        "total": int(total_s or 0),
+        "page": page,
+        "size": size,
+    }
+
+
+async def _rcli(args: list) -> str:
+    env = dict(os.environ)
+    p = redis_password()
+    if p:
+        env["REDISCLI_AUTH"] = p
+    r = await run("redis-cli", ["--no-auth-warning"] + args, env=env, timeout=20)
+    out = r["out"] or ""
+    if r["code"] != 0:
+        raise RuntimeError(out or f"redis-cli 执行失败（code {r['code']}，未安装或 Redis 未运行）")
+    if out.startswith(("NOAUTH", "WRONGPASS", "(error)")):
+        raise RuntimeError(out)
+    return out
+
+
+def _lines(out: str) -> list:
+    return [l for l in out.split("\n") if l != ""]
+
+
+async def redis_scan(cursor: str = "0", pattern: str = "*", count: int = 200) -> dict:
+    c = cursor if str(cursor).isdigit() else "0"
+    n = max(10, min(int(count) if str(count).isdigit() else 200, 1000))
+    out = await _rcli(["SCAN", str(c), "MATCH", (pattern or "*")[:200], "COUNT", str(n)])
+    lines = out.split("\n")
+    return {"cursor": (lines[0].strip() if lines and lines[0].strip().isdigit() else "0"),
+            "keys": _lines("\n".join(lines[1:]))[:n]}
+
+
+def _pairs(flat: list) -> list:
+    return [{"field": flat[i], "value": flat[i + 1] if i + 1 < len(flat) else ""} for i in range(0, len(flat) - len(flat) % 2, 2)]
+
+
+async def redis_key(k: str) -> dict:
+    if not k or len(k) > 512:
+        raise RuntimeError("key 不合法")
+    ktype = (await _rcli(["TYPE", k])).strip()
+    ttl = (await _rcli(["TTL", k])).strip()
+    mem = (await _rcli(["MEMORY", "USAGE", k])).strip()
+    truncated = False
+    if ktype == "string":
+        slen = int(await _rcli(["STRLEN", k]) or 0)
+        truncated = slen > 65536
+        data: object = await _rcli(["GETRANGE", k, "0", "65535"]) if truncated else await _rcli(["GET", k])
+    elif ktype == "hash":
+        n = int(await _rcli(["HLEN", k]) or 0)
+        truncated = n > 200
+        if truncated:
+            data = _pairs(_lines(await _rcli(["HSCAN", k, "0", "COUNT", "200"]))[1:])
+        else:
+            data = _pairs(_lines(await _rcli(["HGETALL", k])))
+    elif ktype == "list":
+        n = int(await _rcli(["LLEN", k]) or 0)
+        truncated = n > 200
+        data = _lines(await _rcli(["LRANGE", k, "0", "199"]))
+    elif ktype == "set":
+        n = int(await _rcli(["SCARD", k]) or 0)
+        truncated = n > 200
+        data = _lines(await _rcli(["SSCAN", k, "0", "COUNT", "200"]))[1:] if truncated else _lines(await _rcli(["SMEMBERS", k]))
+    elif ktype == "zset":
+        n = int(await _rcli(["ZCARD", k]) or 0)
+        truncated = n > 200
+        data = _pairs(_lines(await _rcli(["ZRANGE", k, "0", "199", "WITHSCORES"])))
+    else:
+        data = None
+    return {
+        "key": k, "type": ktype,
+        "ttl": int(ttl) if ttl.lstrip("-").isdigit() else None,
+        "mem": int(mem) if mem.isdigit() else None,
+        "value": data, "truncated": truncated,
+    }
+
+
+async def redis_del(keys: list) -> dict:
+    deleted = 0
+    for k in [str(x) for x in keys[:200] if x]:
+        if len(k) > 512:
+            continue
+        out = await _rcli(["UNLINK", k])
+        if out.strip().startswith("1"):
+            deleted += 1
+    return {"deleted": deleted}

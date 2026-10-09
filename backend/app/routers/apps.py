@@ -37,6 +37,21 @@ async def app_get(app_id: int, req: Request):
     running = await systemd_ops.is_active(unit)
     port = a["port"] if a["port"] is not None else (await apps_service.detect_port(unit) if running else None)
     out = {**a, "running": running, "unit": unit, "port": port, "portAuto": a["port"] is None and port is not None}
+    # 组合项目的组件摘要：详情页要展示"这个项目还有哪些前端/后端"
+    kids = dbm.query(
+        "SELECT id,name,type,parent_id,component_role FROM apps WHERE parent_id=?", (app_id,)
+    )
+    if kids or a.get("parent_id"):
+        fam = list(kids)
+        if a.get("parent_id"):
+            p = dbm.query_one("SELECT id,name,type,parent_id,component_role FROM apps WHERE id=?", (a["parent_id"],))
+            if p:
+                fam.insert(0, p)
+        if not kids and not any(x["id"] == a["id"] for x in fam):
+            fam.insert(0, {"id": a["id"], "name": a["name"], "type": a["type"], "parent_id": a["parent_id"], "component_role": a.get("component_role") or ""})
+        out["components"] = fam
+    else:
+        out["components"] = []
     # env 里是应用密钥；列表接口与告警配置都刻意剥离/脱敏，详情接口不能例外。
     # 保留键名并给空数组，viewer 的前端表单仍能正常解析。
     if req.state.cp_role != "admin":
@@ -48,10 +63,49 @@ async def app_get(app_id: int, req: Request):
 @router.post("/api/apps")
 async def app_create(req: Request):
     try:
+        body = apply_template(await _body(req))
+        comps = body.get("components")
+        if isinstance(comps, list) and len(comps) >= 2:
+            return await _create_group(req, comps)
         # 先套用一键部署模板默认值，再走统一的 create_app 校验
-        a = apps_service.create_app(apply_template(await _body(req)))
+        a = apps_service.create_app(body)
         dbm.audit(req.state.cp_sub, "app:create", a["name"])
         return a
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+async def _create_group(req: Request, comps: list):
+    """前后端分离项目：第一个组件为父（入口/后端），其余挂 parent_id。
+    列表里合并成一个项目展示，各自的部署/启停仍独立管理。"""
+    created = []
+    try:
+        parent = apps_service.create_app(dict(comps[0]))
+        created.append(parent)
+        for c in comps[1:]:
+            item = dict(c)
+            item["parent_id"] = parent["id"]
+            created.append(apps_service.create_app(item))
+        dbm.audit(req.state.cp_sub, "app:group-create", parent["name"])
+        return {"ok": True, "group": parent["id"], "apps": created}
+    except Exception as e:  # noqa: BLE001
+        # 半途失败要把已建的组件清掉，否则留下没有父的孤儿应用
+        for a in created:
+            try:
+                await apps_service.delete_app(a["id"], False)
+            except Exception:  # noqa: BLE001
+                pass
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.delete("/api/apps/{app_id}")
+async def app_delete(app_id: int, req: Request):
+    try:
+        await apps_service.delete_app(app_id, req.query_params.get("purge") == "1")
+        # 父被删后子组件解除归属而不是连带删除：它们是各自独立的服务
+        dbm.execute("UPDATE apps SET parent_id=NULL WHERE parent_id=?", (app_id,))
+        dbm.audit(req.state.cp_sub, "app:delete", str(app_id))
+        return {"ok": True}
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 
@@ -64,16 +118,6 @@ async def app_update(app_id: int, req: Request):
         await apps_service.cleanup_renamed(old, a)
         dbm.audit(req.state.cp_sub, "app:update", a["name"])
         return a
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-
-@router.delete("/api/apps/{app_id}")
-async def app_delete(app_id: int, req: Request):
-    try:
-        await apps_service.delete_app(app_id, req.query_params.get("purge") == "1")
-        dbm.audit(req.state.cp_sub, "app:delete", str(app_id))
-        return {"ok": True}
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": str(e)})
 

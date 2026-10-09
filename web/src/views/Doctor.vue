@@ -1,25 +1,28 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue';
+import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue';
 import {
-  NAlert, NButton, NCard, NIcon, NProgress, NResult, NSpace, NText, NSkeleton, NTooltip,
-  useMessage,
+  NAlert, NButton, NCard, NIcon, NProgress, NResult, NSpace, NText, NSkeleton, NTooltip, useMessage,
 } from 'naive-ui';
 import PageHeader from '../components/PageHeader.vue';
 import { api } from '../api';
 import { icons } from '../icons';
 
-type Item = { id: string; title: string; status: 'pass' | 'warn' | 'fail'; detail: string; fix: string };
+type Item = { id: string; title: string; status: 'pass' | 'warn' | 'fail'; detail: string; fix: string; fixable?: boolean };
 type Report = { status: string; counts: { pass: number; warn: number; fail: number }; items: Item[] };
 
 const msg = useMessage();
 const loading = ref(true);
 const error = ref('');
 const report = ref<Report | null>(null);
+const fixing = ref('');
+const filter = ref<'all' | 'warn' | 'fail'>('all');
+let readyTimer: number | null = null;
+onBeforeUnmount(() => { if (readyTimer) clearInterval(readyTimer); });
 
 const TYPE = {
-  pass: { st: 'ok', label: '正常', icon: 'CheckmarkCircleOutline', color: 'var(--cp-ok)' },
-  warn: { st: 'warn', label: '注意', icon: 'WarningOutline', color: 'var(--cp-warn)' },
-  fail: { st: 'err', label: '异常', icon: 'CloseCircleOutline', color: 'var(--cp-err)' },
+  pass: { label: '正常', icon: 'CheckmarkCircleOutline', color: 'var(--cp-ok)' },
+  warn: { label: '注意', icon: 'WarningOutline', color: 'var(--cp-warn)' },
+  fail: { label: '异常', icon: 'CloseCircleOutline', color: 'var(--cp-err)' },
 } as const;
 
 function ico(name: string, size = 14) {
@@ -37,7 +40,11 @@ const overallColor = computed(() =>
   report.value?.status === 'pass' ? 'var(--cp-ok)' : report.value?.status === 'warn' ? 'var(--cp-warn)' : 'var(--cp-err)',
 );
 
-const nextFix = computed(() => report.value?.items.find((i) => i.status !== 'pass' && i.fix) || null);
+const shown = computed(() => {
+  const items = report.value?.items || [];
+  if (filter.value === 'all') return items;
+  return items.filter((i) => i.status === filter.value);
+});
 
 async function load() {
   loading.value = true;
@@ -60,12 +67,54 @@ async function copyFix(text: string) {
   }
 }
 
+// 面板重启后自恢复：轮询 /api/ready，通了就重新自检
+function watchReady() {
+  let tries = 0;
+  readyTimer = window.setInterval(async () => {
+    tries += 1;
+    try {
+      const r = await api.ready();
+      if (r?.ready) {
+        if (readyTimer) clearInterval(readyTimer);
+        readyTimer = null;
+        msg.success('面板已重启完成，正在重新自检');
+        load();
+      }
+    } catch { /* 重启窗口内请求必然失败，继续等 */ }
+    if (tries > 30 && readyTimer) {
+      clearInterval(readyTimer);
+      readyTimer = null;
+      msg.warning('重启超时，请刷新页面确认面板状态');
+    }
+  }, 2000);
+}
+
+async function fix(it: Item) {
+  fixing.value = it.id;
+  try {
+    const r = await api.doctorFix(it.id);
+    if (r?.restarting) {
+      msg.info(r.message || '面板正在重启');
+      watchReady();
+    } else if (r?.ok) {
+      msg.success(r.message || '修复完成');
+      await load();
+    } else {
+      msg.error(r?.item?.detail || '修复后仍有问题');
+    }
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    fixing.value = '';
+  }
+}
+
 onMounted(load);
 </script>
 
 <template>
   <div>
-    <PageHeader title="安全自检" sub="只读检查，不改任何配置；每项都给出可复制的修复命令">
+    <PageHeader title="安全自检" sub="只读检查，不改任何配置；可自动修复的项目直接点「一键修复」，其余给出可复制命令">
       <template #actions>
         <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">重新检查</NButton>
       </template>
@@ -78,82 +127,61 @@ onMounted(load);
     <template v-if="report">
       <NCard size="small" style="margin-bottom: var(--space-4)">
         <NSpace align="center" :size="16" wrap>
-          <NProgress
-            type="circle"
-            :percentage="percent"
-            :height="80"
-            :color="overallColor"
-          />
+          <NProgress type="circle" :percentage="percent" :height="76" :color="overallColor" />
           <div>
             <NText strong class="cp-pop" style="font-size: var(--fs-lg)">
               通过 {{ report.counts.pass }} · 注意 {{ report.counts.warn }} · 异常 {{ report.counts.fail }}
             </NText>
             <div style="margin-top: var(--space-2); color: var(--cp-text-dim); font-size: var(--fs-sm)">
-              {{ report.status === 'pass' ? '全部检查通过' : '按下方修复建议逐项处理，异常项会直接影响可用性' }}
+              {{ report.status === 'pass' ? '全部检查通过' : '优先处理异常项，它们直接影响可用性' }}
             </div>
-            <NSpace v-if="nextFix" :size="8" style="margin-top: var(--space-3)" align="center">
-              <NText depth="3" style="font-size: var(--fs-sm)">优先处理：</NText>
-              <code class="mono-dim">{{ nextFix.fix }}</code>
-              <NTooltip trigger="hover">
-                <template #trigger>
-                  <NButton
-                    size="tiny"
-                    circle
-                    quaternary
-                    aria-label="复制优先修复命令"
-                    title="复制修复命令"
-                    :icon="ico('CopyOutline')"
-                    @click="copyFix(nextFix.fix)"
-                  />
-                </template>
-                复制修复命令
-              </NTooltip>
+            <NSpace :size="8" style="margin-top: var(--space-3)">
+              <NButton size="tiny" :tertiary="filter !== 'all'" @click="filter = 'all'">全部</NButton>
+              <NButton size="tiny" :type="filter === 'fail' ? 'error' : 'default'" :tertiary="filter !== 'fail'" :disabled="!report.counts.fail" @click="filter = 'fail'">
+                异常 {{ report.counts.fail }}
+              </NButton>
+              <NButton size="tiny" :type="filter === 'warn' ? 'warning' : 'default'" :tertiary="filter !== 'warn'" :disabled="!report.counts.warn" @click="filter = 'warn'">
+                注意 {{ report.counts.warn }}
+              </NButton>
             </NSpace>
           </div>
         </NSpace>
       </NCard>
 
-      <NSpace vertical :size="12">
-        <NCard
-          v-for="(it, idx) in report.items"
-          :key="it.id"
-          size="small"
-          class="cp-rise"
-          :style="`--i:${idx}`"
+      <NCard size="small" :content-style="{ padding: '0' }">
+        <div
+          v-for="(it, idx) in shown" :key="it.id"
+          class="doc-row cp-rise" :style="`--i:${idx}`"
         >
-          <NSpace align="center" justify="space-between" style="gap: var(--space-3)">
-            <NSpace align="center" :size="8" style="min-width: 0">
-              <NIcon
-                :size="18"
-                :component="icons[TYPE[it.status].icon] || icons.InformationCircleOutline"
-                :color="TYPE[it.status].color"
-              />
-              <NText strong>{{ it.title }}</NText>
-            </NSpace>
-            <span class="st" :class="TYPE[it.status].st">
-              <span class="dot" :class="TYPE[it.status].st"></span>{{ TYPE[it.status].label }}
+          <NIcon :size="18" :component="icons[TYPE[it.status].icon]" :color="TYPE[it.status].color" style="flex-shrink: 0" />
+          <div class="doc-txt">
+            <NText strong style="font-size: var(--fs-sm)">{{ it.title }}</NText>
+            <div class="doc-detail">{{ it.detail }}</div>
+            <code v-if="it.fix && it.status !== 'pass' && !it.fixable" class="mono-dim doc-cmd">{{ it.fix }}</code>
+          </div>
+          <NSpace align="center" :size="8" style="flex-shrink: 0">
+            <span class="st" :class="it.status === 'pass' ? 'ok' : it.status === 'warn' ? 'warn' : 'err'">
+              <span class="dot" :class="it.status === 'pass' ? 'ok' : it.status === 'warn' ? 'warn' : 'err'"></span>{{ TYPE[it.status].label }}
             </span>
-          </NSpace>
-          <div style="margin-top: var(--space-2); color: var(--cp-text-mute); font-size: var(--fs-sm)">{{ it.detail }}</div>
-          <NSpace v-if="it.fix && it.status !== 'pass'" :size="8" align="center" style="margin-top: var(--space-2)">
-            <code class="mono-dim">{{ it.fix }}</code>
-            <NTooltip trigger="hover">
+            <NButton
+              v-if="it.fixable && it.status !== 'pass'"
+              size="tiny" type="primary" :loading="fixing === it.id" :disabled="!!fixing"
+              :icon="ico('BuildOutline')" @click="fix(it)"
+            >
+              一键修复
+            </NButton>
+            <NTooltip v-else-if="it.fix && it.status !== 'pass' && it.fixable" trigger="hover">
               <template #trigger>
-                <NButton
-                  size="tiny"
-                  circle
-                  quaternary
-                  :aria-label="`复制修复命令：${it.title}`"
-                  :title="`复制修复命令：${it.title}`"
-                  :icon="ico('CopyOutline')"
-                  @click="copyFix(it.fix)"
-                />
+                <NButton size="tiny" circle quaternary :aria-label="`复制修复命令：${it.title}`" :icon="ico('CopyOutline')" @click="copyFix(it.fix)" />
               </template>
               复制修复命令
             </NTooltip>
           </NSpace>
-        </NCard>
-      </NSpace>
+        </div>
+        <div v-if="!shown.length" style="padding: var(--space-6); text-align: center; color: var(--cp-text-mute); font-size: var(--fs-sm)">
+          {{ filter === 'all' ? '暂无检查结果' : `没有${filter === 'fail' ? '异常' : '注意'}项，切换筛选查看其他` }}
+        </div>
+      </NCard>
     </template>
 
     <NResult v-if="!loading && !report && !error" status="500" title="暂无自检结果" description="点击「重新检查」重试">
@@ -163,3 +191,16 @@ onMounted(load);
     </NResult>
   </div>
 </template>
+
+<style scoped>
+.doc-row {
+  display: flex; align-items: flex-start; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--cp-border);
+}
+.doc-row:last-child { border-bottom: 0; }
+.doc-row:hover { background: var(--cp-hover); }
+.doc-txt { flex: 1; min-width: 0; }
+.doc-detail { color: var(--cp-text-mute); font-size: var(--fs-xs); margin-top: 2px; }
+.doc-cmd { display: block; margin-top: var(--space-2); word-break: break-all; }
+</style>

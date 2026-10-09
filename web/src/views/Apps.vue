@@ -17,35 +17,119 @@ const rows = ref<any[]>([]);
 const kw = ref('');
 const showCreate = ref(false);
 const creating = ref(false);
-const form = ref<any>({
-  name: '', type: 'node', repo_url: '', branch: 'main', domain: '', port: null,
-  install_cmd: '', start_cmd: 'npm start', unit_override: '', path: '', unit_template: '', template: '',
-});
+const form = ref<any>(singleFields());
+const mode = ref<'single' | 'split'>('single');
+const be = ref<any>(singleFields({ start_cmd: '', port: 8000 }));
+const fe = ref<any>(singleFields({ type: 'node', start_cmd: 'npm run start', port: 3100 }));
+
+function singleFields(over: any = {}) {
+  return {
+    name: '', type: 'node', repo_url: '', branch: 'main', domain: '', port: null,
+    install_cmd: '', start_cmd: 'npm start', unit_override: '', path: '', unit_template: '', template: '',
+    ...over,
+  };
+}
+
+// 前后端分离：共享名称/仓库/目录，组件条目派生 `<name>-backend` / `<name>-frontend`
+function applyShared() {
+  const sh = {
+    name: form.value.name,
+    repo_url: form.value.repo_url,
+    branch: form.value.branch || 'main',
+    path: form.value.path,
+  };
+  be.value = { ...be.value, ...sh, type: form.value.type, template: form.value.template || undefined };
+  fe.value = { ...fe.value, ...sh };
+}
+
+function buildApp(f: any, role: string): any {
+  return {
+    name: f.name ? `${f.name}-${role}` : '',
+    type: f.type,
+    repo_url: f.repo_url,
+    branch: f.branch || 'main',
+    domain: role === 'frontend' ? (f.domain || null) : null,
+    port: f.port || null,
+    install_cmd: f.install_cmd || null,
+    start_cmd: f.start_cmd,
+    path: f.path ? `${f.path.replace(/\/+$/, '')}/${role}` : null,
+    component_role: role,
+  };
+}
 
 const runningCount = computed(() => rows.value.filter((r) => r.running).length);
+// 组合项目合并展示：子组件从主列表移除，改在父行的名称单元里缩进渲染
+const childMap = computed(() => {
+  const m = new Map<number, any[]>();
+  for (const r of rows.value) {
+    if (r.parent_id) {
+      const list = m.get(r.parent_id) || [];
+      list.push(r);
+      m.set(r.parent_id, list);
+    }
+  }
+  for (const [, list] of m) {
+    list.sort((a, b) => (a.component_role === 'backend' ? -1 : b.component_role === 'backend' ? 1 : a.name.localeCompare(b.name)));
+  }
+  return m;
+});
+const topLevel = computed(() => rows.value.filter((r) => !r.parent_id));
 const filtered = computed(() => {
-  if (!kw.value) return rows.value;
+  if (!kw.value) return topLevel.value;
   const k = kw.value.toLowerCase();
-  return rows.value.filter((r) => `${r.name} ${r.domain || ''} ${(r.domains || []).join(' ')} ${r.port || ''} ${r.type}`.toLowerCase().includes(k));
+  return topLevel.value.filter((r) => {
+    const kids = childMap.value.get(r.id) || [];
+    return [` ${r.name} ${r.domain || ''} ${kids.map((x) => x.name).join(' ')} ${(r.domains || []).join(' ')} ${r.port || ''} ${r.type}`.toLowerCase().includes(k)];
+  });
 });
 
 function ico(name: string, size = 14) {
   return () => h(NIcon, { size }, { default: () => h(icons[name]) });
 }
 
+function roleLabel(c: any) {
+  return c.component_role === 'frontend' ? '前端' : c.component_role === 'backend' ? '后端' : '组件';
+}
+
+function appCell(r: any) {
+  const kids = childMap.value.get(r.id) || [];
+  const parts = [
+    h('div', { class: 'cell-main' }, [
+      h('span', { class: 'cell-ico' }, [
+        h(NIcon, { component: r.type === 'node' ? icons.LogoElectron : icons.LogoPython, size: 18, color: r.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)' }),
+      ]),
+      h('div', { class: 'cell-txt' }, [
+        h(NSpace, { size: 6, align: 'center', wrap: false }, () => [
+          h(NButton, { text: true, type: 'primary', class: 'cell-name', onClick: () => router.push(`/apps/${r.id}`) }, () => r.name),
+          ...(kids.length ? [h(NTag, { size: 'tiny', bordered: false, type: 'info' }, { default: () => `组合 ${kids.length + 1} 件` })] : []),
+        ]),
+        h('div', { class: 'cell-sub' }, r.domain || r.unit || r.path || '—'),
+      ]),
+    ]),
+  ];
+  for (const c of kids) {
+    parts.push(
+      h('div', { class: 'cell-main cell-child' }, [
+        h('span', { class: 'cell-ico' }, [
+          h(NIcon, { component: c.type === 'node' ? icons.LogoElectron : icons.LogoPython, size: 14, color: c.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)' }),
+        ]),
+        h('div', { class: 'cell-txt' }, [
+          h(NSpace, { size: 6, align: 'center', wrap: false }, () => [
+            h(NButton, { text: true, type: 'primary', class: 'cell-name', style: 'font-size:var(--fs-sm)', onClick: () => router.push(`/apps/${c.id}`) }, () => c.name),
+            h(NTag, { size: 'tiny', bordered: false, type: c.component_role === 'frontend' ? 'success' : 'warning' }, { default: () => roleLabel(c) }),
+            ...(!c.running && !c.deploying ? [h('span', { class: 'st idle' }, [h('span', { class: 'dot idle' }), '已停止'])] : []),
+          ]),
+        ]),
+      ]),
+    );
+  }
+  return parts;
+}
+
 const columns: any[] = [
   {
     title: '应用', key: 'name',
-    render: (r: any) =>
-      h('div', { class: 'cell-main' }, [
-        h('span', { class: 'cell-ico' }, [
-          h(NIcon, { component: r.type === 'node' ? icons.LogoElectron : icons.LogoPython, size: 18, color: r.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)' }),
-        ]),
-        h('div', { class: 'cell-txt' }, [
-          h(NButton, { text: true, type: 'primary', class: 'cell-name', onClick: () => router.push(`/apps/${r.id}`) }, () => r.name),
-          h('div', { class: 'cell-sub' }, r.domain || r.unit || r.path || '—'),
-        ]),
-      ]),
+    render: (r: any) => appCell(r),
   },
   {
     title: '类型', key: 'type', width: 96,
@@ -187,8 +271,21 @@ async function del(r: any) {
 }
 async function create() {
   if (!form.value.name) return msg.error('请填写应用名称');
+  if (mode.value === 'split') {
+    if (!be.value.start_cmd || !fe.value.start_cmd) return msg.error('请填写前后端的启动命令');
+  } else if (!form.value.start_cmd) {
+    return msg.error('请填写启动命令');
+  }
   creating.value = true;
   try {
+    if (mode.value === 'split') {
+      applyShared();
+      const res: any = await api.createApp({ components: [buildApp(be.value, 'backend'), buildApp(fe.value, 'frontend')] });
+      msg.success('前后端项目已创建');
+      showCreate.value = false;
+      router.push(`/apps/${res.group}`);
+      return;
+    }
     const a = await api.createApp({
       name: form.value.name,
       type: form.value.type,
@@ -221,7 +318,7 @@ onMounted(() => {
 
 <template>
   <div>
-    <PageHeader title="应用" :sub="`共 ${rows.length} 个应用 · ${runningCount} 个运行中。部署、启停、日志与域名反代集中在此管理`">
+    <PageHeader title="应用" :sub="`共 ${topLevel.length} 个项目 · ${runningCount} 个服务运行中。部署、启停、日志与域名反代集中在此管理；前后端分离项目合并为一个条目`">
       <template #actions>
         <NInput :value="kw" @update:value="(v: string) => (kw = v)" placeholder="搜索名称/域名/端口" size="small" clearable style="width: 200px; max-width: 100%">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
@@ -237,17 +334,25 @@ onMounted(() => {
       </template>
     </NDataTable>
 
-    <NModal v-model:show="showCreate" preset="card" title="新建应用" style="width: 620px; max-width: 94vw">
+    <NModal v-model:show="showCreate" preset="card" title="新建应用" style="width: 640px; max-width: 94vw">
       <NSpace vertical :size="4">
         <NAlert type="info" :bordered="false" size="small" style="margin-bottom: var(--space-2)">
-          Git 仓库与「已有 unit」都可留空：仓库留空时纳管服务器上已有目录，unit 留空时由面板生成 systemd 服务并接管。
+          {{ mode === 'single'
+            ? 'Git 仓库与「已有 unit」都可留空：仓库留空时纳管服务器上已有目录，unit 留空时由面板生成 systemd 服务并接管。'
+            : '前后端分离项目会创建两个独立应用（<名称>-backend / <名称>-frontend），在列表中合并为一个项目展示，各自可独立部署、启停与回滚。域名与对外端口通常配在前端。' }}
         </NAlert>
+        <NFormItem label="项目形态" style="margin-bottom: var(--space-2)">
+          <NRadioGroup v-model:value="mode" size="small" aria-label="项目形态">
+            <NRadioButton value="single">单应用</NRadioButton>
+            <NRadioButton value="split">前后端分离</NRadioButton>
+          </NRadioGroup>
+        </NFormItem>
         <NForm label-placement="left" label-width="96">
           <NSpace vertical :size="12">
             <NFormItem label="名称" required>
-              <NInput v-model:value="form.name" placeholder="小写字母/数字/连字符，如 my-site" :input-props="{ 'aria-label': '应用名称' }" />
+              <NInput v-model:value="form.name" :placeholder="mode === 'single' ? '小写字母/数字/连字符，如 my-site' : '项目名，自动生成 <名称>-backend / <名称>-frontend'" :input-props="{ 'aria-label': '应用名称' }" />
             </NFormItem>
-            <NFormItem label="一键模板">
+            <NFormItem v-if="mode === 'single'" label="一键模板">
               <NSelect
                 v-model:value="form.template"
                 :options="templateOptions"
@@ -257,7 +362,7 @@ onMounted(() => {
                 @update:value="pickTemplate"
               />
             </NFormItem>
-            <NFormItem label="运行时">
+            <NFormItem v-if="mode === 'single'" label="运行时">
               <NRadioGroup v-model:value="form.type" size="small" aria-label="运行时类型">
                 <NRadioButton value="node">Node.js</NRadioButton>
                 <NRadioButton value="python">Python</NRadioButton>
@@ -270,28 +375,85 @@ onMounted(() => {
               <NInput v-model:value="form.branch" placeholder="main" :input-props="{ 'aria-label': '分支' }" />
             </NFormItem>
             <NFormItem label="安装目录">
-              <NInput v-model:value="form.path" placeholder="留空默认 /root/www/<名称>；可指定如 /root/www/my-site" :input-props="{ 'aria-label': '安装目录' }" />
+              <NInput v-model:value="form.path" :placeholder="mode === 'single' ? '留空默认 /root/www/〈名称〉；可指定如 /root/www/my-site' : '留空默认 /root/www/〈名称〉，前后端自动放在 backend / frontend 子目录'" :input-props="{ 'aria-label': '安装目录' }" />
             </NFormItem>
-            <NFormItem label="安装命令">
+            <NFormItem v-if="mode === 'single'" label="安装命令">
               <NInput
                 v-model:value="form.install_cmd"
                 :placeholder="form.type === 'node' ? '默认 npm install' : '默认 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'"
                 :input-props="{ 'aria-label': '安装命令', class: 'mono' }"
               />
             </NFormItem>
-            <NFormItem label="启动命令" required>
+            <NFormItem v-if="mode === 'single'" label="启动命令" required>
               <NInput v-model:value="form.start_cmd" :placeholder="form.type === 'node' ? '如 npm start 或 node server.js' : '如 .venv/bin/uvicorn main:app --port 8000'" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" />
             </NFormItem>
-            <NFormItem label="端口">
+            <NFormItem v-if="mode === 'single'" label="端口">
               <NInputNumber v-model:value="form.port" placeholder="监听端口，配域名时必填" :input-props="{ 'aria-label': '监听端口' }" style="width: 100%" />
             </NFormItem>
-            <NFormItem label="域名">
+            <NFormItem v-if="mode === 'single'" label="域名">
               <NInput v-model:value="form.domain" placeholder="如 app.choyeon.cc，留空不创建反代" :input-props="{ 'aria-label': '域名' }" />
             </NFormItem>
-            <NFormItem label="已有 unit">
+            <NCollapse v-if="mode === 'split'" style="margin-top: var(--space-1)">
+              <NCollapseItem name="be">
+                <template #header>
+                  <NSpace align="center" :size="8">
+                    <NIcon :component="icons.ServerOutline" size="15" color="var(--cp-warning)" />
+                    <span style="font-size: var(--fs-sm)">后端（入口应用）</span>
+                    <NTag size="tiny" :bordered="false" type="warning">{{ form.name ? `${form.name}-backend` : '—' }}</NTag>
+                  </NSpace>
+                </template>
+                <NSpace vertical :size="10">
+                  <NFormItem label="运行时" :show-feedback="false">
+                    <NRadioGroup v-model:value="be.type" size="small" aria-label="后端运行时">
+                      <NRadioButton value="node">Node.js</NRadioButton>
+                      <NRadioButton value="python">Python</NRadioButton>
+                    </NRadioGroup>
+                  </NFormItem>
+                  <NFormItem label="安装命令" :show-feedback="false">
+                    <NInput v-model:value="be.install_cmd" :placeholder="be.type === 'node' ? '默认 npm install' : '默认 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'" :input-props="{ 'aria-label': '后端安装命令', class: 'mono' }" />
+                  </NFormItem>
+                  <NFormItem label="启动命令" required :show-feedback="false">
+                    <NInput v-model:value="be.start_cmd" :placeholder="be.type === 'node' ? '如 npm run start' : '如 .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000'" :input-props="{ 'aria-label': '后端启动命令', class: 'mono' }" />
+                  </NFormItem>
+                  <NFormItem label="端口" :show-feedback="false">
+                    <NInputNumber v-model:value="be.port" placeholder="后端监听端口" :input-props="{ 'aria-label': '后端端口' }" style="width: 100%" />
+                  </NFormItem>
+                </NSpace>
+              </NCollapseItem>
+              <NCollapseItem name="fe">
+                <template #header>
+                  <NSpace align="center" :size="8">
+                    <NIcon :component="icons.GlobeOutline" size="15" color="var(--cp-success)" />
+                    <span style="font-size: var(--fs-sm)">前端（对外站点）</span>
+                    <NTag size="tiny" :bordered="false" type="success">{{ form.name ? `${form.name}-frontend` : '—' }}</NTag>
+                  </NSpace>
+                </template>
+                <NSpace vertical :size="10">
+                  <NFormItem label="运行时" :show-feedback="false">
+                    <NRadioGroup v-model:value="fe.type" size="small" aria-label="前端运行时">
+                      <NRadioButton value="node">Node.js</NRadioButton>
+                      <NRadioButton value="python">Python</NRadioButton>
+                    </NRadioGroup>
+                  </NFormItem>
+                  <NFormItem label="安装命令" :show-feedback="false">
+                    <NInput v-model:value="fe.install_cmd" placeholder="默认 npm install" :input-props="{ 'aria-label': '前端安装命令', class: 'mono' }" />
+                  </NFormItem>
+                  <NFormItem label="启动命令" required :show-feedback="false">
+                    <NInput v-model:value="fe.start_cmd" placeholder="如 npm run start 或 npx serve dist" :input-props="{ 'aria-label': '前端启动命令', class: 'mono' }" />
+                  </NFormItem>
+                  <NFormItem label="端口" :show-feedback="false">
+                    <NInputNumber v-model:value="fe.port" placeholder="前端监听端口（对外）" :input-props="{ 'aria-label': '前端端口' }" style="width: 100%" />
+                  </NFormItem>
+                  <NFormItem label="域名" :show-feedback="false">
+                    <NInput v-model:value="fe.domain" placeholder="如 app.choyeon.cc，通常配在前端；留空不创建反代" :input-props="{ 'aria-label': '前端域名' }" />
+                  </NFormItem>
+                </NSpace>
+              </NCollapseItem>
+            </NCollapse>
+            <NFormItem v-if="mode === 'single'" label="已有 unit">
               <NInput v-model:value="form.unit_override" placeholder="纳管用：如 rosetta-backend.service，填了则不覆写 unit" :input-props="{ 'aria-label': '已有 systemd unit' }" />
             </NFormItem>
-            <NCollapse>
+            <NCollapse v-if="mode === 'single'">
               <NCollapseItem title="高级：自定义 systemd unit 模板" name="tpl">
                 <NInput
                   v-model:value="form.unit_template"
@@ -312,3 +474,7 @@ onMounted(() => {
     </NModal>
   </div>
 </template>
+
+<style scoped>
+:deep(.cell-child) { margin-top: var(--space-2); padding-left: var(--space-4); border-left: 1px dashed var(--cp-border, rgba(128,128,128,.25)); }
+</style>

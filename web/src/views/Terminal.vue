@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { NButton, NIcon, NSpace, useMessage } from 'naive-ui';
+import { NButton, NIcon, NInput, NSpace, useMessage } from 'naive-ui';
 import '@xterm/xterm/css/xterm.css';
 import { getToken } from '../api';
 import { icons } from '../icons';
@@ -13,6 +13,19 @@ const msg = useMessage();
 const host = ref<HTMLElement | null>(null);
 const connected = ref(false);
 const disconnected = ref(false);
+const cmd = ref('');
+const histIdx = ref(-1);
+// 常用命令从这里走输入框，不碰剪贴板/输入法：粘贴多行、中文、转义符都原样进 shell
+function loadHist(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem('cp-term-hist') || '[]');
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+const history = ref<string[]>(loadHist());
+
 let term: Terminal | null = null;
 let fit: FitAddon | null = null;
 let ws: WebSocket | null = null;
@@ -32,13 +45,17 @@ function applyTheme() {
   if (term) term.options.theme = termTheme();
 }
 
+function sendInput(data: string) {
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ d: 'input', data }));
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/api/terminal?token=${encodeURIComponent(getToken())}`);
   ws.onopen = () => {
     connected.value = true;
     disconnected.value = false;
-    term!.writeln('\x1b[32m已连接服务器终端（root shell，请谨慎操作）\x1b[0m\r\n');
+    term!.writeln('\x1b[32m已连接服务器终端（root shell，请谨慎操作）。下方输入框可直接粘贴并执行命令。\x1b[0m\r\n');
     ws!.send(JSON.stringify({ d: 'resize', cols: term!.cols, rows: term!.rows }));
   };
   ws.onmessage = (e) => {
@@ -69,24 +86,59 @@ function reconnect() {
   connect();
 }
 
+function submitCmd() {
+  const c = cmd.value;
+  if (!c) return;
+  sendInput(c + '\n');
+  history.value = [c, ...history.value.filter((h) => h !== c)].slice(0, 50);
+  localStorage.setItem('cp-term-hist', JSON.stringify(history.value));
+  histIdx.value = -1;
+  cmd.value = '';
+  term?.focus();
+}
+function histMove(dir: -1 | 1) {
+  if (!history.value.length) return;
+  histIdx.value = Math.max(-1, Math.min(history.value.length - 1, histIdx.value + dir));
+  cmd.value = histIdx.value < 0 ? '' : history.value[histIdx.value];
+}
+async function pasteToInput() {
+  // 直接粘贴进 xterm 时，浏览器可能把多行内容拆散、把括号粘贴模式序列丢给 shell，
+  // 表现为"粘贴后命令串在一起执行"。走输入框就能整段可控地提交。
+  try {
+    const t = await navigator.clipboard.readText();
+    cmd.value = t;
+    msg.success('已读取剪贴板，可编辑后回车执行');
+  } catch {
+    msg.warning('浏览器拒绝了剪贴板访问，请手动粘贴到输入框');
+  }
+}
+
 onMounted(() => {
   term = new Terminal({
     cursorBlink: true,
     fontSize: 13,
     fontFamily: "'JetBrains Mono','Fira Code',monospace",
     theme: termTheme(),
-  });
+    // 中文/全角字符按 2 列宽渲染，否则中文输出会出现字符重叠错位
+    unicodeVersion: '11',
+  } as any);
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(host.value!);
   try {
     fit.fit();
   } catch { /* 容器尺寸为 0 时忽略 */ }
-  term.onData((d) => {
-    if (ws?.readyState === 1) ws.send(JSON.stringify({ d: 'input', data: d }));
-  });
+  term.onData(sendInput);
   term.onResize(({ cols, rows }) => {
     if (ws?.readyState === 1) ws.send(JSON.stringify({ d: 'resize', cols, rows }));
+  });
+  // Ctrl/Cmd+V：读剪贴板整段原样写入（xterm 默认粘贴走事件分块，多行/转义容易乱）
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      navigator.clipboard.readText().then((t) => { if (t) sendInput(t); }).catch(() => msg.warning('剪贴板不可用，请改用下方输入框'));
+      return false;
+    }
+    return true;
   });
   term.focus();
   connect();
@@ -139,6 +191,27 @@ onBeforeUnmount(() => {
         </NSpace>
       </div>
       <div ref="host" class="term-host" aria-label="终端输出区" role="region"></div>
+      <div class="term-cmd">
+        <NInput
+          v-model:value="cmd"
+          placeholder="命令输入框：粘贴/输入命令后回车提交到终端（↑ ↓ 翻历史，中文与多行内容不会乱码）"
+          :input-props="{ class: 'mono', 'aria-label': '终端命令输入框' }"
+          @keyup.enter="submitCmd"
+          @keydown.up.prevent="histMove(-1)"
+          @keydown.down.prevent="histMove(1)"
+        >
+          <template #prefix><NIcon :component="icons.TerminalOutline" :size="14" /></template>
+          <template #suffix>
+            <NSpace :size="4">
+              <NButton size="tiny" quaternary @click="pasteToInput">
+                <template #icon><NIcon :component="icons.CopyOutline" :size="13" /></template>
+                粘贴
+              </NButton>
+              <NButton size="tiny" type="primary" :disabled="!cmd || !connected" @click="submitCmd">执行</NButton>
+            </NSpace>
+          </template>
+        </NInput>
+      </div>
     </div>
   </div>
 </template>
@@ -160,11 +233,16 @@ onBeforeUnmount(() => {
 }
 .tdot { width: 11px; height: 11px; border-radius: 50%; margin-right: var(--space-2); display: inline-block; }
 .term-host {
-  height: calc(100vh - 260px);
-  min-height: 320px;
+  height: calc(100vh - 322px);
+  min-height: 280px;
   padding: var(--space-3) var(--space-2) var(--space-3) var(--space-3);
 }
+.term-cmd {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--cp-border);
+  background: var(--cp-bg-1);
+}
 @media (max-width: 640px) {
-  .term-host { height: calc(100vh - 300px); min-height: 260px; }
+  .term-host { height: calc(100vh - 350px); min-height: 240px; }
 }
 </style>

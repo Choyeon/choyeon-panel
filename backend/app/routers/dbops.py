@@ -88,3 +88,59 @@ async def redis_password(req: Request):
     # 只记事件不记内容：口令进审计表等于把凭据抄进一份谁都能翻的日志
     dbm.audit(req.state.cp_sub, "db:redis-password", "已清空" if not pw else "已更新")
     return r
+
+
+# ---------- 网页数据浏览 ----------
+
+@router.get("/api/db/pg/{db}/tables")
+async def pg_tables(db: str):
+    try:
+        return await pg_service.list_tables(db)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@router.get("/api/db/pg/{db}/table")
+async def pg_table(db: str, req: Request):
+    q = req.query_params
+    try:
+        page = int(q.get("page") or 1)
+        size = int(q.get("size") or 50)
+    except ValueError:
+        page, size = 1, 50
+    try:
+        return await pg_service.table_data(db, q.get("schema") or "public", q.get("name") or "", page, size)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.get("/api/db/redis/keys")
+async def redis_keys(req: Request):
+    q = req.query_params
+    try:
+        return await pg_service.redis_scan(q.get("cursor") or "0", q.get("pattern") or "*", int(q.get("count") or 200))
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.get("/api/db/redis/key")
+async def redis_key_detail(req: Request):
+    try:
+        return await pg_service.redis_key(req.query_params.get("k") or "")
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.post("/api/db/redis/del")
+async def redis_key_del(req: Request):
+    body = await _body(req)
+    keys = body.get("keys")
+    if not isinstance(keys, list) or not keys:
+        return JSONResponse(status_code=400, content={"error": "缺少 keys 参数"})
+    try:
+        r = await pg_service.redis_del([str(k) for k in keys])
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    # 不记录 key 内容：业务 key 名本身可能带敏感信息，只记删了几个
+    dbm.audit(req.state.cp_sub, "db:redis-del", f"{r['deleted']} 个 key")
+    return r

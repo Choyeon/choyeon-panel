@@ -3,7 +3,8 @@ import { getToken, getRole, onUnauthorized } from './api';
 
 export const TITLES: Record<string, string> = {
   '/dashboard': '总览', '/apps': '应用', '/services': '系统服务', '/db': '数据库',
-  '/backups': '备份', '/files': '文件', '/terminal': '终端', '/doctor': '安全自检', '/settings': '设置',
+  '/backups': '备份', '/files': '文件', '/terminal': '终端', '/doctor': '安全自检',
+  '/users': '用户管理', '/audit': '操作审计', '/logs': '面板日志', '/settings': '设置',
 };
 
 export const router = createRouter({
@@ -20,6 +21,9 @@ export const router = createRouter({
     { path: '/files', component: () => import('./views/Files.vue') },
     { path: '/terminal', component: () => import('./views/Terminal.vue') },
     { path: '/doctor', component: () => import('./views/Doctor.vue') },
+    { path: '/users', component: () => import('./views/Users.vue') },
+    { path: '/audit', component: () => import('./views/Audit.vue') },
+    { path: '/logs', component: () => import('./views/PanelLogs.vue') },
     { path: '/settings', component: () => import('./views/Settings.vue') },
     { path: '/:pathMatch(.*)*', component: () => import('./views/NotFound.vue'), meta: { title: '页面不存在' } },
   ],
@@ -27,7 +31,7 @@ export const router = createRouter({
 
 // 只有管理员能看到/用得上的页面：菜单里已隐藏，但地址栏直达同样要拦，
 // 否则只读账号会停在一个只会报 403 的空页面上。
-const ADMIN_ONLY = ['/files', '/terminal', '/doctor'];
+const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/users', '/audit'];
 
 router.beforeEach((to) => {
   if (to.path !== '/login' && !getToken()) return '/login';

@@ -314,8 +314,23 @@ onMounted(load);
       </NSpace>
     </NCard>
 
+    <NCard v-if="app.components?.length" size="small" class="comp-bar" style="margin-bottom: var(--space-4)">
+      <NSpace align="center" :size="10" wrap>
+        <NIcon :component="icons.LayersOutline" :size="15" color="var(--cp-brand-soft)" />
+        <NText depth="3" style="font-size: var(--fs-xs)">组合项目组件</NText>
+        <NButton
+          v-for="c in app.components" :key="c.id" size="tiny"
+          :type="c.id === id ? 'primary' : 'default'" :tertiary="c.id !== id"
+          @click="c.id === id ? null : router.push(`/apps/${c.id}`)"
+        >
+          {{ c.component_role === 'frontend' ? '前端' : c.component_role === 'backend' ? '后端' : c.component_role || '组件' }} · {{ c.name }}
+        </NButton>
+        <NText depth="3" style="font-size: var(--fs-2xs)">启停与部署各自独立，nginx/域名按组件分别配置</NText>
+      </NSpace>
+    </NCard>
+
     <NCard size="small" :content-style="{ padding: '0' }">
-      <NTabs type="line" animated pane-style="padding: var(--space-4); padding-top: var(--space-2)">
+      <NTabs type="line" animated :tabs-padding="16" pane-style="padding: var(--space-4); padding-top: var(--space-2)">
         <NTabPane name="config" tab="基本配置">
           <NForm label-placement="left" label-width="100" style="max-width: 660px; margin-top: var(--space-3)">
             <NSpace vertical :size="12">

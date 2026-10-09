@@ -6,6 +6,7 @@ doctor 只做**只读**检查，不修改任何系统状态；每项给出状态
 
 from __future__ import annotations
 
+import asyncio
 import glob
 import os
 import shutil
@@ -214,6 +215,11 @@ _CHECKS = [
     ("cli", "全局 CLI", _check_cli),
 ]
 
+# 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
+# firewall（可能锁死 SSH）、nginx（要人先看报错）、listen/admin/disk
+# 都需要人来决策，不提供按钮，只给可复制的命令。
+FIXABLE = {"cli", "permissions", "service", "frontend"}
+
 
 async def run_checks() -> dict:
     """执行全部检查并返回汇总。网页端 /api/doctor 与 CLI `choyeonctl doctor` 共用。"""
@@ -223,7 +229,12 @@ async def run_checks() -> dict:
             res = await fn()
         except Exception as e:  # noqa: BLE001 单项检查失败不应拖垮整个自检
             res = {"status": "warn", "detail": f"检查出错：{e}", "fix": ""}
-        items.append({"id": cid, "title": title, "status": res["status"], "detail": res["detail"], "fix": res["fix"]})
+        items.append(
+            {
+                "id": cid, "title": title, "status": res["status"],
+                "detail": res["detail"], "fix": res["fix"], "fixable": cid in FIXABLE,
+            }
+        )
 
     counts = {
         "pass": sum(1 for i in items if i["status"] == "pass"),
@@ -239,3 +250,56 @@ async def doctor(req: Request):
     if req.state.cp_role != "admin":
         return JSONResponse(status_code=403, content={"error": "仅管理员可执行自检"})
     return await run_checks()
+
+
+@router.post("/api/doctor/fix")
+async def doctor_fix(req: Request):
+    """一键修复白名单项：命令全部是服务端拼好的固定 argv，不接收外部命令。"""
+    if req.state.cp_role != "admin":
+        return JSONResponse(status_code=403, content={"error": "仅管理员可执行修复"})
+    try:
+        body = await req.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    fid = str((body or {}).get("id") or "")
+    if fid not in FIXABLE:
+        return JSONResponse(status_code=400, content={"error": "该项不支持一键修复，请按修复命令手动处理"})
+
+    if fid == "cli":
+        target = Path(config.BASE) / "bin" / "choyeonctl"
+        if not target.exists():
+            return JSONResponse(status_code=400, content={"error": f"未找到 {target}，仓库可能被移动"})
+        r = await run("ln", ["-sf", str(target), str(CLI_LINK)])
+        msg = "已重建 choyeonctl 链接" if r["code"] == 0 else f"ln 失败：{r['out']}"
+    elif fid == "permissions":
+        env_file = Path(config.ENV_FILE)
+        if not env_file.exists():
+            return JSONResponse(status_code=400, content={"error": ".env 不存在，无需修复"})
+        r = await run("chmod", ["0600", str(env_file)])
+        msg = "已收紧 .env 权限为 0600" if r["code"] == 0 else f"chmod 失败：{r['out']}"
+    elif fid == "frontend":
+        r = await run("bash", ["-c", f"cd {config.BASE}/web && npm run build"], timeout=900)
+        if r["code"] != 0:
+            return JSONResponse(status_code=400, content={"error": f"前端构建失败：{r['out'][-400:]}"})
+        msg = "前端已重新构建"
+    else:  # service：重启自己——响应必须赶在进程退出前发出去
+        dbm.audit(req.state.cp_sub, "doctor:fix", fid)
+
+        async def _restart():
+            # 延迟 1s：先把 JSON 响应发完再 kill，否则客户端只会收到连接中断
+            await asyncio.sleep(1)
+            await asyncio.create_subprocess_shell(
+                f"systemctl restart {SERVICE_NAME}", start_new_session=True,
+            )
+
+        asyncio.create_task(_restart())
+        return {"ok": True, "restarting": True, "message": "面板服务正在重启，约 5 秒后自动恢复"}
+
+    dbm.audit(req.state.cp_sub, "doctor:fix", fid)
+    check = next((fn for cid, _, fn in _CHECKS if cid == fid), None)
+    item = None
+    if check:
+        res = await check()
+        title = next((t for cid, t, _ in _CHECKS if cid == fid), fid)
+        item = {"id": fid, "title": title, "status": res["status"], "detail": res["detail"], "fix": res["fix"], "fixable": True}
+    return {"ok": r["code"] == 0, "message": msg, "item": item}
