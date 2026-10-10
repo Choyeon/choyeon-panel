@@ -1,7 +1,10 @@
 # choyeon-panel 运维手册（RUNBOOK）
 
 > 面向"线上出事了怎么办"。安装与开发请看 [README.md](./README.md)。
-> 默认安装路径 `/root/choyeon-panel`，服务名 `choyeon-panel`，后端监听 `127.0.0.1:3210`。
+> 服务名 `choyeon-panel`，后端监听 `127.0.0.1:3210`；下文示例路径写 `/root/choyeon-panel`，
+> 但 `install.sh` 是**就地部署**的（安装目录就是仓库所在目录，本机为 `/root/www/choyeon-panel`）。
+> 动手前先确认本机的真实路径与端口：
+> `systemctl show choyeon-panel -p WorkingDirectory --value` 与 `systemctl show choyeon-panel -p Environment --value`。
 
 ---
 
@@ -82,13 +85,15 @@ systemctl enable choyeon-panel          # 开机自启（install.sh 已默认开
 journalctl -u choyeon-panel --since "10 min ago" --no-pager
 journalctl -u choyeon-panel -p err -n 100 --no-pager
 
-# 改配置后生效（例如改了 .env）
-systemctl restart choyeon-panel
-systemctl show choyeon-panel -p Environment   # 确认 Environment= 是否注入成功
+# 改配置后生效（例如改了 .env 里的端口 / 数据目录 / 备份目录）
+choyeonctl upgrade --no-pull          # 重新渲染 unit 并重启；单纯 restart 不会让改动生效
+systemctl show choyeon-panel -p Environment   # 确认 Environment= 已是新值
 ```
 
-> `.env` 由后端自己读取（`backend/app/config.py` 的 `_load_env`），**优先级低于 systemd 的 `Environment=`**。
-> 因此在 unit 里写死的值会覆盖 `.env`，排障时先看 `systemctl show`。
+> `.env` 由后端自己读取（`backend/app/config.py` 的 `_load_env`），对**运行中的服务**而言优先级低于 systemd 的 `Environment=`；
+> 排障时先看 `systemctl show`。而 `scripts/*.sh` 现在按 `显式环境变量 > <安装目录>/.env > 内置默认` 取值，
+> 渲染 unit 前还会把生效值写回 `.env`（`install.sh` / `update.sh --no-pull` 都会），
+> 所以改 `.env` 后必须走 `choyeonctl upgrade --no-pull` 重新渲染，直接 `systemctl restart` 只会沿用 unit 里的旧值。
 
 ---
 
@@ -121,7 +126,7 @@ journalctl -u choyeon-panel -n 100 --no-pager   # 看真实报错
 | 报错特征 | 根因 | 修复 |
 | --- | --- | --- |
 | `Address already in use` | 3210 被占用（旧进程残留） | `ss -ltnp \| grep 3210` → `kill <pid>`；或改 `CP_PORT` |
-| `No such file or directory: .../backend/app/main.py` | `WorkingDirectory` 与实际安装路径不符 | 重新渲染 unit：`/root/choyeon-panel/scripts/update.sh --no-pull` |
+| `No such file or directory: .../backend/app/main.py` | `WorkingDirectory` 与实际安装路径不符 | 重新渲染 unit：`choyeonctl upgrade --no-pull`（或 `<安装目录>/scripts/update.sh --no-pull`） |
 | `Permission denied` 写 `/etc/nginx` | 服务不是 root 运行 | unit 必须保持 root（面板要管理 nginx/systemd） |
 | `ModuleNotFoundError` | `.venv` 依赖缺失 | `cd backend && .venv/bin/pip install -r requirements.txt` |
 | `starlette.testclient ... requires the httpx2 package`（只在 CI 红、本地绿） | 测试依赖没装：starlette 1.x 的 `TestClient` 硬依赖 `httpx2`，本地 venv 里躺着旧 `httpx` 只会降级成 deprecation warning | `cd backend && .venv/bin/pip install -r requirements-dev.txt`（CI 已自动装，见 `ci.yml`） |
@@ -238,7 +243,7 @@ scripts/healthcheck.sh
 改配置后只想重建重启（不拉代码）：
 
 ```bash
-/root/choyeon-panel/scripts/update.sh --no-pull
+choyeonctl upgrade --no-pull          # 等价于 <安装目录>/scripts/update.sh --no-pull
 ```
 
 ---
@@ -249,7 +254,7 @@ scripts/healthcheck.sh
 
 - [ ] 面板仅监听 `127.0.0.1:3210`，**没有**直接对外暴露（防火墙只放行 80/443）
 - [ ] 已启用 HTTPS，`CP_HSTS` 保持 0（由 nginx 统一发 HSTS）
-- [ ] `/root/choyeon-panel/.env` 权限为 `0600`（install.sh 已设置）
+- [ ] `<安装目录>/.env` 若存在则权限为 `0600`（install.sh 生成/同步时会设；只看 unit 的实例可以没有这个文件）
 - [ ] `data/` 权限为 `0700`
 - [ ] 管理员口令 ≥ 12 位；已删除默认/测试账号
 - [ ] `CP_FILE_ROOTS` 只包含必要目录，**不含** `/`、`/etc`（不含子路径时不要写 `/etc`）

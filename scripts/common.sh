@@ -21,13 +21,54 @@ _default_prefix() {
 }
 
 PREFIX="${CP_PREFIX:-$(_default_prefix)}"
+
+# ---------- 既有 .env 参与默认值 ----------
+# 取值优先级：显式环境变量 > 安装目录里的 .env > 内置默认，与 config.py 的文档一致。
+# 为什么脚本必须读 .env：render_unit 把 PORT/HOST/DATA_DIR 原样写进 unit 的
+# Environment=，而 systemd 注入的变量优先级高于 .env。过去这三项只认环境变量，
+# 于是 AGENTS.md §7.5 推荐的那条路（改 .env → update.sh --no-pull 重新渲染）根本不生效：
+# 在 .env 里把端口改成 3300、跑一次 --no-pull，unit 仍渲染回 3210，
+# 服务悄悄回到默认端口，而 .env 显示 3300 —— 表现就是"端口怎么改都改不动"。
+_norm_env_value() { # 去掉 CR、首尾空白与成对引号
+  local v="$1"
+  v="${v%$'\r'}"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  if [ "${#v}" -ge 2 ] && [ "${v:0:1}" = '"' ] && [ "${v: -1}" = '"' ]; then v="${v:1:$(( ${#v} - 2 ))}"; fi
+  if [ "${#v}" -ge 2 ] && [ "${v:0:1}" = "'" ] && [ "${v: -1}" = "'" ]; then v="${v:1:$(( ${#v} - 2 ))}"; fi
+  printf '%s' "$v"
+}
+
+_env_default() { # _env_default <KEY> <兜底默认值>
+  local key="$1" fallback="$2" v="" line pfx
+  v="${!key:-}"
+  if [ -n "$v" ]; then _norm_env_value "$v"; return; fi
+  if [ -r "$PREFIX/.env" ]; then
+    pfx="$key="
+    while IFS= read -r line || [ -n "$line" ]; do
+      # 注释行以 # 开头，进不了这两个分支
+      case "$line" in
+        "export $pfx"*) v="${line#*"$pfx"}" ;;
+        "$pfx"*) v="${line#*"$pfx"}" ;;
+        *) continue ;;
+      esac
+      v="$(_norm_env_value "$v")"
+      [ -n "$v" ] || continue
+      printf '%s' "$v"; return
+    done < "$PREFIX/.env"
+  fi
+  printf '%s' "$fallback"
+}
+
 REPO="${CP_REPO:-https://github.com/Choyeon/choyeon-panel.git}"
 BRANCH="${CP_BRANCH:-main}"
 SERVICE_NAME="${CP_SERVICE:-choyeon-panel}"
-PORT="${CP_PORT:-3210}"
-HOST="${CP_HOST:-127.0.0.1}"
-DATA_DIR="${CP_DATA_DIR:-$PREFIX/data}"
-BACKUP_DIR="${CP_BACKUP_DIR:-/root/backups/panel}"
+PORT="$(_env_default CP_PORT 3210)"
+HOST="$(_env_default CP_HOST 127.0.0.1)"
+DATA_DIR="$(_env_default CP_DATA_DIR "$PREFIX/data")"
+BACKUP_DIR="$(_env_default CP_BACKUP_DIR /root/backups/panel)"
+APP_ROOT="$(_env_default CP_APP_ROOT /root/www)"
+FILE_ROOTS="$(_env_default CP_FILE_ROOTS "$APP_ROOT,/etc/nginx,$BACKUP_DIR")"
 KEEP_BACKUPS="${CP_KEEP_BACKUPS:-14}"
 
 BACKEND_DIR="$PREFIX/backend"
@@ -283,6 +324,14 @@ ensure_node() {
 clone_or_die() {
   need_cmd git
   if [ -d "$PREFIX/.git" ]; then
+    # CP_BRANCH / `deploy --branch` 只在真正克隆时生效。这里静默返回的话，
+    # `choyeonctl deploy --branch v2` 会报告部署成功，跑的却还是当前分支的代码。
+    if [ -n "${CP_BRANCH:-}" ]; then
+      local now
+      now="$(git -C "$PREFIX" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 未知)"
+      warn "指定了 CP_BRANCH=$CP_BRANCH，但 $PREFIX 已是 git 仓库、跳过克隆，分支未生效（当前 $now）"
+      warn "要切到该分支请执行：CP_BRANCH=$CP_BRANCH bash scripts/update.sh"
+    fi
     log "$PREFIX 已存在，跳过克隆（更新请执行 scripts/update.sh）"
     return
   fi
@@ -333,9 +382,7 @@ render_unit() {
   local src="$PREFIX/deploy/choyeon-panel.service"
   [ -r "$src" ] || die "缺少 $src"
   step "安装 systemd unit -> $UNIT_FILE"
-  local line extra app_root file_roots
-  app_root="${CP_APP_ROOT:-/root/www}"
-  file_roots="$app_root,/etc/nginx,$BACKUP_DIR"
+  local line extra
   : > "$UNIT_FILE.tmp" || die "无法写入 $UNIT_FILE.tmp"
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line//\/root\/choyeon-panel/$PREFIX}"
@@ -348,9 +395,9 @@ render_unit() {
         # 备份目录与应用根目录都可以用 CP_BACKUP_DIR / CP_APP_ROOT 改写，unit 必须跟着变：
         # 否则 backup.sh 按 $BACKUP_DIR 写出去，面板服务却仍按模板里的默认值去找，
         # 表现是"备份成功但面板列表永远为空"，文件管理也进不去备份目录。
-        extra="$(printf 'Environment=CP_BACKUP_DIR=%s\nEnvironment=CP_APP_ROOT=%s\n' "$BACKUP_DIR" "$app_root")"
+        extra="$(printf 'Environment=CP_BACKUP_DIR=%s\nEnvironment=CP_APP_ROOT=%s\n' "$BACKUP_DIR" "$APP_ROOT")"
         ;;
-      Environment=CP_FILE_ROOTS=*) line="Environment=CP_FILE_ROOTS=$file_roots" ;;
+      Environment=CP_FILE_ROOTS=*) line="Environment=CP_FILE_ROOTS=$FILE_ROOTS" ;;
     esac
     printf '%s\n' "$line" >> "$UNIT_FILE.tmp"
     if [ -n "$extra" ]; then
@@ -376,6 +423,42 @@ unit_restart() {
 unit_is_active() {
   have_systemd || return 1
   systemctl is-active --quiet "$SERVICE_NAME"
+}
+
+# ---------- .env 同步 ----------
+# sync_env <KEY> <值>：只改这一行，其余键（密钥、限额、手改的开关）原样保留；
+# .env 里没有这个键时追加。用临时文件 + mv，而不是就地读写同一个 fd。
+sync_env() {
+  local key="$1" val="$2" line tmp pfx
+  tmp="$PREFIX/.env.tmp.$$"
+  pfx="$key="
+  : > "$tmp" || die "无法写入 $tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$pfx"*|"export $pfx"*) line="$key=$val" ;;
+    esac
+    printf '%s\n' "$line"
+  done < "$PREFIX/.env" >> "$tmp"
+  grep -q "^$key=" "$tmp" || printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$PREFIX/.env"
+  chmod 0600 "$PREFIX/.env"
+}
+
+# 把"这次真正渲染进 unit 的那几个值"写回 .env。两个方向都会出错，所以必须成对出现：
+# - .env 落后于 unit：`choyeonctl deploy --port 3211` 之后服务在 3211，.env 仍写 3210，
+#   而紧接着按 AGENTS.md 跑的 `choyeonctl status` 读 .env 探 3210 → healthy:false，
+#   一次成功的部署在文档推荐的验收命令上看起来像失败。
+# - unit 落后于 .env：见 _env_default 的注释（systemd Environment= 优先于 .env）。
+# install.sh 与 update.sh 都要调用：CP_PORT=3300 bash scripts/update.sh 同样会渲染 unit，
+# 只同步 .env 的那半边等于留下下一次升级把它改回去的隐患。
+env_sync_all() {
+  [ -f "$PREFIX/.env" ] || return 0
+  sync_env CP_HOST "$HOST"
+  sync_env CP_PORT "$PORT"
+  sync_env CP_DATA_DIR "$DATA_DIR"
+  sync_env CP_BACKUP_DIR "$BACKUP_DIR"
+  sync_env CP_APP_ROOT "$APP_ROOT"
+  sync_env CP_FILE_ROOTS "$FILE_ROOTS"
 }
 
 # ---------- 健康检查 ----------

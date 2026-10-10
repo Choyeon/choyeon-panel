@@ -22,7 +22,9 @@ cd /root/choyeon-panel && bash scripts/install.sh
 
 脚本会完成：装系统依赖（Python 3.11+ / Node 22 / nginx / git / sqlite）→ 建 venv → 构建前端 → 渲染 systemd unit → 启动并做健康检查 → （可选）配置 nginx 反代与 certbot。
 
-可用环境变量覆盖：`CP_PREFIX`（默认 `/root/choyeon-panel`）、`CP_PORT`（3210）、`CP_DATA_DIR`、`CP_BACKUP_DIR`、`CP_SKIP_NGINX=1`、`CP_SKIP_DEPS=1`。
+可用环境变量覆盖：`CP_PREFIX`（默认就是脚本所在的仓库目录，仓库结构不完整时才退回 `/root/choyeon-panel`）、`CP_PORT`（3210）、`CP_DATA_DIR`、`CP_BACKUP_DIR`、`CP_APP_ROOT`、`CP_SKIP_NGINX=1`、`CP_SKIP_DEPS=1`。
+
+部署参数的取值顺序统一为 **显式环境变量 > 安装目录的 `.env` > 内置默认**；`install.sh` 会把最终生效的值写回 `.env` 并渲染进 unit，两边不会各说各话。改配置的正确路径是编辑 `.env` 后执行 `choyeonctl upgrade --no-pull`（见 AGENTS.md 第 5 节）。
 
 ### 命令行（等价路径）
 

@@ -38,26 +38,29 @@ clone_or_die
 cd "$PREFIX"
 
 # ---------- 3. 配置文件 ----------
+# 同 render_unit：用 bash 字符串替换而非 sed，避免 $DATA_DIR 里的 sed 元字符改坏内容
+render_env() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      CP_DATA_DIR=*) line="CP_DATA_DIR=$DATA_DIR" ;;
+      CP_PORT=*) line="CP_PORT=$PORT" ;;
+      CP_HOST=*) line="CP_HOST=$HOST" ;;
+    esac
+    printf '%s\n' "$line"
+  done < "$PREFIX/.env.example"
+}
+
+# sync_env / env_sync_all 见 common.sh：把这次生效的部署参数写回 .env。
 if [ ! -f "$PREFIX/.env" ]; then
   step "生成 .env（从 .env.example）"
-  # 同 render_unit：用 bash 字符串替换而非 sed，避免 $DATA_DIR 里的 sed 元字符改坏内容
-  render_env() {
-    local line
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        CP_DATA_DIR=*) line="CP_DATA_DIR=$DATA_DIR" ;;
-        CP_PORT=*) line="CP_PORT=$PORT" ;;
-        CP_HOST=*) line="CP_HOST=$HOST" ;;
-      esac
-      printf '%s\n' "$line"
-    done < "$PREFIX/.env.example"
-  }
   render_env > "$PREFIX/.env"
-  chmod 0600 "$PREFIX/.env"
-  ok "已生成 $PREFIX/.env（权限 0600）"
+  ok "已生成 $PREFIX/.env"
 else
-  log ".env 已存在，保留原配置"
+  log ".env 已存在：保留其它配置，只同步本次生效的部署参数"
 fi
+env_sync_all
+chmod 0600 "$PREFIX/.env"
 
 mkdir -p "$DATA_DIR" "$BACKUP_DIR"
 chmod 0700 "$DATA_DIR"

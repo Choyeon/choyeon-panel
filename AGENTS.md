@@ -26,10 +26,10 @@ choyeonctl status --json      # healthy == true
 choyeonctl doctor --json      # counts.fail == 0
 ```
 
-若机器上还没有 CLI（未安装 / 未软链），用仓库内入口：
+若机器上还没有 CLI（未安装 / 未软链），用仓库内入口（`<安装目录>` 就是代码所在目录，默认就地部署）：
 
 ```bash
-cd /root/choyeon-panel && ./bin/choyeonctl deploy --json
+cd <安装目录> && ./bin/choyeonctl deploy --json
 ```
 
 ---
@@ -44,7 +44,7 @@ cd /root/choyeon-panel && ./bin/choyeonctl deploy --json
 | 磁盘 ≥ 2GB | `df -h /` | 清理后再装 |
 | 网络可达 | `curl -fsS https://github.com` | 装依赖与克隆代码需要外网 |
 
-**不要**在已有面板实例的机器上重复 `deploy`（会覆盖 unit）。已有实例请走第 5 节升级。
+**不要**在已有面板实例的机器上随意重复 `deploy`：它会重新渲染 systemd unit，并把本次生效的端口 / 数据目录 / 备份目录写回 `.env`。已有实例请走第 5 节升级（改配置用 `upgrade --no-pull`）。
 
 ---
 
@@ -59,10 +59,14 @@ choyeonctl deploy --port 3210 --json
 返回示例：
 
 ```json
-{ "ok": true, "url": "http://127.0.0.1:3210", "healthy": true, "adminCreated": false }
+{ "ok": true, "url": "http://127.0.0.1:3210", "healthy": true,
+  "prefix": "/root/www/choyeon-panel", "dataDir": "/root/www/choyeon-panel/data",
+  "adminCreated": false }
 ```
 
-验收：`ok == true` **且** `healthy == true`。若 `healthy == false`，转「失败处置」。
+验收：`ok == true` **且** `healthy == true`。后续命令要在返回的 `prefix` 目录下执行（`install.sh` 会把
+`/usr/local/bin/choyeonctl` 指向它）；若 `prefix` 与当前 CLI 所在仓库不同，结果里会有 `cliHint`。
+若 `healthy == false`，转「失败处置」。
 
 ### 步骤 2：创建管理员
 
@@ -86,9 +90,9 @@ choyeonctl doctor --json
 ### 步骤 4：（可选）接入 HTTPS 域名
 
 ```bash
-# 只在用户给了域名且该域名已解析到本机时执行
-choyeonctl deploy --port 3210 --json        # 已部署则跳过本行
-# 然后按 scripts/install.sh 的 nginx 交互步骤，或手工套用：
+# 只在用户给了域名且该域名已解析到本机时执行。
+# 注意：choyeonctl deploy 是非交互的（会置 CP_SKIP_NGINX=1），nginx 询问只发生在终端里手工跑脚本时。
+bash scripts/install.sh                    # 在终端中按提示配置反代 + 申请证书，或手工套用：
 #   deploy/nginx-panel.conf.example -> /etc/nginx/conf.d/choyeon-panel.conf
 #   nginx -t && systemctl reload nginx
 #   certbot --nginx -d <域名> --non-interactive --agree-tos -m admin@<域名>
@@ -105,30 +109,34 @@ choyeonctl deploy --port 3210 --json        # 已部署则跳过本行
 管理员：admin / <口令>
 健康状态：choyeonctl status --json -> healthy
 自检结果：choyeonctl doctor --json -> status / counts
-数据目录：<CP_DATA_DIR，默认 /root/choyeon-panel/data>
-备份目录：/root/backups/panel
+数据目录：<CP_DATA_DIR，默认 <安装目录>/data>
+备份目录：<CP_BACKUP_DIR，默认 /root/backups/panel>
 ```
 
 ---
 
 ## 4. 命令契约（完整）
 
-`choyeonctl schema --json` 会输出同样的内容，以命令输出为准。
+`choyeonctl schema --json` 是本契约的权威来源，下表与它同步；若出现不一致，以命令输出为准（并把它当作缺陷上报）。
 
 | 命令 | 关键参数 | 说明 |
 | --- | --- | --- |
-| `deploy` | `--prefix --port --branch --skip-nginx --no-deps` | 一键部署（依赖→venv→前端构建→systemd→健康检查） |
-| `upgrade` | — | 拉代码→备份→重建→重启，健康检查失败自动回滚 |
+| `deploy` | `--prefix --port --branch --skip-nginx --no-deps` | 一键部署（依赖→venv→前端构建→systemd→健康检查）；非交互，不会询问 nginx 反代 |
+| `upgrade` | `--no-pull` | 拉代码→备份→重建→重启，健康检查失败自动回滚；`--no-pull` 只重建并重新渲染 unit |
 | `status` | — | 版本/监听/服务/健康/自检汇总 |
-| `doctor` | — | 10 项只读自检，每项带修复命令 |
+| `doctor` | — | 只读安全与健康自检（当前 11 项，以 JSON 的 `items` 为准），每项带修复命令 |
 | `user list\|create\|reset\|delete` | `<name> --password --role --yes` | 改密会吊销该用户旧 token；`delete` 必须加 `--yes` |
-| `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --repo --path --port --domain --lines` | 应用全生命周期 |
+| `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --type --repo --branch --path --port --domain --start-cmd --install-cmd --lines` | 应用全生命周期；`create` 需 `--template` 或 `--start-cmd` 之一 |
 | `backup run\|list` | — | 面板数据备份（SQLite 在线备份 API） |
 | `start\|stop\|restart` | — | systemd 服务控制 |
 | `logs` | `--lines` | journalctl 日志 |
 | `schema` | — | 输出命令契约 |
 
 应用模板（`choyeonctl app templates`）：`node-service`、`node-next`、`python-fastapi`、`static-site`。
+
+`deploy --prefix` 默认取 CLI 所在的仓库目录（结构完整时就地部署），只有仓库不完整（无 `.git`）时才退回 `/root/choyeon-panel`；
+`deploy --branch` 仅在全新克隆时生效——安装目录已是 git 仓库时会打印 warn 并保持当前分支，切分支请执行 `CP_BRANCH=<分支> bash scripts/update.sh`。
+
 创建示例：
 
 ```bash
@@ -139,19 +147,30 @@ choyeonctl app logs --id 1 --lines 80
 
 ---
 
-## 5. 升级与回滚
+## 5. 升级、改配置与回滚
 
 ```bash
-choyeonctl upgrade --json     # 失败会自动 git reset 回上一个 commit 并重启
+choyeonctl upgrade --json     # 拉代码→备份→重建→重启，健康检查失败自动 git reset 回上一个 commit
+choyeonctl upgrade --no-pull --json   # 不拉代码：改完 .env / 手工改过 unit 后，重新渲染 unit 并重启
 ```
+
+改端口、数据目录、备份目录、文件根目录的正规做法：
+
+```bash
+vi <安装目录>/.env                    # 只改需要改的键
+choyeonctl upgrade --no-pull --json   # 重新渲染 systemd unit 并重启
+choyeonctl status --json              # dataDir / port 应与 .env 一致，healthy 必须为 true
+```
+
+`.env` 与 unit 的 `Environment=` 现在是同一套值（`upgrade --no-pull` 会双向对齐），优先级为
+`进程环境变量 > .env > 内置默认`，与 `backend/app/config.py` 的文档一致。
 
 手动回滚：
 
 ```bash
-cd /root/choyeon-panel && git log --oneline -5
+cd <安装目录> && git log --oneline -5
 git reset --hard <旧 commit>
-cd web && npm run build && cd ..
-systemctl restart choyeon-panel
+choyeonctl upgrade --no-pull --json   # 比手工 npm run build + restart 多一份健康检查与回滚保障
 choyeonctl status --json
 ```
 
@@ -162,6 +181,7 @@ choyeonctl status --json
 | 症状 | 诊断 | 处置 |
 | --- | --- | --- |
 | `deploy` 返回 `healthy:false` | `journalctl -u choyeon-panel -n 50` | 多为端口占用或依赖缺失；改端口或 `./scripts/install.sh` 重跑 |
+| `deploy` 报 unhealthy 但服务确实在跑 | 看返回 JSON 的 `url` / `prefix`，`ss -ltnp \| grep <端口>` | CLI 探测的端口/数据目录来自 `.env`，与 unit 不一致时先 `choyeonctl upgrade --no-pull` 把两边对齐再判失败 |
 | `Address already in use` | `ss -ltnp \| grep :3210` | `kill <pid>` 或换 `--port` |
 | 页面 404 | `ls web/dist/index.html` | 前端未构建：`cd web && npm run build` |
 | `user create` 报「已存在」 | `choyeonctl user list` | 改走 `user reset <name> --password` |
@@ -180,7 +200,7 @@ choyeonctl status --json
 2. **禁止**把口令、token、`.env` 内容写进仓库、日志或交付消息（口令只在终端生成并使用）。
 3. **禁止**跳过 `doctor` 就宣布部署成功。
 4. **禁止**用 `rm -rf` 清理 `data/`、`/root/backups/panel`；需要空间先跑 `choyeonctl backup run` 再清理旧备份。
-5. **禁止**手工编辑 `/etc/systemd/system/choyeon-panel.service`——改配置走 `choyeonctl upgrade --no-pull` 等价流程（scripts/update.sh --no-pull）重新渲染。
+5. **禁止**手工编辑 `/etc/systemd/system/choyeon-panel.service`——它是 `render_unit` 从 `deploy/choyeon-panel.service` + `.env` 渲染出来的，下次升级会被覆盖。改配置请编辑 `<安装目录>/.env`，再执行 `choyeonctl upgrade --no-pull`（等价于 `bash scripts/update.sh --no-pull`）重新渲染。
 6. **禁止**执行 `git reset --hard` 之外的破坏性 git 操作；`reset` 前确认工作区无未提交改动。
 7. **禁止**在容器内使用 Docker 化部署——本项目是**原生部署**方案，设计前提就是不用 Docker。
 8. **禁止**伪造自检结果：某项无法检查（如无 systemd）就如实标为 warn 并说明。

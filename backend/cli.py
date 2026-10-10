@@ -105,15 +105,15 @@ async def sh(cmd: list[str], timeout: int = 60, env: dict | None = None,
     }
 
 
-def health_url() -> str:
-    return f"http://127.0.0.1:{config.PORT}/api/health"
+def health_url(port: int | None = None) -> str:
+    return f"http://127.0.0.1:{port or config.PORT}/api/health"
 
 
-async def http_json(path: str, timeout: int = 10) -> tuple[int, dict | str]:
+async def http_json(path: str, timeout: int = 10, port: int | None = None) -> tuple[int, dict | str]:
     """用 curl 取后端 JSON；curl 不可用时返回 (0, '')。"""
     if not shutil.which("curl"):
         return 0, ""
-    url = f"http://127.0.0.1:{config.PORT}{path}"
+    url = f"http://127.0.0.1:{port or config.PORT}{path}"
     r = await sh(["curl", "-fsS", "--max-time", str(timeout), url], timeout=timeout + 5)
     if r["code"] != 0:
         return r["code"], r["err"] or r["out"]
@@ -124,6 +124,61 @@ async def http_json(path: str, timeout: int = 10) -> tuple[int, dict | str]:
 
 
 # ---------------------------------------------------------------- 命令实现
+def _deploy_target(a: argparse.Namespace) -> tuple[Path, Path, int]:
+    """按 scripts/{common,install}.sh 的取值口径算出这次部署真正落地的位置与端口。
+
+    不能读 CLI 进程自己的 config.*：config 来自**当前仓库**的 .env，而 --prefix/--port
+    写的是**即将生成**的那份配置。实测在 /root/www/choyeon-panel 里执行
+    `choyeonctl deploy --port 3211`，服务被正确渲染成监听 3211 并且健康，CLI 却按
+    config.PORT=3210 探测，30 秒后返回 healthy:false 并以退出码 1 结束——
+    自动化据此判定"部署失败"，把一次成功的部署当成故障去排障。
+
+    口径与 common.sh 的 _env_default 一致：显式环境变量 > 目标目录的 .env > 内置默认。
+    """
+    prefix = Path(a.prefix) if a.prefix else _default_prefix()
+    env_file = config._parse_env_file(prefix / ".env")
+    data_dir = Path(_first_nonempty(os.environ.get("CP_DATA_DIR"),
+                                    env_file.get("CP_DATA_DIR"),
+                                    str(prefix / "data")))
+    raw_port = _first_nonempty(str(a.port) if a.port else "",
+                               os.environ.get("CP_PORT"),
+                               env_file.get("CP_PORT"),
+                               str(config.PORT))
+    port = int(raw_port) if raw_port.isdigit() else config.PORT
+    return prefix, data_dir, port
+
+
+def _first_nonempty(*values: str | None) -> str:
+    for v in values:
+        if v and v.strip():
+            return v.strip()
+    return ""
+
+
+def _default_prefix() -> Path:
+    """镜像 common.sh 的 _default_prefix：仓库结构完整就地部署，否则退回默认安装目录。"""
+    if (ROOT / ".git").exists() and (ROOT / "backend" / "app" / "main.py").exists():
+        return ROOT
+    return Path("/root/choyeon-panel")
+
+
+def _user_count(db_file: Path) -> int:
+    """直接读目标库计数，不走 dbm —— dbm 绑的是 CLI 进程自己的 CP_DATA_DIR。"""
+    if not db_file.is_file():
+        return 0
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(db_file)
+        try:
+            row = con.execute("SELECT COUNT(*) FROM users").fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row else 0
+
+
 async def cmd_deploy(a: argparse.Namespace) -> dict:
     """一键部署：复用 scripts/install.sh，避免两套安装逻辑漂移。"""
     if os.geteuid() != 0:
@@ -131,6 +186,8 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
     script = ROOT / "scripts" / "install.sh"
     if not script.exists():
         Out.error(f"缺少 {script}", EXIT_PRECONDITION)
+
+    prefix, data_dir, port = _deploy_target(a)
 
     env = dict(os.environ)
     if a.prefix:
@@ -143,6 +200,9 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
         env["CP_SKIP_DEPS"] = "1"
     if a.branch:
         env["CP_BRANCH"] = a.branch
+    # CLI 的 subprocess 没有 tty，install.sh 的 read_value 拿不到输入必然跳过 nginx 步骤；
+    # 与其让"是否配置反代"这个决定悄悄不发生，不如显式声明并让文档给出域名接入的入口。
+    env["CP_SKIP_NGINX"] = env.get("CP_SKIP_NGINX", "1")
 
     Out.info(f"==> 执行 {script}（可能要几分钟，前端构建较慢）")
     # 走统一的 sh() 而不是 subprocess.run(capture_output=True)：
@@ -162,17 +222,25 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
     if r["code"] != 0:
         Out.error(f"安装脚本退出码 {r['code']}", EXIT_FAIL)
 
-    ok_health = await wait_health(30)
-    admins = dbm.query_one("SELECT COUNT(*) c FROM users")
+    ok_health = await wait_health(30, port=port)
+    admins = _user_count(data_dir / "panel.db")
     data = {
         "ok": ok_health,
-        "url": f"http://127.0.0.1:{a.port or config.PORT}",
+        "url": f"http://127.0.0.1:{port}",
         "healthy": ok_health,
-        "adminCreated": bool(admins and admins["c"]),
+        "prefix": str(prefix),
+        "dataDir": str(data_dir),
+        "adminCreated": bool(admins),
         "next": "无管理员时打开 URL 注册，或 choyeonctl user create <name> --password <pw>",
     }
+    if str(prefix.resolve()) != str(ROOT):
+        data["cliHint"] = (
+            f"本次安装目录是 {prefix}，而当前 CLI 属于 {ROOT}；后续命令请用 "
+            f"{prefix}/bin/choyeonctl（install.sh 已把 /usr/local/bin/choyeonctl 指向它），"
+            "否则会读写另一份数据目录"
+        )
     if not ok_health:
-        data["error"] = f"部署脚本已执行完，但 {health_url()} 在 30s 内没有返回健康状态"
+        data["error"] = f"部署脚本已执行完，但 {health_url(port)} 在 30s 内没有返回健康状态"
         data["hint"] = "journalctl -u choyeon-panel -n 50 看启动失败原因；端口占用换 --port 重试"
     # 这两个命令过去只 return、从不 Out.result，而 amain 又丢弃返回值：
     # `choyeonctl deploy --json` 实际输出 0 字节且 exit 0，AGENTS.md 承诺的
@@ -187,9 +255,9 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
     return data
 
 
-async def wait_health(timeout: int = 30) -> bool:
+async def wait_health(timeout: int = 30, port: int | None = None) -> bool:
     for _ in range(timeout):
-        code, body = await http_json("/api/health", timeout=3)
+        code, body = await http_json("/api/health", timeout=3, port=port)
         if code == 200 and isinstance(body, dict) and body.get("ok"):
             return True
         await asyncio.sleep(1)
@@ -454,11 +522,17 @@ async def cmd_logs(a: argparse.Namespace) -> dict:
     return {"lines": text.splitlines()}
 
 
-async def cmd_upgrade(_a: argparse.Namespace) -> dict:
+async def cmd_upgrade(a: argparse.Namespace) -> dict:
     script = ROOT / "scripts" / "update.sh"
     if not script.exists():
         Out.error(f"缺少 {script}", EXIT_PRECONDITION)
-    r = await sh(["bash", str(script)], timeout=DEPLOY_TIMEOUT_SEC, stdin_devnull=True)
+    # AGENTS.md §7.5 把 `choyeonctl upgrade --no-pull` 写成"禁止手工编辑 unit"的正规替代路径
+    # （改配置后重新渲染 unit + 重建 + 重启，不拉代码），update.sh 也早已支持该参数；
+    # 但 CLI 侧一直没透传，照文档执行会得到 exit 2「用法错误」——文档指向的出口本身是坏的。
+    cmd = ["bash", str(script)]
+    if a.no_pull:
+        cmd.append("--no-pull")
+    r = await sh(cmd, timeout=DEPLOY_TIMEOUT_SEC, stdin_devnull=True)
     if r["code"] == 124:
         Out.error(f"升级脚本超时（>{DEPLOY_TIMEOUT_SEC}s），已终止整个进程组；"
                   "升级失败时脚本本应自动回滚，请先 choyeonctl status 确认现场", EXIT_FAIL)
@@ -484,15 +558,21 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
         },
         "commands": [
             {"name": "deploy", "args": ["--prefix", "--port", "--branch", "--skip-nginx", "--no-deps"],
-             "desc": "一键部署（依赖→构建→systemd→健康检查）"},
-            {"name": "upgrade", "args": [], "desc": "升级到最新代码，失败自动回滚"},
+             "desc": "一键部署（依赖→构建→systemd→健康检查）",
+             "notes": ["--branch 只在全新克隆时生效；安装目录已是 git 仓库时代码由 update.sh 拉取",
+                       "--prefix 默认取当前 CLI 所在的仓库目录（结构完整时就地部署）",
+                       "非交互执行，不会询问 nginx 反代；接入域名见 AGENTS.md 步骤 4"]},
+            {"name": "upgrade", "args": ["--no-pull"],
+             "desc": "升级到最新代码，失败自动回滚；--no-pull 只重建并重启（改配置后重新渲染 unit）"},
             {"name": "status", "args": [], "desc": "版本/监听/服务/健康/自检汇总"},
             {"name": "doctor", "args": [], "desc": "安全与健康自检，含每项修复建议"},
             {"name": "user list|create|reset|delete", "args": ["<name>", "--password", "--role", "--yes"],
              "desc": "账号管理（改密会吊销旧 token）"},
             {"name": "app templates|list|create|deploy|rollback|logs",
-             "args": ["--id", "--name", "--template", "--repo", "--path", "--port", "--domain", "--lines"],
-             "desc": "应用全生命周期管理"},
+             "args": ["--id", "--name", "--template", "--type", "--repo", "--branch", "--path",
+                      "--port", "--domain", "--start-cmd", "--install-cmd", "--lines"],
+             "desc": "应用全生命周期管理",
+             "notes": ["create 需要 --template 或 --start-cmd 之一；用 --start-cmd 时可配 --type/--install-cmd"]},
             {"name": "backup run|list", "args": [], "desc": "面板数据备份"},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
@@ -521,14 +601,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("deploy", help="一键部署面板", parents=[common])
-    d.add_argument("--prefix", help="安装目录，默认 /root/choyeon-panel")
+    d.add_argument("--prefix", help="安装目录；默认就是当前 CLI 所在的仓库目录，"
+                                    "仓库结构不完整（无 .git）时才退回 /root/choyeon-panel")
     d.add_argument("--port", type=int, help="监听端口，默认 3210")
-    d.add_argument("--branch", help="部署指定分支")
-    d.add_argument("--skip-nginx", action="store_true", help="跳过 nginx 反代配置")
+    d.add_argument("--branch", help="克隆指定分支（安装目录已是 git 仓库时不生效，改分支请走 upgrade）")
+    d.add_argument("--skip-nginx", action="store_true", help="跳过 nginx 反代配置（CLI 调用本就非交互）")
     d.add_argument("--no-deps", action="store_true", help="跳过系统依赖安装")
     d.set_defaults(fn=cmd_deploy)
 
-    sub.add_parser("upgrade", help="升级并自动回滚失败", parents=[common]).set_defaults(fn=cmd_upgrade)
+    up = sub.add_parser("upgrade", help="升级并自动回滚失败", parents=[common])
+    up.add_argument("--no-pull", action="store_true",
+                    help="不拉代码，仅重装依赖、重建前端、重新渲染 unit 并重启（改配置后用）")
+    up.set_defaults(fn=cmd_upgrade)
     sub.add_parser("status", help="运行状态", parents=[common]).set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="安全与健康自检", parents=[common]).set_defaults(fn=cmd_doctor)
 

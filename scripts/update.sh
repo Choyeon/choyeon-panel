@@ -89,8 +89,15 @@ web_build
 
 # ---------- 4. 重启与校验 ----------
 if have_systemd; then
-  render_unit 2>/dev/null || true
-  systemctl daemon-reload
+  # AGENTS.md §7.5 说"改配置走 update.sh --no-pull 重新渲染 unit"，所以这一步是这条
+  # 路径的核心，不能写成 `render_unit 2>/dev/null || true`：那既吞掉真实报错，又吞不掉
+  # die()（die 是 exit，会把整个脚本一起带走），结果是 unit 没更新、日志里也没有原因。
+  env_sync_all
+  if ( render_unit ); then
+    systemctl daemon-reload
+  else
+    warn "systemd unit 重新渲染失败，本次沿用旧 unit；请手工执行 bash scripts/update.sh --no-pull 复现报错"
+  fi
 fi
 
 restart_and_check() {
