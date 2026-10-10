@@ -26,7 +26,7 @@ from app.services import backup_service, files_service  # noqa: E402
 
 class TestUploadAndExtract(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="cp_up_")
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="cp_up_"))
         self.old_roots = files_service.ROOTS
         files_service.ROOTS = [self.root]
 

@@ -193,6 +193,17 @@ async function send<T>(path: string, init: RequestInit, timeout: number): Promis
 
 async function uploadFiles(files: File[], overwrite = false) {
   if (!files.length) return;
+  // 服务端会拒收超限文件，但那是在浏览器把整个文件传完之后：几百 MB 的误选
+  // 白占一轮带宽和磁盘缓存，最后只换来一句"超过 8MB"。额度由列表接口带回来。
+  const cap = Number(data.value?.maxUploadBytes || 0);
+  if (cap) {
+    const over = files.filter((f) => f.size > cap).map((f) => f.name);
+    if (over.length) {
+      msg.warning(`超过 ${fmtSize(cap)} 上限，已跳过：${over.join('、')}`);
+      files = files.filter((f) => f.size <= cap);
+      if (!files.length) return;
+    }
+  }
   const dup = files.filter((f) => entries.value.some((e) => !e.isDir && e.name === f.name));
   if (!overwrite && dup.length) {
     // 覆盖是不可逆的，先给出名单再动手；后端在这种情况下会逐个拒绝，不会写一半。

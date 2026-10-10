@@ -1,5 +1,6 @@
 import json
 import time
+from urllib.parse import urlsplit
 
 from starlette.datastructures import Headers, MutableHeaders, QueryParams
 from starlette.requests import Request
@@ -62,18 +63,47 @@ def need_admin(req: Request) -> JSONResponse | None:
     return None
 
 
-def _extract_token(headers: Headers, query: QueryParams) -> str:
+def _extract_token(headers: Headers, query: QueryParams, allow_query: bool) -> str:
     auth = headers.get("authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
-    return query.get("token", "")
+    # ?token= 只用于浏览器无法带 Header 的场景（<a> 下载、EventSource、WebSocket），
+    # 它们全是 GET。写操作如果也认 URL 里的 token，口令化的长期凭证就会原样出现在
+    # nginx access log、浏览器历史和代理日志里——那些地方的留存策略没人替你负责。
+    return query.get("token", "") if allow_query else ""
+
+
+def _same_origin(headers: Headers) -> bool:
+    """WebSocket 握手没有 Authorization，也没有 CORS 保护，只能自己验 Origin。
+
+    浏览器发起跨站 ws:// 连接时照样带上 cookie/URL 里的凭证，面板的终端是 root shell，
+    一个恶意网页只要诱导已登录管理员点开，就能拿到交互终端。同源检查是这道防线。
+    """
+    origin = headers.get("origin")
+    if not origin:
+        return True  # 非浏览器客户端（自检脚本）不带 Origin
+    return (urlsplit(origin).netloc or "").lower() == (headers.get("host") or "").lower()
+
+
+async def _ws_close(send, code: int) -> None:
+    """先 accept 再 close，才能把 close code 送到浏览器。
+
+    握手阶段直接发 websocket.close 时 uvicorn 回的是 HTTP 403，客户端只会看到
+    code=1006 的"连接异常断开"，于是 4401/4498/4403 这几种原因在前端长成同一句话
+    （重新登录 / 换管理员账号 / 访问来源不对，用户根本分不出来）。
+    接受连接后立即关闭不读任何帧，代价只是一次空会话。
+    """
+    await send({"type": "websocket.accept", "subprotocol": None, "headers": []})
+    await send({"type": "websocket.close", "code": code, "reason": ""})
 
 
 class AuthMiddleware:
     """Pure ASGI middleware: JWT auth + viewer write guard + security headers.
 
-    - /api/* 全部要求登录（公开白名单除外），支持 Header Bearer 或 ?token=（SSE/下载场景）
-    - 401 文案区分：未登录 / 登录已过期
+    - /api/* 全部要求登录（公开白名单除外），支持 Header Bearer；
+      ?token= 只在 GET 与 WebSocket 握手被接受（下载/SSE/终端带不了 Header）
+    - WebSocket 握手额外校验 Origin 同源，挡跨站网页接管 root 终端
+    - 401 文案区分：未登录 / 登录已过期；WS 用 close 码 4401/4498 表达同样的区分
     - viewer 角色禁止一切写操作（POST/PATCH/PUT/DELETE），/api/auth/password 自助改密除外
     - 统一注入安全响应头；WebSocket 连接同样写入 scope["state"]，供终端鉴权
     """
@@ -94,8 +124,16 @@ class AuthMiddleware:
         started = time.perf_counter()
 
         if path.startswith("/api/") and not is_public:
-            token = _extract_token(headers, query)
+            is_ws = scope["type"] == "websocket"
+            if is_ws and not _same_origin(headers):
+                await _ws_close(send, 4498)
+                return
+            allow_query = is_ws or scope.get("method") in ("GET", "HEAD")
+            token = _extract_token(headers, query, allow_query)
             if not token:
+                if is_ws:
+                    await _ws_close(send, 4401)
+                    return
                 await _json(401, "未登录")(scope, receive, send)
                 return
             try:
@@ -105,10 +143,13 @@ class AuthMiddleware:
                 scope["state"]["cp_role"] = role
             except Exception:  # noqa: BLE001
                 role = None
-                if scope["type"] == "http":
-                    await _json(401, "登录已过期")(scope, receive, send)
+                # 过期会话在 WS 上要如实说"登录已过期"：旧写法让握手继续、由终端路由
+                # 按角色关闭（4403），前端把一次重新登录就能解决的事报成"无终端权限"。
+                if is_ws:
+                    await _ws_close(send, 4401)
                     return
-                # WebSocket 不返回 HTTP 响应：保持 state 为空，由路由自行 close（如终端 4403）
+                await _json(401, "登录已过期")(scope, receive, send)
+                return
             if (
                 scope["type"] == "http"
                 and scope["method"] in MUTATIONS

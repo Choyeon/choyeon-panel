@@ -30,7 +30,9 @@ class TestFilesServiceErrors(unittest.TestCase):
     """fs_action / read_text 的错误必须是可读文案，且不能假报成功。"""
 
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="cp_files_")
+        # 归一成真实路径：files_service.ROOTS 现在存的是 realpath，测试若塞
+        # /tmp 下的软链接目录（macOS 的 /tmp → /private/tmp）就会全部判成越界。
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="cp_files_"))
         self.old_roots = files_service.ROOTS
         files_service.ROOTS = [self.root]
         self.files = files_service
@@ -186,18 +188,53 @@ class TestFilesServiceErrors(unittest.TestCase):
         self.assertFalse(r["binary"])
         self.assertEqual(r["content"], body)
 
-    def test_symlink_escape_still_blocked(self):
-        """加固项本身不能被这次改动削弱：越界软链接仍要拒绝。"""
+    def test_symlink_through_read_and_write_still_blocked(self):
+        """读写/预览顺着链接走：这类操作必须继续拒绝，否则等于开放白名单外读写。"""
         outside = tempfile.mkdtemp(prefix="cp_outside_")
         try:
-            Path(outside, "secret.txt").write_text("no")
+            secret = Path(outside, "secret.txt")
+            secret.write_text("no")
             link = self._p("link.txt")
-            os.symlink(os.path.join(outside, "secret.txt"), link)
-            for action, args in (("delete", (link,)), ("rename", (link, self._p("x2")))):
-                with self.assertRaises(RuntimeError) as cm:
-                    self._act(action, *args)
-                self.assertIn("超出允许范围", str(cm.exception))
-            self.assertTrue(Path(outside, "secret.txt").exists())
+            os.symlink(str(secret), link)
+            with self.assertRaises(RuntimeError) as cm:
+                self.files.read_text(link)
+            self.assertIn("超出允许范围", str(cm.exception))
+            with self.assertRaises(RuntimeError) as cm:
+                self.files.write_text(link, "pwn")
+            self.assertEqual(secret.read_text(), "no")
+            with self.assertRaises(RuntimeError) as cm:
+                self.files.safe_path(link)
+            self.assertIn("超出允许范围", str(cm.exception))
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_bad_symlink_can_be_deleted_and_renamed(self):
+        """删除/改名动的是链接本身（os.unlink/rename 不跟随最后一层链接），
+        必须放行：应用目录里指错路的 symlink 用 safe_path 判会永远被拒，
+        用户在文件页删不掉它，只能进终端手工 rm——那还要文件页做什么。
+        安全边界不变：链接指向的真文件一个字节都不会被动到。
+        """
+        outside = tempfile.mkdtemp(prefix="cp_outside2_")
+        try:
+            secret = Path(outside, "secret.txt")
+            secret.write_text("no")
+            link = self._p("link.txt")
+            os.symlink(str(secret), link)
+            self.assertEqual(self._act("delete", link), {"ok": True})
+            self.assertFalse(os.path.lexists(link))
+            self.assertEqual(secret.read_text(), "no")
+
+            link2 = self._p("link2.txt")
+            os.symlink(str(secret), link2)
+            self.assertEqual(self._act("rename", link2, self._p("link3.txt")), {"ok": True})
+            self.assertFalse(os.path.lexists(link2))
+            self.assertTrue(os.path.islink(self._p("link3.txt")))
+            self.assertEqual(secret.read_text(), "no")
+
+            # 但改名目标必须在白名单内：把链接挪到 /etc 仍是逃逸
+            with self.assertRaises(RuntimeError) as cm:
+                self._act("rename", self._p("link3.txt"), "/etc/link4.txt")
+            self.assertIn("超出允许范围", str(cm.exception))
         finally:
             shutil.rmtree(outside, ignore_errors=True)
 

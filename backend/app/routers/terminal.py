@@ -19,6 +19,7 @@ from ..log import warn
 router = APIRouter()
 
 _SESSIONS = 0  # 当前终端会话数，避免并发 pty 拖垮机器
+_OVERFLOW_NOTE = "\r\n\x1b[31m[面板] 输出积压超过上限，已断开该终端会话。\x1b[0m\r\n".encode()
 
 
 def _dim(raw: object, fallback: int, cap: int) -> int:
@@ -31,6 +32,27 @@ def _dim(raw: object, fallback: int, cap: int) -> int:
     if n <= 0:
         return fallback
     return min(n, cap)
+
+
+class _Backlog:
+    """终端未消费输出的字节水位。
+
+    浏览器停住时（切后台、断网但连接没关）pty 还在生产输出，无界队列会把
+    `yes`/`cat 大文件` 的输出全堆进内存，最终 OOM 带走的是整个面板。
+    按"已入队 - 已消费"计量，超过上限就主动收尾这一个会话。
+    """
+
+    def __init__(self, cap: int):
+        self.cap = cap
+        self.pending = 0
+
+    def add(self, n: int) -> bool:
+        """记录新输出，返回是否已越过水位（EOF 帧 n=0 永不触发）。"""
+        self.pending += n
+        return n > 0 and self.pending > self.cap
+
+    def drain(self, n: int) -> None:
+        self.pending = max(0, self.pending - n)
 
 
 def _reap_process(proc: subprocess.Popen) -> None:
@@ -114,12 +136,23 @@ async def terminal(ws: WebSocket):
         os.close(slave)
         slave = None
         out_q: asyncio.Queue = asyncio.Queue()
+        backlog = _Backlog(config.TERMINAL_OUT_BUFFER)
 
         def on_readable():
+            nonlocal reader_added
             try:
                 data = os.read(master, 4096)
             except OSError:
                 data = b""
+            if backlog.add(len(data)):
+                # 先把"为什么断了"塞进同一条流，再放 EOF 哨兵让 pump 正常收尾
+                with contextlib.suppress(Exception):
+                    out_q.put_nowait(_OVERFLOW_NOTE)
+                    out_q.put_nowait(b"")
+                with contextlib.suppress(Exception):
+                    loop.remove_reader(master)
+                reader_added = False
+                return
             out_q.put_nowait(data)
 
         loop.add_reader(master, on_readable)
@@ -134,6 +167,7 @@ async def terminal(ws: WebSocket):
                 data = await out_q.get()
                 if not data:
                     break
+                backlog.drain(len(data))
                 text = decoder.decode(data)
                 if not text:
                     continue  # 整块都是半个字符，等下一块凑齐再发

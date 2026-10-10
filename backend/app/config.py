@@ -122,9 +122,16 @@ LOGIN_LIMIT = _int("CP_LOGIN_LIMIT", 10, 1, 100)          # 每 IP 每分钟
 LOGIN_WINDOW_SEC = 60
 AUDIT_KEEP = _int("CP_AUDIT_KEEP", 5000, 100)             # 审计日志保留条数
 MAX_UPLOAD_BYTES = _int("CP_MAX_UPLOAD_MB", 8, 1, 512) * 1024 * 1024
+# 解压上限：压缩包本身被 CP_MAX_UPLOAD_MB 卡住，但 8MB 的 zip 能在头部声明
+# 5GB 的解压后尺寸（zip bomb）。面板是 root 进程，写满磁盘只需要用户点一次"解压"。
+MAX_EXTRACT_BYTES = _int("CP_MAX_EXTRACT_MB", 512, 16, 8192) * 1024 * 1024
+MAX_EXTRACT_FILES = _int("CP_MAX_EXTRACT_FILES", 5000, 10, 200000)
 # 头像走浏览器本地压缩（256px JPEG 通常 20-80KB），2MB 足够宽松又能挡住误传的原始大图
 AVATAR_MAX_BYTES = _int("CP_AVATAR_MAX_KB", 2048, 32, 16384) * 1024
 TERMINAL_MAX_SESSIONS = _int("CP_TERMINAL_MAX_SESSIONS", 4, 1, 32)
+# 终端输出缓冲水位：浏览器读得慢时 pty 的输出会在队列里堆积，`yes` 这类命令
+# 几秒就能堆到几百 MB。超过这个水位主动断会话，而不是等 OOM 把面板一起带走。
+TERMINAL_OUT_BUFFER = _int("CP_TERMINAL_OUT_BUFFER_KB", 4096, 256, 65536) * 1024
 
 # 是否发送 HSTS 头（仅在 HTTPS 直接暴露时开启；反代场景由 nginx 负责）
 HSTS = _bool("CP_HSTS")
@@ -144,6 +151,9 @@ def as_dict() -> dict:
         "appRoot": APP_ROOT,
         "backupDir": BACKUP_DIR,
         "fileRoots": FILE_ROOTS,
+        # 前端上传前先按这个额度拦一道，免得用户传完 300MB 才被服务端拒绝
+        "maxUploadBytes": MAX_UPLOAD_BYTES,
+        "terminalMaxSessions": TERMINAL_MAX_SESSIONS,
         "unitDir": UNIT_DIR,
         "python": PYTHON,
         "webDist": str(WEB_DIST),

@@ -277,7 +277,7 @@ class TestConfigParsers(unittest.TestCase):
         allowed = {
             "version", "host", "port", "trustProxy", "log", "dataDir", "appRoot",
             "backupDir", "fileRoots", "unitDir", "python", "webDist", "webBuilt",
-            "tokenTtlHours",
+            "tokenTtlHours", "maxUploadBytes", "terminalMaxSessions",
         }
         self.assertEqual(set(config.as_dict()) - allowed, set(), "as_dict 出现了未登记的配置项")
         self.assertTrue(config.VERSION, "版本号不应为空")
@@ -815,7 +815,7 @@ class TestDataPruning(unittest.TestCase):
 # ---------------------------------------------------------------- 文件守卫
 class TestFileGuards(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="cp_fs_")
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="cp_fs_"))
         self.old_roots = files_service.ROOTS
         self.old_max = files_service.MAX_FILE_BYTES
         files_service.ROOTS = [self.root]

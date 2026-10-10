@@ -1,14 +1,17 @@
 import contextlib
 import datetime as _dt
-import errno
 import os
 import shutil
 import stat
+import threading
 from pathlib import Path
 
 from .. import config
 
-ROOTS = config.FILE_ROOTS
+# 白名单要在源头归一成真实路径：CP_FILE_ROOTS 写 /root/www 而 www 本身是指向
+# /data/www 的符号链接时，safe_path 解析出的真实路径永远不可能以 /root/www 开头，
+# 文件页从第一个请求起就全报「路径超出允许范围」，看着像面板坏了。
+ROOTS = list(dict.fromkeys(os.path.realpath(r) for r in config.FILE_ROOTS if r))
 MAX_FILE_BYTES = config.MAX_UPLOAD_BYTES
 
 
@@ -16,6 +19,10 @@ def iso_ms(epoch: float) -> str:
     ms = round(epoch * 1000)
     dt = _dt.datetime.fromtimestamp(ms / 1000, tz=_dt.UTC)
     return f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{ms % 1000:03d}Z"
+
+
+def _in_roots(p: str) -> bool:
+    return any(p == r or p.startswith(r + "/") for r in ROOTS)
 
 
 def safe_path(p: str) -> str:
@@ -31,11 +38,33 @@ def safe_path(p: str) -> str:
     real = os.path.realpath(probe)
     rest = abs_[len(probe) :]
     full = os.path.abspath(real + rest)
-    if not any(full == r or full.startswith(r + "/") for r in ROOTS):
+    if not _in_roots(full):
         raise RuntimeError("路径超出允许范围")
-    if ".." in full.split("/"):
-        raise RuntimeError("非法路径")
     return full
+
+
+def safe_entry_path(p: str) -> str:
+    """删除/改名用：判的是"条目本身"，不能按符号链接解析后的目标来算白名单。
+
+    用 safe_path 删一个指向白名单外的链接（应用目录里指错路的 symlink 很常见）
+    会永远得到「路径超出允许范围」——链接删不掉，用户只能进终端手工 rm，
+    文件页的存在意义就没了。这里只要求父目录落在白名单内，末段名字保持原样，
+    os.unlink/os.rename 本来就不跟随最后一层符号链接，删的就是链接自己。
+    """
+    if not p:
+        raise RuntimeError("非法路径")
+    abs_ = os.path.abspath(p)
+    parent, base = os.path.split(abs_)
+    if not base or base in {".", ".."}:
+        raise RuntimeError("非法路径")
+    if not _in_roots(os.path.realpath(parent)):
+        raise RuntimeError("路径超出允许范围")
+    return abs_
+
+
+def is_root(p: str) -> bool:
+    """p 是否就是某个白名单根目录（含通过符号链接写法传入）。"""
+    return os.path.realpath(p) in ROOTS if p else False
 
 
 def list_dir(p: str) -> dict:
@@ -61,7 +90,8 @@ def list_dir(p: str) -> dict:
             pass
         entries.append({"name": name, "isDir": is_dir, "size": size, "mtime": mtime})
     entries.sort(key=lambda e: (0 if e["isDir"] else 1, str(e["name"]).lower()))
-    return {"path": abs_, "roots": list(ROOTS), "entries": entries}
+    # 顺带回传额度：上传前先在前端拦一道，免得用户看着进度条走完才收到"超过 8MB"。
+    return {"path": abs_, "roots": list(ROOTS), "maxUploadBytes": MAX_FILE_BYTES, "entries": entries}
 
 
 def read_text(p: str) -> dict:
@@ -88,6 +118,61 @@ def read_text(p: str) -> dict:
     return {"path": abs_, "content": text if text is not None else "", "binary": text is None}
 
 
+def _keep_owner(tmp: str, target: str) -> None:
+    """把原文件的属主与权限搬到临时文件上，再让 replace 顶替。
+
+    面板以 root 运行，新建文件默认 0600 root:root。直接 os.replace 而不搬属性的话，
+    改一次应用目录里的文件就可能把 appuser 可读的 0644 变成谁都读不到的 0600，
+    而应用是在下一次重启时才炸，排查起来完全对不上"我只是编辑了一个配置"。
+    """
+    try:
+        st = os.stat(target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o644)  # 新文件：给一个应用进程通常能读的权限
+        return
+    with contextlib.suppress(OSError):
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+    with contextlib.suppress(OSError):
+        os.chown(tmp, st.st_uid, st.st_gid)
+
+
+def _write_atomic(abs_: str, data: bytes) -> None:
+    """同目录临时文件 + os.replace：要么旧内容，要么新内容，不会出现半截文件。
+
+    O_TRUNC 就地改写时，写一半被断电/磁盘满/服务重启打断，目标文件就剩半截，
+    应用目录里的 .env 当场变成不可解析的配置——比写失败更难解释。
+    """
+    parent = os.path.dirname(abs_) or "/"
+    os.makedirs(parent, exist_ok=True)
+    if os.path.islink(abs_):
+        # 只可能来自竞态：safe_path 给出的是已解析的路径，正常不是链接。
+        # 若检查与写入之间有人把它换成指向别处的链接，replace 会把链接顶掉
+        # 并在原位置放一个真文件——内容没写到白名单外，但链接背后的语义没了。
+        raise RuntimeError("目标是符号链接，为避免写到别处已拒绝")
+    tmp = os.path.join(parent, f".{os.path.basename(abs_)}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except OSError as e:
+            raise RuntimeError(f"写入失败：{e.strerror or e}") from None
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError as e:
+            raise RuntimeError(f"写入失败：{e.strerror or e}") from None
+        _keep_owner(tmp, abs_)
+        try:
+            os.replace(tmp, abs_)
+        except OSError as e:
+            raise RuntimeError(f"写入失败：{e.strerror or e}") from None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
 def write_text(p: str, content: str | bytes) -> dict:
     """按字节落盘。
 
@@ -98,24 +183,18 @@ def write_text(p: str, content: str | bytes) -> dict:
     data = content if isinstance(content, bytes) else content.encode("utf8")
     if len(data) > MAX_FILE_BYTES:
         raise RuntimeError(f"内容超过 {MAX_FILE_BYTES // 1024 // 1024}MB，拒绝写入")
-    Path(os.path.dirname(abs_)).mkdir(parents=True, exist_ok=True)
-    # O_NOFOLLOW：safe_path 是按"当前"的符号链接解析的，检查与写入之间换一个链接
-    # 就能把内容写到白名单外（TOCTOU）。拒绝跟随最后一层链接，让写入只落在真文件上。
-    try:
-        fd = os.open(abs_, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            raise RuntimeError("目标是符号链接，为避免写到别处已拒绝") from None
-        raise RuntimeError(f"写入失败：{e.strerror or e}") from None
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
+    _write_atomic(abs_, data)
     return {"path": abs_, "size": len(data)}
 
 
 def safe_name(name: str) -> str:
-    """上传文件名只留 basename，并拒绝任何点号目录与隐藏的路径分隔。"""
+    """上传文件名只留 basename，拒绝点号目录；点文件（.env/.gitignore）是合法的。
+
+    一开始连 `.env` 都拒绝过：部署应用时点文件本来就要上传，一刀切只会逼用户
+    先传成 `env` 再改名，而改名走的是另一条代码路径，出错信息也对不上。
+    """
     base = os.path.basename((name or "").replace("\\", "/")).strip()
-    if not base or base in {".", ".."} or "/" in base or base.startswith("."):
+    if not base or base in {".", ".."} or "/" in base or "\\" in base:
         raise RuntimeError(f"文件名不合法：{base[:40] or '空'}")
     if len(base) > 180:
         raise RuntimeError("文件名过长")
@@ -132,9 +211,8 @@ def save_upload(dir_path: str, filename: str, data: bytes, overwrite: bool = Fal
     if not os.path.isdir(target_dir):
         raise RuntimeError("目标不是目录")
     abs_ = os.path.join(target_dir, safe_name(filename))
-    if os.path.islink(abs_) and not overwrite:
-        raise RuntimeError("目标是符号链接，拒绝覆盖")
-    if os.path.exists(abs_) and not overwrite:
+    if os.path.lexists(abs_) and not overwrite:
+        # lexists：悬空链接也要算"已存在"，否则用户以为会覆盖，实际删掉了链接
         raise RuntimeError(f"同名文件已存在：{os.path.basename(abs_)}")
     if len(data) > MAX_FILE_BYTES:
         raise RuntimeError(f"单个文件超过 {MAX_FILE_BYTES // 1024 // 1024}MB 上限")
@@ -152,11 +230,22 @@ def _check_member(name: str, real_dest: str) -> str:
     return out
 
 
+def _limit(total: int, count: int) -> None:
+    if count > config.MAX_EXTRACT_FILES:
+        raise RuntimeError(f"压缩包条目数 {count} 超过上限 {config.MAX_EXTRACT_FILES}，已拒绝")
+    if total > config.MAX_EXTRACT_BYTES:
+        raise RuntimeError(
+            f"解压后总大小超过上限 {config.MAX_EXTRACT_BYTES // 1024 // 1024}MB，已拒绝（疑似压缩炸弹）"
+        )
+
+
 def extract_archive(p: str, into: str | None = None) -> dict:
     """解压 zip/tar(.gz/.bz2/.xz) 到目标目录，只接受落在目标内的常规文件。
 
     先整体验证成员再动手写：半途抛错会留下已经解压出来的一半文件，
     用户看到失败却以为目录还是干净的。
+    总量与条目数另有一道闸：包体受上传上限约束，但压缩比可以做到几千倍，
+    一个 8MB 的包就能把 root 进程写满整块盘。
     """
     src = safe_path(p)
     if not os.path.isfile(src):
@@ -169,20 +258,30 @@ def extract_archive(p: str, into: str | None = None) -> dict:
         import zipfile
 
         with zipfile.ZipFile(src) as z:
-            for info in z.infolist():
-                if info.is_dir():
-                    continue
+            infos = [i for i in z.infolist() if not i.is_dir()]
+            _limit(sum(i.file_size for i in infos), len(infos))
+            for info in infos:
                 mode = info.external_attr >> 16
                 if stat.S_ISLNK(mode):
                     raise RuntimeError(f"压缩包内含符号链接，已拒绝：{info.filename[:60]}")
                 _check_member(info.filename, real_dest)
-            for info in z.infolist():
-                if info.is_dir():
-                    continue
+            total = 0
+            for info in infos:
                 out = _check_member(info.filename, real_dest)
                 os.makedirs(os.path.dirname(out), exist_ok=True)
+                # 头部声明的尺寸可以是假的，所以边写边统计真实字节数
                 with z.open(info) as fp, open(out, "wb") as fo:
-                    shutil.copyfileobj(fp, fo, 1024 * 256)
+                    while True:
+                        chunk = fp.read(256 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > config.MAX_EXTRACT_BYTES:
+                            os.unlink(out)
+                            raise RuntimeError(
+                                f"解压超过上限 {config.MAX_EXTRACT_BYTES // 1024 // 1024}MB，已中止（疑似压缩炸弹）"
+                            )
+                        fo.write(chunk)
                 names.append(info.filename)
     else:
         import tarfile
@@ -192,13 +291,15 @@ def extract_archive(p: str, into: str | None = None) -> dict:
         except tarfile.ReadError:
             raise RuntimeError("只支持 .zip 与 .tar/.tar.gz/.tar.bz2/.tar.xz") from None
         with tf:
-            for m in tf.getmembers():
+            members = tf.getmembers()
+            _limit(sum(m.size for m in members if m.isfile()), len(members))
+            for m in members:
                 if not (m.isfile() or m.isdir()):
                     raise RuntimeError(f"压缩包内含特殊文件（链接/设备），已拒绝：{m.name[:60]}")
                 _check_member(m.name, real_dest)
             # filter='data' 是标准库自带的越界/权限防护（3.12+），双保险
             tf.extractall(dest, filter="data")
-            names = [m.name for m in tf.getmembers() if m.isfile()]
+            names = [m.name for m in members if m.isfile()]
     return {"ok": True, "dest": dest, "files": len(names), "names": names[:50]}
 
 
@@ -212,7 +313,9 @@ def make_archive(paths: list[str], out_name: str = "archive.tar.gz") -> dict:
     common = os.path.commonpath([os.path.dirname(x) for x in picked])
     if not any(common == r or common.startswith(r + "/") for r in ROOTS):
         raise RuntimeError("路径超出允许范围")
-    tmp = os.path.join(common, f".{safe_name(out_name)}.{os.getpid()}.tmp")
+    # 带线程号：打包跑在线程池里，两个并发请求选中同一个目录时只用 pid 会撞在
+    # 同一个临时文件上，tar 互相截断，两边都"成功"，产物却都是坏的。
+    tmp = os.path.join(common, f".{safe_name(out_name)}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         with tarfile.open(tmp, "w:gz") as tf:
             for x in picked:
@@ -227,8 +330,8 @@ def make_archive(paths: list[str], out_name: str = "archive.tar.gz") -> dict:
 
 
 def fs_action(action: str, p: str, p2: str | None = None) -> dict:
-    abs_ = safe_path(p)
     if action == "mkdir":
+        abs_ = safe_path(p)
         try:
             os.makedirs(abs_, exist_ok=True)
         except FileExistsError:
@@ -236,8 +339,9 @@ def fs_action(action: str, p: str, p2: str | None = None) -> dict:
             # 转成可读信息，否则前端拿到 "[Errno 17] File exists: '/root/www/x'"。
             raise RuntimeError("同名文件已存在，无法创建目录") from None
     elif action == "delete":
-        if abs_ in ROOTS:
+        if is_root(p):
             raise RuntimeError("禁止删除根目录")
+        abs_ = safe_entry_path(p)
         if not os.path.lexists(abs_):
             raise RuntimeError("路径不存在")
         if os.path.isdir(abs_) and not os.path.islink(abs_):
@@ -266,10 +370,15 @@ def fs_action(action: str, p: str, p2: str | None = None) -> dict:
             except OSError as e:
                 raise RuntimeError(f"删除失败：{e.strerror or e}") from e
     elif action == "rename":
-        to = safe_path(p2 or "")
+        if is_root(p) or is_root(p2 or ""):
+            raise RuntimeError("禁止重命名根目录")
+        abs_ = safe_entry_path(p)
+        to = safe_entry_path(p2 or "")
         if not os.path.lexists(abs_):
             raise RuntimeError("原路径不存在")
-        if os.path.exists(to):
+        # 用 lexists 而不是 exists：目标是个悬空符号链接时 exists 为 False，
+        # 检查放行后 os.rename 会把这个链接直接顶掉，用户以为"目标已存在"被拦了。
+        if os.path.lexists(to):
             raise RuntimeError("目标已存在")
         if os.path.dirname(abs_) != os.path.dirname(to):
             raise RuntimeError("暂不支持跨目录移动")

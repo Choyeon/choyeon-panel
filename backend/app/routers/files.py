@@ -12,6 +12,18 @@ from ..services import files_service
 router = APIRouter()
 
 
+async def _read_capped(field, cap: int) -> bytes | None:
+    """分块读 multipart 字段，一旦超过 cap 立刻放弃（返回 None）。"""
+    buf = bytearray()
+    while True:
+        chunk = await field.read(256 * 1024)
+        if not chunk:
+            return bytes(buf)
+        buf += chunk
+        if len(buf) > cap:
+            return None
+
+
 @router.get("/api/files")
 async def files_list(request: Request):
     # 文件接口能直接读到应用目录下的 .env（数据库口令、第三方 key 都在里面），
@@ -41,21 +53,25 @@ async def files_write(request: Request):
         return r
     try:
         declared = request.headers.get("content-length")
-        if declared and int(declared) > config.MAX_UPLOAD_BYTES:
+        if declared and declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES:
             return JSONResponse(
                 status_code=413,
                 content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
             )
-        raw = await request.body()
-        if len(raw) > config.MAX_UPLOAD_BYTES:
-            return JSONResponse(
-                status_code=413,
-                content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
-            )
+        # 逐块收并即时计量：Content-Length 是客户端自己写的，谎报就能让
+        # request.body() 把任意大的正文全读进内存。
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw += chunk
+            if len(raw) > config.MAX_UPLOAD_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
+                )
         path = request.query_params.get("path") or ""
         # 原样按字节写入：解码成字符串再落盘会把二进制文件（图片/zip/db）毁成 U+FFFD，
         # 而接口仍返回 200，用户以为上传成功。
-        r = await run_in_threadpool(files_service.write_text, path, raw)
+        r = await run_in_threadpool(files_service.write_text, path, bytes(raw))
         # 改文件是覆盖面最大的操作，出事时只有一份审计能回答"谁在什么时候动过什么"。
         await aio_db.audit(request.state.cp_sub, "file:write", path)
         return r
@@ -109,6 +125,14 @@ async def files_upload(request: Request):
     if r := need_admin(request):
         return r
     try:
+        declared = request.headers.get("content-length")
+        # multipart 除文件内容外还有 boundary/头部，留 1MB 余量，否则刚好贴限额的
+        # 单个文件会因为这几百字节被误判超限。
+        if declared and declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES + 1024 * 1024:
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"整个请求超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
+            )
         form = await request.form()
         files = [f for f in form.getlist("files") if hasattr(f, "read")]
         if not files:
@@ -117,11 +141,13 @@ async def files_upload(request: Request):
         overwrite = str(form.get("overwrite") or "") in {"1", "true", "yes"}
         saved, failed, total = [], [], 0
         for f in files:
-            data = await f.read()
-            total += len(data)
-            if total > config.MAX_UPLOAD_BYTES:
+            # 分块读、边读边计量：整份 read() 会先把文件全收进内存/临时文件，
+            # 超限的判断得等浏览器传完才做，白占一轮带宽和磁盘。
+            data = await _read_capped(f, config.MAX_UPLOAD_BYTES - total)
+            if data is None:
                 failed.append(f"{f.filename}（整体超过上限）")
                 continue
+            total += len(data)
             try:
                 r = await run_in_threadpool(files_service.save_upload, target, f.filename, data, overwrite)
                 saved.append(r)

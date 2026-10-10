@@ -73,7 +73,11 @@ function connect() {
   ws.onclose = (e) => {
     connected.value = false;
     disconnected.value = true;
-    if (e.code === 4403) msg.error('当前账号无终端权限（仅管理员可用）');
+    // 后端用 close 码区分三种断开原因，不区分就只能统一提示"连接已断开"，
+    // 用户会反复点重连，而实际要做的分别是重新登录 / 换管理员账号 / 等会话释放。
+    if (e.code === 4401) msg.error('登录已过期或无效，请重新登录后再打开终端');
+    else if (e.code === 4403) msg.error('当前账号无终端权限（仅管理员可用）');
+    else if (e.code === 4498) msg.error('访问来源与面板地址不一致，终端连接被拒绝');
     else if (e.code === 4503) msg.error('终端会话数已达上限，请稍后再试');
     term?.writeln('\r\n\x1b[31m连接已断开。点击右上角「重新连接」恢复终端。\x1b[0m');
   };
