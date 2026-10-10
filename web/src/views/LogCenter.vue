@@ -252,7 +252,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
           :scroll-x="900" :max-height="tableH" :virtual-scroll="true" class="cp-tbl tbl-log"
           :row-key="(r: { i: number }) => r.i"
         >
-          <template #empty><EmptyBox :text="nResult?.items?.length ? '过滤后没有命中行' : '点「读取末尾」取一份日志'" /></template>
+          <template #empty><EmptyBox :text="nResult ? '这段日志里没有命中行（换个过滤词，或加大尾读行数）' : '点「读取末尾」取一份日志'" /></template>
         </NDataTable>
       </NTabPane>
     </NTabs>

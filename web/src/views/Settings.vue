@@ -45,7 +45,11 @@ const probeList = ref<{ name: string; expect: string }[]>([]);
 const probeDraft = ref({ name: '', expect: '' });
 
 watch(alerts, (v) => {
-  probeList.value = Object.entries(v?.probe_overrides || {}).map(([name, expect]) => ({ name, expect: String(expect) }));
+  // 空值在服务端就是「没有覆写」（_app_expectation 用 `or` 回落全局期望），
+  // 所以列表里也不该出现空行：点删除后那一行必须真的消失，否则看着像没删掉。
+  probeList.value = Object.entries(v?.probe_overrides || {})
+    .filter(([, expect]) => String(expect).trim())
+    .map(([name, expect]) => ({ name, expect: String(expect) }));
 });
 
 const ico = (name: string, size = 14) => icon(name, size);
@@ -168,6 +172,9 @@ async function saveProbeRow(entry: { name: string; expect: string }) {
 async function addProbeRow() {
   const name = probeDraft.value.name.trim();
   if (!name) { msg.warning('先填应用名'); return; }
+  // 空期望 = 没有覆写，存下去也不会生效，列表又会把它过滤掉：
+  // 让用户点了「新增覆写」却看到行凭空消失，比直接提示更糟。
+  if (!probeDraft.value.expect.trim()) { msg.warning('先填期望状态码，留空等于不覆写'); return; }
   if (probeList.value.some((r) => r.name === name)) { msg.warning('这个应用已经有覆写了，直接改上面那行'); return; }
   await saveProbeRow({ name, expect: probeDraft.value.expect });
   probeDraft.value = { name: '', expect: '' };

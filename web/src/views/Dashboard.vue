@@ -121,7 +121,10 @@ const gauges = computed(() => [
   },
   {
     key: 'load', label: '负载', percent: loadVal.value, text: loadWord.value, unit: '',
-    detail: `1min ${(stat.value.load || [0])[0].toFixed(2)}`, color: band(loadVal.value, 70, 100),
+    // 首轮采样还没到货时 text 是"采集中"，detail 不能同时写 "1min 0.00"——
+    // 同一格里两个互相矛盾的读数，用户会以为负载真的是 0。
+    detail: stat.value.load?.length ? `1min ${Number(stat.value.load[0]).toFixed(2)}` : '1min —',
+    color: band(loadVal.value, 70, 100),
   },
   {
     key: 'disk', label: '磁盘 /', percent: diskVal.value, text: diskVal.value == null ? '-' : String(diskVal.value),
@@ -234,6 +237,7 @@ const hist = ref<any>(null);
 const histLoading = ref(true);
 const histError = ref('');
 const mstat = ref<any>(null);
+let histSeq = 0;
 const histPoints = computed<number>(() => hist.value?.meta?.points ?? 0);
 const histEmpty = computed(() => !histError.value && !histLoading.value && histPoints.value === 0);
 
@@ -299,7 +303,25 @@ async function tick() {
   }
 }
 
+// 服务端算速率靠的是"上一次采样的全局快照"（system_metrics.snapshot 的 _prev），
+// 所以同一时刻只允许有一个 /system/stats 在飞：交叠的第二个请求 dt≈0，
+// _rate 归零，曲线上就留下一个真实的 0 采样点并一直挂在 12 分钟窗口里，
+// 网速/IO 芯片同时也会闪一下 0 B/s。tick 每 3s 发一次、请求偶尔超过 3s 就必然交叠。
+let tickInflight: Promise<void> | null = null;
+function tickSingleton(): Promise<void> {
+  // 复用同一个 promise：手动刷新撞上轮询时不是"跳过"，而是等这一轮真正拿回数据，
+  // 否则刷新按钮会秒回、画面却什么都没变。
+  if (!tickInflight) {
+    tickInflight = tick().finally(() => { tickInflight = null; });
+  }
+  return tickInflight;
+}
+
 async function loadHistory() {
+  // 区间切换/30s 轮询/手动刷新会并发打同一条 history：两个请求的返回顺序没有保证，
+  // 后发先至时画面就停在旧区间上（要等下一次轮询才纠正），而且 histXs 是按
+  // histRange 格式化时间的，标签与数据会对不上。用自增序号只认最后一次。
+  const seq = ++histSeq;
   histLoading.value = true;
   histError.value = '';
   try {
@@ -307,15 +329,15 @@ async function loadHistory() {
       req(`/system/history?range=${histRange.value}`),
       req('/system/metrics-status'),
     ]);
-    if (disposed) return;
+    if (disposed || seq !== histSeq) return;
     hist.value = d;
     mstat.value = st;
   } catch (e: any) {
-    if (disposed) return;
+    if (disposed || seq !== histSeq) return;
     hist.value = null;
     histError.value = e?.message || '历史数据获取失败';
   } finally {
-    if (!disposed) histLoading.value = false;
+    if (!disposed && seq === histSeq) histLoading.value = false;
   }
 }
 
@@ -367,7 +389,7 @@ const refreshing = ref(false);
 async function refresh() {
   refreshing.value = true;
   try {
-    await Promise.all([tick(), loadHistory(), loadSide(), loadProcs(), loadOverview()]);
+    await Promise.all([tickSingleton(), loadHistory(), loadSide(), loadProcs(), probeAlerts(), loadOverview()]);
   } finally {
     if (!disposed) refreshing.value = false;
   }
@@ -393,12 +415,14 @@ function quickGo(key: string) {
 onMounted(() => {
   // 挂载期全部并发取数，不再串行瀑布
   api.info().then((d) => { if (!disposed) info.value = d; }).catch(() => { /* 降级为未知主机信息 */ });
-  Promise.all([tick(), loadHistory(), loadSide(), loadProcs(), probeAlerts(), loadOverview()]);
+  Promise.all([tickSingleton(), loadHistory(), loadSide(), loadProcs(), probeAlerts(), loadOverview()]);
   let n = 0;
   timer = window.setInterval(() => {
-    tick();
+    tickSingleton();
     if (++n % 5 === 0) { loadSide(); loadProcs(); }   // 侧栏/进程 15s，随 tick 自动重试失败态
-    if (n % 10 === 0) { loadHistory(); loadOverview(); } // raw 行 30s 一条，历史曲线同频更新
+    // 概览"未确认告警"计数 30s 一跳，但"最近告警"列表过去只在挂载时拉过一次：
+    // 挂着页面时新告警进来，计数 +1 而列表不出新行，两个口径互相打脸。同频一起刷。
+    if (n % 10 === 0) { loadHistory(); loadOverview(); probeAlerts(); }
   }, 3000);
 });
 

@@ -46,8 +46,13 @@ function applyTheme() {
   if (term) term.options.theme = termTheme();
 }
 
-function sendInput(data: string) {
-  if (ws?.readyState === 1) ws.send(JSON.stringify({ d: 'input', data }));
+/** 发送原始输入；返回 false 表示 socket 不可用，调用方要据此提示而不是静默丢弃 */
+function sendInput(data: string): boolean {
+  if (ws?.readyState === 1) {
+    ws.send(JSON.stringify({ d: 'input', data }));
+    return true;
+  }
+  return false;
 }
 
 function connect() {
@@ -90,7 +95,12 @@ function reconnect() {
 function submitCmd() {
   const c = cmd.value;
   if (!c) return;
-  sendInput(c + '\n');
+  // 断开时 sendInput 是空操作：命令既没执行，也不该写进历史，
+  // 否则历史里全是"看着跑过其实没跑"的条目，翻出来一改就误执行。
+  if (!sendInput(c + '\n')) {
+    msg.warning('终端未连接，命令未执行');
+    return;
+  }
   history.value = [c, ...history.value.filter((h) => h !== c)].slice(0, 50);
   localStorage.setItem('cp-term-hist', JSON.stringify(history.value));
   histIdx.value = -1;
@@ -136,7 +146,7 @@ onMounted(() => {
   // Ctrl/Cmd+V：读剪贴板整段原样写入（xterm 默认粘贴走事件分块，多行/转义容易乱）
   term.attachCustomKeyEventHandler((e) => {
     if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      navigator.clipboard.readText().then((t) => { if (t) sendInput(t); }).catch(() => msg.warning('剪贴板不可用，请改用下方输入框'));
+      navigator.clipboard.readText().then((t) => { if (t && !sendInput(t)) msg.warning('终端未连接，粘贴内容未发送'); }).catch(() => msg.warning('剪贴板不可用，请改用下方输入框'));
       return false;
     }
     return true;

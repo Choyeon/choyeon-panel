@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
-  NAlert, NCard, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NModal, NSelect, NSpace, NSwitch, NTag, NText,
+  NAlert, NCard, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, NText,
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { req } from '../api';
@@ -31,8 +31,16 @@ const options = ref<Options>({ allowed: [], presets: [], units: [], note: '' });
 const showForm = ref(false);
 const editing = ref<Task | null>(null);
 const logRow = ref<Task | null>(null);
-const form = ref<{ name: string; expr: string; preset: number; unit: string; args: string; enabled: boolean }>({
-  name: '', expr: '', preset: 0, unit: '', args: '', enabled: true,
+
+// 预设里只有 `choyeonctl logs` 带一个可调参数（尾读行数）。白名单接受
+// `logs --lines N` 和 `logs --lines=N`，但 logs 后面挂第二个参数就会被拒，
+// 所以这里给行单独一个数字框，而不是放进"附加参数"自由文本。
+const LOGS_HEAD = 'choyeonctl logs';
+const LOG_LINES_DEFAULT = 200;
+const LOG_LINES_MAX = 1000;   // 与后端 _LINES_RE / CLI _tail() 同口径
+
+const form = ref<{ name: string; expr: string; preset: number; unit: string; lines: number; raw: string[] | null; enabled: boolean }>({
+  name: '', expr: '', preset: 0, unit: '', lines: LOG_LINES_DEFAULT, raw: null, enabled: true,
 });
 
 // 列表与白名单都取一次就够（白名单只在打开表单时才用得上），但写操作后必须作废，
@@ -50,9 +58,17 @@ const { load: loadOptions } = useCachedFetch<Options>({
 });
 
 const rows = computed<Task[]>(() => data.value?.items ?? []);
-const presetOpts = computed(() => (options.value.presets || []).map((p, i) => ({ label: p.label, value: i })));
+const presetOpts = computed(() => {
+  const list = (options.value.presets || []).map((p, i) => ({ label: p.label, value: i }));
+  // 编辑一条对不上任何预设的任务时，下拉里要有一个能对上当前值的选项，
+  // 否则 NSelect 显示空白，而 buildArgv 会拿 presets[0] 拼出一条完全不同的命令。
+  if (form.value.raw) list.push({ label: '自定义命令（原样保留，不可改）', value: -1 });
+  return list;
+});
 const unitOpts = computed(() => (options.value.units || []).map((u) => ({ label: u, value: u })));
-const needUnit = computed(() => !!options.value.presets?.[form.value.preset]?.needs_unit);
+const curPreset = computed(() => options.value.presets?.[form.value.preset]);
+const isLogs = computed(() => !form.value.raw && (curPreset.value?.argv || []).slice(0, 2).join(' ') === LOGS_HEAD);
+const needUnit = computed(() => !!curPreset.value?.needs_unit);
 
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
 
@@ -75,7 +91,7 @@ onBeforeUnmount(() => { if (autoTimer) clearInterval(autoTimer); });
 
 async function openCreate() {
   editing.value = null;
-  form.value = { name: '', expr: '0 4 * * *', preset: 0, unit: '', args: '', enabled: true };
+  form.value = { name: '', expr: '0 4 * * *', preset: 0, unit: '', lines: LOG_LINES_DEFAULT, raw: null, enabled: true };
   preview.value = null;
   showForm.value = true;
   err.value = '';
@@ -92,9 +108,9 @@ async function ensureOptions() {
   }
 }
 
-// 回填时按"预设自带的固定前缀"切分：前缀之外先是 unit（需要 unit 的预设），再是附加参数。
-// 对不上任何预设（历史数据、或后端白名单收紧后残留）就退回第一个预设，把整条命令
-// 原样放进参数框，让用户看得见真实要执行的内容而不是被静默改写。
+// 回填时按"预设自带的固定前缀"切分：前缀之外先是 unit（需要 unit 的预设），
+// logs 预设则从 --lines 里读回行数。对不上任何预设（历史数据、或白名单收紧后的残留）
+// 就进 raw 模式原样带着这条命令，而不是拿 presets[0] 去拼出一条完全不同的命令。
 async function openEdit(r: Task) {
   await ensureOptions();
   const argv = r.argv_list || [];
@@ -104,20 +120,37 @@ async function openEdit(r: Task) {
   showForm.value = true;
   preview.value = null;
   if (idx < 0) {
-    form.value = { name: r.name, expr: r.expr, preset: 0, unit: '', args: argv.join(' '), enabled: !!r.enabled };
-    err.value = '这条任务的命令不在当前白名单预设里，参数框里保留的是原命令，保存前请确认。';
+    // 原样带着这条命令，不再拿 presets[0] 去接它：以前这里会拼出
+    // `choyeonctl backup run choyeonctl logs --lines 500` 这种必然被白名单拒掉的命令，
+    // 用户只是想改一下执行时间。
+    form.value = {
+      name: r.name, expr: r.expr, preset: -1, unit: '', lines: LOG_LINES_DEFAULT,
+      raw: argv.slice(), enabled: !!r.enabled,
+    };
+    err.value = '这条任务的命令不在当前白名单预设里，下面原样保留它要执行的内容；保存只会改名称与计划时间。';
   } else {
-    const base = (presets[idx].argv || []).length;
+    const p = presets[idx];
+    const base = (p.argv || []).length;
     form.value = {
       name: r.name,
       expr: r.expr,
       preset: idx,
-      unit: presets[idx].needs_unit ? argv[base] || '' : '',
-      args: argv.slice(presets[idx].needs_unit ? base + 1 : base).join(' '),
+      unit: p.needs_unit ? argv[base] || '' : '',
+      lines: linesFromArgv(argv),
+      raw: null,
       enabled: !!r.enabled,
     };
   }
   runPreview();
+}
+
+/** 从 argv 里取尾读行数，`--lines N` 与 `--lines=N` 都认；没写就用 CLI 之外的面板默认值。 */
+function linesFromArgv(argv: string[]): number {
+  const i = argv.findIndex((a) => a === '--lines' || a.startsWith('--lines='));
+  if (i < 0) return LOG_LINES_DEFAULT;
+  const raw = argv[i].includes('=') ? argv[i].split('=')[1] : argv[i + 1];
+  const n = Number(String(raw ?? '').trim());
+  return Number.isInteger(n) && n >= 1 && n <= LOG_LINES_MAX ? n : LOG_LINES_DEFAULT;
 }
 
 // 表达式回显是人话而不是 OnCalendar：写 cron 的人想确认的是「每周一 4 点」，
@@ -135,17 +168,29 @@ function runPreview() {
   }, 350);
 }
 watch(() => form.value.expr, runPreview);
+// 选了真实预设就退出「原样保留」模式，否则 raw 会一直压着 buildArgv，
+// 下拉换成什么都还是提交那条旧命令。
+watch(() => form.value.preset, (v) => { if (v >= 0) form.value.raw = null; });
 onBeforeUnmount(() => { if (previewTimer) clearTimeout(previewTimer); });
 
 function buildArgv(): string[] {
-  const p = options.value.presets?.[form.value.preset] || { argv: [] };
-  const base = [...(p.argv || [])];
-  if (p.needs_unit) {
-    if (form.value.unit) base.push(form.value.unit);
+  if (form.value.raw) return form.value.raw.slice();
+  const p = curPreset.value || { argv: [] };
+  if (isLogs.value) {
+    // 只发 `--lines=N` 一个参数：白名单对 logs 只认「无参数 / --lines N / --lines=N」，
+    // 再挂第二个就会被 400 拒掉，而旧写法正是在固定 --lines 200 后又追加一个 --lines。
+    // 这里始终显式写出行数，不用 CLI 的 100 行默认值，保持和预设原本 200 行一致。
+    return [...(p.argv || []), `--lines=${clampLines(form.value.lines)}`];
   }
-  const extra = form.value.args.trim();
-  if (extra) base.push(...extra.split(/\s+/));
+  const base = [...(p.argv || [])];
+  if (p.needs_unit && form.value.unit) base.push(form.value.unit);
   return base;
+}
+
+function clampLines(n: number) {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 1) return LOG_LINES_DEFAULT;
+  return Math.min(v, LOG_LINES_MAX);
 }
 
 async function save() {
@@ -353,15 +398,26 @@ const cols: any[] = [
                 <span class="cp-help">白名单在服务端逐条校验（命令名、子命令、参数个数与取值范围），不合格会被拒绝且不会保存。</span>
               </NSpace>
             </NFormItem>
-            <NFormItem v-if="needUnit" label="要重启的 unit">
-              <NSelect v-model:value="form.unit" :options="unitOpts" filterable placeholder="只能选面板纳管的 unit" />
-            </NFormItem>
-            <NFormItem label="附加参数（可留空）">
+            <NFormItem v-if="form.raw" label="原命令（不在预设内）">
               <NSpace vertical :size="2" style="width: 100%">
-                <NInput v-model:value="form.args" placeholder="例如 --lines=500" maxlength="200" />
-                <span class="cp-help">按空格拆分为多个参数。</span>
+                <span class="mono-dim cp-break">{{ form.raw.join(' ') }}</span>
+                <span class="cp-help">这条任务的命令对不上当前白名单预设，保存时原样提交；改选一个预设即可换成预设命令。</span>
               </NSpace>
             </NFormItem>
+            <template v-else>
+              <NFormItem v-if="needUnit" label="要重启的 unit">
+                <NSelect v-model:value="form.unit" :options="unitOpts" filterable placeholder="只能选面板纳管的 unit" />
+              </NFormItem>
+              <NFormItem v-if="isLogs" label="尾读行数">
+                <NSpace vertical :size="2" style="width: 100%">
+                  <NInputNumber
+                    :value="form.lines" :min="1" :max="LOG_LINES_MAX" style="width: 140px"
+                    aria-label="尾读行数" @update:value="(v: number | null) => { form.lines = v ?? LOG_LINES_DEFAULT; }"
+                  />
+                  <span class="cp-help">拼成 choyeonctl logs --lines=N，取值 1-{{ LOG_LINES_MAX }}；logs 之后不再接受其它参数，定时任务的输出服务端只保留最后 4KB。</span>
+                </NSpace>
+              </NFormItem>
+            </template>
             <span class="cp-help">将执行：<span class="mono-dim">{{ buildArgv().join(' ') || '（命令不完整）' }}</span></span>
           </NCard>
         </NForm>

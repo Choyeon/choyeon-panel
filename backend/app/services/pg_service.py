@@ -571,7 +571,10 @@ async def _rcli_exact(args: list) -> str:
 
 def _check_key(k: str) -> str:
     k = str(k or "")
-    if not k or len(k) > 512:
+    # 上限要 ≥ 列表侧能返回的 key 长度，否则 SCAN 把长 key 列出来了，
+    # 点进去却固定报"key 不合法"，那些 key 在页面上永远不可查看。
+    # 2048 是详情走 query string（URL 编码后约 6KB）还能安全过 nginx 的量级。
+    if not k or len(k) > 2048:
         raise RuntimeError("key 不合法")
     return k
 

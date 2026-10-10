@@ -76,7 +76,7 @@ PRESET_CMDS: tuple[dict, ...] = (
     {"label": "面板数据备份 choyeonctl backup run", "argv": ["choyeonctl", "backup", "run"]},
     {"label": "面板自检 choyeonctl doctor", "argv": ["choyeonctl", "doctor"]},
     {"label": "备份产物列表 choyeonctl backup list", "argv": ["choyeonctl", "backup", "list"]},
-    {"label": "面板日志 choyeonctl logs", "argv": ["choyeonctl", "logs", "--lines", "200"]},
+    {"label": "面板日志 choyeonctl logs", "argv": ["choyeonctl", "logs"]},
     {"label": "应用列表 choyeonctl app list", "argv": ["choyeonctl", "app", "list"]},
     {"label": "证书续期 certbot renew", "argv": ["certbot", "renew"]},
     {"label": "清理 journal journalctl --vacuum-size=200M", "argv": ["journalctl", "--vacuum-size=200M"]},

@@ -13,6 +13,11 @@ import { getCurrentScope, onScopeDispose, ref } from 'vue';
 export function useDelayedRefresh() {
   const pending = ref(false);
   let timer = 0;
+  // 卸载时刻必须单独记住，不能只靠 cancel()：调用方普遍写成
+  // `await api.xxx(); later(reload, 400)`，请求期间页面被切走时 dispose 先跑，
+  // 那一刻定时器还没建（timer=0，cancel 无事可做），接口 resolve 之后照样挂表，
+  // 于是在别人的页面上多发一次列表请求，失败还会把不相干的 toast 打过去。
+  let disposed = false;
 
   function cancel() {
     if (timer) window.clearTimeout(timer);
@@ -22,11 +27,13 @@ export function useDelayedRefresh() {
 
   /** ms 后执行 fn；组件卸载自动取消。返回 false 表示已被卸载/取消挡下 */
   function later(fn: () => void | Promise<void>, ms = 400): boolean {
+    if (disposed) return false;
     if (timer) window.clearTimeout(timer);
     pending.value = true;
     timer = window.setTimeout(() => {
       timer = 0;
       pending.value = false;
+      if (disposed) return;
       void fn();
     }, ms);
     return true;
@@ -37,7 +44,10 @@ export function useDelayedRefresh() {
     void p.catch(() => undefined).then(() => later(fn, ms));
   }
 
-  if (getCurrentScope()) onScopeDispose(cancel);
+  if (getCurrentScope()) onScopeDispose(() => {
+    disposed = true;
+    cancel();
+  });
 
   /** 探针用：是否还挂着定时器（卸载后必须是 false） */
   return { pending, later, after, cancel, hasPendingTimer: () => timer !== 0 };

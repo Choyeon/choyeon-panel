@@ -196,16 +196,26 @@ export function useCachedFetch<T = unknown>(opts: CachedFetchOptions<T>) {
     refreshing.value = painting || !!e.inflight;
     try {
       const v = await run(e, opts.loader);
-      // 期间被 invalidate 就不要把结果写回画面（下一次 load 会拿新的）
-      if (!e.dead) data.value = v;
-      error.value = null;
+      // 两种情况都不能把这一次的结果写进画面：
+      // ①期间被 invalidate（e.dead）；②期间 key 变了（翻页/切目录/改条数），
+      //   此时 e 还活着（旧条目没人 invalidate 它），但画面已经属于新 key。
+      // 只判 dead 的话，慢的旧响应会后到并把上一个目录/上一页的数据盖回 data，
+      // 列表停在先点的那一页，而新请求其实还在飞（下面的 finally 还会提前把
+      // loading/refreshing 关掉，转圈消失却没有数据 —— 实测最难复现的就是这一条）。
+      if (!e.dead && boundEntry === e) {
+        data.value = v;
+        error.value = null;
+      }
       return v;
     } catch (err) {
-      error.value = err;
+      if (boundEntry === e) error.value = err;
       throw err;
     } finally {
-      loading.value = false;
-      refreshing.value = false;
+      // 只有当前仍在这一次的 key 上，才由它收尾进度标志
+      if (boundEntry === e) {
+        loading.value = false;
+        refreshing.value = false;
+      }
     }
   }
 

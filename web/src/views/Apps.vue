@@ -7,8 +7,9 @@ import {
   useMessage,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { api, repoHref, siteHref } from '../api';
+import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
+import { useDelayedRefresh } from '../composables/useDelayedRefresh';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
@@ -109,7 +110,7 @@ function repoLink(url: any, size = 13) {
 }
 
 function syncBtn(r: any) {
-  if (!r.repo_url) return null;
+  if (!isAdmin.value || !r.repo_url) return null;
   // 同步只在配了仓库时可用；这里不重装依赖、不改 unit/nginx，几分钟的部署换成几秒的拉取+重启。
   return h(NButton, {
     size: 'tiny',
@@ -165,6 +166,7 @@ function appCell(r: any) {
 // 1Panel 的操作列是文字按钮 + 5px gap，超过 ellipsis 个收进「更多」；
 // 列宽按它的估算取 35 + 2*58 + 58 = 209。
 function rowActions(r: any) {
+  if (!isAdmin.value) return [];
   const stop = !!r.running;
   const list: { label: string; run: () => void; danger?: boolean; disabled?: boolean }[] = [
     { label: '部署', run: () => act(r.id, 'deploy'), disabled: rowBusy(r.id) },
@@ -238,12 +240,26 @@ const loading = ref(false);
 const busy = ref<{ id: number; verb: string } | null>(null);
 const busyOn = (id: number, verb: string) => busy.value?.id === id && busy.value?.verb === verb;
 const rowBusy = (id: number) => busy.value?.id === id;
-// 延迟刷新不能拖过页面卸载：那是一次没人看的请求，失败还会把错误 toast 打到新页面上。
-const timers: number[] = [];
-function later(fn: () => void, ms: number) {
-  timers.push(window.setTimeout(fn, ms));
+// 后端 deps.py 对所有 MUTATION 全局拦 403，只读账号点这些按钮必然失败：
+// 按钮直接不进 DOM，而不是留一个按不动的入口。
+const isAdmin = computed(() => getRole() === 'admin');
+// 延迟刷新走共享的 useDelayedRefresh，本页不再自己抄一份 timers 数组
+const { later } = useDelayedRefresh();
+
+// 部署是后台任务，deploying 会自己落定：列表里只要还有部署中的行就每 10s 静默续拉，
+// 全部落定就不再挂定时器（不轮询的话用户只能手动点刷新才知道部署完了）。
+let pollTimer = 0;
+function schedulePoll() {
+  if (pollTimer || !rows.value.some((r) => r.deploying)) return;
+  pollTimer = window.setTimeout(() => {
+    pollTimer = 0;
+    loadQuiet().then(schedulePoll);
+  }, 10000);
 }
-onBeforeUnmount(() => timers.forEach(clearTimeout));
+onBeforeUnmount(() => {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = 0;
+});
 
 async function load() {
   loading.value = true;
@@ -253,6 +269,14 @@ async function load() {
     msg.error(e.message);
   } finally {
     loading.value = false;
+    schedulePoll();
+  }
+}
+async function loadQuiet() {
+  try {
+    rows.value = await api.apps();
+  } catch {
+    /* 轮询失败保留上一帧，下个周期自动重试 */
   }
 }
 async function rollback(r: any) {
@@ -260,6 +284,7 @@ async function rollback(r: any) {
   try {
     const res = await api.appAction(r.id, 'rollback');
     msg.success(`已回滚到 ${res.commit || '上一版本'}`);
+    later(load, 900);
   } catch (e: any) {
     msg.error(e.message);
   } finally {
@@ -330,6 +355,14 @@ function askDel(r: any) {
     successMsg: '已删除配置',
   });
 }
+// 关窗即恢复初值：NModal 里的表单是常驻组件状态，不重置的话，
+// 取消后重开还留着上一次的名称/仓库/命令，用户会在旧值上继续点「创建」。
+function resetCreate() {
+  mode.value = 'single';
+  form.value = singleFields();
+  be.value = singleFields({ start_cmd: '', port: 8000 });
+  fe.value = singleFields({ type: 'node', start_cmd: 'npm run start', port: 3100 });
+}
 async function create() {
   if (!form.value.name) return msg.error('请填写应用名称');
   if (mode.value === 'split') {
@@ -391,7 +424,7 @@ onMounted(() => {
 
     <CpToolbarCard>
       <template #left>
-        <NButton size="small" type="primary" round :icon="ico('AddOutline')" @click="showCreate = true">新建应用</NButton>
+        <NButton v-if="isAdmin" size="small" type="primary" round :icon="ico('AddOutline')" @click="showCreate = true">新建应用</NButton>
       </template>
       <template #right>
         <NInput :value="kw" @update:value="(v: string) => (kw = v)" placeholder="搜索名称/域名/端口" size="small" clearable style="width: 200px; max-width: 100%">
@@ -409,7 +442,7 @@ onMounted(() => {
 
     <ConfirmActionDialog ref="opRef" />
 
-    <NModal v-model:show="showCreate" preset="card" title="新建应用" style="width: 640px; max-width: 94vw">
+    <NModal v-model:show="showCreate" preset="card" title="新建应用" style="width: 640px; max-width: 94vw" @after-leave="resetCreate">
       <NSpace vertical :size="4">
         <NAlert type="info" :bordered="false" size="small" style="margin-bottom: var(--space-2)">
           {{ mode === 'single'

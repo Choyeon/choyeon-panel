@@ -39,6 +39,12 @@ async def app_get(app_id: int, req: Request):
     running = await systemd_ops.is_active(unit)
     port = a["port"] if a["port"] is not None else (await apps_service.detect_port(unit) if running else None)
     out = {**a, "running": running, "unit": unit, "port": port, "portAuto": a["port"] is None and port is not None}
+    # 列表接口算了 deploying（apps_service.list_apps），详情接口一直没算，
+    # 而 AppDetail 判断的正是 app.deploying —— 于是详情页标题永远显示"运行中/已停止"、
+    # 「一键同步」永不置灰，用户点了才收到"部署进行中，不能同步"。
+    out["deploying"] = bool(
+        dbm.query_one("SELECT 1 FROM deployments WHERE app_id=? AND status='running' LIMIT 1", (app_id,))
+    )
     # 组合项目的组件摘要：详情页要展示"这个项目还有哪些前端/后端"
     kids = dbm.query(
         "SELECT id,name,type,parent_id,component_role FROM apps WHERE parent_id=?", (app_id,)

@@ -6,7 +6,7 @@ import {
   NSelect, useMessage, NIcon, NAlert, NSwitch,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { api } from '../api';
+import { api, getRole } from '../api';
 import { icon, icons } from '../icons';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
 import CpRowActions from '../components/CpRowActions.vue';
@@ -18,6 +18,8 @@ import { fmtBytes, fmtDateTime } from '../composables/useFormat';
 
 const msg = useMessage();
 const router = useRouter();
+// 备份任务的增删改与立即执行都是 MUTATION，服务端统一拦 403：只读账号只看计数
+const isAdmin = getRole() === 'admin';
 const show = ref(false);
 const busy = ref<number | null>(null);
 const toggling = ref<number | null>(null);
@@ -115,11 +117,14 @@ const columns: any[] = [
       r.schedule === 'manual'
         ? h(NTag, { size: 'small', round: true, bordered: false }, () => '手动')
         : h('div', { class: 'cell-bk-sched' }, [
-            h(NButton, {
-              size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
-              loading: toggling.value === r.id, disabled: toggling.value !== null,
-              onClick: () => toggleEnabled(r),
-            }, () => (r.enabled ? '启用' : '停用')),
+            // 只读账号不给按不动的开关，直接只显示状态文字
+            isAdmin
+              ? h(NButton, {
+                  size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
+                  loading: toggling.value === r.id, disabled: toggling.value !== null,
+                  onClick: () => toggleEnabled(r),
+                }, () => (r.enabled ? '启用' : '停用'))
+              : h(NTag, { size: 'small', round: true, bordered: false, type: r.enabled ? 'success' : 'default' }, () => (r.enabled ? '启用' : '停用')),
             h('span', { class: 'mono-dim' }, `${r.schedule === 'daily' ? '每日' : '每周一'} ${String(r.hour).padStart(2, '0')}:${String(r.minute).padStart(2, '0')}`),
           ]),
   },
@@ -140,10 +145,16 @@ const columns: any[] = [
       h(CpRowActions, {
         ellipsis: 3,
         buttons: [
-          { label: busy.value === r.id ? '备份中…' : '立即备份', run: () => run(r.id), disabled: busy.value !== null },
+          ...(isAdmin
+            ? [{ label: busy.value === r.id ? '备份中…' : '立即备份', run: () => run(r.id), disabled: busy.value !== null }]
+            : []),
           { label: '备份文件', run: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }), disabled: busy.value === r.id || !r.files.length },
-          { label: '编辑', run: () => openEdit(r), disabled: busy.value === r.id },
-          { label: '删除', danger: true, run: () => confirmDel(r), disabled: busy.value === r.id },
+          ...(isAdmin
+            ? [
+                { label: '编辑', run: () => openEdit(r), disabled: busy.value === r.id },
+                { label: '删除', danger: true, run: () => confirmDel(r), disabled: busy.value === r.id },
+              ]
+            : []),
         ],
       }),
   },
@@ -227,6 +238,13 @@ function openEdit(r: any) {
   show.value = true;
 }
 async function submit() {
+  // 切换类型会把 target 置空（pg 的库名不是应用名），而后端 update 对 target=null
+  // 的语义是"沿用旧值"：不选目标就提交，任务会静默继续指向原来那个名字，
+  // 列表上还显示着新类型 —— 必须在提交前把空目标拦下来。
+  if (!form.value.target) {
+    msg.error(form.value.kind === 'pg' ? '请填写要备份的数据库名（或 all）' : '请选择要备份的应用');
+    return;
+  }
   submitting.value = true;
   try {
     if (editingId.value == null) {
@@ -250,7 +268,7 @@ async function submit() {
   <div>
     <CpToolbarCard title="备份">
       <template #left>
-        <NButton size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建备份任务</NButton>
+        <NButton v-if="isAdmin" size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建备份任务</NButton>
         <NButton size="small" tertiary :icon="icon('FolderOpenOutline', 14)" @click="router.push('/backups/files')">备份文件</NButton>
       </template>
       <template #right>
@@ -314,7 +332,7 @@ async function submit() {
             </NSpace>
             <NFormItem label="保留份数">
               <NSpace vertical :size="2">
-                <NInputNumber v-model:value="form.keep" :min="1" :max="60" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px" />
+                <NInputNumber v-model:value="form.keep" :min="1" :max="365" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px" />
                 <span class="cp-help">超出份数后由任务自动裁剪最旧的产物（按文件名排序删最旧的）。</span>
               </NSpace>
             </NFormItem>

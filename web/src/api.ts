@@ -52,6 +52,11 @@ export function clearSession() {
   localStorage.removeItem(NICK_KEY);
   localStorage.removeItem(AVA_KEY);
   localStorage.removeItem(USER_KEY);
+  // 缓存里可能装着刚才那个账号（管理员）拉到的用户表/审计/文件目录，
+  // 换会话时必须一起丢掉，否则新登录的只读账号能短暂看见旧数据。
+  // 放在这里而不是放在调用方：手动退出曾经只调了 clearSession，
+  // 于是"退出→换只读账号登录"后各页直接命中旧缓存，连请求都不发。
+  clearCache();
 }
 
 export const onUnauthorized: Array<() => void> = [];
@@ -59,9 +64,6 @@ let redirecting = false;
 
 function notifyUnauthorized() {
   clearSession();
-  // 缓存里可能装着刚才那个账号（管理员）拉到的用户表/审计/文件目录，
-  // 换会话时必须一起丢掉，否则新登录的只读账号能短暂看见旧数据。
-  clearCache();
   if (redirecting) return;
   redirecting = true;
   onUnauthorized.forEach((fn) => fn());
@@ -95,13 +97,18 @@ function authHeaders(extra: Record<string, string> = {}) {
 
 async function parse(res: Response) {
   const data = await res.json().catch(() => ({}) as any);
-  // /auth/login|setup|password 的 401/403 是"这次认证动作失败"，不该把人已登录的会话清掉；
-  // /auth/avatar 是已登录用户的功能，它的失败必须正常提示，且响应体只有 {"detail": ...}
-  // （FastAPI 默认字段名，不是面板统一的 error），不加这条特例界面会显示 "HTTP 413" 这种空话。
+  // 401 的唯一含义是"这个会话已经不被认了"，必须登出——除了 /auth/login：
+  // 它的 401 是"这一次用户名或密码错了"，人还登录着（改密走 400，profile/avatar 的
+  // 401 只可能是 token 过期）。过去用 `includes('/auth/')` 一刀切，结果编辑资料/上传头像
+  // 撞上过期令牌时既不登出也不跳登录，用户卡在假登录态里反复收 401。
+  const isExpired = res.status === 401 && !/\/auth\/(login|setup)(\/|$|\?)/.test(String(res.url));
+  if (isExpired) notifyUnauthorized();
+  // /auth/avatar 的响应体只有 {"detail": ...}（FastAPI 默认字段名，不是面板统一的 error），
+  // 不加这条特例界面会显示 "HTTP 413" 这种空话。
   if (!res.ok && res.url.includes('/auth/avatar')) {
     throw new Error((data as any).error || (data as any).detail || `HTTP ${res.status}`);
   }
-  if (res.status === 401 && !String(res.url).includes('/auth/')) notifyUnauthorized();
+  if (isExpired) throw new Error('登录已过期，请重新登录');
   if (!res.ok) throw new Error((data as any).error || `HTTP ${res.status}`);
   return data as any;
 }

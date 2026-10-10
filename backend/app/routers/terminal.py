@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import contextlib
 import fcntl
 import json
@@ -125,12 +126,21 @@ async def terminal(ws: WebSocket):
         reader_added = True
 
         async def pump_out():
+            # PTY 是按 4096 字节切块读出来的，一个中文字符（3 字节）可能正好跨在两块边界上。
+            # 直接 data.decode(errors="replace") 会把那半截变成 U+FFFD，网页终端里的中文
+            # 就永久乱码了；增量解码器把残字节留到下一块，会话结束再收尾。
+            decoder = codecs.getincrementaldecoder("utf-8")()
             while True:
                 data = await out_q.get()
                 if not data:
                     break
+                text = decoder.decode(data)
+                if not text:
+                    continue  # 整块都是半个字符，等下一块凑齐再发
                 with contextlib.suppress(Exception):
-                    await ws.send_json({"d": "out", "data": data.decode(errors="replace")})
+                    await ws.send_json({"d": "out", "data": text})
+            with contextlib.suppress(Exception):
+                await ws.send_json({"d": "out", "data": decoder.decode(b"", final=True)})
             with contextlib.suppress(Exception):
                 await ws.close()
 

@@ -32,7 +32,14 @@ async function copyAll() {
 function open() {
   close();
   es = new EventSource(logUrl(props.urlPath, linesCount.value));
-  es.onopen = () => (streamState.value = 'live');
+  // 服务端每次连接都是 `journalctl -n <lines> -f`：先把整段尾部重打一遍再跟随。
+  // 浏览器在断线（网络闪断、面板重启）后会自动重连，而旧画面还留着上一段的
+  // 同样内容，onmessage 只会往后追加 —— 于是日志框里出现整段重复，反复断连就反复叠加。
+  // 重连即新的一次完整尾部，先清屏再收才是对的。
+  es.onopen = () => {
+    streamState.value = 'live';
+    if (lines.value.length) lines.value = [];
+  };
   es.onmessage = async (e) => {
     try {
       lines.value.push(JSON.parse(e.data));
@@ -62,12 +69,27 @@ function refresh() {
   lines.value = [];
   open();
 }
+
+// NInputNumber 每敲一个字符就 update:value 一次：输入 2000 会连着重连 4 次
+// （每次都先清屏，中途还按半截数字去请求），看着像日志在抽搐。等手停下再重连。
+let countTimer = 0;
+function onCountChange() {
+  if (countTimer) window.clearTimeout(countTimer);
+  countTimer = window.setTimeout(() => {
+    countTimer = 0;
+    refresh();
+  }, 500);
+}
+
 function toggleFollow() {
   following.value ? close() : open();
 }
 
 onMounted(open);
-onBeforeUnmount(close);
+onBeforeUnmount(() => {
+  if (countTimer) window.clearTimeout(countTimer);
+  close();
+});
 </script>
 
 <template>
@@ -95,7 +117,7 @@ onBeforeUnmount(close);
         复制全部日志
       </NTooltip>
       <NText depth="3" style="font-size: var(--fs-xs)">初始行数</NText>
-      <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="2000" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="refresh" />
+      <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="2000" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="onCountChange" />
       <NText depth="3" id="ls-autoscroll-label" style="font-size: var(--fs-xs)">自动滚动</NText>
       <NSwitch v-model:value="autoScroll" size="small" aria-labelledby="ls-autoscroll-label" />
       <span class="st" style="font-size: var(--fs-xs)" :class="streamState === 'live' ? 'ok' : streamState === 'retry' ? 'warn' : 'err'">

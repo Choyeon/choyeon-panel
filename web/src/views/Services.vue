@@ -2,7 +2,7 @@
 import { computed, ref, watch, h } from 'vue';
 import { NDataTable, NInput, NSelect, NAlert, NText, useMessage, NIcon } from 'naive-ui';
 import { NButton } from '../ui';
-import { api } from '../api';
+import { api, getRole } from '../api';
 import { icon, icons } from '../icons';
 import LogStream from '../components/LogStream.vue';
 import PageTabBar from '../components/PageTabBar.vue';
@@ -16,6 +16,7 @@ import { useDelayedRefresh } from '../composables/useDelayedRefresh';
 import { useTableHeight } from '../composables/useTableHeight';
 
 const msg = useMessage();
+const isAdmin = getRole() === 'admin';
 const tab = ref('services');
 const filter = ref('');
 const statusSel = ref<string[]>([]);
@@ -72,10 +73,13 @@ const statusOptions = computed(() =>
   [...new Set(services.value.map((r) => r.active))].sort().map((v) => ({ label: statusLabel(v), value: v })),
 );
 
-async function act(unit: string, verb: string) {
+async function act(unit: string, verb: string, ok?: string) {
   busy.value = { unit, verb };
   try {
     await api.serviceAction(unit, verb);
+    // 走确认弹窗的路径由弹窗报成功，这里只给行内直调（启动/自启）补反馈，
+    // 否则用户点完什么也没发生，只能猜 systemctl 到底下发了没有。
+    if (ok) msg.success(ok);
     later(reload, 400);
   } finally {
     busy.value = null;
@@ -106,11 +110,13 @@ function rowButtons(r: any): RowAction[] {
   const running = r.active === 'active';
   const dis = unitBusy(r.unit);
   const list: RowAction[] = [{ label: '查看', run: () => openLog(r.unit) }];
+  // 服务端对全部 MUTATION 拦 403，只读账号只留「查看」，不把必然失败的按钮摆出来
+  if (!isAdmin) return list;
   list.push(running
     ? { label: '停止', danger: true, disabled: dis, run: () => askConfirm(r.unit, 'stop') }
-    : { label: '启动', disabled: dis, run: () => act(r.unit, 'start').catch((e: any) => msg.error(e.message)) });
+    : { label: '启动', disabled: dis, run: () => act(r.unit, 'start', `已下发启动：${r.unit}`).catch((e: any) => msg.error(e.message)) });
   if (running) list.push({ label: '重启', disabled: dis, run: () => askConfirm(r.unit, 'restart') });
-  list.push({ label: '自启', disabled: dis, run: () => act(r.unit, 'enable').catch((e: any) => msg.error(e.message)) });
+  list.push({ label: '自启', disabled: dis, run: () => act(r.unit, 'enable', `已设置开机自启：${r.unit}`).catch((e: any) => msg.error(e.message)) });
   return list;
 }
 

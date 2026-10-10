@@ -1,5 +1,28 @@
 import { createRouter, createWebHashHistory } from 'vue-router';
 import { getToken, getRole, onUnauthorized } from './api';
+import { beginChunk, endChunk, chunkFailed } from './composables/useAppProgress';
+
+/**
+ * 懒加载包一层 chunk 计数：进度条只看得见在飞的 API 请求，而"点侧栏卡一下"
+ * 主要发生在页面 chunk 下载的那段——那段时间一个请求都没有。
+ * useAppProgress 一直导出着 beginChunk/endChunk/chunkFailed 却零调用，
+ * 头注释宣称的"请求数 + chunk 数"实际只剩一半，这里把它接上。
+ */
+function lazy(loader: () => Promise<any>) {
+  return () => {
+    beginChunk();
+    return loader().then(
+      (m) => {
+        endChunk();
+        return m;
+      },
+      (e) => {
+        chunkFailed();
+        return Promise.reject(e);
+      },
+    );
+  };
+}
 
 export const TITLES: Record<string, string> = {
   '/dashboard': '总览', '/apps': '应用', '/services': '系统服务', '/db': '数据库', '/sites': '网站与证书',
@@ -11,27 +34,27 @@ export const TITLES: Record<string, string> = {
 export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/login', component: () => import('./views/Login.vue'), meta: { title: '登录', public: true } },
+    { path: '/login', component: lazy(() => import('./views/Login.vue')), meta: { title: '登录', public: true } },
     { path: '/', redirect: '/dashboard' },
-    { path: '/dashboard', component: () => import('./views/Dashboard.vue') },
-    { path: '/apps', component: () => import('./views/Apps.vue') },
-    { path: '/apps/:id', component: () => import('./views/AppDetail.vue'), meta: { title: '应用详情' } },
-    { path: '/services', component: () => import('./views/Services.vue') },
-    { path: '/db', component: () => import('./views/Databases.vue') },
-    { path: '/sites', component: () => import('./views/Sites.vue') },
-    { path: '/backups', component: () => import('./views/Backups.vue') },
-    { path: '/backups/files', component: () => import('./views/BackupFiles.vue') },
-    { path: '/alerts', component: () => import('./views/Alerts.vue') },
-    { path: '/cron', component: () => import('./views/CronTasks.vue') },
-    { path: '/files', component: () => import('./views/Files.vue') },
-    { path: '/terminal', component: () => import('./views/Terminal.vue') },
-    { path: '/doctor', component: () => import('./views/Doctor.vue') },
-    { path: '/users', component: () => import('./views/Users.vue') },
-    { path: '/audit', component: () => import('./views/Audit.vue') },
-    { path: '/logs', component: () => import('./views/PanelLogs.vue') },
-    { path: '/logsearch', component: () => import('./views/LogCenter.vue') },
-    { path: '/settings', component: () => import('./views/Settings.vue') },
-    { path: '/:pathMatch(.*)*', component: () => import('./views/NotFound.vue'), meta: { title: '页面不存在' } },
+    { path: '/dashboard', component: lazy(() => import('./views/Dashboard.vue')) },
+    { path: '/apps', component: lazy(() => import('./views/Apps.vue')) },
+    { path: '/apps/:id', component: lazy(() => import('./views/AppDetail.vue')), meta: { title: '应用详情' } },
+    { path: '/services', component: lazy(() => import('./views/Services.vue')) },
+    { path: '/db', component: lazy(() => import('./views/Databases.vue')) },
+    { path: '/sites', component: lazy(() => import('./views/Sites.vue')) },
+    { path: '/backups', component: lazy(() => import('./views/Backups.vue')) },
+    { path: '/backups/files', component: lazy(() => import('./views/BackupFiles.vue')) },
+    { path: '/alerts', component: lazy(() => import('./views/Alerts.vue')) },
+    { path: '/cron', component: lazy(() => import('./views/CronTasks.vue')) },
+    { path: '/files', component: lazy(() => import('./views/Files.vue')) },
+    { path: '/terminal', component: lazy(() => import('./views/Terminal.vue')) },
+    { path: '/doctor', component: lazy(() => import('./views/Doctor.vue')) },
+    { path: '/users', component: lazy(() => import('./views/Users.vue')) },
+    { path: '/audit', component: lazy(() => import('./views/Audit.vue')) },
+    { path: '/logs', component: lazy(() => import('./views/PanelLogs.vue')) },
+    { path: '/logsearch', component: lazy(() => import('./views/LogCenter.vue')) },
+    { path: '/settings', component: lazy(() => import('./views/Settings.vue')) },
+    { path: '/:pathMatch(.*)*', component: lazy(() => import('./views/NotFound.vue')), meta: { title: '页面不存在' } },
   ],
 });
 

@@ -45,12 +45,27 @@ const entries = computed<any[]>(() => data.value?.entries ?? []);
 const roots = computed<string[]>(() => data.value?.roots ?? []);
 const path = computed(() => String(data.value?.path ?? reqPath.value));
 const quick = computed(() => roots.value);
-const homeRoot = computed(() => roots.value[0] || '/');
-
-function splitPath(p: string) {
-  return p.split('/').filter(Boolean);
+/** 当前路径所属的白名单根：从快捷入口进第二个根之后，面包屑必须以它为起点，
+ *  固定取 roots[0] 会让第一段「标签是 A、点下去跳到 B」，祖先段还会拼出白名单外的路径。 */
+const curRoot = computed(() => {
+  const p = path.value;
+  const hit = roots.value.filter((r) => {
+    const base = r.replace(/\/+$/, '') || '/';
+    return p === base || p.startsWith(base === '/' ? '/' : base + '/');
+  });
+  return hit.sort((a, b) => b.length - a.length)[0] || roots.value[0] || '/';
+});
+/** 相对 curRoot 的路径段：第一段单列成根，其余才是要拼接的层级 */
+const crumbs = computed(() => {
+  const base = curRoot.value.replace(/\/+$/, '') || '/';
+  const rest = base === '/' ? path.value : path.value.slice(base.length);
+  return rest.split('/').filter(Boolean);
+});
+function crumbPath(i: number) {
+  const base = curRoot.value.replace(/\/+$/, '') || '/';
+  const seg = crumbs.value.slice(0, i + 1).join('/');
+  return base === '/' ? `/${seg}` : `${base}/${seg}`;
 }
-const crumbs = computed(() => splitPath(path.value));
 
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
 
@@ -78,6 +93,9 @@ async function open(e: any) {
   if (e.size > 1024 * 1024) return msg.warning('文件过大，请使用下载');
   try {
     const r = await api.fileContent(p);
+    // 后端只在严格 UTF-8 时下发内容：二进制没有 content，直接引导到下载。
+    // 以前这里会把图片/zip 解成 U+FFFD 塞进编辑器，点保存就把原文件写坏了。
+    if (r.binary) return msg.warning('二进制文件，无法在线编辑，请使用下载');
     editPath.value = p;
     editContent.value = r.content;
     editing.value = true;
@@ -326,10 +344,10 @@ const rowSelection = computed(() => ({
         <NSpace align="center" justify="space-between" style="width: 100%">
           <NBreadcrumb>
             <NBreadcrumbItem>
-              <NButton text type="primary" size="tiny" @click="load(homeRoot)">{{ crumbs[0] || 'root' }}</NButton>
+              <NButton text type="primary" size="tiny" @click="load(curRoot)">{{ curRoot }}</NButton>
             </NBreadcrumbItem>
-            <NBreadcrumbItem v-for="(c, i) in crumbs.slice(1)" :key="i">
-              <NButton text size="tiny" style="color: var(--cp-text-dim)" @click="load('/' + crumbs.slice(0, i + 1).join('/'))">{{ c }}</NButton>
+            <NBreadcrumbItem v-for="(c, i) in crumbs" :key="i">
+              <NButton text size="tiny" style="color: var(--cp-text-dim)" @click="load(crumbPath(i))">{{ c }}</NButton>
             </NBreadcrumbItem>
           </NBreadcrumb>
           <NSpace :size="6">

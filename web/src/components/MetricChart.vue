@@ -94,6 +94,10 @@ function fmtFn(fn?: (v: number) => string, fallback = '') {
  *  表现为"刚框选好区间就自己弹回去"，所以每次重建 option 前先把它抄下来。 */
 let zoom = { start: 0, end: 100 };
 
+/** legend 的显隐选择同理：notMerge 重建会把用户点掉的曲线塞回来，
+ *  表现为"点掉『下行』之后 ≤3s 它自己又出现，永远关不掉"。 */
+let legendSelected: Record<string, boolean> | null = null;
+
 function buildOption() {
   const label = cssVar('--cp-text-dim', '#8a90a0');
   const axisLine = cssVar('--cp-border-strong', '#2c2c33');
@@ -161,6 +165,8 @@ function buildOption() {
           legend: {
             show: true, top: 2, right: 4, itemWidth: 8, itemHeight: 8, icon: 'circle',
             textStyle: { color: label, fontSize: 12 },
+            // 不回填 selected 时，notMerge 重建等价于每次刷新都把用户的显隐选择抹掉
+            ...(legendSelected ? { selected: legendSelected } : {}),
           },
         }
       : {}),
@@ -192,6 +198,10 @@ function render() {
     if (cur && typeof cur.start === 'number' && typeof cur.end === 'number') {
       zoom = { start: cur.start, end: cur.end };
     }
+  }
+  if (chart && props.legend) {
+    const sel: any = (chart.getOption() as any)?.legend?.[0]?.selected;
+    if (sel && typeof sel === 'object') legendSelected = { ...sel };
   }
   chart?.setOption(buildOption(), { notMerge: true });
 }

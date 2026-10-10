@@ -43,6 +43,13 @@ const parsed = computed(() => {
   }
 });
 
+// 非 UTF-8 的 value（序列化对象、gzip、msgpack）在后端是 errors="replace" 解码的，
+// 页面上看到的文本已经不等于原值。基于它点保存会把替换符写回 Redis，
+// 原值就此损坏且不可恢复——和截断同理，一律不开放编辑。
+const LOSSY = "\uFFFD";
+const hasLossy = (v: any) => typeof v === "string" && v.includes(LOSSY);
+const lossy = computed(() => type.value === "string" && hasLossy(props.detail?.value));
+
 const memberData = computed<any[]>(() => {
   const v = props.detail?.value;
   if (!Array.isArray(v)) return [];
@@ -116,11 +123,11 @@ watch(() => props.detail?.key, () => {
 
 const msg = useMessage();
 
-async function act(fn: () => Promise<any>, ok: string) {
+async function act(fn: () => Promise<any>, ok: string | ((r: any) => string)) {
   busy.value = true;
   try {
-    await fn();
-    msg.success(ok);
+    const r = await fn();
+    msg.success(typeof ok === 'function' ? ok(r) : ok);
     emit('refresh');
     return true;
   } catch (e: any) {
@@ -139,6 +146,10 @@ async function saveString() {
   if (await act(() => api.redisSet(props.detail.key, draft.value), '已保存值，TTL 保持不变')) editing.value = false;
 }
 function startFieldEdit(r: any) {
+  if (hasLossy(r.value)) {
+    msg.warning('该字段含非 UTF-8 字节，页面显示的不是原值，编辑保存会写坏数据，已禁止');
+    return;
+  }
   editField.value = r.field;
   editValue.value = String(r.value ?? '');
 }
@@ -146,7 +157,12 @@ async function saveField(r: any) {
   if (await act(() => api.redisMember({ key: props.detail.key, type: 'hash', op: 'add', field: r.field, value: editValue.value }), '已更新该字段')) editField.value = '';
 }
 async function delMember(value: string, field: string) {
-  await act(() => api.redisMember({ key: props.detail.key, type: type.value, op: 'del', value, field }), '已删除该条目');
+  // list 走 LREM key 0 <value>：它删掉的是**所有**相同条目，只报"已删除该条目"
+  // 会让人以为列表只少了一行，实际可能少了好几行。
+  await act(
+    () => api.redisMember({ key: props.detail.key, type: type.value, op: 'del', value, field }),
+    (r) => (type.value === 'list' && Number(r?.n || 1) > 1 ? `已删除 ${r.n} 个相同条目` : '已删除该条目'),
+  );
 }
 async function addMember() {
   const f = addForm.value;
@@ -176,6 +192,7 @@ async function saveTtl() {
 
     <NSpace vertical :size="10">
       <NText v-if="detail.truncated" depth="3" style="font-size: var(--fs-xs)">内容过长，仅读取前 64KB（截断）；截断状态下不开放编辑，保存会把值覆盖成截断后的内容</NText>
+      <NText v-else-if="lossy" depth="3" style="font-size: var(--fs-xs)">该值是二进制/非 UTF-8 内容，页面显示的文本已含替换符、不等于原值，因此不开放编辑：保存会把这份文本当成新值写回，原数据不可恢复</NText>
 
       <template v-if="type === 'string'">
         <NInput
@@ -189,7 +206,7 @@ async function saveTtl() {
             <NButton size="tiny" tertiary :disabled="busy" @click="editing = false">取消</NButton>
             <NButton size="tiny" type="primary" class="cp-press" :loading="busy" :icon="saveIco" @click="saveString">保存值</NButton>
           </template>
-          <NButton v-else-if="!detail.truncated" size="tiny" tertiary :icon="editIco" @click="startEdit">编辑值</NButton>
+          <NButton v-else-if="!detail.truncated && !lossy" size="tiny" tertiary :icon="editIco" @click="startEdit">编辑值</NButton>
         </NSpace>
       </template>
 

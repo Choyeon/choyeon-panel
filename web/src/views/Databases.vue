@@ -285,22 +285,35 @@ async function pickTable(t: any) {
   tPage.value = 1;
   await loadTableData();
 }
+// 连点翻页 / 快速切表时，先发的请求可能后到：不比对序号就会把当前页覆盖成
+// 上一个请求的结果（看到的是第 2 页的数据、页码却显示第 3 页）。
+let tableSeq = 0;
 async function loadTableData() {
   if (!brDb.value || !curTable.value) return;
+  const seq = ++tableSeq;
   tBusy.value = true;
   try {
     const r = await api.pgTable(brDb.value, curTable.value.schema, curTable.value.name, tPage.value, tSize.value);
+    if (seq !== tableSeq) return;
     tCols.value = r.columns || [];
     tColMeta.value = r.cols || [];
     tPk.value = r.pk || [];
     tRows.value = r.rows || [];
     tTotal.value = r.total || 0;
   } catch (e: any) {
+    if (seq !== tableSeq) return;
     tRows.value = [];
     msg.error(e.message);
   } finally {
-    tBusy.value = false;
+    if (seq === tableSeq) tBusy.value = false;
   }
+}
+async function onRowSaved() {
+  // 保存后 tRows 换成一批新对象，抽屉里的 rowModel 还指着旧的那一行：
+  // 改过主键（或按 ctid 定位）的行会以旧键再次提交，更新/删除都命中不到，
+  // 而只读详情也停在改之前的值上，看着像"保存没生效"。收回列表重选。
+  showRow.value = false;
+  await loadTableData();
 }
 function onPage(p: number) {
   tPage.value = p;
@@ -330,15 +343,20 @@ async function scanKeys(more = false) {
     rBusy.value = false;
   }
 }
+let keySeq = 0;
 async function inspectKey(k: string) {
+  const seq = ++keySeq;
   rDetailBusy.value = true;
   try {
-    rDetail.value = await api.redisKey(k);
+    const d = await api.redisKey(k);
+    if (seq !== keySeq) return;
+    rDetail.value = d;
   } catch (e: any) {
+    if (seq !== keySeq) return;
     rDetail.value = null;
     msg.error(e.message);
   } finally {
-    rDetailBusy.value = false;
+    if (seq === keySeq) rDetailBusy.value = false;
   }
 }
 function refreshDetail() {
@@ -538,7 +556,7 @@ async function delKeys(keys: string[]) {
       v-if="brDb && curTable" v-model:show="showRow" :db="brDb"
       :schema="curTable.schema" :table="curTable.name"
       :cols="tColMeta" :pk="tPk" :row="rowModel" :insert="rowInsert" :focus="rowFocus"
-      @saved="loadTableData"
+      @saved="onRowSaved"
     />
   </div>
 </template>

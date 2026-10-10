@@ -260,6 +260,23 @@ class TestArgvWhitelist(unittest.TestCase):
             with self.subTest(preset=p["argv"]):
                 C._validate_argv(list(p["argv"]))
 
+    def test_logs_preset_pins_no_line_count(self):
+        """logs 预设只到子命令为止，行数交给前端参数框拼 `--lines=N`。
+
+        预设里写死 `--lines 200` 时，界面上再填任何参数都会变成 logs 的第二个参数，
+        服务端必然 400，用户无论怎么改都保存不了。
+        """
+        p = next(x for x in C.PRESET_CMDS if x["argv"][:2] == ["choyeonctl", "logs"])
+        self.assertEqual(p["argv"], ["choyeonctl", "logs"])
+
+    def test_logs_accepts_one_lines_flag_only(self):
+        for argv in (["choyeonctl", "logs"], ["choyeonctl", "logs", "--lines=500"],
+                     ["choyeonctl", "logs", "--lines", "500"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(C._validate_argv(list(argv)), argv)
+        with self.assertRaises(BadInput):
+            C._validate_argv(["choyeonctl", "logs", "--lines", "200", "--lines=500"])
+
     def test_rejects_arbitrary_command(self):
         with self.assertRaises(BadInput) as cm:
             C._validate_argv(["rm", "-rf", "/"])

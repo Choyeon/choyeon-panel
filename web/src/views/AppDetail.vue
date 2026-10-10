@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch, h, computed } from 'vue';
+import { onMounted, ref, watch, h, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NCard, NSpace, NText, NTag, NInput, NDynamicInput,
   useMessage, NPopconfirm, NIcon, NForm, NFormItem, NSkeleton, NGrid, NGridItem, NSelect, NAlert,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { api, repoHref, siteHref } from '../api';
+import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
+import { useDelayedRefresh } from '../composables/useDelayedRefresh';
 import LogStream from '../components/LogStream.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import PageTabBar from '../components/PageTabBar.vue';
@@ -24,12 +25,11 @@ const env = ref<{ k: string; v: string }[]>([]);
 const edit = ref<any>({});
 const deps = ref<any[]>([]);
 const depLog = ref<any>(null);
-// 延迟刷新不能拖过页面卸载：那是一次没人看的请求，失败还会把错误 toast 打到新页面上。
-const timers: number[] = [];
-function later(fn: () => void, ms: number) {
-  timers.push(window.setTimeout(fn, ms));
-}
-onBeforeUnmount(() => timers.forEach(clearTimeout));
+// 延迟刷新走共享实现：本页多处写成 `await api.xxx(); later(load, 600)`，
+// 自建 timers 数组在 dispose 时定时器往往还没挂上，接口回来照样刷新，
+// 于是在别的页面上多发请求、把不相干的错误 toast 打过去。
+const { later, cancel } = useDelayedRefresh();
+const isAdmin = computed(() => getRole() === 'admin');
 const saving = ref(false);
 const acting = ref('');
 // 页签受控 + 内容用 v-if 挂载：运行日志那条 SSE 只有在当前页签时才存在，
@@ -166,6 +166,7 @@ function selConfig(c: any) {
   ngxContent.value = c.content;
 }
 async function saveNginx() {
+  if (ngxSaving.value) return;
   ngxSaving.value = true;
   try {
     await api.saveNginx(id, ngxFile.value.file, ngxContent.value);
@@ -178,12 +179,18 @@ async function saveNginx() {
   }
 }
 async function quick(kind: string) {
+  // 快捷项与「保存配置」都是读-改-写同一个文件：并发跑会互相覆盖，
+  // 后端还会同时写同一个临时文件，所以共用 ngxSaving 这把锁。
+  if (ngxSaving.value) return;
+  ngxSaving.value = true;
   try {
     await api.quickNginx(id, ngxFile.value.file, kind, kind === 'body' ? bodySizeVal.value : undefined);
     msg.success('快捷配置已生效');
     await loadNginx();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    ngxSaving.value = false;
   }
 }
 async function loadPg() {
@@ -216,6 +223,8 @@ async function load() {
   loadPg();
   loadUnit();
   loadProc();
+  // 带着 running 记录进入/刷新页面时接续轮询，否则部署记录停在打开那一刻
+  if (deps.value.some((d: any) => d.status === 'running')) later(pollDeps, 3000);
 }
 
 async function save() {
@@ -276,7 +285,16 @@ async function pollDeps() {
     deps.value = await api.deployments(id);
   } catch (e: any) {
     msg.error(`部署记录获取失败：${e.message}`);
+    return;
   }
+  // 头部徽标看的是 app.deploying：只换记录列表的话「部署中」要等手动刷新才出现
+  try {
+    app.value = await api.app(id);
+  } catch {
+    /* 保留上一帧，下个周期自动重试 */
+  }
+  // 还有 running 记录就继续轮：部署是后台任务，不轮询用户只能反复点「刷新」才知道跑完了
+  if (deps.value.some((d: any) => d.status === 'running')) later(pollDeps, 5000);
 }
 async function viewDep(depId: number) {
   try {
@@ -297,11 +315,17 @@ async function act(verb: string) {
   }
 }
 async function ssl() {
+  // certbot 是分钟级外部命令，连点会并发跑两个签发进程互相抢同一张证书锁
+  acting.value = 'ssl';
   try {
     await api.appSsl(id, sslEmail.value || undefined);
     msg.success('证书已配置');
+    // 申请成功后后端会把 vhost 改成 HTTPS，nginx 页签的分析结果必须跟着刷新
+    later(loadNginx, 600);
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    acting.value = '';
   }
 }
 function purge() {
@@ -334,6 +358,7 @@ watch(
     proc.value = null;
     depLog.value = null;
     deps.value = [];
+    cancel();   // 切应用时掐掉上一个应用挂着的部署轮询
     load();
   },
 );
@@ -358,7 +383,7 @@ watch(
         <h2 class="ad-title" :title="app.name">{{ app.name }}</h2>
         <CpStatusTag :status="appStatus.status" :text="appStatus.text" class="ad-status" />
       </div>
-      <div class="ad-head-right">
+      <div v-if="isAdmin" class="ad-head-right">
         <NButton size="small" type="primary" round class="cp-press" :loading="acting === 'deploy'" :disabled="!!acting" :icon="ico('CloudUploadOutline')" @click="deploy">立即部署</NButton>
         <NButton v-if="app.repo_url" size="small" tertiary round :loading="acting === 'sync'" :disabled="!!acting || app.deploying" :icon="ico('CloudDownloadOutline')" title="拉取远端最新代码并重启，不重装依赖、不改 unit/反代" @click="sync">一键同步</NButton>
         <NPopconfirm v-if="app.running" @positive-click="act('stop')">
@@ -421,18 +446,19 @@ watch(
       <div v-if="tab === 'config'">
         <NForm label-placement="left" label-width="100" style="max-width: 660px">
           <NSpace vertical :size="12">
-            <NFormItem label="名称"><NInput v-model:value="edit.name" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
-            <NFormItem label="安装目录"><NInput v-model:value="edit.path" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
-            <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" :input-props="{ 'aria-label': 'Git 仓库地址' }" /></NFormItem>
-            <NFormItem label="分支"><NInput v-model:value="edit.branch" :input-props="{ 'aria-label': '分支' }" /></NFormItem>
-            <NFormItem label="安装命令"><NInput v-model:value="edit.install_cmd" :input-props="{ 'aria-label': '安装命令' }" /></NFormItem>
-            <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" /></NFormItem>
-            <NFormItem label="端口"><NInput v-model:value="edit.port" placeholder="留空表示无端口" :input-props="{ 'aria-label': '监听端口' }" /></NFormItem>
-            <NFormItem label="域名"><NInput v-model:value="edit.domain" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
+            <!-- 只读账号：字段保留可读（read-only 不减对比度），写入口不放进来 -->
+            <NFormItem label="名称"><NInput v-model:value="edit.name" :read-only="!isAdmin" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
+            <NFormItem label="安装目录"><NInput v-model:value="edit.path" :read-only="!isAdmin" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
+            <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" :read-only="!isAdmin" :input-props="{ 'aria-label': 'Git 仓库地址' }" /></NFormItem>
+            <NFormItem label="分支"><NInput v-model:value="edit.branch" :read-only="!isAdmin" :input-props="{ 'aria-label': '分支' }" /></NFormItem>
+            <NFormItem label="安装命令"><NInput v-model:value="edit.install_cmd" :read-only="!isAdmin" :input-props="{ 'aria-label': '安装命令' }" /></NFormItem>
+            <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" :read-only="!isAdmin" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" /></NFormItem>
+            <NFormItem label="端口"><NInput v-model:value="edit.port" :read-only="!isAdmin" placeholder="留空表示无端口" :input-props="{ 'aria-label': '监听端口' }" /></NFormItem>
+            <NFormItem label="域名"><NInput v-model:value="edit.domain" :read-only="!isAdmin" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
             <NFormItem label="关联数据库">
-              <NSelect v-model:value="dbSel" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" aria-label="关联数据库" style="width: 100%" />
+              <NSelect v-model:value="dbSel" :disabled="!isAdmin" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" aria-label="关联数据库" style="width: 100%" />
             </NFormItem>
-            <NButton type="primary" size="small" round :loading="saving" :icon="ico('SaveOutline')" @click="save">保存配置</NButton>
+            <NButton v-if="isAdmin" type="primary" size="small" round :loading="saving" :disabled="saving" :icon="ico('SaveOutline')" @click="save">保存配置</NButton>
           </NSpace>
         </NForm>
       </div>
@@ -441,7 +467,7 @@ watch(
         <NSpace vertical :size="12" style="width: 100%">
           <div class="cp-help">写入应用目录的 .env 并由 systemd EnvironmentFile 加载；保存后重启应用生效。</div>
           <!-- 1Panel 的参数抽屉是「只读详情 / 编辑」互斥切换：默认只读，敏感值先遮罩 -->
-          <NButton size="small" tertiary round :icon="ico(envView === 'edit' ? 'EyeOutline' : 'PencilOutline')" style="align-self: flex-start" @click="envView = envView === 'edit' ? 'detail' : 'edit'">
+          <NButton v-if="isAdmin" size="small" tertiary round :icon="ico(envView === 'edit' ? 'EyeOutline' : 'PencilOutline')" style="align-self: flex-start" @click="envView = envView === 'edit' ? 'detail' : 'edit'">
             {{ envView === 'edit' ? '详情' : '编辑' }}
           </NButton>
           <template v-if="envView === 'detail'">
@@ -455,7 +481,7 @@ watch(
                 <NInput v-model:value="value.v" placeholder="value" style="flex: 1" :input-props="{ class: 'mono', 'aria-label': '环境变量值' }" />
               </template>
             </NDynamicInput>
-            <NButton size="small" type="primary" round :icon="ico('SaveOutline')" style="align-self: flex-start" @click="save">保存环境变量</NButton>
+            <NButton size="small" type="primary" round :loading="saving" :disabled="saving" :icon="ico('SaveOutline')" style="align-self: flex-start" @click="save">保存环境变量</NButton>
           </template>
         </NSpace>
       </div>
@@ -508,16 +534,16 @@ watch(
             <NText v-if="ngxFile" depth="3" style="font-size: var(--fs-2xs); display: block; margin-top: var(--space-2); word-break: break-all">{{ ngxFile.file }}</NText>
           </div>
           <div style="flex: 1; min-width: 0">
-            <NSpace size="small" style="margin-bottom: var(--space-3)" wrap>
-              <NButton size="small" tertiary round :disabled="!ngxFile || ngxFile.analysis.websocket" :icon="ico('PulseOutline')" @click="quick('ws')">添加 WebSocket 支持</NButton>
+            <NSpace v-if="isAdmin" size="small" style="margin-bottom: var(--space-3)" wrap>
+              <NButton size="small" tertiary round :disabled="!ngxFile || ngxFile.analysis.websocket || ngxSaving" :loading="ngxSaving" :icon="ico('PulseOutline')" @click="quick('ws')">添加 WebSocket 支持</NButton>
               <NInput v-model:value="bodySizeVal" size="small" style="width: 80px" placeholder="50m" :input-props="{ 'aria-label': '上传大小限制' }" />
-              <NButton size="small" tertiary round :disabled="!ngxFile" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
-              <NButton size="small" tertiary round :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
+              <NButton size="small" tertiary round :disabled="!ngxFile || ngxSaving" :loading="ngxSaving" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
+              <NButton size="small" tertiary round :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect || ngxSaving" :loading="ngxSaving" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
             </NSpace>
-            <NInput v-model:value="ngxContent" type="textarea" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
+            <NInput v-model:value="ngxContent" type="textarea" :read-only="!isAdmin || ngxSaving" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
             <NSpace justify="space-between" align="center" style="margin-top: var(--space-3)">
-              <div class="cp-help">保存将执行 nginx -t 校验，失败自动回滚并 reload 生效</div>
-              <NButton type="primary" size="small" round class="cp-press" :loading="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
+              <div class="cp-help">{{ isAdmin ? '保存将执行 nginx -t 校验，失败自动回滚并 reload 生效' : '只读账号可查看配置，保存与快捷项由管理员操作' }}</div>
+              <NButton v-if="isAdmin" type="primary" size="small" round class="cp-press" :loading="ngxSaving" :disabled="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
             </NSpace>
           </div>
         </div>
@@ -536,15 +562,16 @@ watch(
             type="textarea"
             :autosize="{ minRows: 14, maxRows: 26 }"
             :read-only="!!unitInfo && !unitInfo.managed"
+            :disabled="!isAdmin"
             :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: var(--fs-xs)' }"
           />
           <NSpace justify="space-between" align="center">
             <NSpace size="small">
               <NButton size="small" tertiary round :icon="ico('RefreshOutline')" @click="loadUnit">重新读取</NButton>
-              <NButton v-if="unitInfo?.managed" size="small" tertiary round @click="restoreDefaultTpl">恢复面板默认模板</NButton>
-              <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
+              <NButton v-if="isAdmin && unitInfo?.managed" size="small" tertiary round @click="restoreDefaultTpl">恢复面板默认模板</NButton>
+              <NButton v-if="isAdmin && unitInfo?.managed" size="small" tertiary round type="warning" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
             </NSpace>
-            <NButton type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
+            <NButton v-if="isAdmin" type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed || unitSaving" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
           </NSpace>
         </NSpace>
       </div>
@@ -558,8 +585,8 @@ watch(
           </NSpace>
           <div class="cp-help">要求该域名 DNS A 记录已指向本机 IP。申请成功后自动切换为 HTTPS 反代并开启 80 → 443 跳转。</div>
           <NSpace>
-            <NInput v-model:value="sslEmail" placeholder="邮箱（可选，用于到期通知）" style="width: 300px" :input-props="{ 'aria-label': 'SSL 到期通知邮箱' }" />
-            <NButton type="primary" round :disabled="!app.domain" :icon="ico('KeyOutline')" @click="ssl">申请 / 配置证书</NButton>
+            <NInput v-model:value="sslEmail" :disabled="!isAdmin" placeholder="邮箱（可选，用于到期通知）" style="width: 300px" :input-props="{ 'aria-label': 'SSL 到期通知邮箱' }" />
+            <NButton v-if="isAdmin" type="primary" round :disabled="!app.domain || acting === 'ssl'" :loading="acting === 'ssl'" :icon="ico('KeyOutline')" @click="ssl">申请 / 配置证书</NButton>
           </NSpace>
         </NSpace>
       </div>

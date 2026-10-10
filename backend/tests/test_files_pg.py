@@ -161,6 +161,31 @@ class TestFilesServiceErrors(unittest.TestCase):
         self.assertNotIn("Errno", str(cm.exception))
         self.assertIn("不是文件", str(cm.exception))
 
+    def test_read_text_marks_non_utf8_as_binary(self):
+        """二进制必须标 binary 且不下发内容。
+
+        用 errors="replace" 读的话，图片/zip/db 会显示成一堆 U+FFFD，而网页编辑器的
+        「保存」就是把这份丢失的文本原样写回去——接口返回 200，原文件已经不可恢复。
+        """
+        png = self._p("p.png")
+        Path(png).write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00\x01")
+        r = self.files.read_text(png)
+        self.assertTrue(r["binary"], "含 NUL/非法 UTF-8 字节的文件必须被判定为二进制")
+        self.assertEqual(r["content"], "")
+
+    def test_read_text_marks_utf16_as_binary(self):
+        p = self._p("u16.txt")
+        Path(p).write_bytes("hi".encode("utf-16"))
+        self.assertTrue(self.files.read_text(p)["binary"])
+
+    def test_read_text_keeps_utf8_verbatim(self):
+        p = self._p("cn.txt")
+        body = "# 标题\nok\n"
+        Path(p).write_bytes(body.encode("utf8"))
+        r = self.files.read_text(p)
+        self.assertFalse(r["binary"])
+        self.assertEqual(r["content"], body)
+
     def test_symlink_escape_still_blocked(self):
         """加固项本身不能被这次改动削弱：越界软链接仍要拒绝。"""
         outside = tempfile.mkdtemp(prefix="cp_outside_")
@@ -439,6 +464,27 @@ class TestRedisInfo(unittest.TestCase):
             asyncio.run(pg_service.redis_info())
         self.assertIn("需要密码", str(cm.exception))
 
+
+
+# ------------------------------------------------------------------ Redis key 长度上限
+class TestRedisKeyLimit(unittest.TestCase):
+    """列表侧 SCAN 会返回任意长度的 key，详情侧的上限必须盖得住它们。
+
+    上限比列表短的时候，长 key 在页面上是「列得出来、点不开」，每次点击都固定
+    报「key 不合法」，看起来像 Redis 坏了。
+    """
+
+    def test_key_from_scan_is_viewable(self):
+        k = "app:rosetta:queue:payload:" + "x" * 900
+        self.assertEqual(pg_service._check_key(k), k)
+        self.assertEqual(pg_service._check_key("k" * 2048), "k" * 2048)
+
+    def test_empty_and_absurd_keys_are_rejected(self):
+        for bad in ("", "k" * 2049):
+            with self.subTest(key_len=len(bad)):
+                with self.assertRaises(RuntimeError) as cm:
+                    pg_service._check_key(bad)
+                self.assertIn("key 不合法", str(cm.exception))
 
 
 if __name__ == "__main__":

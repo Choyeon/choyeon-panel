@@ -73,7 +73,19 @@ def read_text(p: str) -> dict:
     st = os.stat(abs_)
     if st.st_size > MAX_FILE_BYTES:
         raise RuntimeError(f"文件超过 {MAX_FILE_BYTES // 1024 // 1024}MB，请用下载")
-    return {"path": abs_, "content": Path(abs_).read_text(encoding="utf8", errors="replace")}
+    raw = Path(abs_).read_bytes()
+    # NUL 在文本文件里几乎不出现，但 UTF-16 源码和多数二进制都有；按二进制处理，
+    # 免得编辑器显示成「一串空字符」后又被当成合法内容保存回去。
+    text: str | None = None
+    if b"\x00" not in raw:
+        try:
+            # 严格解码：只有真的是 UTF-8 文本才交给编辑器。用 errors="replace" 的话，
+            # 图片/zip/db 会被显示成一堆 U+FFFD，而「保存」就是把这份丢失的文本写回去，
+            # 原文件不可恢复。判不出编码的二进制一律不下发内容，让前端走下载。
+            text = raw.decode("utf8")
+        except UnicodeDecodeError:
+            text = None
+    return {"path": abs_, "content": text if text is not None else "", "binary": text is None}
 
 
 def write_text(p: str, content: str | bytes) -> dict:

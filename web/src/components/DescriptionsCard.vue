@@ -6,6 +6,7 @@
 import { computed, ref } from 'vue';
 import { NButton } from '../ui';
 import { icon } from '../icons';
+import { useCopy } from '../composables/useCopy';
 
 export interface DescItem {
   label: string;
@@ -32,13 +33,7 @@ const emit = defineEmits<{ openSlot: [name: string] }>();
 const shown = ref<Record<string, boolean>>({});
 const grid = computed(() => `grid-template-columns: ${props.labelWidth} minmax(0, 1fr)`);
 
-async function copy(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    /* 无剪贴板权限（http 上下文）时静默失败即可，值本身就在页面上 */
-  }
-}
+const { copy } = useCopy();
 </script>
 
 <template>

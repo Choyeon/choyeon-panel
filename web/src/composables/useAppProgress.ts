@@ -67,7 +67,15 @@ export function endChunk() {
 
 export function chunkFailed() {
   if (chunks > 0) chunks--;
-  endRequest(false);
+  // 不能复用 endRequest(false)：那会再减一次 requests，把另一个仍在飞的请求的
+  // 名额吃掉，条子提前收尾，真请求返回时既不亮红也不再更新。
+  if (bar && requests + chunks === 0) {
+    running = false;
+    bar.error();
+    bar.finish();
+    return;
+  }
+  sync();
 }
 
 /** 探针 / 调试用快照 */
