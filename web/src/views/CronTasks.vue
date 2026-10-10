@@ -20,7 +20,9 @@ type Task = {
   id: number; name: string; expr: string; enabled: number; last_run: string; last_status: string;
   log_tail: string; cmd: string; human: string; expr_error: boolean; timer: string;
   timer_active: boolean; timer_next: string; timer_unit_state: string; argv_list: string[];
+  running: boolean; last_source: string;
 };
+type RunLog = { unit: string; source: string; start: string; status: string; log: string };
 type Options = { allowed: string[]; presets: any[]; units: string[]; note: string };
 type Preview = { expr: string; human: string; oncalendar: string | null; error: string | null };
 
@@ -35,6 +37,10 @@ const options = ref<Options>({ allowed: [], presets: [], units: [], note: '' });
 const showForm = ref(false);
 const editing = ref<Task | null>(null);
 const logRow = ref<Task | null>(null);
+// 抽屉内容一律来自 GET /cron/{id}/log，而不是列表行里带的 log_tail：面板库里的尾巴只有
+// 手动执行写得出，被定时器唤醒的那一轮在 journald 里，只读 log_tail 会把"天天在跑"显示成"从未执行"。
+const logData = ref<RunLog | null>(null);
+const logLoading = ref(false);
 
 // 预设里只有 `choyeonctl logs` 带一个可调参数（尾读行数）。白名单接受
 // `logs --lines N` 和 `logs --lines=N`，但 logs 后面挂第二个参数就会被拒，
@@ -218,12 +224,29 @@ async function runNow(r: Task) {
   err.value = '';
   try {
     const res = await req(`/cron/${r.id}/run`, { body: {}, timeout: 660000 });
-    logRow.value = { ...r, last_status: res?.status || '', log_tail: res?.log || '' };
+    // 手动这一轮由面板当场捕获输出，直接放进抽屉，不必再回读 journald（那里没有它）
+    logData.value = { unit: '', source: 'stored', start: '', status: res?.status || '', log: res?.log || '' };
+    logRow.value = r;
     await reload();
   } catch (e: any) {
     err.value = e.message || String(e);
   } finally {
     runningId.value = null;
+  }
+}
+
+async function openLog(r: Task) {
+  logRow.value = r;
+  logData.value = null;
+  logLoading.value = true;
+  err.value = '';
+  try {
+    logData.value = (await req(`/cron/${r.id}/log`, { timeout: 30000 })) as RunLog;
+  } catch (e: any) {
+    err.value = e.message || String(e);
+    logRow.value = null;
+  } finally {
+    logLoading.value = false;
   }
 }
 
@@ -266,9 +289,12 @@ function lastRunCell(r: Task) {
   // 成功用 --cp-ok（和其它页的"正常"同源）；--cp-node 是给节点/chip 用的另一套绿，
   // 混在这里会出现"同一个意思两种绿"。
   const color = !s ? 'var(--cp-text-mute)' : s === 'ok' ? 'var(--cp-ok)' : 'var(--cp-err)';
+  // 来源必须标出来：timer 那一轮的结果是 systemd 报的（退出码来自 unit），面板库里并没有这行
+  const src = r.last_source === 'timer' ? '·定时' : r.last_source === 'manual' ? '·手动' : '';
+  const text = r.running ? '执行中…' : r.last_run ? fmtDateTime(r.last_run) + src : '—';
   return h('div', { class: 'cell-lastrun' }, [
     h(NIcon, { component: icons[icoName], size: 14, color }),
-    h('span', { class: 'mono-dim', title: r.last_run ? `${r.last_run} (本地)` : '' }, r.last_run ? fmtDateTime(r.last_run) : '—'),
+    h('span', { class: 'mono-dim', title: r.last_run ? `${r.last_run} (本地)${src}` : '' }, text),
   ]);
 }
 
@@ -323,12 +349,13 @@ const cols: any[] = [
       ellipsis: 3,
       // 顺序是 [执行, 输出, 编辑, 删除]：CpRowActions 平铺前 3 个、剩下的收进「更多」，
       // 删除（唯一不可逆的那个）正好落在菜单里，需要多点一下确认。
-      // 「输出」读的是列表已经带回的 log_tail，只读账号也能看，所以它对所有人都摆在明面上。
+      // 「输出」不限角色：它只读。这一组接口后端本来就只给 admin（列表带完整命令行与
+      // 输出），viewer 拿不到数据，所以这里的差别只在于「执行/编辑/删除」三个写操作。
       buttons: [
         ...(isAdmin ? [
-          { label: runningId.value === r.id ? '执行中…' : '执行', run: () => runNow(r), disabled: runningId.value !== null },
+          { label: runningId.value === r.id ? '执行中…' : '执行', run: () => runNow(r), disabled: runningId.value !== null || r.running },
         ] : []),
-        { label: '输出', run: () => { logRow.value = r; }, disabled: !r.log_tail && !r.last_run },
+        { label: '输出', run: () => openLog(r), disabled: !r.last_run && !r.running },
         ...(isAdmin ? [
           { label: '编辑', run: () => openEdit(r) },
           { label: '删除', danger: true, run: () => confirmDel(r) },
@@ -448,17 +475,18 @@ const cols: any[] = [
       </NSpace>
     </NModal>
 
-    <NDrawer :show="!!logRow" :width="'50%'" @update:show="(v: boolean) => { if (!v) logRow = null; }">
+    <NDrawer :show="!!logRow" :width="'50%'" @update:show="(v: boolean) => { if (!v) { logRow = null; logData = null; } }">
       <NDrawerContent :title="`最近一次输出 - ${logRow?.name || ''}`" closable>
         <NSpace vertical :size="10" style="width: 100%">
           <DescriptionsCard
             :items="[
-              { label: '开始时间', value: logRow?.last_run ? fmtDateTime(logRow.last_run) : '未执行' },
-              { label: '状态', value: logRow?.last_status || '未执行' },
+              { label: '开始时间', value: logData?.start ? fmtDateTime(logData.start) : (logLoading ? '读取中…' : '未执行') },
+              { label: '状态', value: logData?.status || '—' },
+              { label: '来源', value: logData?.source === 'journal' ? 'systemd timer（journald）' : logData?.source === 'stored' ? '面板手动执行记录' : '—' },
             ]"
           />
-          <NAlert type="warning" :bordered="false" size="small">服务端已对口令/连接串做脱敏，并且只保留最后 4KB。</NAlert>
-          <pre class="cr-log mono">{{ logRow?.log_tail || '（无输出）' }}</pre>
+          <NAlert type="warning" :bordered="false" size="small">服务端已对口令/连接串做脱敏；面板手动执行的记录只保留最后 4KB，定时器那一轮读的是 journald。</NAlert>
+          <pre class="cr-log mono">{{ logLoading ? '读取中…' : (logData?.log || '（无输出）') }}</pre>
         </NSpace>
       </NDrawerContent>
     </NDrawer>

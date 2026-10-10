@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import os
 import re
 import shutil
 import time
@@ -481,12 +483,106 @@ async def list_tasks() -> list[dict]:
     rows = await aio_db.query("SELECT * FROM cron_task ORDER BY id")
     items = [_row_out(r) for r in rows]
     states = await _timer_states([i["timer"] for i in items])
+    results = await _unit_results([_unit_base(i["id"]) for i in items])
     for i in items:
         st = states.get(i["timer"]) or {}
         i["timer_active"] = bool(st.get("active", False))
         i["timer_next"] = st.get("next", "")
         i["timer_unit_state"] = st.get("enabled", "")
+        _merge_last_run(i, results.get(_unit_base(i["id"])) or {})
     return items
+
+
+def _merge_last_run(item: dict, res: dict) -> None:
+    """把 systemd 记录的那次执行并进列表行，比库里的 last_run 新就覆盖它。
+
+    只有 run_now 会写 cron_task.last_run，而绝大多数任务是被 timer 唤醒的：不读 systemd
+    的话界面长期显示"未执行"或几周前手动那一次，而定时器其实天天在跑。
+    `last_source` 如实说明这条结果来自哪一侧（timer 跑的输出在 journald 里，见 run_log）。
+    """
+    item["running"] = bool(res.get("running"))
+    item["last_source"] = "manual" if item.get("last_run") else ""
+    if not res.get("start") or not res.get("status"):
+        return
+    if (item.get("last_run") or "") >= res["start"]:
+        return
+    item["last_run"] = res["start"]
+    item["last_status"] = res["status"]
+    item["last_source"] = "timer"
+
+
+def _parse_show(text: str) -> list[dict]:
+    """`systemctl show` 多单元输出 → 每个单元一个 dict。
+
+    块之间用空行分隔，而**属性顺序由 systemd 自己决定**：实测
+    NextElapseUSecRealtime 排在 Id 之前，所以"看到 Id 才开始收属性"的写法
+    会把下次执行时间整列丢掉（这块真在生产上红过：Timer 列永远显示"未取到"）。
+    """
+    blocks: list[dict] = []
+    cur: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            if cur:
+                blocks.append(cur)
+            cur = {}
+            continue
+        key, sep, val = line.partition("=")
+        if sep:
+            cur[key.strip()] = val.strip()
+    if cur:
+        blocks.append(cur)
+    return blocks
+
+
+_TS_DROP_RE = re.compile(r"^(?:\w{3}\s+)?(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+
+
+def _local_ts(raw: str) -> str:
+    """systemd 的 `Sun 2026-10-11 03:30:10 CST` → `2026-10-11 03:30:10`（本机本地时间）。
+
+    与 run_now 写库的 time.strftime 同格式，前端 fmtDateTime 才不用区分两种来源。
+    """
+    m = _TS_DROP_RE.match(raw or "")
+    return m.group(1) if m else ""
+
+
+def _exec_result(block: dict) -> str:
+    """systemd 的 Result + ExecMainStatus → 面板用的状态串（与 run_now 同词汇）。"""
+    if not _local_ts(block.get("ExecMainStartTimestamp", "")):
+        return ""
+    result = block.get("Result", "")
+    if block.get("ExecMainStatus") == "0" and result in ("success", ""):
+        return "ok"
+    if result == "timeout":
+        return "timeout"
+    code = block.get("ExecMainStatus", "")
+    if code.isdigit() and code != "0":
+        return f"exit {code}"
+    return f"result {result or 'failed'}"
+
+
+async def _unit_results(bases: list[str]) -> dict[str, dict]:
+    """每个 panel-cron-N.service 最近一次执行的时间/退出码/是否正在跑。"""
+    if not bases:
+        return {}
+    r = await run(
+        "systemctl",
+        ["show", "-p", "Id", "-p", "ActiveState", "-p", "ExecMainStartTimestamp",
+         "-p", "ExecMainStatus", "-p", "Result", *[f"{b}.service" for b in bases]],
+        timeout=10,
+    )
+    out: dict[str, dict] = {}
+    for block in _parse_show(r["out"]):
+        uid = block.get("Id", "")
+        if not uid.endswith(".service"):
+            continue
+        start = _local_ts(block.get("ExecMainStartTimestamp", ""))
+        out[uid[: -len(".service")]] = {
+            "start": start,
+            "status": _exec_result(block),
+            "running": block.get("ActiveState") == "active",
+        }
+    return out
 
 
 async def _timer_states(units: list[str]) -> dict:
@@ -502,31 +598,51 @@ async def _timer_states(units: list[str]) -> dict:
         ["show", "-p", "Id", "-p", "ActiveState", "-p", "UnitFileState", "-p", "NextElapseUSecRealtime", *units],
         timeout=10,
     )
-    if not r["out"]:
-        return {}
     out: dict[str, dict] = {}
-    cur: dict | None = None
-    for line in r["out"].split("\n"):
-        if not line.strip():
-            cur = None
+    for block in _parse_show(r["out"]):
+        uid = block.get("Id", "")
+        if not uid:
             continue
-        key, sep, val = line.partition("=")
-        if not sep:
-            continue
-        val = val.strip()
-        if key == "Id":
-            cur = {"active": False, "next": "", "enabled": ""}
-            out[val] = cur
-            continue
-        if cur is None:
-            continue
-        if key == "ActiveState":
-            cur["active"] = val == "active"
-        elif key == "UnitFileState":
-            cur["enabled"] = val
-        elif key == "NextElapseUSecRealtime" and val not in ("n/a", "infinity"):
-            cur["next"] = val
+        nxt = block.get("NextElapseUSecRealtime", "")
+        out[uid] = {
+            "active": block.get("ActiveState") == "active",
+            "next": "" if nxt in ("n/a", "infinity") else nxt,
+            "enabled": block.get("UnitFileState", ""),
+        }
     return out
+
+
+async def run_log(tid: int) -> dict:
+    """读某条任务最近一次执行的输出，来源取"时间上更新的那一侧"。
+
+    手动执行由面板自己捕获输出并写进 log_tail，timer 唤醒的那一轮不经过面板、
+    输出只在 journald 里。两边各自只知道自己的最后一次，所以必须比时间：
+    刚手动跑完就去看 journald，读到的是上一次定时器那轮，等于答非所问。
+    `--since` 卡在这次启动的时间点上，否则 -n 会把历史几十轮一起倒回来。
+    """
+    row = await aio_db.query_one("SELECT log_tail, last_run, last_status FROM cron_task WHERE id=?", (tid,))
+    if not row:
+        raise NotFound("定时任务不存在")
+    base = _unit_base(tid)
+    res = (await _unit_results([base])).get(base) or {}
+    stored = {"unit": f"{base}.service", "source": "stored", "start": row["last_run"] or "",
+              "status": row["last_status"] or "", "log": redact_creds(row["log_tail"] or "")}
+    if not res.get("start") or (row["last_run"] or "") >= res["start"]:
+        return stored
+    args = ["-u", f"{base}.service", "--no-pager", "-o", "cat", "-n", "400", "--since", res["start"]]
+    r = await run("journalctl", args, timeout=20)
+    text = redact_creds(r["out"] or "")
+    if r["code"] != 0 and not text.strip():
+        # 无 systemd / 无权限的机器上 journalctl 会整段失败，退回库里那份而不是显示空白；
+        # 时间取 systemd 的（它更新），状态取它的退出码，输出只能是库里那份。
+        return {**stored, "start": res["start"], "status": res["status"] or stored["status"]}
+    return {
+        "unit": f"{base}.service",
+        "source": "journal",
+        "start": res.get("start", ""),
+        "status": res.get("status", ""),
+        "log": text[-LOG_TAIL_BYTES * 2:],
+    }
 
 
 def _spec_or_bad(expr: object) -> str:
@@ -606,6 +722,30 @@ async def run_now(tid: int, actor: str = "system") -> dict:
     if not row:
         raise NotFound("定时任务不存在")
     argv = _validate_argv(json.loads(row["argv"] or "[]"))
+    # 两道闸各挡一种重叠：systemd 那条挡"timer 正在跑这一轮"，文件锁挡"两个管理员同时点"。
+    # 重叠跑 `choyeonctl backup run` 会写出两份备份、pg_dump 会互相挤，出错的还是数据库。
+    base = _unit_base(tid)
+    if (await _unit_results([base])).get(base, {}).get("running"):
+        raise BadInput("定时器正在执行这个任务，请等这一轮结束后再手动执行")
+    lock = _lock_path(tid)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise BadInput("这个任务正在执行中（上一次还没跑完），请等它结束") from None
+    try:
+        return await _exec_task(tid, row, argv, actor)
+    finally:
+        os.close(fd)  # 关描述符即释放锁
+
+
+def _lock_path(tid: int) -> Path:
+    return Path(config.DATA_DIR, "cron", f"{tid}.lock")
+
+
+async def _exec_task(tid: int, row: dict, argv: list[str], actor: str) -> dict:
     started = time.time()
     code, raw, timed_out = 0, b"", False
     try:

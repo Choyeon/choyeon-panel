@@ -253,6 +253,58 @@ async def _check_cert_renewal() -> dict:
     }
 
 
+# 第三项是「库里哪些行**应该**在盘上有 unit」的判据：备份走 schedule/hour/minute，
+# 定时任务只看 enabled。把 manual 备份和禁用任务算成"单元缺失"会变成永久性误报。
+_TIMER_KINDS = (
+    ("panel-cron", "cron_task", "enabled=1"),
+    ("panel-backup", "backups", "enabled=1 AND schedule!='manual'"),
+)
+
+
+async def _check_timer_units() -> dict:
+    """盘上的 panel-cron-* / panel-backup-* 单元必须和库里的行一一对应。
+
+    本机实测残留过一对没有主人的 panel-cron timer（早期把 unit 目录写死成
+    /etc/systemd/system 的测试留下的），它每 5 分钟真的执行一次 certbot renew：
+    unit 文件在盘上就是 systemd 的事实，而面板的列表只读数据库，
+    于是多出一个既看不见也关不掉的定时器。反方向同样要紧——库里的任务开着、
+    unit 却没了（恢复备份、手工删文件），界面显示"已挂表"但它永远不会跑。
+    """
+    unit_dir = Path(config.UNIT_DIR)
+    if not unit_dir.is_dir():
+        return {"status": "pass", "detail": "本机无 systemd 单元目录，跳过定时器对账", "fix": ""}
+    orphans: list[str] = []
+    missing: list[str] = []
+    wants = unit_dir / "timers.target.wants"
+    for prefix, table, should_have in _TIMER_KINDS:
+        # 表名与条件都来自上面的常量，不来自请求
+        rows = await aio_db.query(f"SELECT id FROM {table} WHERE {should_have}")
+        ids = {str(r["id"]) for r in rows}
+        on_disk = set()
+        for p in glob.glob(str(unit_dir / f"{prefix}-*.timer")):
+            stem = Path(p).name[: -len(".timer")]
+            tid = stem.rsplit("-", 1)[-1]
+            on_disk.add(tid)
+            if tid not in ids:
+                live = "（仍在按计划执行）" if (wants / f"{stem}.timer").exists() else ""
+                orphans.append(f"{stem}.timer{live}")
+        for tid in sorted(ids - on_disk):
+            missing.append(f"{prefix}-{tid}")
+    if orphans or missing:
+        parts = []
+        if orphans:
+            parts.append("没有对应任务的残留单元：" + "、".join(sorted(orphans)[:6]))
+        if missing:
+            parts.append("已启用但单元文件不存在：" + "、".join(sorted(missing)[:6]))
+        fix = "；".join(
+            f"systemctl disable --now {o.split('（')[0]} && rm -f {unit_dir}/{o.split('（')[0]} "
+            f"{unit_dir}/{o.split('（')[0].replace('.timer', '.service')}"
+            for o in sorted(orphans)[:6]
+        ) or "在对应页面重新保存一次任务（面板会重新渲染 unit）"
+        return {"status": "warn", "detail": "；".join(parts), "fix": fix}
+    return {"status": "pass", "detail": "定时器单元与任务记录一一对应", "fix": ""}
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -265,11 +317,14 @@ _CHECKS = [
     ("permissions", "文件权限", _check_permissions),
     ("cli", "全局 CLI", _check_cli),
     ("cert-renew", "证书续期", _check_cert_renewal),
+    ("timer-units", "定时器对账", _check_timer_units),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
 # firewall（可能锁死 SSH）、nginx（要人先看报错）、listen/admin/disk
 # 都需要人来决策，不提供按钮，只给可复制的命令。
+# timer-units 也不放：删 unit 文件等于删掉一个可能正在按计划执行的定时器，
+# 先要人确认它到底属于哪一行任务。
 FIXABLE = {"cli", "permissions", "service", "frontend"}
 
 

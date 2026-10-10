@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | **CLI `choyeonctl`** | `backend/cli.py` + `bin/choyeonctl` | `deploy / upgrade / status / doctor / user / app / backup / start·stop·restart / logs / schema`；全命令支持 `--json`；退出码 `0/1/2/3`；`schema` 输出机器可读契约 |
 | **部署模板** | `backend/app/templates.py` | `node-service`、`node-next`、`python-fastapi`、`static-site`；网页端与 CLI 共用，显式传参优先于模板 |
-| **就绪探针 + 自检** | `backend/app/routers/meta.py` | `/api/ready`（就绪，库不可用返 503，免认证）、`/api/templates`、`/api/doctor`（11 项只读自检，每项带修复命令；含「证书续期是否真有人托管」——装了 certbot ≠ 会自动续期） |
+| **就绪探针 + 自检** | `backend/app/routers/meta.py` | `/api/ready`（就绪，库不可用返 503，免认证）、`/api/templates`、`/api/doctor`（12 项只读自检，每项带修复命令；含「证书续期是否真有人托管」——装了 certbot ≠ 会自动续期） |
 | **自检页** | `web/src/views/Doctor.vue` | 圆环进度 + 逐项卡片 + 一键复制修复命令；stagger 入场动画、骨架屏 |
 | **动效令牌** | `web/src/style.css` | `cp-rise`（stagger 上浮）、`cp-shimmer`（骨架微光）、`cp-pop`、`cp-press`；`prefers-reduced-motion` 自动降级 |
 | **AI 部署规则** | `AGENTS.md` | 前置条件 → 三步部署（每步验收字段）→ 交付信息 → 命令契约 → 失败处置表 → 8 条硬性禁止事项 |

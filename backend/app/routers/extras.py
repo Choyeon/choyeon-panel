@@ -262,6 +262,8 @@ async def alerts_run_checks(req: Request):
     if r := _need_admin(req):
         return r
     await alerts_service.run_checks()
+    # 手动跑一轮巡检会真的发通知，事后必须查得到是谁在什么时候点过
+    await aio_db.audit(req.state.cp_sub, "settings:alert-checks", "manual")
     return {"ok": True}
 
 

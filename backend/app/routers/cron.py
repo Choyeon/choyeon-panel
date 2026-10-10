@@ -108,3 +108,15 @@ async def cron_run(tid: str, req: Request):
         return await cron_service.run_now(_tid(tid), actor=req.state.cp_sub)
     except Exception as e:  # noqa: BLE001
         return err_json(e, log_tag="cron:run")
+
+
+@router.get("/api/cron/{tid}/log")
+async def cron_log(tid: str, req: Request):
+    """最近一次执行的输出。timer 唤醒的那一轮不经过面板，只在 journald 里，
+    列表带回的 log_tail 是上一次手动执行的，两者不是一回事，所以单独开一个读接口。"""
+    if r := need_admin(req):
+        return r
+    try:
+        return await cron_service.run_log(_tid(tid))
+    except Exception as e:  # noqa: BLE001
+        return err_json(e, log_tag="cron:log")

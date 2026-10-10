@@ -12,6 +12,8 @@
 4. 历史与通知是两条独立的线：历史每轮去重后落库（含恢复的 ok 行），通知按
    `sent:<key>` 做当日去重，资源阈值还要连续两轮超标才发。
    任何"为了少发通知而少记历史"的改动都会让网页端的告警列表失明。
+5. 发过告警的对象必须发一条「已恢复」（`notified:<code>` 标记）：只有告警没有
+   下文的通道，会逼着人反复登录面板确认，很快就被当成噪音忽略。
 """
 
 import asyncio
@@ -173,13 +175,23 @@ async def _check(key: str, trigger: bool, message: str, *, code: str | None = No
     数值同时进 meta，展开最新一条就能看到。
 
     `debounce` > 1 时，前若干轮只落历史不推送，避免瞬时尖峰变成通知噪音。
+
+    恢复也要推送：`notified:<code>` 记的是"这个对象发过告警通知"，恢复时据此
+    发一条「已恢复」并清掉标记。没有这条的话，用户收到"磁盘 91%"之后永远等不到
+    下文，只能自己登录面板确认——而收到告警的人恰恰是不会天天开面板的人。
     """
     log_code = code or key
     if not trigger:
         if debounce > 1:
             _streak(log_code, False)
-        if ok_message is not None:
-            await record("ok", log_code, ok_message, meta)
+        if ok_message is None:
+            return
+        # record 返回 None = 与上一条 ok 完全相同（已恢复过），不重复发恢复通知
+        if await record("ok", log_code, ok_message, meta) is None:
+            return
+        if dbm.get_setting("notified:" + log_code):
+            dbm.set_setting("notified:" + log_code, "")
+            await notify(f"已恢复：{ok_message}")
         return
     await record(level, log_code, message if log_message is None else log_message, meta)
     if debounce > 1 and _streak(log_code, True) < debounce:
@@ -189,6 +201,7 @@ async def _check(key: str, trigger: bool, message: str, *, code: str | None = No
     # 只有真投递成功才标记"今天已发"，否则本次告警当天不会再重试
     if await notify(message):
         dbm.set_setting("sent:" + key, _today())
+        dbm.set_setting("notified:" + log_code, _today())
 
 
 # systemctl 输出的第一列一定是「带类型后缀的单元名」，正文不是。
