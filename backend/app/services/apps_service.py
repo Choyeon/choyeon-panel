@@ -506,12 +506,21 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
     renamed = old["name"] != new_app["name"]
     # 改名前没在跑的应用不该被改名"顺手启动"，所以先记下状态再拆
     was_active = await is_active(unit_name(old))
+    # vhost 文件名跟着 name 变，所以"建新"与"拆旧"的先后决定站点断多久：
+    # 先拆旧的，一旦新的 nginx -t 不过（域名填错、证书路径没了），旧文件已经没了，
+    # 站点当场下线，界面却只剩一句"下次部署会补上"。只有新记录里确实有一份
+    # 可接替的 vhost 时才把拆旧推迟到建好之后；其余情况必须当场拆，
+    # 否则留下指向死端口 / 已改名应用的孤儿 server 块。
+    will_apply_vhost = bool(
+        not new_app.get("unit_override") and new_app.get("domain") and new_app.get("port")
+    )
     if renamed:
         # 只拆不建是一半问题，只建不拆是另一半：旧 unit 带 Restart=always 会继续
         # 占着端口、旧站点还在把域名转过去，而面板记录里已经没有这个名字，
         # 界面上再也管不到这两个孤儿。
         await remove_unit(old)
-        await nginx_ops.remove_vhost(old["name"])
+        if not will_apply_vhost:
+            await nginx_ops.remove_vhost(old["name"])
     if new_app.get("unit_override"):
         out["applied"] = False
         out["note"] = "外部 unit：unit 与环境变量文件不由面板写入，本次只改了记录"
@@ -523,9 +532,20 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
             await nginx_ops.apply_vhost(
                 {"name": new_app["name"], "domain": new_app["domain"], "port": new_app["port"]}
             )
+            if renamed:
+                try:
+                    await nginx_ops.remove_vhost(old["name"])
+                except Exception as e:  # noqa: BLE001
+                    # 新配置已经在服务了，旧文件删不掉是"多一份残留"，不是"没生效"，
+                    # 所以这里只追加说明，不把整次保存判成失败。
+                    out["note"] = f"新的反向代理已生效，但旧配置文件没能删除：{str(e)[:120]}"
         elif old.get("domain") and not renamed:
             # 域名被清空、或只剩域名没有端口：留着那个 server 块就是一个指向死端口的 502
             await nginx_ops.remove_vhost(new_app["name"])
+    except nginx_ops.DomainOwnedElsewhere as e:
+        out["applied"] = False
+        out["note"] = f"配置已保存，但该域名的反向代理仍由别处的文件托管，面板没有覆盖：{str(e)[:180]}"
+        return out
     except Exception as e:  # noqa: BLE001
         out["applied"] = False
         out["note"] = f"配置已保存，但没能同步到 systemd/nginx：{str(e)[:160]}（下次部署会补上）"
@@ -999,7 +1019,13 @@ async def _run_deployment(app: dict, dep_id: int):
         if app["domain"]:
             if app["port"]:
                 _append_log(dep_id, f"==> 应用 nginx 反代 {app['domain']} -> 127.0.0.1:{app['port']}")
-                await nginx_ops.apply_vhost({"name": app["name"], "domain": app["domain"], "port": app["port"]})
+                try:
+                    await nginx_ops.apply_vhost({"name": app["name"], "domain": app["domain"], "port": app["port"]})
+                except nginx_ops.DomainOwnedElsewhere as e:
+                    # 域名已经写在别处（比如手工维护的 sites-enabled 配置）：不覆盖，
+                    # 也不为了这件"面板不托管"的事把跑了几分钟的部署判成失败。
+                    # 但必须留下这一行——否则用户看到"部署完成"，域名行为却和面板无关。
+                    _append_log(dep_id, f"!!> {e}")
             else:
                 # 反代必须知道往哪个端口转，缺端口就只能不配；不写这一行的话
                 # 用户只看到"部署完成"，域名却始终打不开，无从猜起是证书还是应用的问题。

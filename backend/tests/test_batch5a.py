@@ -153,7 +153,7 @@ class TestAdminCheckCountsAdmins(unittest.TestCase):
 
 
 class TestRemoveVhostFailsLoudly(unittest.TestCase):
-    """配置文件删了但 nginx 没通过校验：不能静默返回 ok。"""
+    """配置文件删了但 nginx 没通过校验：不能静默返回 ok，也不能把用户的站点删没。"""
 
     def setUp(self):
         # CONF_DIR 在 import 时绑成了 /etc/nginx/conf.d，测试必须指到临时目录，
@@ -164,24 +164,28 @@ class TestRemoveVhostFailsLoudly(unittest.TestCase):
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
 
-    def _vhost(self, name):
+    def _vhost(self, name, content="server {};\n"):
         path = Path(nginx_ops.vhost_path(name))
-        path.write_text("server {};\n")
+        path.write_text(content)
         return path
 
-    def test_raises_when_nginx_test_fails(self):
+    def test_restores_file_when_nginx_test_fails(self):
+        # 校验不过的原因通常在别处（另一个文件引用了本文件的 upstream，或机器上本来
+        # 就有坏配置）。旧实现删了就删了：调用方收到 400，界面显示"移除失败"，
+        # 而那份保住域名的配置已经没了，下一次 reload 站点直接下线。
         name = f"roll{os.getpid()}"
-        path = self._vhost(name)
+        path = self._vhost(name, "# 保留我\nserver {};\n")
 
         async def fake_run(cmd, args, **_kw):
-            code = 1 if (cmd == "nginx" or args[:1] == ["reload"]) else 0
-            return {"code": code, "out": 'nginx: [emerg] unknown directive in /etc/nginx/nginx.conf:20', "err": ""}
+            code = 1 if cmd == "nginx" else 0
+            return {"code": code, "out": 'nginx: [emerg] unknown directive in /etc/nginx/nginx.conf:20'}
 
         with mock.patch.object(nginx_ops, "run", fake_run):
             with self.assertRaises(RuntimeError) as ctx:
                 asyncio.run(nginx_ops.remove_vhost(name))
-        self.assertIn("nginx 校验未通过", str(ctx.exception))
-        self.assertFalse(path.exists(), "报错时文件确实已经删除，调用方要按此说明状态")
+        self.assertIn("恢复", str(ctx.exception))
+        self.assertTrue(path.exists(), "校验不过必须把文件放回去，域名照旧由它服务")
+        self.assertEqual(path.read_text(), "# 保留我\nserver {};\n")
 
     def test_reloads_when_config_is_valid(self):
         name = f"good{os.getpid()}"
@@ -190,21 +194,33 @@ class TestRemoveVhostFailsLoudly(unittest.TestCase):
 
         async def fake_run(cmd, args, **_kw):
             calls.append(" ".join([cmd, *args]))
-            return {"code": 0, "out": "syntax is ok", "err": ""}
+            return {"code": 0, "out": "syntax is ok"}
 
         with mock.patch.object(nginx_ops, "run", fake_run):
             asyncio.run(nginx_ops.remove_vhost(name))
         self.assertIn("systemctl reload nginx", calls)
 
+    def test_reload_failure_is_reported_not_swallowed(self):
+        # 删除已经落盘、nginx -t 也过了，但 reload 失败：nginx 仍按内存里的旧配置服务。
+        # 旧写法 `await run(...)` 直接丢掉返回值，接口回 ok，界面显示"已移除"，
+        # 域名照旧可访问，直到下一次成功 reload 才暴露。
+        name = f"badreload{os.getpid()}"
+        path = self._vhost(name)
+
+        async def fake_run(cmd, args, **_kw):
+            return {"code": 1, "out": "nginx is not running"} if cmd == "systemctl" else {"code": 0, "out": "ok"}
+
+        with mock.patch.object(nginx_ops, "run", fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(nginx_ops.remove_vhost(name))
+        self.assertIn("重载失败", str(ctx.exception))
+        self.assertFalse(path.exists(), "这一步不回收文件：配置是对的，nginx 一起来就按新配置走")
+
 
 class TestSiteRemoveReportsFailedReload(unittest.TestCase):
-    """删除站点时 nginx 校验失败必须回 400，不能让界面显示"已移除"。"""
+    """删除站点这一步失败必须回 400，不能让界面显示"已移除"。"""
 
-    def test_returns_400_with_honest_wording(self):
-        # 生产里 remove_vhost 抛的就是这句：文件已删、面板没 reload、附上 nginx 原文
-        msg = ('配置已删除，但 nginx 校验未通过，面板没有重载（该域名可能仍在按旧配置提供服务）：'
-               'nginx: [emerg] open() "/etc/nginx/conf.d/panel-x.conf" failed (2: No such file or directory)')
-
+    def _remove_with(self, msg: str):
         async def _boom(*_a, **_kw):
             raise RuntimeError(msg)
 
@@ -218,9 +234,23 @@ class TestSiteRemoveReportsFailedReload(unittest.TestCase):
             r = asyncio.run(sites.site_remove(app["id"], _req()))
         self.assertEqual(r.status_code, 400)
         body = r.body.decode()
-        self.assertNotIn("/etc/nginx", body)
+        self.assertNotIn("/etc/nginx", body, "本机绝对路径不出接口")
+        return body
+
+    def test_restored_file_is_described_as_restored(self):
+        # nginx -t 因别的原因不过时，remove_vhost 会把配置放回去：文案必须说"恢复了"，
+        # 说成"已移除"或"删了没恢复"都让人无法判断站点现在到底是谁在服务。
+        body = self._remove_with(
+            'nginx 校验未通过，已把该域名的配置恢复回去（面板没有重载，站点仍按原配置提供服务）：'
+            'nginx: [emerg] host not found in upstream "x" in /etc/nginx/conf.d/other.conf:3')
+        self.assertIn("恢复", body)
+
+    def test_deleted_but_not_reloaded_is_not_reported_as_rollback(self):
+        # 校验通过、reload 失败：文件确实没了，这时说"已回滚该文件"就是反话
+        body = self._remove_with(
+            '配置已删除，但 nginx 校验通过、重载失败（该域名可能仍在按旧配置提供服务）：'
+            'Failed to reload nginx.service: Unit nginx.service is not active')
         self.assertIn("配置已删除", body)
-        # 删除场景没有回滚：说"已回滚该文件"会让人以为旧 vhost 还在，实际文件已经没了
         self.assertNotIn("已回滚", body)
 
 

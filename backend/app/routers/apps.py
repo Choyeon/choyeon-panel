@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -214,12 +216,18 @@ async def _nginx_scope(a: dict) -> tuple:
 
 
 @router.get("/api/apps/{app_id}/nginx")
-async def app_nginx(app_id: int):
+async def app_nginx(app_id: int, req: Request):
     a = apps_service.get_app(app_id)
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
     port, domain = await _nginx_scope(a)
-    return {"domain": a["domain"], "port": port, "configs": nginx_ops.find_app_configs(port, domain)}
+    configs = nginx_ops.find_app_configs(port, domain)
+    if req.state.cp_role != "admin":
+        # vhost 原文里有内部端口、证书路径和本机目录结构，与 /api/sites/{domain}/config
+        # 同一口径：只读账号看分析结论（域名、HTTPS、WebSocket、body 限制），
+        # 全文归管理员。绝对路径换成文件名，前端的选中态与展示都仍然可用。
+        configs = [{**c, "file": Path(c["file"]).name, "content": None} for c in configs]
+    return {"domain": a["domain"], "port": port, "configs": configs}
 
 
 @router.put("/api/apps/{app_id}/nginx")

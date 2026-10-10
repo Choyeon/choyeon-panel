@@ -1,12 +1,14 @@
+import asyncio
 import os
 import re
 import threading
 import time
+import weakref
 from contextlib import suppress
 from pathlib import Path
 
 from .. import config
-from ..util import is_domain, run
+from ..util import is_domain, is_email, run
 
 CONF_DIR = config.NGINX_CONF_DIRS[0]
 TLS_DIR = config.TLS_DIR
@@ -16,6 +18,43 @@ RE_PROXY_PORT = re.compile(r"proxy_pass\s+https?://[\w.:-]*?:(\d{2,5})\s*;")
 RE_UPSTREAM = re.compile(r"upstream\s+([\w.-]+)\s*\{([^}]*)\}")
 RE_UP_SERVER = re.compile(r"server\s+[\w.:-]*?:(\d{2,5})")
 RE_PROXY_NAME = re.compile(r"proxy_pass\s+https?://([\w.-]+)\s*;")
+
+# 「写文件 → nginx -t → reload」必须整体串行：nginx -t 校验的是 /etc/nginx 全目录，
+# 两个并发写会让其中一方在校验时读到另一方刚截断的空文件（把好配置判成语法错误，
+# 回滚掉的还是别人的改动），或者 reload 时加载半份 server 块——一次 reload 失败
+# 是全站域名同时不可用。面板的这些写路径都是低频接口，串行没有可感代价。
+# 锁按事件循环建：一个进程里通常只有服务那一个循环，但 CLI 与测试会各自
+# asyncio.run(...) 开一个新循环，跨循环复用同一把 asyncio.Lock 会直接抛
+# "is bound to a different event loop"（不同循环之间本来也不存在并发，换新锁即可）。
+_nginx_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _nginx_section() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _nginx_locks.get(loop)
+    if lock is None:
+        lock = _nginx_locks[loop] = asyncio.Lock()
+    return lock
+
+
+def _write_conf(path: str, content: str) -> None:
+    """同目录临时文件 + os.replace 落盘，而不是 write_text 原地截断。
+
+    nginx -t 与 reload 都会读这个文件，原地截断意味着读侧可能拿到空文件或半份配置；
+    rename 在同一目录内是原子的，读到的要么是旧的完整文件要么是新的。
+    临时文件后缀刻意用 `.tmp`：conf.d 的 include 规则是 `*.conf`，进程中途被杀
+    留下的残留文件不会被 nginx 当配置读进去。
+    """
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        with suppress(OSError):
+            os.unlink(tmp)
 
 
 def _has_cert(domain: str) -> bool:
@@ -78,45 +117,132 @@ def vhost_path(name: str) -> str:
     return f"{CONF_DIR}/panel-{name}.conf"
 
 
+# Debian 的 nginx.conf 只 include `conf.d/*.conf` 与 `sites-enabled/*`，
+# 而 conf.d 排在前面：同一个 server_name 写在这两处时，nginx 只认先加载的那一份
+# （nginx -t 会给一句 conflicting server name 警告，然后照样通过）。
+# 所以"这个域名有没有被别处定义"只能按**实际加载**的文件集合判断：
+# 拿 sites-available 里那些没启用的文件算会误报，拿内存里的旧配置算又会漏报。
+# nginx -T 实测 42ms，缓存 15 秒并写完即失效；拿不到时返回 None，让调用方
+# 如实说"无法确认"，而不是把"查不了"当成"没冲突"照常写入。
+_LOADED_TTL = 15.0
+_loaded_cache: tuple[float, set | None] | None = None
+_loaded_lock = threading.Lock()
+
+
+async def loaded_conf_paths() -> set | None:
+    global _loaded_cache
+    now = time.time()
+    with _loaded_lock:
+        if _loaded_cache and now - _loaded_cache[0] < _LOADED_TTL:
+            return _loaded_cache[1]
+    r = await run("nginx", ["-T"], timeout=30)
+    if r["code"] != 0:
+        return None
+    paths = {
+        os.path.realpath(m)
+        for m in re.findall(r"^# configuration file (.+?):", r["out"] or "", re.M)
+    }
+    data = paths or None
+    with _loaded_lock:
+        _loaded_cache = (now, data)
+    return data
+
+
+async def domain_owner(domain: str, target: str) -> str | None:
+    """返回真正加载了该 domain、又不是本次要写的那个文件的配置路径。"""
+    loaded = await loaded_conf_paths()
+    if loaded is None:
+        return None
+    real_target = os.path.realpath(target)
+    for p in sorted(loaded):
+        if p == real_target:
+            continue
+        with suppress(OSError):
+            if domain in analyze_config(Path(p).read_text(errors="replace"))["serverNames"]:
+                return p
+    return None
+
+
+class DomainOwnedElsewhere(RuntimeError):
+    """这个域名的 server 块已经由**别的面板文件**定义，面板不生成第二份。
+
+    单独一个类型是为了让调用方分清两种失败：
+    部署跑了几分钟不该因为一次可解释的域名归属冲突被判成 failed（站点仍按现有配置
+    服务，只是不由面板托管）；而 reload 失败、nginx -t 不过那类是真失败，必须照实失败。
+    """
+
+
 async def apply_vhost(spec: dict):
+    domain = spec["domain"]
+    content = render_vhost(spec)
     Path(CONF_DIR).mkdir(parents=True, exist_ok=True)
     path = vhost_path(spec["name"])
-    old = Path(path).read_text(errors="replace") if os.path.exists(path) else None
-    Path(path).write_text(render_vhost(spec))
-    check = await run("nginx", ["-t"])
-    if check["code"] != 0:
-        # 回滚到原文件（新建的则删除），并恢复 nginx 配置状态
-        if old is not None:
-            Path(path).write_text(old)
-        else:
-            os.unlink(path)
-        raise RuntimeError(f"nginx config test failed, rolled back: {check['out']}")
-    reload = await run("systemctl", ["reload", "nginx"])
-    if reload["code"] != 0:
-        raise RuntimeError(f"nginx reload failed: {reload['out']}")
+    async with _nginx_section():
+        owner = await domain_owner(domain, path)
+        if owner:
+            raise DomainOwnedElsewhere(
+                f"域名 {domain} 已由 {owner} 定义，面板没有生成第二份 server 块："
+                "同一域名存在两份配置时 nginx 只按加载顺序认第一份（conf.d 先于 sites-enabled），"
+                f"强行套用会让 {Path(owner).name} 里的手工配置静默失效。"
+                f"要让面板托管这个域名，请删除那份文件，或把它改名为 {Path(path).name} 放到 {CONF_DIR}。"
+            )
+        old = Path(path).read_text(errors="replace") if os.path.exists(path) else None
+        _write_conf(path, content)
+        check = await run("nginx", ["-t"])
+        if check["code"] != 0:
+            # 回滚到原文件（新建的则删除），并恢复 nginx 配置状态
+            if old is not None:
+                _write_conf(path, old)
+            else:
+                os.unlink(path)
+            raise RuntimeError(f"nginx config test failed, rolled back: {check['out']}")
+        reload = await run("systemctl", ["reload", "nginx"])
+        if reload["code"] != 0:
+            raise RuntimeError(f"nginx reload failed: {reload['out']}")
     invalidate_domain_cache()
 
 
 async def remove_vhost(name: str):
     path = vhost_path(name)
-    if os.path.exists(path):
+    if not os.path.exists(path):
+        # 没有这个应用的文件就别去 nginx -t + reload：拆除/清理流程对从未配过域名的
+        # 应用也会调到这里，空跑一次 reload 是无谓的全站配置重载。
+        return
+    async with _nginx_section():
+        old = Path(path).read_text(errors="replace")
         os.unlink(path)
-    check = await run("nginx", ["-t"])
-    if check["code"] != 0:
-        # 文件已经删了但配置没通过校验：这时 nginx 仍在按内存里的旧配置反代该域名。
-        # 静默返回会让调用方（sites.py）回 ok/removed:true，界面显示"已移除"，
-        # 而域名照旧可访问，直到下一次成功 reload 才暴露——运维完全看不出两个状态不一致。
-        raise RuntimeError(
-            "配置已删除，但 nginx 校验未通过，面板没有重载（该域名可能仍在按旧配置提供服务）："
-            f"{(check['out'] or '').strip()[:200]}"
-        )
-    await run("systemctl", ["reload", "nginx"])
+        check = await run("nginx", ["-t"])
+        if check["code"] != 0:
+            # 校验不过多半是因为别的文件引用了这个文件里的 upstream，或者机器上本来
+            # 就有另一处坏配置。这时把文件放回去：站点照旧由原配置服务，
+            # 用户不会因为一次"删除"而莫名丢站；失败原因仍然如实报出来。
+            _write_conf(path, old)
+            raise RuntimeError(
+                "nginx 校验未通过，已把该域名的配置恢复回去（面板没有重载，站点仍按原配置提供服务）："
+                f"{(check['out'] or '').strip()[:200]}"
+            )
+        reload = await run("systemctl", ["reload", "nginx"])
+        if reload["code"] != 0:
+            # 已经删除且校验通过，这里不回滚文件：nginx 仍在按内存里的旧配置服务，
+            # 下一次成功 reload 就会断开。状态与磁盘不一致必须说清楚，
+            # 静默返回 ok 会让界面显示"已移除"而域名照旧可访问。
+            raise RuntimeError(
+                "配置已删除，但 nginx 校验通过、重载失败（该域名可能仍在按旧配置提供服务）："
+                f"{(reload['out'] or '').strip()[:200]}"
+            )
     invalidate_domain_cache()
 
 
 async def issue_cert(domain: str, email: str | None = None) -> str:
     if not is_domain(domain):
         raise RuntimeError(f"invalid domain: {domain}")
+    # email 直接进 certbot 的 argv，而面板以 root 跑：certbot 会拿它注册 ACME 账户、
+    # 写进 /etc/letsencrypt 的配置里。空串、带空白、以 `-` 开头的值会让参数解析错位
+    # （`-m --no-redirect` 之类把后面的选项当邮箱吃掉），所以在这里一次收口，
+    # 而不是在每个调用点各补一层。留空仍然是合法选择（走无邮箱注册）。
+    email = (email or "").strip()
+    if email and not is_email(email):
+        raise RuntimeError(f"邮箱格式不正确：{email}")
     args = ["--nginx", "-d", domain, "--non-interactive", "--redirect", "--agree-tos", "--no-eff-email"]
     extra = ["-m", email] if email else ["--register-unsafely-without-email"]
     args = args[:4] + extra + args[4:]
@@ -141,7 +267,10 @@ async def renew_certs() -> dict:
     before = await _expiries()
     r = await run("certbot", ["renew", "--non-interactive"], timeout=600)
     if r["code"] != 0:
-        raise RuntimeError(f"证书续期失败 (exit {r['code']}): {r['out'] or r['err']}")
+        # util.run 把 stderr 并进了 stdout，返回只有 {code, out}：这里再取 r["err"]
+        # 就等于"报错正好发生在 out 为空的时候"必然 KeyError，把一条本该是 400 的
+        # 失败变成 500（out 为空恰恰是 certbot 被 kill、磁盘写满这类情况）。
+        raise RuntimeError(f"证书续期失败 (exit {r['code']}): {r['out'] or '(无输出)'}")
     after = await _expiries()
     renewed = sorted(n for n, e in after.items() if e and before.get(n) and e != before.get(n))
     reloaded = False
@@ -196,6 +325,11 @@ def _iter_conf_files():
     for d in config.NGINX_CONF_DIRS:
         try:
             for f in os.listdir(d):
+                # 原子写留下的 `.面板.conf.<pid>.tmp` 正常不存在（写完就 rename），
+                # 只有进程被杀在中间才会残留；它不是 nginx 会 include 的文件，
+                # 也不该出现在站点列表里。
+                if f.endswith(".tmp"):
+                    continue
                 yield f"{d}/{f}", f
         except OSError:
             continue
@@ -239,9 +373,13 @@ _domain_lock = threading.Lock()
 
 
 def invalidate_domain_cache() -> None:
-    global _domain_cache
+    global _domain_cache, _loaded_cache
     with _domain_lock:
         _domain_cache = None
+    # "nginx 到底加载了哪些文件"也是同一批事实：面板刚写完/删掉配置，
+    # 15 秒内的旧集合会让下一次域名冲突判断看漏（或看多）刚动过的那个文件。
+    with _loaded_lock:
+        _loaded_cache = None
 
 
 def domains_by_port() -> dict:
@@ -313,22 +451,23 @@ async def save_app_config(path: str, content: str) -> dict:
         raise RuntimeError("内容不能为空")
     if len(content) > 200000:
         raise RuntimeError("文件过大")
-    old = Path(real).read_text(errors="replace") if os.path.exists(real) else None
-    Path(real).write_text(content)
-    check = await run("nginx", ["-t"])
-    if check["code"] != 0:
-        # 有原文件就恢复；没有原文件（本次是新建）必须删掉，
-        # 否则坏配置会留在 conf.d/ 里，之后每次 nginx -t / reload 都连带失败，
-        # 面板上其它应用的域名与 SSL 操作也会全部不可用。
-        if old is not None:
-            Path(real).write_text(old)
-        else:
-            with suppress(OSError):
-                os.unlink(real)
-        raise RuntimeError(f"nginx -t 校验失败，已回滚：\n{check['out']}")
-    reload = await run("systemctl", ["reload", "nginx"])
-    if reload["code"] != 0:
-        raise RuntimeError(f"nginx reload 失败：{reload['out']}")
+    async with _nginx_section():
+        old = Path(real).read_text(errors="replace") if os.path.exists(real) else None
+        _write_conf(real, content)
+        check = await run("nginx", ["-t"])
+        if check["code"] != 0:
+            # 有原文件就恢复；没有原文件（本次是新建）必须删掉，
+            # 否则坏配置会留在 conf.d/ 里，之后每次 nginx -t / reload 都连带失败，
+            # 面板上其它应用的域名与 SSL 操作也会全部不可用。
+            if old is not None:
+                _write_conf(real, old)
+            else:
+                with suppress(OSError):
+                    os.unlink(real)
+            raise RuntimeError(f"nginx -t 校验失败，已回滚：\n{check['out']}")
+        reload = await run("systemctl", ["reload", "nginx"])
+        if reload["code"] != 0:
+            raise RuntimeError(f"nginx reload 失败：{reload['out']}")
     invalidate_domain_cache()
     return {"ok": True, "file": real}
 

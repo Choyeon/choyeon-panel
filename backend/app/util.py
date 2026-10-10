@@ -12,6 +12,10 @@ DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-
 UNIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@:._-]{0,63}(\.service)?$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
 GIT_URL_RE = re.compile(r"^(https?://\S+|git@[\w.-]+:\S+)$")
+# 邮箱只用于 certbot 注册 ACME 账户，但它以 root 身份进 argv，所以按"能安全落到 argv
+# 与 letsencrypt 配置里"的最严口径收：单个 @、两侧无空白、总长有上限。
+# 不做 RFC 5322 全量校验——那会放进引号、注释和反斜杠，正好是把参数解析玩坏的材料。
+EMAIL_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})+$")
 IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{2,200}$")
 CRED_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/@:\s]*)(:[^@/\s]*)?@")
@@ -25,6 +29,7 @@ def is_branch(s): return bool(BRANCH_RE.match(s or ""))
 def is_ident(s): return bool(IDENT_RE.match(s or ""))
 def is_path(s): return bool(PATH_RE.match(s or ""))
 def is_git_url(s): return bool(s) and (bool(GIT_URL_RE.match(s)) or s.startswith("/"))
+def is_email(s): return bool(EMAIL_RE.match((s or "").strip()))
 
 
 def sub_port(text, old, new):

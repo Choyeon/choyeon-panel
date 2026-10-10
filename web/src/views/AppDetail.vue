@@ -546,9 +546,10 @@ watch(
               <NButton size="small" tertiary round :disabled="!ngxFile || ngxSaving" :loading="ngxSaving" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
               <NButton size="small" tertiary round :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect || ngxSaving" :loading="ngxSaving" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
             </NSpace>
-            <NInput v-model:value="ngxContent" type="textarea" :read-only="!isAdmin || ngxSaving" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
+            <EmptyBox v-if="!ngxFile.content" text="完整配置文本仅管理员可见：这里保留域名、HTTPS、WebSocket 与上传限制的分析结论" />
+            <NInput v-else v-model:value="ngxContent" type="textarea" :read-only="!isAdmin || ngxSaving" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
             <NSpace justify="space-between" align="center" style="margin-top: var(--space-3)">
-              <div class="cp-help">{{ isAdmin ? '保存将执行 nginx -t 校验，失败自动回滚并 reload 生效' : '只读账号可查看配置，保存与快捷项由管理员操作' }}</div>
+              <div class="cp-help">{{ isAdmin ? '保存将执行 nginx -t 校验，失败自动回滚并 reload 生效' : '只读账号可查看分析结论，配置全文、保存与快捷项由管理员操作' }}</div>
               <NButton v-if="isAdmin" type="primary" size="small" round class="cp-press" :loading="ngxSaving" :disabled="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
             </NSpace>
           </div>
