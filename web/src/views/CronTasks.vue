@@ -318,7 +318,7 @@ const cols: any[] = [
   { title: '上次执行', key: 'last_run', width: 180, render: lastRunCell },
   { title: '结果', key: 'last_status', width: 96, render: statusTag },
   {
-    title: '操作', key: 'ops', width: 200,
+    title: '操作', key: 'ops', width: 200, align: 'center',
     render: (r: Task) => h(CpRowActions, {
       ellipsis: 3,
       // 顺序是 [执行, 输出, 编辑, 删除]：CpRowActions 平铺前 3 个、剩下的收进「更多」，

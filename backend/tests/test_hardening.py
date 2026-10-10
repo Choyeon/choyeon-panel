@@ -325,6 +325,34 @@ class TestTokenRevocation(unittest.TestCase):
         with self.assertRaises(jwt.InvalidTokenError, msg="bump 之后旧 token 必须立即失效"):
             security.verify_token(tok)
 
+    def test_cross_process_epoch_write_revokes_after_ttl(self):
+        """回归：`choyeonctl user reset/delete` 在**另一个进程**里写 settings 表，
+        服务进程的 _auth_cache pop 不到，被吊销的旧 token 会一直有效到服务重启。
+        （实测：删号后用同一个 token 请求 /api/system/unit-files 仍返回 200。）
+        缓存于是必须有 TTL；这里绕过 set_setting 直接写库，复现跨进程那次写入。
+        """
+        tok = security.sign_token(self.user, "viewer")
+        self.assertEqual(security.verify_token(tok)["sub"], self.user)
+        dbm.get_setting(f"token_epoch:{self.user}")  # 把旧值灌进缓存
+
+        dbm.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"token_epoch:{self.user}", "9999999999"),
+        )
+        with mock.patch.object(dbm, "_AUTH_TTL", 0.0):
+            with self.assertRaises(jwt.InvalidTokenError, msg="缓存条目过期后必须读到跨进程写入的新 epoch"):
+                security.verify_token(tok)
+
+    def test_epoch_read_is_cached_within_ttl(self):
+        """TTL 不能被顺手改成「每请求都查库」——那正是批次④要消掉的常驻开销。"""
+        dbm.set_setting(f"token_epoch:{self.user}", "123")
+        self.assertEqual(dbm.get_setting(f"token_epoch:{self.user}"), "123")  # 预热，排除冷启动那一次 SELECT
+        with mock.patch.object(dbm, "_read_setting", wraps=dbm._read_setting) as spy:
+            for _ in range(5):
+                self.assertEqual(dbm.get_setting(f"token_epoch:{self.user}"), "123")
+        self.assertEqual(spy.call_count, 0, "TTL 内应命中缓存，不该重复 SELECT")
+
 
 # ---------------------------------------------------- 用户改角色/改密（HTTP 层）
 class TestUserUpdateRevocation(unittest.TestCase):

@@ -6,7 +6,7 @@ import {
   NSelect, NPagination, NTooltip,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { api } from '../api';
+import { api, getRole } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
@@ -14,6 +14,9 @@ import RowEditor from '../components/RowEditor.vue';
 import RedisKeyPanel from '../components/RedisKeyPanel.vue';
 
 const msg = useMessage();
+// 只读账号：写操作在服务端一律拦 403，所以这一页凡是对 viewer 必然失败的入口都不摆出来
+// （新建、删除、改密、SQL 执行、行/键写入），只留读取路径。
+const isAdmin = computed(() => getRole() === 'admin');
 const dbs = ref<any[]>([]);
 const roles = ref<any[]>([]);
 const redis = ref<any>(null);
@@ -214,6 +217,12 @@ const keyCols: any[] = [
   },
 ];
 
+// 操作列/勾选列按角色收起来：留一列必然 403 的按钮，比不给按钮更让人困惑。
+const dropOps = (cols: any[]) => cols.filter((c) => isAdmin.value || c.key !== 'ops');
+const dbColsV = computed(() => dropOps(dbCols));
+const roleColsV = computed(() => dropOps(roleCols));
+const keyColsV = computed(() => (isAdmin.value ? keyCols : keyCols.filter((c) => c.type !== 'selection')));
+
 function jsonBrief(v: any) {
   if (Array.isArray(v)) return `Array(${v.length})`;
   return `{ ${Object.keys(v || {}).length} 项 }`;
@@ -392,25 +401,25 @@ async function delKeys(keys: string[]) {
               <span class="section-title"><NIcon :component="icons.ServerOutline" :size="15" color="var(--cp-brand-soft)" /> 数据库列表</span>
               <NSpace :size="8">
                 <NButton size="small" tertiary @click="load" :icon="ico('RefreshOutline')">刷新</NButton>
-                <NButton size="small" type="primary" :icon="ico('AddOutline')" @click="showDb = true">新建数据库</NButton>
+                <NButton v-if="isAdmin" size="small" type="primary" :icon="ico('AddOutline')" @click="showDb = true">新建数据库</NButton>
               </NSpace>
             </NSpace>
             <!-- 两个列表同屏，这里不用 --table-h 撑满视口（角色表已有 320 固定上限），保持自然高度 -->
-            <NDataTable size="small" :bordered="false" :columns="dbCols" :data="Array.isArray(dbs) ? dbs : []" :row-key="(r: any) => r.name" :scroll-x="520">
+            <NDataTable size="small" :bordered="false" :columns="dbColsV" :data="Array.isArray(dbs) ? dbs : []" :row-key="(r: any) => r.name" :scroll-x="520">
               <template #empty><EmptyBox text="无法读取数据库列表（PostgreSQL 未运行？）" /></template>
             </NDataTable>
 
             <NSpace justify="space-between" align="center" style="width: 100%; margin-top: var(--space-2)">
               <span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-warn)" /> 用户 / 角色</span>
-              <NButton size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
+              <NButton v-if="isAdmin" size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="roleCols" :data="Array.isArray(roles) ? roles : []" :row-key="(r: any) => r.name" :max-height="320" :scroll-x="520">
+            <NDataTable size="small" :bordered="false" :columns="roleColsV" :data="Array.isArray(roles) ? roles : []" :row-key="(r: any) => r.name" :max-height="320" :scroll-x="520">
               <template #empty><EmptyBox text="没有可读取的角色（PostgreSQL 未运行？）" /></template>
             </NDataTable>
           </NSpace>
         </NTabPane>
 
-        <NTabPane name="sql" tab="SQL 控制台">
+        <NTabPane v-if="isAdmin" name="sql" tab="SQL 控制台">
           <NSpace vertical :size="12" style="width: 100%">
             <NInput
               v-model:value="sql" type="textarea" :autosize="{ minRows: 4, maxRows: 9 }"
@@ -440,9 +449,9 @@ async function delKeys(keys: string[]) {
               <NSpace align="center" :size="10" wrap>
                 <NButton size="tiny" tertiary :icon="ico('ArrowBackOutline')" @click="curTable = null">表列表</NButton>
                 <NTag size="small" :bordered="false" type="info">{{ curTable.schema }}.{{ curTable.name }}</NTag>
-                <NText depth="3" style="font-size: var(--fs-xs)">{{ tTotal }} 行 · {{ tCols.length }} 列 · 点击任意行查看/编辑</NText>
+                <NText depth="3" style="font-size: var(--fs-xs)">{{ tTotal }} 行 · {{ tCols.length }} 列 · 点击任意行{{ isAdmin ? '查看/编辑' : '查看详情' }}</NText>
                 <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" @click="loadTableData">刷新</NButton>
-                <NButton size="tiny" type="primary" tertiary :icon="ico('AddOutline')" :disabled="!tColMeta.length" @click="openRow(null, true)">新增行</NButton>
+                <NButton v-if="isAdmin" size="tiny" type="primary" tertiary :icon="ico('AddOutline')" :disabled="!tColMeta.length" @click="openRow(null, true)">新增行</NButton>
                 <NPagination v-model:page="tPage" :page-count="Math.max(1, Math.ceil(tTotal / tSize))" :page-size="tSize" size="small" :show-quick-jumper="false" @update:page="onPage" />
               </NSpace>
               <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" class="cp-tbl tbl-dbs-data" :max-height="'var(--table-h)'" :row-key="(r: any) => r._ctid" :row-props="rowProps" :scroll-x="Math.max(560, 78 + tCols.length * 180)">
@@ -459,7 +468,7 @@ async function delKeys(keys: string[]) {
               <NButton size="small" type="primary" :loading="rBusy" :icon="ico('SearchOutline')" @click="scanKeys(false)">扫描</NButton>
               <NButton v-if="rCursor !== '0'" size="small" tertiary :loading="rBusy" :icon="ico('RefreshCircleOutline')" @click="scanKeys(true)">加载更多</NButton>
               <NText depth="3" style="font-size: var(--fs-xs)">已加载 {{ rKeys.length }} 个 key</NText>
-              <NPopconfirm v-if="rSel.length" @positive-click="delKeys(rSel)">
+              <NPopconfirm v-if="isAdmin && rSel.length" @positive-click="delKeys(rSel)">
                 <template #trigger>
                   <NButton size="small" tertiary type="error" :icon="ico('TrashOutline')">删除选中（{{ rSel.length }}）</NButton>
                 </template>
@@ -470,7 +479,7 @@ async function delKeys(keys: string[]) {
               <div class="rk-list">
                 <NDataTable
                   size="small" :bordered="false"
-                  :columns="keyCols"
+                  :columns="keyColsV"
                   :data="rKeys.map((k) => ({ k }))"
                   :row-key="(r: any) => r.k"
                   v-model:checked-row-keys="rSel"
@@ -509,7 +518,7 @@ async function delKeys(keys: string[]) {
               <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">累计命令</div><div class="rv">{{ redis.info?.total_commands_processed ?? '—' }}</div></NCard></NGridItem>
               <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
             </NGrid>
-            <NSpace align="center" :size="12" wrap style="margin-top: var(--space-4)">
+            <NSpace v-if="isAdmin" align="center" :size="12" wrap style="margin-top: var(--space-4)">
               <!-- 输入框里的 placeholder 不滚动也不换行：24 个中文字在 320px 里必然被裁成半截。
                    说明挪到框外用文字写清楚，框内只留能看全的短提示。 -->
               <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码" style="width: 240px" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />

@@ -242,8 +242,10 @@ const busy = ref<{ id: number; verb: string } | null>(null);
 const busyOn = (id: number, verb: string) => busy.value?.id === id && busy.value?.verb === verb;
 const rowBusy = (id: number) => busy.value?.id === id;
 // 后端 deps.py 对所有 MUTATION 全局拦 403，只读账号点这些按钮必然失败：
-// 按钮直接不进 DOM，而不是留一个按不动的入口。
+// 按钮直接不进 DOM，而不是留一个按不动的入口；整列都没有可用动作时连列头一起收掉，
+// 免得留一条 209px 的空白列，看着像表格没加载出来。
 const isAdmin = computed(() => getRole() === 'admin');
+const visColumns = computed(() => columns.filter((c) => isAdmin.value || c.key !== 'ops'));
 // 延迟刷新走共享的 useDelayedRefresh，本页不再自己抄一份 timers 数组
 const { later } = useDelayedRefresh();
 
@@ -430,7 +432,7 @@ onMounted(() => {
         <NButton size="small" tertiary round :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
       </template>
 
-      <NDataTable :columns="columns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1040" class="cp-tbl tbl-apps" :max-height="'var(--table-h)'">
+      <NDataTable :columns="visColumns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1040" class="cp-tbl tbl-apps" :max-height="'var(--table-h)'">
         <template #empty>
           <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
         </template>

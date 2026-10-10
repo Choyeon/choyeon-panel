@@ -186,7 +186,7 @@ const columns: any[] = [
     },
   },
   {
-    title: '操作', key: 'ops', width: 209,
+    title: '操作', key: 'ops', width: 209, align: 'center',
     render: (r: any) => h(CpRowActions, { buttons: rowButtons(r) }),
   },
 ];

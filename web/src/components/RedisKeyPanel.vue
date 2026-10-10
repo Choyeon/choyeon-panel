@@ -2,7 +2,7 @@
 import { computed, h, ref, watch } from 'vue';
 import { NCard, NSpace, NTag, NInput, NPopconfirm, NText, NDataTable, useMessage } from 'naive-ui';
 import { NButton } from '../ui';
-import { api } from '../api';
+import { api, getRole } from '../api';
 import { icon } from '../icons';
 import JsonView from './JsonView.vue';
 import EmptyBox from './EmptyBox.vue';
@@ -13,6 +13,8 @@ import EmptyBox from './EmptyBox.vue';
  * 每次写成功后让父级重拉一次详情，TTL/内存/长度这些派生值才不会是旧的。
  */
 const props = defineProps<{ detail: any }>();
+// 只读账号看 key 的内容，但改值/增删条目/改 TTL/删 key 在服务端一律拦 403，这里不摆入口。
+const isAdmin = computed(() => getRole() === 'admin');
 const emit = defineEmits<{ refresh: []; deleted: [k: string] }>();
 
 const editing = ref(false);
@@ -76,7 +78,7 @@ const memberCols = computed<any[]>(() => {
           })
           : hText(String(r.value ?? '')),
     });
-    cols.push(ops((r: any) =>
+    if (isAdmin.value) cols.push(ops((r: any) =>
       editField.value === r.field
         ? h('div', { class: 'cp-ops' }, [
             h(NButton, { size: 'tiny', text: true, type: 'primary', class: 'cp-op', onClick: () => saveField(r) }, { default: () => '保存' }),
@@ -97,7 +99,7 @@ const memberCols = computed<any[]>(() => {
     render: (r: any) => hText(String(r.v ?? '')),
   });
   if (type.value === 'zset') cols.push({ title: 'score', key: 'field', width: 90 });
-  cols.push(ops((r: any) =>
+  if (isAdmin.value) cols.push(ops((r: any) =>
     h(NPopconfirm, { onPositiveClick: () => delMember(String(r.v), '') }, {
       trigger: () => h(NButton, { size: 'tiny', text: true, type: 'error', class: 'cp-op' }, { default: () => '删除' }),
       default: () => `从 ${type.value} 中删除该条目？`,
@@ -197,7 +199,7 @@ async function saveTtl() {
         />
         <JsonView v-else-if="parsed !== null" :value="parsed" />
         <pre v-else class="mono-pre">{{ detail.value }}</pre>
-        <NSpace justify="end" :size="8">
+        <NSpace v-if="isAdmin" justify="end" :size="8">
           <template v-if="editing">
             <NButton size="tiny" tertiary :disabled="busy" @click="editing = false">取消</NButton>
             <NButton size="tiny" type="primary" class="cp-press" :loading="busy" :icon="saveIco" @click="saveString">保存值</NButton>
@@ -213,7 +215,7 @@ async function saveTtl() {
         >
           <template #empty><EmptyBox text="这个 key 里还没有条目" /></template>
         </NDataTable>
-        <NSpace align="end" :size="8" wrap>
+        <NSpace v-if="isAdmin" align="end" :size="8" wrap>
           <NInput
             v-if="type === 'hash'" v-model:value="addForm.field" size="tiny" placeholder="field"
             style="width: 140px" :input-props="{ class: 'mono', 'aria-label': '新增条目的 field' }"
@@ -233,7 +235,7 @@ async function saveTtl() {
 
       <NText v-else depth="3" style="font-size: var(--fs-xs)">该类型暂不支持在线查看（{{ detail.type }}）</NText>
 
-      <div class="ttl-row">
+      <div v-if="isAdmin" class="ttl-row">
         <NText depth="3" class="ttl-label">过期时间</NText>
         <NInput
           v-model:value="ttlDraft" size="tiny" style="width: 128px"
@@ -245,7 +247,7 @@ async function saveTtl() {
         <NText depth="3" style="font-size: var(--fs-2xs)">-1 ＝ 不过期</NText>
       </div>
 
-      <NSpace justify="end">
+      <NSpace v-if="isAdmin" justify="end">
         <NPopconfirm @positive-click="emit('deleted', detail.key)">
           <template #trigger>
             <NButton size="tiny" tertiary type="error" :icon="trashIco">删除此 key</NButton>

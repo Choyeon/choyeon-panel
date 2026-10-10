@@ -205,12 +205,17 @@ def set_setting(key: str, value) -> None:
 
 
 # 认证路径（每个 /api 请求都要验 token）读的这几个 key 走进程内缓存。
-# 以前每请求两次带全局锁的 SELECT，仪表盘 3 秒轮询把它放大成常驻开销；
-# 这些行只有本进程写（backup_runner 从不碰 settings 表），且 set_setting 精确失效，
-# 所以不存在读到跨进程陈旧值的路径。缓存与 DB 共用同一把可重入锁——两把锁会因
-# jwt_secret（先缓存锁后 DB 锁）与 set_setting（先 DB 锁后缓存锁）反序而死锁。
+# 以前每请求两次带全局锁的 SELECT，仪表盘 3 秒轮询把它放大成常驻开销。
+# 缓存必须带 TTL，不能只靠 set_setting 精确失效：`choyeonctl user reset/delete`
+# 是**另一个进程**在写 settings 表，它 pop 不到本进程的字典。没有 TTL 的话，
+# CLI 吊销的旧 token 会一直有效到服务重启（实测删号后仍返回 200）。
+# 缓存与 DB 共用同一把可重入锁——两把锁会因 jwt_secret（先缓存锁后 DB 锁）与
+# set_setting（先 DB 锁后缓存锁）反序而死锁。
 _AUTH_KEYS = ("jwt_secret", "token_epoch")
-_auth_cache: dict[str, str | None] = {}
+_AUTH_TTL = 3.0
+# 值为 (内容, 写入时刻)。时刻用 monotonic：系统时钟回拨不会让缓存提前过期，
+# NTP 校时也不会把吊销窗口拉长。
+_auth_cache: dict[str, tuple[str | None, float]] = {}
 
 
 def _auth_key(key: str) -> bool:
@@ -220,11 +225,13 @@ def _auth_key(key: str) -> bool:
 def get_setting(key: str) -> str | None:
     if not _auth_key(key):
         return _read_setting(key)
+    now = time.monotonic()
     with _lock:
-        if key in _auth_cache:
-            return _auth_cache[key]
+        hit = _auth_cache.get(key)
+        if hit is not None and now - hit[1] < _AUTH_TTL:
+            return hit[0]
         val = _read_setting(key)
-        _auth_cache[key] = val
+        _auth_cache[key] = (val, now)
         return val
 
 

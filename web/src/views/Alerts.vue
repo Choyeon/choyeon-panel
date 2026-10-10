@@ -116,7 +116,7 @@ const cols: any[] = [
       }, { default: () => (r.acked ? '已确认' : '未确认') }),
   },
   {
-    title: '操作', key: 'ops', width: 110,
+    title: '操作', key: 'ops', width: 110, align: 'center',
     render: (r: AlertRow) =>
       // 只读账号既看不到按钮，也不该在 DOM 里留一个必然 403 的入口
       isAdmin.value && !r.acked

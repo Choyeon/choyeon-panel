@@ -4,7 +4,7 @@ import {
   NDrawer, NDrawerContent, NSpace, NTag, NCheckbox, NInput, NPopconfirm, NText, useMessage,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { api } from '../api';
+import { api, getRole } from '../api';
 import { icon } from '../icons';
 import JsonView from './JsonView.vue';
 
@@ -56,6 +56,8 @@ function toText(c: any, v: any) {
   return typeof v === 'object' ? JSON.stringify(v) : String(v);
 }
 
+// 只读账号在这里只看得到数据：写操作（编辑/删除/创建）在服务端一律拦 403。
+const isAdmin = computed(() => getRole() === 'admin');
 const title = computed(() => (props.insert ? '新增行' : props.table));
 const rowLabel = computed(() => {
   if (props.insert || !props.row) return `${props.schema}.${props.table}`;
@@ -270,14 +272,14 @@ async function delRow() {
           </NText>
           <NSpace :size="8">
             <template v-if="!editing">
-              <NPopconfirm v-if="!insert" @positive-click="delRow">
+              <NPopconfirm v-if="isAdmin && !insert" @positive-click="delRow">
                 <template #trigger>
                   <NButton size="small" tertiary type="error" :icon="trashIcon">删除行</NButton>
                 </template>
                 删除该行？不可恢复
               </NPopconfirm>
               <NButton size="small" tertiary @click="emit('update:show', false)">关闭</NButton>
-              <NButton size="small" type="primary" :icon="headIcon" @click="startEdit">编辑</NButton>
+              <NButton v-if="isAdmin" size="small" type="primary" :icon="headIcon" @click="startEdit">编辑</NButton>
             </template>
             <template v-else>
               <NButton size="small" tertiary :disabled="busy" @click="cancelEdit">取消</NButton>
