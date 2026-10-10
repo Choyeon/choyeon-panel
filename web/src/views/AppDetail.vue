@@ -604,7 +604,7 @@ watch(
 .ad-head-right { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; justify-content: flex-end; }
 /* .d-name .name 实测 18px/500 + clamp 宽度省略，长应用名不会把右侧按钮挤没 */
 .ad-title {
-  margin: 0; font-size: 18px; font-weight: 500; color: var(--cp-text-strong);
+  margin: 0; font-size: var(--fs-title); font-weight: 500; color: var(--cp-text-strong);
   min-width: 0; max-width: clamp(140px, 22vw, 320px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ad-status { margin-left: var(--space-1); flex-shrink: 0; }

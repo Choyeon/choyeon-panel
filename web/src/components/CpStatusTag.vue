@@ -9,9 +9,12 @@ import { NTag } from 'naive-ui';
 const props = defineProps<{ status: string; text?: string; operate?: boolean }>();
 
 const SUCCESS = ['running', 'free', 'success', 'enable', 'enabled', 'done', 'healthy', 'executing', 'new', 'active', 'up', 'ok'];
-const ERROR = ['stopped', 'exceptional', 'disable', 'disabled', 'unhealthy', 'failed', 'crashed', 'lost', 'exited', 'notfound', 'inaccessible', 'dead'];
+// 'stopped' 从 ERROR 挪到 INFO：应用列表/应用详情的「已停止」用的是它，服务器管理里同一个
+// 文案走的是 systemd 的 'inactive'，两边一红一蓝，同一状态在站内是两种严重程度。
+// 真正异常的表达另有 failed / crashed / exited / dead，红色留给它们。
+const ERROR = ['exceptional', 'disable', 'disabled', 'unhealthy', 'failed', 'crashed', 'lost', 'exited', 'notfound', 'inaccessible', 'dead'];
 const WARN = ['paused', 'blocked', 'shutdown', 'pmsuspended', 'removing', 'deleted', 'conflict', 'partial', 'degraded'];
-const INFO = ['duplicate', 'unexecuted', 'canceled', 'inactive', 'unknown'];
+const INFO = ['duplicate', 'unexecuted', 'canceled', 'inactive', 'stopped', 'unknown'];
 const LOADING = ['installing', 'building', 'restarting', 'upgrading', 'rebuilding', 'recreating', 'creating', 'starting', 'applying', 'uninstalling', 'downloading', 'packing', 'sending', 'waiting', 'loading', 'deploying'];
 
 const type = computed(() => {

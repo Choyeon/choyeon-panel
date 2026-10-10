@@ -121,7 +121,7 @@ const cols: any[] = [
       // 只读账号既看不到按钮，也不该在 DOM 里留一个必然 403 的入口
       isAdmin.value && !r.acked
         ? h(NButton, {
-            text: true, size: 'small', type: 'primary',
+            text: true, size: 'small', type: 'primary', class: 'cp-op',
             loading: acking.value === r.id, disabled: !!acking.value,
             onClick: () => ack(r),
           }, () => '确认')

@@ -1,6 +1,8 @@
 import asyncio
+import mimetypes
 import os
 import re
+import stat
 import time
 from contextlib import asynccontextmanager, suppress
 
@@ -322,6 +324,23 @@ async def _housekeeping():
 
 
 # ---------- static frontend ----------
+def _accepts_gzip(raw: bytes) -> bool:
+    """Accept-Encoding 是否接受 gzip（`gzip;q=0` 是显式拒绝，不能只 grep 子串）。"""
+    for part in raw.decode("latin-1", "replace").split(","):
+        token, _, params = part.strip().partition(";")
+        if token.lower() not in ("gzip", "*"):
+            continue
+        for p in params.split(";"):
+            key, _, val = p.strip().partition("=")
+            if key.lower() == "q":
+                try:
+                    return float(val) > 0
+                except ValueError:
+                    pass
+        return True
+    return False
+
+
 class DistFiles(StaticFiles):
     """哈希产物长缓存、HTML 每次回源。
 
@@ -337,9 +356,40 @@ class DistFiles(StaticFiles):
             resp.headers["Cache-Control"] = "no-cache"
         elif "/assets/" in name:
             resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            # 未压缩的首屏是 956KB（framework 单文件就 856KB），协商到预压缩副本后是 273KB。
+            resp.headers["Vary"] = "Accept-Encoding"
+            gz = self._precompressed(name, scope, resp)
+            if gz is not None:
+                return gz
         else:
             resp.headers["Cache-Control"] = "public, max-age=3600"
         return resp
+
+    def _precompressed(self, name: str, scope, resp):
+        """命中构建期产出的 `<file>.gz`（web/scripts/gzip-assets.mjs）。
+
+        刻意不在请求路径上压缩：日志接口是 text/event-stream，任何 gzip 中间件都会
+        把流攒成一块，日志中心就变成"卡住不动"。Etag/Last-Modified 沿用原文件——两种
+        编码是同一份内容的两种表示，客户端带旧 ETag 来验证时应得到 304 而不是整份重传。
+        """
+        if name.endswith(".gz") or resp.status_code != 200:
+            return None
+        if not any(k == b"accept-encoding" and _accepts_gzip(v) for k, v in scope.get("headers", [])):
+            return None
+        try:
+            gz_stat = os.stat(f"{name}.gz")
+        except OSError:
+            return None
+        if not stat.S_ISREG(gz_stat.st_mode):
+            return None
+        media, _ = mimetypes.guess_type(name)
+        out = FileResponse(f"{name}.gz", stat_result=gz_stat, media_type=media)
+        for h in ("etag", "last-modified", "cache-control"):
+            if h in resp.headers:
+                out.headers[h] = resp.headers[h]
+        out.headers["Content-Encoding"] = "gzip"
+        out.headers["Vary"] = "Accept-Encoding"
+        return out
 
 
 if config.WEB_DIST.exists():

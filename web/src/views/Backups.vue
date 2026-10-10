@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch, h } from 'vue';
+import { computed, onMounted, ref, watch, h } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   NDataTable, NSpace, NTag, NDrawer, NDrawerContent, NForm, NFormItem, NInput, NInputNumber,
@@ -15,6 +15,7 @@ import EmptyBox from '../components/EmptyBox.vue';
 import { useCachedFetch, invalidateCache } from '../composables/useCachedFetch';
 import { useTableHeight } from '../composables/useTableHeight';
 import { fmtBytes, fmtDateTime } from '../composables/useFormat';
+import { useVisiblePoll } from '../composables/useVisiblePoll';
 
 const msg = useMessage();
 const router = useRouter();
@@ -63,14 +64,9 @@ function reload() {
 // 1Panel TableSetting 的自动刷新：0/5/10/30/60/120/300s，localStorage 记忆
 const AUTO_OPTS = [0, 5, 10, 30, 60, 120, 300].map((s) => ({ label: s ? `${s} 秒` : '关闭自动刷新', value: s }));
 const autoSec = ref(Math.max(0, Number(localStorage.getItem('backups-auto-refresh')) || 0));
-let autoTimer: number | null = null;
-function restartAuto() {
-  if (autoTimer) clearInterval(autoTimer);
-  autoTimer = autoSec.value > 0 ? window.setInterval(() => void reload(), autoSec.value * 1000) : null;
-}
-watch(autoSec, (v) => { localStorage.setItem('backups-auto-refresh', String(v)); restartAuto(); });
-onMounted(restartAuto);
-onBeforeUnmount(() => { if (autoTimer) clearInterval(autoTimer); });
+const autoPoll = useVisiblePoll(() => void reload(), autoSec.value * 1000);
+watch(autoSec, (v) => { localStorage.setItem('backups-auto-refresh', String(v)); autoPoll.every(v * 1000); });
+onMounted(autoPoll.start);
 
 const kindOpts = [
   { label: 'PostgreSQL 数据库', value: 'pg' },
@@ -111,22 +107,28 @@ const columns: any[] = [
       ]),
   },
   {
-    // 1Panel Status operate 模式：启用/停用是可点的小圆按钮，点击直发 updateBackup
-    title: '计划', key: 'schedule', width: 200,
+    // 1Panel Status operate 模式：启用/停用是可点的小圆按钮，点击直发 updateBackup。
+    // 以前这颗开关和"每日 03:00"挤在同一列、列名还和定时任务页的「计划」（cron 表达式）
+    // 同名不同义，两页来回切的时候读不出这是哪一类信息。
+    title: '启用', key: 'enabled', width: 90,
+    render: (r: any) =>
+      r.schedule === 'manual'
+        ? h('span', { class: 'cell-sub' }, '—')
+        : isAdmin
+          ? h(NButton, {
+              size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
+              loading: toggling.value === r.id, disabled: toggling.value !== null,
+              onClick: () => toggleEnabled(r),
+            }, () => (r.enabled ? '启用' : '停用'))
+          // 只读账号不给按不动的开关，直接只显示状态文字
+          : h(NTag, { size: 'small', round: true, bordered: false, type: r.enabled ? 'success' : 'default' }, () => (r.enabled ? '启用' : '停用')),
+  },
+  {
+    title: '调度', key: 'schedule', width: 130,
     render: (r: any) =>
       r.schedule === 'manual'
         ? h(NTag, { size: 'small', round: true, bordered: false }, () => '手动')
-        : h('div', { class: 'cell-bk-sched' }, [
-            // 只读账号不给按不动的开关，直接只显示状态文字
-            isAdmin
-              ? h(NButton, {
-                  size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
-                  loading: toggling.value === r.id, disabled: toggling.value !== null,
-                  onClick: () => toggleEnabled(r),
-                }, () => (r.enabled ? '启用' : '停用'))
-              : h(NTag, { size: 'small', round: true, bordered: false, type: r.enabled ? 'success' : 'default' }, () => (r.enabled ? '启用' : '停用')),
-            h('span', { class: 'mono-dim' }, `${r.schedule === 'daily' ? '每日' : '每周一'} ${String(r.hour).padStart(2, '0')}:${String(r.minute).padStart(2, '0')}`),
-          ]),
+        : h('span', { class: 'mono-dim' }, `${r.schedule === 'daily' ? '每日' : '每周一'} ${String(r.hour).padStart(2, '0')}:${String(r.minute).padStart(2, '0')}`),
   },
   { title: '保留', key: 'keep', width: 70, render: (r: any) => h('span', { class: 'mono-dim' }, `${r.keep} 份`) },
   {
@@ -135,7 +137,7 @@ const columns: any[] = [
       r.files.length
         ? h('div', { class: 'cell-txt' }, [
             h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files.length} 份`),
-            h('div', { class: 'cell-sub' }, `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)}`),
+            h('div', { class: 'cell-sub' }, `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)} UTC`),
           ])
         : h('span', { class: 'cell-sub' }, '—'),
   },
@@ -283,9 +285,11 @@ async function submit() {
       <NDataTable
         ref="tableAnchor"
         :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading"
-        :scroll-x="1210" :max-height="tableH" :row-key="(r: any) => r.id"
+        :scroll-x="1230" :max-height="tableH" :row-key="(r: any) => r.id"
       >
-        <template #empty><EmptyBox text="还没有备份任务，点左上方「新建备份任务」" /></template>
+        <template #empty>
+          <EmptyBox :text="error ? '备份任务获取失败，点上方「刷新」重试' : (isAdmin ? '还没有备份任务，点左上方「新建备份任务」' : '还没有备份任务')" />
+        </template>
       </NDataTable>
     </CpToolbarCard>
 
@@ -358,7 +362,6 @@ async function submit() {
 </template>
 
 <style scoped>
-.cell-bk-sched { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 /* 1Panel LogFile：calc(100vh - 420px)、14px/16px、padding 5px、深色代码底 */
 .cr-log {
   margin: 0; height: calc(100vh - 420px); overflow: auto; padding: 5px;

@@ -913,5 +913,140 @@ class TestScryptOffLoop(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sec.check_pass("abcabcdefghijk", stored))
 
 
+class TestUnitFilesState(unittest.IsolatedAsyncioTestCase):
+    """回归：服务管理页的「自启」按钮原先没有任何状态来源。
+
+    `systemctl list-units` 输出的五列是 UNIT/LOAD/ACTIVE/SUB/DESCRIPTION，**不含**
+    开机自启状态；前端那个按钮既显示不了当前是否已启用，enable/disable 之后也读不回来。
+    补上的 unit_files() 要锁死四件事：解析对齐、整表一次调用（带 TTL 复用）、
+    空结果不被当成缓存、systemctl 失败时沿用上一份而不是显示成「全部未启用」；
+    外加接口写完必须把新状态回显给前端（否则按钮要点两次才变）。
+    """
+
+    LIST = (
+        "choyeon-panel.service           enabled    enabled\n"
+        "nginx.service                   disabled   disabled\n"
+        "serial-getty@ttyS0.service      indirect   disabled\n"
+        "systemd-resolved.service        static     enabled\n"
+    )
+
+    def setUp(self):
+        from app.services import systemd_ops
+
+        self.sys = systemd_ops
+        self.addCleanup(setattr, systemd_ops, "_uf_cache", (0.0, {}))
+        systemd_ops._uf_cache = (0.0, {})
+
+    def _fake_run(self, *, uf_out=None, uf_code=0):
+        calls = []
+
+        async def run(cmd, args, cwd=None, timeout=120, env=None):
+            calls.append(list(args))
+            if args and args[0] == "list-unit-files":
+                return {"code": uf_code, "out": self.LIST if uf_out is None else uf_out}
+            return {"code": 0, "out": ""}
+
+        return calls, run
+
+    async def test_parsed_and_reused_inside_ttl(self):
+        calls, run = self._fake_run()
+        with mock.patch.object(self.sys, "run", run):
+            first = await self.sys.unit_files()
+            for _ in range(5):
+                second = await self.sys.unit_files()
+        self.assertEqual(calls.count(["list-unit-files", "--type=service", "--no-legend", "--plain", "--no-pager"]), 1,
+                         "6 次读取只该起 1 个 systemctl；逐行 is-enabled 在 15s 刷新周期里会打满进程")
+        self.assertIs(second, first)
+        self.assertEqual(first["choyeon-panel.service"], "enabled")
+        # STATE 是第二个字段，PRESET 在后面：按空白切列时不能把 preset 读成 state
+        self.assertEqual(first["nginx.service"], "disabled")
+        self.assertEqual(first["systemd-resolved.service"], "static")
+
+    async def test_instance_names_survive(self):
+        calls, run = self._fake_run()
+        with mock.patch.object(self.sys, "run", run):
+            d = await self.sys.unit_files()
+        self.assertEqual(d["serial-getty@ttyS0.service"], "indirect", "@ 实例名被切成两半就查不到状态")
+
+    async def test_empty_result_is_not_cached(self):
+        """code=0 但没输出（unit 文件表为空/被截断）不能被当作一份可用缓存。"""
+        calls, run = self._fake_run(uf_out="")
+        with mock.patch.object(self.sys, "run", run):
+            await self.sys.unit_files()
+            await self.sys.unit_files()
+        self.assertEqual(len([c for c in calls if c[0] == "list-unit-files"]), 2)
+
+    async def test_failure_keeps_previous_snapshot(self):
+        _, run = self._fake_run()
+        with mock.patch.object(self.sys, "run", run):
+            good = await self.sys.unit_files()
+        self.assertEqual(good["choyeon-panel.service"], "enabled")
+        _, fail = self._fake_run(uf_code=1)
+        with mock.patch.object(self.sys, "run", fail):
+            again = await self.sys.unit_files()
+        self.assertEqual(again, good, "systemctl 失败时把全部服务显示成「未启用」比停留在旧状态更糟")
+
+    async def test_force_rereads_after_a_write(self):
+        calls, run = self._fake_run()
+        with mock.patch.object(self.sys, "run", run):
+            await self.sys.unit_files()
+            _, after = self._fake_run(uf_out="choyeon-panel.service  disabled  disabled\n")
+            with mock.patch.object(self.sys, "run", after):
+                fresh = await self.sys.unit_files(force=True)
+        self.assertEqual(fresh["choyeon-panel.service"], "disabled")
+        self.assertEqual(len(calls), 1, "force=True 不该真的回源过一次以上")
+
+    async def test_endpoint_returns_mapping(self):
+        from app.routers import system as system_router
+
+        _, run = self._fake_run()
+        with mock.patch.object(self.sys, "run", run):
+            self.assertEqual((await system_router.unit_files())["nginx.service"], "disabled")
+
+    async def test_enable_response_echoes_new_state(self):
+        from app.routers import system as system_router
+
+        calls, run = self._fake_run(uf_out="choyeon-panel.service  enabled  enabled\n")
+
+        async def act(unit, verb):
+            return ""
+
+        async def inactive(unit):
+            return False
+
+        with (
+            mock.patch.object(self.sys, "run", run),
+            mock.patch.object(self.sys, "service_action", act),
+            mock.patch.object(self.sys, "is_active", inactive),
+        ):
+            out = await system_router.service_action(
+                "choyeon-panel.service",
+                _req(body={"verb": "enable"}, headers={"content-type": "application/json"}),
+            )
+        self.assertEqual(out.get("enabled"), "enabled", "前端点完「自启」要当场变状态，不能等 30s 缓存过期")
+        self.assertTrue(out["ok"])
+        self.assertEqual([c for c in calls if c[0] == "list-unit-files"], [["list-unit-files", "--type=service", "--no-legend", "--plain", "--no-pager"]])
+
+    async def test_restart_response_has_no_enabled(self):
+        from app.routers import system as system_router
+
+        calls, run = self._fake_run()
+
+        async def act(unit, verb):
+            return ""
+
+        async def active(unit):
+            return True
+
+        with (
+            mock.patch.object(self.sys, "run", run),
+            mock.patch.object(self.sys, "service_action", act),
+            mock.patch.object(self.sys, "is_active", active),
+        ):
+            out = await system_router.service_action("nginx.service", _req(body={"verb": "restart"}))
+        self.assertNotIn("enabled", out, "restart 不改自启，回读一次 list-unit-files 是白起一个进程")
+        self.assertEqual([c for c in calls if c[0] == "list-unit-files"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

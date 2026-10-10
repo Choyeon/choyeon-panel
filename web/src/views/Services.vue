@@ -35,6 +35,19 @@ const { data, error, loading, refreshing, refresh } = useCachedFetch<any[]>({
 });
 watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
+// 「自启」状态不在 list-units 的输出里（那五个列是 UNIT/LOAD/ACTIVE/SUB/DESCRIPTION），
+// 得单独走 list-unit-files。没有它之前，页面上那颗「自启」按钮既显示不出当前是否
+// 已启用、也点不出"取消自启"，用户只能反复盲按 enable。
+const { data: unitFiles } = useCachedFetch<Record<string, string>>({
+  key: () => 'unit-files',
+  loader: () => api.unitFiles(),
+  maxAge: 30000,
+});
+// enable/disable 的响应里带服务端强制回读的新状态，先在本地生效；
+// reload() 拿回整张表（服务端那份 30s 缓存已被同一次调用刷新）就让位给服务端值。
+const enabledPatch = ref<Record<string, string>>({});
+const enabledOf = (unit: string) => enabledPatch.value[unit] ?? unitFiles.value?.[unit] ?? '';
+
 const rows = computed<any[]>(() => data.value ?? []);
 // 延迟刷新不能拖过页面卸载：那是一次没人看的请求，失败还会把错误 toast 打到新页面上。
 const { pending: pendingRefresh, later } = useDelayedRefresh();
@@ -42,9 +55,12 @@ const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, 
 
 function reload() {
   invalidateCache('services');
+  invalidateCache('unit-files');
   // 启停/自启都会写一条审计：审计页的缓存同样作废，切过去不会看到旧记录
   invalidateCache('audit:');
-  return refresh().catch(() => undefined);
+  return refresh()
+    .catch(() => undefined)
+    .then(() => { enabledPatch.value = {}; });
 }
 
 const important = ['nginx', 'postgresql', 'redis', 'rosetta', 'choyeon', 'ssh', 'panel-'];
@@ -67,8 +83,13 @@ const tabs = computed(() => [
 // 选项从实际返回的 active 值里取，systemd 状态枚举（如 reloading）出现也不至于漏
 const STATE_LABELS: Record<string, string> = {
   active: '运行中', inactive: '已停止', failed: '异常', activating: '启动中', deactivating: '停止中',
+  reloading: '重新加载中', maintenance: '维护中',
 };
 const statusLabel = (s: string) => STATE_LABELS[s] || s;
+// masked（被 systemctl mask 掉）在 list-units 里 ACTIVE 也是 inactive，照原样翻译就成了
+// 「已停止」——那是"能启动但没启动"，而 masked 是"根本不许启动"，得区分开。
+const isMasked = (r: any) => r.load === 'masked' || enabledOf(r.unit) === 'masked';
+const statusText = (r: any) => (isMasked(r) ? '已屏蔽' : statusLabel(r.active));
 const statusOptions = computed(() =>
   [...new Set(services.value.map((r) => r.active))].sort().map((v) => ({ label: statusLabel(v), value: v })),
 );
@@ -76,7 +97,8 @@ const statusOptions = computed(() =>
 async function act(unit: string, verb: string, ok?: string) {
   busy.value = { unit, verb };
   try {
-    await api.serviceAction(unit, verb);
+    const res: any = await api.serviceAction(unit, verb);
+    if (verb === 'enable' || verb === 'disable') enabledPatch.value = { ...enabledPatch.value, [unit]: String(res?.enabled ?? '') };
     // 走确认弹窗的路径由弹窗报成功，这里只给行内直调（启动/自启）补反馈，
     // 否则用户点完什么也没发生，只能猜 systemctl 到底下发了没有。
     if (ok) msg.success(ok);
@@ -109,14 +131,24 @@ function openLog(unit: string) {
 function rowButtons(r: any): RowAction[] {
   const running = r.active === 'active';
   const dis = unitBusy(r.unit);
+  const masked = isMasked(r);
   const list: RowAction[] = [{ label: '查看', run: () => openLog(r.unit) }];
   // 服务端对全部 MUTATION 拦 403，只读账号只留「查看」，不把必然失败的按钮摆出来
   if (!isAdmin) return list;
-  list.push(running
-    ? { label: '停止', danger: true, disabled: dis, run: () => askConfirm(r.unit, 'stop') }
-    : { label: '启动', disabled: dis, run: () => act(r.unit, 'start', `已下发启动：${r.unit}`).catch((e: any) => msg.error(e.message)) });
-  if (running) list.push({ label: '重启', disabled: dis, run: () => askConfirm(r.unit, 'restart') });
-  list.push({ label: '自启', disabled: dis, run: () => act(r.unit, 'enable', `已设置开机自启：${r.unit}`).catch((e: any) => msg.error(e.message)) });
+  // 屏蔽中的 unit 连 start 都会被 systemd 拒绝，按钮不摆（比摆了报错更诚实）
+  if (!masked) {
+    list.push(running
+      ? { label: '停止', danger: true, disabled: dis, run: () => askConfirm(r.unit, 'stop') }
+      : { label: '启动', disabled: dis, run: () => act(r.unit, 'start', `已下发启动：${r.unit}`).catch((e: any) => msg.error(e.message)) });
+    if (running) list.push({ label: '重启', disabled: dis, run: () => askConfirm(r.unit, 'restart') });
+  }
+  const uf = enabledOf(r.unit);
+  if (uf === 'enabled') {
+    list.push({ label: '取消自启', disabled: dis, run: () => act(r.unit, 'disable', `已取消开机自启：${r.unit}`).catch((e: any) => msg.error(e.message)) });
+  } else if (uf === 'disabled' || uf === '') {
+    // 取不到状态时保留「自启」入口（enable 是幂等的），masked/static/generated 则不给按钮
+    list.push({ label: '自启', disabled: dis, run: () => act(r.unit, 'enable', `已设置开机自启：${r.unit}`).catch((e: any) => msg.error(e.message)) });
+  }
   return list;
 }
 
@@ -136,8 +168,22 @@ const columns: any[] = [
   },
   {
     // 状态不只用颜色：CpStatusTag 的文字（运行中/异常/已停止）始终在场
-    title: '状态', key: 'active', width: 100,
-    render: (r: any) => h(CpStatusTag, { status: r.active, text: statusLabel(r.active) }),
+    title: '状态', key: 'active', width: 110,
+    render: (r: any) => h(CpStatusTag, { status: isMasked(r) ? 'blocked' : r.active, text: statusText(r) }),
+  },
+  {
+    // 1Panel 的服务列表里「开机自启」是独立一列：它和"现在在不在跑"是两件事，
+    // 合成一列会让人以为已停止 = 未自启。
+    title: '自启', key: 'enabled', width: 96,
+    render: (r: any) => {
+      const uf = enabledOf(r.unit);
+      const text = uf || (r.unit.endsWith('.service') ? '未知' : '');
+      const cls = uf === 'enabled' ? 'ok' : uf === 'disabled' ? 'idle' : uf === 'masked' ? 'err' : 'idle';
+      return h('span', {
+        class: `st ${cls}`,
+        title: uf ? `systemctl 状态：${uf}` : 'list-unit-files 未返回这个 unit 的自启状态',
+      }, [h('span', { class: `dot ${cls}` }), text]);
+    },
   },
   {
     title: '操作', key: 'ops', width: 209,
@@ -182,10 +228,11 @@ const paging = { pageSize: 50, showSizePicker: false, showQuickJumper: false };
       <NDataTable
         ref="tableAnchor"
         :columns="columns" :data="filtered" size="small" :bordered="false" :loading="loading"
-        :scroll-x="720" :max-height="tableH" :pagination="paging" :row-key="(r: any) => r.unit"
+        :scroll-x="810" :max-height="tableH" :pagination="paging" :row-key="(r: any) => r.unit"
         class="cp-tbl tbl-services"
       >
-        <template #empty><EmptyBox text="没有匹配的服务" /></template>
+        <!-- 拉取失败不能显示成「没有匹配的服务」：那是"数据是空的"，而实际是"没拿到数据" -->
+        <template #empty><EmptyBox :text="error ? '服务列表获取失败，点上方「刷新」重试' : '没有匹配的服务'" /></template>
       </NDataTable>
     </CpToolbarCard>
 

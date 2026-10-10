@@ -10,6 +10,7 @@ import platform
 import shutil
 import socket
 import time
+import weakref
 from collections import deque
 
 try:  # 缺 psutil 也不能让监控整页挂掉，兜底走 /proc
@@ -17,11 +18,33 @@ try:  # 缺 psutil 也不能让监控整页挂掉，兜底走 /proc
 except ImportError:  # pragma: no cover
     psutil = None
 
-_history: deque = deque(maxlen=240)
-_prev: dict | None = None  # 上一次的累计量，用于算差值（占用率/网速/IO 速率）
+_history: deque = deque(maxlen=60)
+_prev: dict | None = None  # 上一次**采样**的累计量，用于算差值（占用率/网速/IO 速率）
 _proc_objs: dict[int, object] = {}
 _top_cache: tuple[float, list] = (0.0, [])
 _TOP_TTL = 3.0
+
+# 实时采样的墙钟节奏（秒）。旧实现是"每个请求自己 diff 一次全局快照"，而读取者不止一个：
+# Dashboard 每 3s 轮询，metrics_store 的后台采样器每 30s 也要调 snapshot()，多开一个标签页
+# 就多一个写入者。它们抢同一个 _prev，落在别人之后那一刻 elapsed 只有几毫秒——
+# 短分母把网速/IO 放大成尖峰，而 cpu 的 jiffies 差在该窗口内取整为 0，直接算出 0% 并作为
+# "真实采样点"永久留在曲线里；_history 也按请求数增长，时间轴随客户端数量被压密。
+# 现在到点才真的采样，区间内的调用复用同一份：速率分母恒为采样窗口，曲线口径与客户端数无关。
+_RT_INTERVAL = 2.0
+_latest: dict | None = None
+_latest_at = 0.0  # time.monotonic()，不用墙钟：NTP 回拨会让仪表盘长时间不再更新
+# 锁按事件循环存：常驻服务只有一个循环，测试里每个 asyncio.run 一个循环。模块级
+# asyncio.Lock 会绑死在第一个循环上，第二次 run 就报 "bound to a different event loop"；
+# WeakKeyDictionary 让用完的循环连同它的锁一起回收。
+_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lk = _locks.get(loop)
+    if lk is None:
+        lk = _locks[loop] = asyncio.Lock()
+    return lk
 
 
 def _read(path: str) -> str:
@@ -146,8 +169,19 @@ def _rate(cur, prev, dt_s: float) -> int:
 
 
 async def snapshot() -> dict:
+    """新鲜度由墙钟节奏决定，不由请求节奏决定（见 _RT_INTERVAL 注释）。"""
+    global _latest, _latest_at
+    async with _lock():
+        if _latest is None or time.monotonic() - _latest_at >= _RT_INTERVAL:
+            _latest = await _sample()
+            _latest_at = time.monotonic()
+        return _latest
+
+
+async def _sample() -> dict:
     global _prev
     now_ms = int(time.time() * 1000)
+    mono = time.monotonic()
     raw = await asyncio.to_thread(_psutil_raw if psutil else _proc_raw)
 
     cpu = 0.0
@@ -165,7 +199,7 @@ async def snapshot() -> dict:
                 pdt = tot - prev_core[i][1]
                 if pdt > 0:
                     per_core[i] = max(0.0, round((1 - (idl - prev_core[i][0]) / pdt) * 1000) / 10)
-        elapsed = (now_ms - _prev["at"]) / 1000
+        elapsed = mono - _prev["mono"]
         net_rx = _rate(raw["rx"], _prev["rx"], elapsed)
         net_tx = _rate(raw["tx"], _prev["tx"], elapsed)
         io_r = _rate(raw["ioRead"], _prev["ioRead"], elapsed)
@@ -187,6 +221,7 @@ async def snapshot() -> dict:
         "idle": raw["idle"], "total": raw["total"], "perCore": raw["perCore"],
         "rx": raw["rx"], "tx": raw["tx"], "ioRead": raw["ioRead"], "ioWrite": raw["ioWrite"],
         "nics": raw["nics"],
+        "mono": mono,
         "at": now_ms,
     }
 

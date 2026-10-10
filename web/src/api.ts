@@ -144,6 +144,8 @@ export const api = {
   stats: () => req('/system/stats'),
   overview: () => req('/system/overview'),
   services: () => req('/system/services'),
+  // 开机自启状态：list-units 的输出里没有这一列，只能单独走 list-unit-files（服务端 30s 缓存）
+  unitFiles: () => req('/system/unit-files'),
   serviceAction: (unit: string, verb: string) => req(`/system/services/${encodeURIComponent(unit)}`, { body: { verb } }),
   // certbot 续期在服务器上最长可跑到几分钟，前端 15s 就 abort 会显示"请求超时"，
   // 而续期其实还在跑：用户重试 → 多个 certbot 并发抢同一张证书。给到 620s（略大于服务端上限）。

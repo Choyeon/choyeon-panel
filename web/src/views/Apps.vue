@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, h, computed } from 'vue';
+import { onMounted, ref, h, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   NSpace, NDataTable, NModal, NForm, NFormItem, NInput, NInputNumber, NSelect,
@@ -10,6 +10,7 @@ import { NButton } from '../ui';
 import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
+import { useVisiblePoll } from '../composables/useVisiblePoll';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
@@ -248,18 +249,14 @@ const { later } = useDelayedRefresh();
 
 // 部署是后台任务，deploying 会自己落定：列表里只要还有部署中的行就每 10s 静默续拉，
 // 全部落定就不再挂定时器（不轮询的话用户只能手动点刷新才知道部署完了）。
-let pollTimer = 0;
+// 部署动辄几分钟，期间标签页常常不在前台，所以走 useVisiblePoll。
+const deployPoll = useVisiblePoll(() => {
+  void loadQuiet().then(() => { if (!rows.value.some((r) => r.deploying)) deployPoll.stop(); });
+}, 10000);
 function schedulePoll() {
-  if (pollTimer || !rows.value.some((r) => r.deploying)) return;
-  pollTimer = window.setTimeout(() => {
-    pollTimer = 0;
-    loadQuiet().then(schedulePoll);
-  }, 10000);
+  if (rows.value.some((r) => r.deploying)) deployPoll.start();
+  else deployPoll.stop();
 }
-onBeforeUnmount(() => {
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = 0;
-});
 
 async function load() {
   loading.value = true;

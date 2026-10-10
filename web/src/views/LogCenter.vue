@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, ref } from 'vue';
+import { computed, h, ref } from 'vue';
 import {
   NAlert, NDataTable, NInput, NSelect, NSpace, NTabPane, NTabs, NSwitch, NTag, NText,
 } from 'naive-ui';
@@ -10,6 +10,7 @@ import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import { useCachedFetch } from '../composables/useCachedFetch';
 import { useTableHeight } from '../composables/useTableHeight';
+import { useVisiblePoll } from '../composables/useVisiblePoll';
 
 type JItem = { ts: string; unit: string; prio: number; text: string };
 type JResp = { items: JItem[]; count: number; truncated: boolean };
@@ -88,20 +89,15 @@ async function searchJournal(opts: { silent?: boolean } = {}) {
 
 // 跟随用轮询而不是 SSE：SSE 那条 -f 流是全量转发、不按关键词/级别过滤，
 // 挂着不动就占一个 journalctl 进程；轮询复用同一个检索接口，条件所见即所得。
-let pollTimer: number | null = null;
-function stopFollow() {
-  if (pollTimer) window.clearInterval(pollTimer);
-  pollTimer = null;
-  follow.value = false;
-}
+// 标签页隐藏时由 useVisiblePoll 挂起，回到前台立刻补一次，不会错过最新几行。
+const followPoll = useVisiblePoll(() => { void searchJournal({ silent: true }); }, FOLLOW_MS);
 function toggleFollow(v: boolean) {
   follow.value = v;
-  if (pollTimer) { window.clearInterval(pollTimer); pollTimer = null; }
+  followPoll.stop();
   if (!v) return;
   void searchJournal({ silent: true });
-  pollTimer = window.setInterval(() => { void searchJournal({ silent: true }); }, FOLLOW_MS);
+  followPoll.start();
 }
-onBeforeUnmount(stopFollow);
 
 async function tailNginx() {
   nLoading.value = true;
@@ -147,7 +143,9 @@ function prioTag(p: number) {
 }
 
 const jCols: any[] = [
-  { title: '时间', key: 'ts', width: 148, render: (r: JItem) => h('span', { class: 'mono-dim' }, r.ts || '—') },
+  // 后端 _journal_items 用 time.localtime 格式化，和下方 since/until 的「按服务器本地时区解析」
+  // 是同一套口径；这里如果只写「时间」，用户会拿它和审计页的 UTC 列对表。
+  { title: '时间（本地）', key: 'ts', width: 158, render: (r: JItem) => h('span', { class: 'mono-dim', title: r.ts }, r.ts || '—') },
   {
     title: '来源', key: 'unit', width: 180,
     render: (r: JItem) => h('span', { class: 'mono-dim cp-break', style: { fontSize: 'var(--fs-xs)' } }, r.unit || '—'),

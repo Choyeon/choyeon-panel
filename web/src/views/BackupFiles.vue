@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, h, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NAlert, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NModal, NPopconfirm, NSpace,
@@ -15,6 +15,7 @@ import CpStatusTag from '../components/CpStatusTag.vue';
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue';
 import { useTableHeight } from '../composables/useTableHeight';
 import { fmtBytes, fmtDateTime } from '../composables/useFormat';
+import { useVisiblePoll } from '../composables/useVisiblePoll';
 
 const msg = useMessage();
 const route = useRoute();
@@ -114,12 +115,12 @@ async function load() {
 // 1Panel TableSetting 自动刷新：0/5/10/30/60/120/300s，localStorage 记忆
 const AUTO_OPTS = [0, 5, 10, 30, 60, 120, 300].map((s) => ({ label: s ? `${s} 秒` : '关闭自动刷新', value: s }));
 const autoSec = ref(Math.max(0, Number(localStorage.getItem('backup-files-auto-refresh')) || 0));
-let autoTimer: number | null = null;
-function restartAuto() {
-  if (autoTimer) clearInterval(autoTimer);
-  autoTimer = autoSec.value > 0 ? window.setInterval(() => void load(), autoSec.value * 1000) : null;
-}
-watch(autoSec, (v) => { localStorage.setItem('backup-files-auto-refresh', String(v)); restartAuto(); });
+// 用增到 5s 档时，后台标签页每分钟白打一次 backupFiles（列目录 + 算大小）。
+const autoPoll = useVisiblePoll(() => void load(), autoSec.value * 1000);
+watch(autoSec, (v) => {
+  localStorage.setItem('backup-files-auto-refresh', String(v));
+  autoPoll.every(v * 1000);
+});
 
 const delDialog = ref<InstanceType<typeof ConfirmActionDialog> | null>(null);
 function confirmDelOne(f: any) {
@@ -272,7 +273,7 @@ const columns: any[] = [
     title: '类型', key: 'kind', width: 110,
     render: (f: any) => h(NTag, { size: 'small', bordered: false, type: f.job_missing ? 'warning' : 'default' }, () => KIND_LABEL[f.kind] || '未知'),
   },
-  { title: '生成时间', key: 'mtime', width: 180, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim', title: f.mtime }, fmtDateTime(f.mtime)) },
+  { title: '生成时间 (UTC)', key: 'mtime', width: 180, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim', title: f.mtime }, fmtDateTime(f.mtime)) },
   { title: '大小', key: 'size', width: 100, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim' }, fmtBytes(f.size)) },
   {
     title: '状态', key: 'state', width: 130,
@@ -300,9 +301,8 @@ onMounted(() => {
   const q = route.query.job;
   if (typeof q === 'string' && /^\d+$/.test(q)) jobFilter.value = q;
   load();
-  restartAuto();
+  autoPoll.start();
 });
-onBeforeUnmount(() => { if (autoTimer) clearInterval(autoTimer); });
 </script>
 
 <template>
@@ -356,7 +356,7 @@ onBeforeUnmount(() => { if (autoTimer) clearInterval(autoTimer); });
         <NForm label-placement="top" :show-feedback="false">
           <NFormItem label="文件"><NText class="mono cp-break" style="font-size: var(--fs-sm); min-width: 0">{{ restoreTarget?.name }}</NText></NFormItem>
           <NFormItem label="所属任务"><NText style="font-size: var(--fs-sm)">{{ restoreTarget ? jobLabel(restoreTarget) : '' }}</NText></NFormItem>
-          <NFormItem label="生成时间"><NText style="font-size: var(--fs-sm)">{{ fmtDateTime(restoreTarget?.mtime) }} · {{ fmtBytes(restoreTarget?.size || 0) }}</NText></NFormItem>
+          <NFormItem label="生成时间 (UTC)"><NText style="font-size: var(--fs-sm)">{{ fmtDateTime(restoreTarget?.mtime) }} · {{ fmtBytes(restoreTarget?.size || 0) }}</NText></NFormItem>
         </NForm>
         <NAlert v-if="restoreErr" type="error" :bordered="false" size="small" role="alert">{{ restoreErr }}</NAlert>
         <NAlert v-if="restoreLog" type="success" :bordered="false" size="small" role="status">

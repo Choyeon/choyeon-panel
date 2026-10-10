@@ -1,8 +1,13 @@
 import re
+import time
 
 from ..util import run
 
 VERBS = {"start", "stop", "restart", "reload", "enable", "disable"}
+
+# list-unit-files 结果的短 TTL 缓存：见 unit_files() 的说明。
+_UF_TTL = 30.0
+_uf_cache: tuple[float, dict] = (0.0, {})
 
 
 async def list_services() -> list:
@@ -13,6 +18,41 @@ async def list_services() -> list:
             continue
         f = re.split(r"\s+", line.strip())
         out.append({"unit": f[0], "load": f[1], "active": f[2], "sub": f[3], "desc": " ".join(f[4:])})
+    return out
+
+
+async def unit_files(force: bool = False) -> dict:
+    """unit → 开机自启状态（enabled/disabled/masked/static/alias/generated/…）。
+
+    自启状态**不在** list-units 的输出里（那五个列是 UNIT/LOAD/ACTIVE/SUB/DESCRIPTION，
+    `--all` 只是把未加载的 unit 也列出来），所以前端原来那个「自启」按钮没有任何状态来源：
+    既不能显示当前是否已启用，也无法在改完之后回读。这里单独走 list-unit-files。
+
+    整表一次调用（约 200 行）而不是逐行 `systemctl is-enabled`，配 30s TTL：
+    服务管理页每 15s 刷一次，逐行查就是每个周期多起几百个 systemctl 进程。
+    `force=True` 只给写完立刻回读的用（enable/disable 之后按钮要当场变状态）。
+    """
+    global _uf_cache
+    now = time.monotonic()
+    if not force and _uf_cache[1] and now - _uf_cache[0] < _UF_TTL:
+        return _uf_cache[1]
+    r = await run(
+        "systemctl",
+        ["list-unit-files", "--type=service", "--no-legend", "--plain", "--no-pager"],
+        timeout=20,
+    )
+    out: dict[str, str] = {}
+    if r["code"] == 0:
+        for line in r["out"].split("\n"):
+            if not line.strip():
+                continue
+            f = re.split(r"\s+", line.strip())
+            if len(f) >= 2:
+                out[f[0]] = f[1]
+        _uf_cache = (now, out)
+    elif _uf_cache[1]:
+        # 拿不到就沿用上一份：把「查不到」显示成「全部未启用」比不更新更糟
+        return _uf_cache[1]
     return out
 
 

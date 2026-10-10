@@ -87,7 +87,10 @@ const cols: any[] = [
   {
     title: '用户', key: 'username',
     render: (u: any) => {
-      const sub = u.nickname ? `${u.username} · 创建于 ${fmtDateTime(u.created_at)}` : `创建于 ${fmtDateTime(u.created_at)}`;
+      // fmtDateTime 按 UTC 截断展示（见 useFormat 注释），这里不标注就会被读成浏览器本地时间。
+      const sub = u.nickname
+        ? `${u.username} · 创建于 ${fmtDateTime(u.created_at)} UTC`
+        : `创建于 ${fmtDateTime(u.created_at)} UTC`;
       return h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-avatar' }, [
           u.avatar

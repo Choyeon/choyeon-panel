@@ -78,21 +78,17 @@ const memberCols = computed<any[]>(() => {
     });
     cols.push(ops((r: any) =>
       editField.value === r.field
-        ? h(NSpace, { size: 6 }, {
-          default: () => [
-            h(NButton, { size: 'tiny', text: true, type: 'primary', onClick: () => saveField(r) }, { default: () => '保存' }),
-            h(NButton, { size: 'tiny', text: true, onClick: () => { editField.value = ''; } }, { default: () => '取消' }),
-          ],
-        })
-        : h(NSpace, { size: 6 }, {
-          default: () => [
-            h(NButton, { size: 'tiny', text: true, onClick: () => startFieldEdit(r) }, { default: () => '编辑' }),
+        ? h('div', { class: 'cp-ops' }, [
+            h(NButton, { size: 'tiny', text: true, type: 'primary', class: 'cp-op', onClick: () => saveField(r) }, { default: () => '保存' }),
+            h(NButton, { size: 'tiny', text: true, class: 'cp-op', onClick: () => { editField.value = ''; } }, { default: () => '取消' }),
+          ])
+        : h('div', { class: 'cp-ops' }, [
+            h(NButton, { size: 'tiny', text: true, class: 'cp-op', onClick: () => startFieldEdit(r) }, { default: () => '编辑' }),
             h(NPopconfirm, { onPositiveClick: () => delMember('', r.field) }, {
-              trigger: () => h(NButton, { size: 'tiny', text: true, type: 'error' }, { default: () => '删除' }),
+              trigger: () => h(NButton, { size: 'tiny', text: true, type: 'error', class: 'cp-op' }, { default: () => '删除' }),
               default: () => `HDEL ${r.field}？`,
             }),
-          ],
-        })));
+          ])));
     return cols;
   }
   if (type.value === 'list') cols.push({ title: '#', key: 'i', width: 56 });
@@ -103,7 +99,7 @@ const memberCols = computed<any[]>(() => {
   if (type.value === 'zset') cols.push({ title: 'score', key: 'field', width: 90 });
   cols.push(ops((r: any) =>
     h(NPopconfirm, { onPositiveClick: () => delMember(String(r.v), '') }, {
-      trigger: () => h(NButton, { size: 'tiny', text: true, type: 'error' }, { default: () => '删除' }),
+      trigger: () => h(NButton, { size: 'tiny', text: true, type: 'error', class: 'cp-op' }, { default: () => '删除' }),
       default: () => `从 ${type.value} 中删除该条目？`,
     })));
   return cols;

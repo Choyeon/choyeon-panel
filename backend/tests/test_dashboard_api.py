@@ -41,15 +41,23 @@ class NicRateCase(unittest.TestCase):
     def setUp(self):
         system_metrics._prev = None
         system_metrics._history.clear()
+        system_metrics._latest = None
+        system_metrics._latest_at = 0.0
         self._now = self.BASE
 
     def _snap(self, raw, advance: float = 0.0):
-        """自己拨钟：速率断言一旦依赖真实墙钟就会因几毫秒抖动差 1。"""
+        """自己拨钟：速率断言一旦依赖真实墙钟就会因几毫秒抖动差 1。
+
+        _RT_INTERVAL 置 0 是为了让每一帧都真的采样——本类测的是差值数学，
+        复用节奏由 SampleReuseCase 按生产节奏单独测。
+        """
         self._now += advance
         clock = mock.Mock()
         clock.time.return_value = self._now
+        clock.monotonic.return_value = self._now
         with mock.patch.object(system_metrics, "_psutil_raw", return_value=raw), \
-             mock.patch.object(system_metrics, "time", clock):
+             mock.patch.object(system_metrics, "time", clock), \
+             mock.patch.object(system_metrics, "_RT_INTERVAL", 0.0):
             return asyncio.run(system_metrics.snapshot())
 
     def test_first_frame_has_zero_rates_but_keeps_totals(self):
@@ -114,6 +122,70 @@ class NicRateCase(unittest.TestCase):
         self.assertEqual(raw["nics"], {"eth0": (1200, 3400)})
         self.assertEqual((raw["rx"], raw["tx"]), (1200, 3400), "lo 不计入整机总量")
         self.assertEqual(raw["nicUp"], {"eth0": True}, "读不到 sysfs 时按 up 处理")
+
+
+class SampleReuseCase(unittest.TestCase):
+    """快照按墙钟节奏采样，不按请求节奏。
+
+    读取者不止一个：Dashboard 每 3s 轮询，metrics_store 的后台采样器每 30s 也要调
+    snapshot()，多开一个标签页就多一个写入者。旧实现让它们各自 diff 全局 `_prev`，
+    抢在别人之后那一刻 elapsed 只有毫秒级——网速被短分母放大成尖峰，cpu 的 jiffies
+    差在该窗口内取整为 0 就算出 0%，并作为"真实采样点"永久留在曲线里。
+    """
+
+    BASE = 1_700_000_000.0
+
+    def setUp(self):
+        system_metrics._prev = None
+        system_metrics._history.clear()
+        system_metrics._latest = None
+        system_metrics._latest_at = 0.0
+        self.mono = self.BASE
+
+    @staticmethod
+    def _counters(idle: int, total: int, rx: int, tx: int) -> dict:
+        d = _raw({"eth0": (rx, tx)})
+        d["idle"], d["total"], d["perCore"] = idle, total, [(idle, total)]
+        return d
+
+    def _run(self, raw, advance: float):
+        """按生产节奏走：不压 _RT_INTERVAL，拨 monotonic。"""
+        self.mono += advance
+        clock = mock.Mock()
+        clock.time.return_value = self.mono
+        clock.monotonic.return_value = self.mono
+        with mock.patch.object(system_metrics, "_psutil_raw", return_value=raw), \
+             mock.patch.object(system_metrics, "time", clock):
+            return asyncio.run(system_metrics.snapshot())
+
+    def test_second_reader_inside_the_interval_reuses_one_sample(self):
+        first = self._run(self._counters(1000, 2000, 1000, 500), 0.0)
+        second = self._run(self._counters(1050, 2100, 91000, 45500), 0.4)
+        self.assertIs(second, first, "区间内复用同一份快照，不再各算各的窗口")
+        self.assertEqual(len(system_metrics._history), 1, "一个区间只落一个采样点")
+
+    def test_a_late_reader_does_not_read_zero_or_a_spike(self):
+        self._run(self._counters(1000, 2000, 1000, 500), 0.0)
+        good = self._run(self._counters(1050, 2100, 3000, 1500), 2.0)
+        self.assertAlmostEqual(good["cpu"], 50.0)
+        self.assertEqual(good["netRx"], 1000)
+        late = self._run(self._counters(1050, 2100, 3000, 1500), 0.1)
+        self.assertIs(late, good)
+        self.assertEqual((late["cpu"], late["netRx"]), (50.0, 1000), "短窗口既不该归零也不该放大")
+
+    def test_window_accumulates_across_reused_reads(self):
+        self._run(self._counters(1000, 2000, 1000, 500), 0.0)
+        for _ in range(2):
+            self._run(self._counters(1000, 2000, 1000, 500), 0.4)
+        d = self._run(self._counters(1000, 2000, 3800, 1900), 2.0)
+        self.assertEqual(d["netRx"], 1000, "分母是整个采样窗口 2.8s，不是最后一次请求的间隔")
+        self.assertEqual(len(system_metrics._history), 2)
+
+    def test_history_is_capped_for_the_realtime_curve(self):
+        self.assertEqual(
+            system_metrics._history.maxlen, 60,
+            "仪表盘只画最后 60 点，多出的 180 点每 3s 白序列化+白解析一次",
+        )
 
 
 class OverviewCase(unittest.TestCase):

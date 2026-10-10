@@ -64,7 +64,11 @@ export function useTableHeight(opts: TableHeightOptions = {}) {
   // 变量写在滚动容器上（容器内所有元素都能继承），找不到就退回根节点
   function paintVar() {
     const node = el();
-    varHost = (node?.closest('.cp-scroll') as HTMLElement | null) ?? document.documentElement;
+    const host = (node?.closest('.cp-scroll') as HTMLElement | null) ?? document.documentElement;
+    if (host !== varHost) {
+      varHost?.style.removeProperty(varName);
+      varHost = host;
+    }
     varHost.style.setProperty(varName, `${heightPx.value}px`);
   }
 
@@ -73,25 +77,36 @@ export function useTableHeight(opts: TableHeightOptions = {}) {
     nextTick(measure);
   }
 
+  // 观测目标每次重新绑定，不一次性捕获：页面里的表格几乎都套在 `v-if="tab === …"` 的
+  // 卡片里（Services / Databases / LogCenter / Sites / Apps），切走再切回来时 Vue 会销毁
+  // 并重建表格元素。一次性捕获的话 RO 就永远挂在那个已经脱离文档的旧节点上——新表格的
+  // 尺寸变化再也不会触发重测，旧节点还被观测器一直引用着。
+  function observeTargets() {
+    if (!ro) return;
+    ro.disconnect();
+    const node = el();
+    const scroller = node?.closest('.cp-scroll') as HTMLElement | null;
+    if (scroller) ro.observe(scroller);
+    if (node?.parentElement) ro.observe(node.parentElement);
+  }
+
   // 首屏先给一个保守估计，避免量到之前那一帧表格没高度上限
   if (typeof window !== 'undefined') heightPx.value = Math.max(min, Math.round(window.innerHeight * 0.6));
 
   if (getCurrentScope()) {
     const start = () => {
-      measure();
-      const node = el();
-      const scroller = node?.closest('.cp-scroll') as HTMLElement | null;
       if (typeof ResizeObserver === 'undefined') {
         window.addEventListener('resize', measure);
+        measure();
         return;
       }
       ro = new ResizeObserver(measure);
       OBSERVERS.add(ro);
-      if (scroller) ro.observe(scroller);
-      if (node?.parentElement) ro.observe(node.parentElement);
+      observeTargets();
       window.addEventListener('resize', measure);
+      measure();
     };
-    const stopData = watch(() => el(), () => remeasure());
+    const stopData = watch(() => el(), () => { observeTargets(); remeasure(); });
     onMounted(start);
     onScopeDispose(() => {
       stopData();

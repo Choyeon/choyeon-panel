@@ -63,7 +63,8 @@ const cols: any[] = [
         h('span', { class: 'cell-name', title: r.nickname ? `登录名：${r.username || '—'}` : r.username }, r.nickname || r.username || '—'),
       ]),
   },
-  { title: '操作', key: 'action', width: 190, render: (r: any) => h(NTag, { size: 'tiny', bordered: false, type: actionType(r.action) }, () => r.action) },
+  // action 最长的是 `terminal.exec`/`app.deploy.rollback` 这类点分名，190px 会截断，给它一个 title。
+  { title: '操作', key: 'action', width: 190, render: (r: any) => h(NTag, { size: 'tiny', bordered: false, type: actionType(r.action), title: r.action }, () => r.action) },
   { title: '详情', key: 'detail', minWidth: 220, ellipsis: { tooltip: true }, render: (r: any) => h('span', { class: 'mono-dim' }, r.detail || '—') },
 ];
 </script>
@@ -95,7 +96,7 @@ const cols: any[] = [
         :columns="cols" :data="filtered"
         :row-key="(r: any) => r.id"
       >
-        <template #empty><EmptyBox text="暂无操作记录" /></template>
+        <template #empty><EmptyBox :text="error ? '审计记录获取失败，点上方「刷新」重试' : (kw ? '没有匹配的记录' : '暂无操作记录')" /></template>
       </NDataTable>
     </NCard>
   </div>

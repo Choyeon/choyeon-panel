@@ -110,7 +110,9 @@ const columns: any[] = [
         if (!r.fixable) children.push(h('span', { class: 'vchip', title: r.fix }, r.fix));
         children.push(h(CopyButton, { text: r.fix, label: `复制修复命令：${r.title}` }));
       }
-      return h(NSpace, { size: 5, align: 'center', justify: 'end' }, () => children);
+      // 操作列统一走全局 .cp-ops（5px gap + 居中），不再单开一个 NSpace：
+      // 这一列的按钮和 CpRowActions 渲染的是同一形态，间距却各算各的。
+      return h('div', { class: 'cp-ops' }, children);
     },
   },
 ];

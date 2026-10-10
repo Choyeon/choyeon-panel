@@ -4,8 +4,9 @@ import {
   NAlert, NCard, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, NText,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { req } from '../api';
+import { req, getRole } from '../api';
 import { icon, icons } from '../icons';
+import { useVisiblePoll } from '../composables/useVisiblePoll';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
 import CpRowActions from '../components/CpRowActions.vue';
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue';
@@ -24,6 +25,9 @@ type Options = { allowed: string[]; presets: any[]; units: string[]; note: strin
 type Preview = { expr: string; human: string; oncalendar: string | null; error: string | null };
 
 const err = ref('');
+// 后端 deps.py 对全部 MUTATION 拦 403：新建/编辑/删除/执行/启停对只读账号必然失败，
+// 这些入口就不进 DOM（与 Apps / Services / Backups 同一口径）。
+const isAdmin = getRole() === 'admin';
 const runningId = ref<number | null>(null);
 const saving = ref(false);
 const preview = ref<Preview | null>(null);
@@ -80,14 +84,9 @@ async function reload() {
 // 1Panel TableSetting 自动刷新：0/5/10/30/60/120/300s，localStorage 记忆
 const AUTO_OPTS = [0, 5, 10, 30, 60, 120, 300].map((s) => ({ label: s ? `${s} 秒` : '关闭自动刷新', value: s }));
 const autoSec = ref(Math.max(0, Number(localStorage.getItem('cron-auto-refresh')) || 0));
-let autoTimer: number | null = null;
-function restartAuto() {
-  if (autoTimer) clearInterval(autoTimer);
-  autoTimer = autoSec.value > 0 ? window.setInterval(() => void reload(), autoSec.value * 1000) : null;
-}
-watch(autoSec, (v) => { localStorage.setItem('cron-auto-refresh', String(v)); restartAuto(); });
-onMounted(restartAuto);
-onBeforeUnmount(() => { if (autoTimer) clearInterval(autoTimer); });
+const autoPoll = useVisiblePoll(() => void reload(), autoSec.value * 1000);
+watch(autoSec, (v) => { localStorage.setItem('cron-auto-refresh', String(v)); autoPoll.every(v * 1000); });
+onMounted(autoPoll.start);
 
 async function openCreate() {
   editing.value = null;
@@ -264,7 +263,9 @@ function statusTag(r: Task) {
 function lastRunCell(r: Task) {
   const s = r.last_status || '';
   const icoName = !s ? 'InformationCircleOutline' : s === 'ok' ? 'CheckmarkCircleOutline' : 'CloseCircleOutline';
-  const color = !s ? 'var(--cp-text-mute)' : s === 'ok' ? 'var(--cp-node)' : 'var(--cp-err)';
+  // 成功用 --cp-ok（和其它页的"正常"同源）；--cp-node 是给节点/chip 用的另一套绿，
+  // 混在这里会出现"同一个意思两种绿"。
+  const color = !s ? 'var(--cp-text-mute)' : s === 'ok' ? 'var(--cp-ok)' : 'var(--cp-err)';
   return h('div', { class: 'cell-lastrun' }, [
     h(NIcon, { component: icons[icoName], size: 14, color }),
     h('span', { class: 'mono-dim', title: r.last_run ? `${r.last_run} (本地)` : '' }, r.last_run ? fmtDateTime(r.last_run) : '—'),
@@ -274,18 +275,18 @@ function lastRunCell(r: Task) {
 const cols: any[] = [
   {
     title: '任务', key: 'name', minWidth: 170,
-    render: (r: Task) => h('div', { class: 'cell-stack' }, [
+    render: (r: Task) => h('div', { class: 'cell-txt' }, [
       h('span', { class: 'cell-name', title: r.name }, r.name),
-      h('span', { class: 'cell-sub mono-dim cp-break' }, r.timer),
+      h('span', { class: 'cell-sub mono-dim cp-break', title: r.timer || '' }, r.timer),
     ]),
   },
   {
     title: '计划', key: 'expr', minWidth: 210,
-    render: (r: Task) => h('div', { class: 'cell-stack' }, [
+    render: (r: Task) => h('div', { class: 'cell-txt' }, [
       r.expr_error
         ? h(NTag, { size: 'tiny', bordered: false, round: true, type: 'error' }, { default: () => '表达式无法解析' })
         : h('span', { class: 'cell-name', title: `${r.expr} → ${r.human}` }, r.human || r.expr),
-      h('span', { class: 'cell-sub mono-dim cp-break' }, r.expr),
+      h('span', { class: 'cell-sub mono-dim cp-break', title: r.expr }, r.expr),
     ]),
   },
   {
@@ -297,15 +298,20 @@ const cols: any[] = [
   {
     // 1Panel Status operate 模式：启用/停用是可点的圆角小按钮，点击直发 PATCH
     title: '启用', key: 'enabled', width: 90,
-    render: (r: Task) => h(NButton, {
-      size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
-      disabled: runningId.value === r.id, onClick: () => toggle(r, !r.enabled),
-    }, { default: () => (r.enabled ? '启用' : '停用') }),
+    render: (r: Task) => isAdmin
+      ? h(NButton, {
+          size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
+          disabled: runningId.value === r.id, onClick: () => toggle(r, !r.enabled),
+        }, { default: () => (r.enabled ? '启用' : '停用') })
+      // 只读账号：给状态不给按钮
+      : h(NTag, { size: 'small', round: true, bordered: false, type: r.enabled ? 'success' : 'default' }, { default: () => (r.enabled ? '启用' : '停用') }),
   },
   {
     title: 'Timer', key: 'timer', width: 116,
-    render: (r: Task) => h('span', { class: 'st ' + (r.timer_active ? 'run' : 'idle'), title: r.timer_next ? `下次：${r.timer_next}` : '下次执行时间未取到' }, [
-      h('span', { class: 'dot ' + (r.timer_active ? 'run' : 'idle') }),
+    // 颜色类只有 ok/err/warn/idle 四档（style.css 的 .st/.dot），以前写的 `run` 根本不存在，
+    // 「已挂表」于是渲染成无色文字 + 一颗透明点，看起来和"没挂表"一模一样。
+    render: (r: Task) => h('span', { class: `st ${r.timer_active ? 'ok' : 'idle'}`, title: r.timer_next ? `下次：${r.timer_next}` : '下次执行时间未取到' }, [
+      h('span', { class: `dot ${r.timer_active ? 'ok' : 'idle'}` }),
       r.timer_active ? '已挂表' : (r.enabled ? '未挂表' : '已停用'),
     ]),
   },
@@ -315,11 +321,18 @@ const cols: any[] = [
     title: '操作', key: 'ops', width: 200,
     render: (r: Task) => h(CpRowActions, {
       ellipsis: 3,
+      // 顺序是 [执行, 输出, 编辑, 删除]：CpRowActions 平铺前 3 个、剩下的收进「更多」，
+      // 删除（唯一不可逆的那个）正好落在菜单里，需要多点一下确认。
+      // 「输出」读的是列表已经带回的 log_tail，只读账号也能看，所以它对所有人都摆在明面上。
       buttons: [
-        { label: runningId.value === r.id ? '执行中…' : '执行', run: () => runNow(r), disabled: runningId.value !== null },
+        ...(isAdmin ? [
+          { label: runningId.value === r.id ? '执行中…' : '执行', run: () => runNow(r), disabled: runningId.value !== null },
+        ] : []),
         { label: '输出', run: () => { logRow.value = r; }, disabled: !r.log_tail && !r.last_run },
-        { label: '编辑', run: () => openEdit(r) },
-        { label: '删除', danger: true, run: () => confirmDel(r) },
+        ...(isAdmin ? [
+          { label: '编辑', run: () => openEdit(r) },
+          { label: '删除', danger: true, run: () => confirmDel(r) },
+        ] : []),
       ],
     }),
   },
@@ -332,7 +345,7 @@ const cols: any[] = [
 
     <CpToolbarCard title="定时任务">
       <template #left>
-        <NButton size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建任务</NButton>
+        <NButton v-if="isAdmin" size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建任务</NButton>
       </template>
       <template #right>
         <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px" aria-label="自动刷新间隔" />
@@ -350,7 +363,9 @@ const cols: any[] = [
         :scroll-x="1220" :max-height="tableH"
         :row-key="(r: Task) => r.id"
       >
-        <template #empty><EmptyBox text="还没有定时任务，点「新建任务」加一条" /></template>
+        <template #empty>
+          <EmptyBox :text="err ? '定时任务获取失败，点上方「刷新」重试' : (isAdmin ? '还没有定时任务，点「新建任务」加一条' : '还没有定时任务')" />
+        </template>
       </NDataTable>
     </CpToolbarCard>
 
@@ -366,7 +381,8 @@ const cols: any[] = [
                 </NSpace>
               </NFormItem>
               <NFormItem label="启用" style="flex: 0 0 90px">
-                <NSwitch v-model:value="form.enabled" size="small" />
+                <!-- naive 的 NFormItem label 不做 for 关联，开关自身必须带可访问名 -->
+                <NSwitch v-model:value="form.enabled" size="small" aria-label="启用该定时任务" />
               </NFormItem>
             </NSpace>
           </NCard>

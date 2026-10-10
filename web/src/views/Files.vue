@@ -375,7 +375,9 @@ const rowSelection = computed(() => ({
       :scroll-x="900" :max-height="tableH" :min-row-height="40" virtual-scroll :pagination="false"
       :row-key="(e: any) => e.name"
     >
-      <template #empty><EmptyBox text="空目录" /></template>
+      <!-- 拉取失败不能显示成「空目录」：那是"这个目录没有条目"，而实际是"没读到"，
+           两者在运维上是完全不同的结论（前者正常，后者要去看权限/服务）。 -->
+      <template #empty><EmptyBox :text="error ? '目录读取失败' : '空目录'" /></template>
     </NDataTable>
 
     <NModal v-model:show="editing" preset="card" style="width: 900px; max-width: 94vw" :title="`编辑 ${editPath.split('/').pop()}`">

@@ -520,7 +520,7 @@ function toggleTheme(ev: MouseEvent) {
   height: 28px;
   border-radius: var(--radius);
   background: var(--gradient-brand);
-  color: #fff;
+  color: var(--cp-on-brand);
   font-weight: 700;
   display: flex;
   align-items: center;

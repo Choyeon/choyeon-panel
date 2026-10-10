@@ -2,7 +2,7 @@
 import { computed, defineComponent, nextTick, onMounted, onScopeDispose, ref } from 'vue';
 import {
   NConfigProvider, NMessageProvider, NDialogProvider, NNotificationProvider, NLoadingBarProvider,
-  useLoadingBar, zhCN, dateZhCN, darkTheme,
+  useLoadingBar, zhCN, darkTheme,
 } from 'naive-ui';
 import { darkOverrides, lightOverrides } from './theme';
 import { revealThemeSwitch, type ThemeOrigin } from './themeReveal';
@@ -65,7 +65,6 @@ defineExpose({ setMode, mode });
     :theme="isDark ? darkTheme : null"
     :theme-overrides="themeOverrides"
     :locale="zhCN"
-    :date-locale="dateZhCN"
     :inline-theme-disabled="false"
   >
     <NMessageProvider :duration="3000" :max="3" placement="top">

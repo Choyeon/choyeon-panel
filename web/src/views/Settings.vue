@@ -347,5 +347,5 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 <style scoped>
 /* 分区标题行：18px/400 左置，动作按钮右置（1Panel LayoutContent title 行） */
 .sec-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
-.sec-title { margin: 0; font-size: 18px; font-weight: 400; line-height: 26px; color: var(--cp-text-strong); }
+.sec-title { margin: 0; font-size: var(--fs-title); font-weight: 400; line-height: var(--lh-title); color: var(--cp-text-strong); }
 </style>

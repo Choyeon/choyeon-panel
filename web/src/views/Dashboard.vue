@@ -6,6 +6,7 @@ import { NButton } from '../ui';
 import { api, getRole, req } from '../api';
 import { icons, icon } from '../icons';
 import { fmtAgo, fmtBytes } from '../composables/useFormat';
+import { useVisiblePoll } from '../composables/useVisiblePoll';
 import EmptyBox from '../components/EmptyBox.vue';
 import MetricChart from '../components/MetricChart.vue';
 import StatGauge from '../components/StatGauge.vue';
@@ -23,7 +24,6 @@ const rtLoading = ref(true);
 // 卸载后 in-flight 请求的回包一律丢弃（api 层不透传 AbortController，仓库不许改它）；
 // 定时器在同一处清空，保证卸载后不再有任何新的请求发出。
 let disposed = false;
-let timer: number | null = null;
 
 function fmtUptime(s: number) {
   if (!s) return '-';
@@ -412,23 +412,26 @@ function quickGo(key: string) {
   if (to) router.push(to);
 }
 
+let n = 0;
+// 后台标签页继续 3s 一跳等于白跑 systemctl/journalctl 子进程，见 useVisiblePoll
+const poll = useVisiblePoll(() => {
+  tickSingleton();
+  if (++n % 5 === 0) { loadSide(); loadProcs(); }   // 侧栏/进程 15s，随 tick 自动重试失败态
+  // 概览"未确认告警"计数 30s 一跳，但"最近告警"列表过去只在挂载时拉过一次：
+  // 挂着页面时新告警进来，计数 +1 而列表不出新行，两个口径互相打脸。同频一起刷。
+  if (n % 10 === 0) { loadHistory(); loadOverview(); probeAlerts(); }
+}, 3000);
+
 onMounted(() => {
   // 挂载期全部并发取数，不再串行瀑布
   api.info().then((d) => { if (!disposed) info.value = d; }).catch(() => { /* 降级为未知主机信息 */ });
   Promise.all([tickSingleton(), loadHistory(), loadSide(), loadProcs(), probeAlerts(), loadOverview()]);
-  let n = 0;
-  timer = window.setInterval(() => {
-    tickSingleton();
-    if (++n % 5 === 0) { loadSide(); loadProcs(); }   // 侧栏/进程 15s，随 tick 自动重试失败态
-    // 概览"未确认告警"计数 30s 一跳，但"最近告警"列表过去只在挂载时拉过一次：
-    // 挂着页面时新告警进来，计数 +1 而列表不出新行，两个口径互相打脸。同频一起刷。
-    if (n % 10 === 0) { loadHistory(); loadOverview(); probeAlerts(); }
-  }, 3000);
+  poll.start();
 });
 
 onBeforeUnmount(() => {
   disposed = true;
-  if (timer) { clearInterval(timer); timer = null; }
+  poll.stop();
 });
 </script>
 

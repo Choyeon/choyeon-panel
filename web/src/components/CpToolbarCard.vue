@@ -26,6 +26,6 @@ defineProps<{ title?: string }>();
 .cp-tool-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; min-width: 0; }
 .cp-tool-left { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; min-width: 0; }
 .cp-tool-right { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
-.cp-tool-title { margin: 0 6px 0 0; font-size: 18px; font-weight: 400; line-height: 26px; color: var(--cp-text-strong); }
+.cp-tool-title { margin: 0 6px 0 0; font-size: var(--fs-title); font-weight: 400; line-height: var(--lh-title); color: var(--cp-text-strong); }
 .cp-tool-body { margin-top: 10px; min-width: 0; }
 </style>

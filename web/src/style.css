@@ -13,6 +13,9 @@
   --err: #f5616c;
 
   --gradient-brand: linear-gradient(135deg, #005eeb, #4c8ef1);
+  /* 压在品牌色/渐变之上的前景（logo 字、分段控件选中态）：此前三处各写 #fff，
+     换成深色品牌底时要改的就不是三个字面量。 */
+  --cp-on-brand: #ffffff;
 
   /* 圆角与阴影 */
   /* --radius 取 6px 而不是 1Panel/element-plus 的 4px：面板里有大量 22~26px 高的
@@ -45,6 +48,11 @@
   --fs-lg: 17px;
   --fs-xl: 21px;
   --fs-2xl: 27px;
+  --fs-3xl: 34px;
+  /* 区块/工具卡标题的固定档：1Panel 的 .content-container__title 是 18px/400/26px，
+     它正好落在 --fs-lg(17) 与 --fs-xl(21) 之间，此前三个文件各写字面量 18px。 */
+  --fs-title: 18px;
+  --lh-title: 26px;
   --fs-3xl: 34px;
 
   /* 等宽字体族：多处一直写 var(--font-mono, ui-monospace)，此前从未定义过，
@@ -433,9 +441,8 @@ button.cell-name > .n-button__content {
 }
 .cp-seg > button:hover { color: var(--cp-text); }
 .cp-seg > button[aria-pressed='true'] {
-  background: var(--cp-brand); color: #fff; font-weight: 550;
+  background: var(--cp-brand); color: var(--cp-on-brand); font-weight: 550;
 }
-html[data-theme='light'] .cp-seg > button[aria-pressed='true'] { color: #fff; }
 
 /* ---------- 表格：行内操作按钮的可点面积 ---------- */
 /* naive 的 tiny 按钮高 22px，触屏按不准；表格单元格里统一到 26px（flex 居中，
@@ -575,9 +582,11 @@ html.cp-vt *::after {
 .cp-card-gap { margin-top: 7px; }
 /* 图表卡标题不带竖条（.monitor-toolbar--card .title 实测 16px/500） */
 .cp-chart-title { font-size: 16px; font-weight: 500; color: var(--cp-text-strong); }
-/* 设置页内容列：桌面约 50%（1Panel :md=15 :lg=12），窄屏放回全宽 */
+/* 设置页内容列：桌面约 50%（1Panel :md=15 :lg=12），窄屏放回全宽。
+   断点从 640 提到 900：641~900px 这段减去侧栏后 50% 只剩 320~450px，
+   表单项标签会竖着换行，比直接全宽更难读。 */
 .cp-set-form { max-width: 50%; }
-@media (max-width: 640px) {
+@media (max-width: 900px) {
   .cp-set-form { max-width: 100%; }
 }
 .cp-divider { margin-top: 20px; border-top: 1px solid var(--cp-border); }
@@ -585,6 +594,9 @@ html.cp-vt *::after {
    全局而非组件内 scoped：行内需要 <a> 下载、loading、Popconfirm 的页面用不了那个组件，
    但版式必须一致，所以形态做成公共类由 h(NButton) 直接挂。 */
 .cp-ops { display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex-wrap: wrap; }
+/* 挂在 td 上（Databases / RedisKeyPanel 的操作列用 className 而不是包 .cp-ops，
+   行点击屏蔽还要靠它当锚点）：这一格的单个文字按钮要和 .cp-ops 一样居中。 */
+.row-ops { text-align: center; }
 .cp-op { padding-inline: 0; white-space: nowrap; }
 /* 前置条件不满足时整页降能见度（1Panel 的 .mask + .mask-prompt 范式） */
 .cp-masked { opacity: 0.4; pointer-events: none; }

@@ -83,6 +83,16 @@ async def services():
     return await systemd_ops.list_services()
 
 
+@router.get("/api/system/unit-files")
+async def unit_files():
+    """unit → 开机自启状态（enabled/disabled/masked/…）。
+
+    单独一条而不并进 /system/services：list-units 的输出里没有这一列，补上它就得每个
+    周期多起一次 list-unit-files，而 Dashboard 每 15s 也在打 /system/services。
+    """
+    return await systemd_ops.unit_files()
+
+
 @router.post("/api/system/services/{unit}")
 async def service_action(unit: str, req: Request):
     if not is_unit(unit):
@@ -92,7 +102,11 @@ async def service_action(unit: str, req: Request):
     try:
         await systemd_ops.service_action(unit, verb)
         await aio_db.audit(req.state.cp_sub, f"service:{verb}", unit)
-        return {"ok": True, "active": await systemd_ops.is_active(unit)}
+        out: dict = {"ok": True, "active": await systemd_ops.is_active(unit)}
+        if verb in ("enable", "disable"):
+            # 前端「自启」按钮点完要当场变状态，不能等 30s 缓存过期
+            out["enabled"] = (await systemd_ops.unit_files(force=True)).get(unit, "")
+        return out
     except Exception as e:  # noqa: BLE001
         # systemctl 的报错常带 unit 路径与 errno，原样回给浏览器等于公开服务器结构
         return err_json(e, 500, log_tag="service:action")

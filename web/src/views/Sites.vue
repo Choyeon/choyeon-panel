@@ -8,6 +8,7 @@ import { getRole, req, siteHref } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
+import { fmtDateTime } from '../composables/useFormat';
 
 /**
  * 接口封装放在页面里，而不是往 api.ts 里加方法：api.ts 是多个改动流共同的落点，
@@ -257,7 +258,10 @@ const certColumns: any[] = [
       const cls = c.status === 'expired' ? 'err' : c.status === 'expiring' ? 'warn' : c.status === 'ok' ? 'ok' : 'idle';
       return h('div', { class: 'cell-txt' }, [
         h('span', { class: `st ${cls}` }, c.days_left === null ? '未知' : `${c.days_left} 天`),
-        h('div', { class: 'cell-sub' }, c.expiry ? String(c.expiry).replace('T', ' ').slice(0, 16) : '到期时间未知'),
+        // 原来这里自己 slice(0, 16)：把秒和 +00:00 一起砍掉，列头又没写时区，
+        // 于是"到期时间"读起来像本地时间（本机 +8 就少看 8 小时）。
+        // 现在走全站同一套 fmtDateTime（到秒），时区在列头写明，完整原值放 tooltip。
+        h('div', { class: 'cell-sub', title: c.expiry || '到期时间未知' }, c.expiry ? `${fmtDateTime(c.expiry)} UTC` : '到期时间未知'),
       ]);
     },
   },
