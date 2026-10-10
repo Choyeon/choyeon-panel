@@ -981,13 +981,35 @@ class TestRollback(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(_rmtree, self.repo)
 
     async def test_rolls_back_to_previous_version_not_current(self):
-        with mock.patch.object(apps_service, "service_action", new=mock.AsyncMock()) as restart:
+        with mock.patch.object(apps_service, "service_action", new=mock.AsyncMock()) as restart, \
+             mock.patch.object(apps_service, "is_active", new=mock.AsyncMock(return_value=True)), \
+             mock.patch.object(apps_service, "_live_pid", new=mock.AsyncMock(return_value=4321)), \
+             mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01):
             res = await apps_service.rollback_app(self.app_id)
         self.assertEqual(res["commit"], self.sha_v1, "必须回到上一个成功版本")
         self.assertEqual(res["from"], self.sha_v2)
         restart.assert_awaited_once()
         head = await apps_service._current_sha(self.repo)
         self.assertEqual(head, self.sha_v1, "工作区必须真的切换过去")
+
+    async def test_restart_returning_zero_without_active_service_is_not_success(self):
+        """实测踩到过的两种"restart 返回 0 但服务没跑"：
+        - unit 文件还没被 systemd 加载 → 走 transient unit，stderr 提示 "This will not work properly"；
+        - Type=simple + Restart=always 起来就崩 → is-active 在崩溃循环期间照样回 active。
+        所以成功与否只能靠主进程是否持续存活来判，返回码与 is-active 都会说谎。
+        """
+        with mock.patch.object(apps_service, "service_action", new=mock.AsyncMock()), \
+             mock.patch.object(apps_service, "is_active", new=mock.AsyncMock(return_value=False)), \
+             mock.patch.object(apps_service, "_live_pid", new=mock.AsyncMock(return_value=0)), \
+             mock.patch.object(apps_service, "UNIT_START_GRACE_SEC", 0.02), \
+             mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01):
+            with self.assertRaises(RuntimeError) as ctx:
+                await apps_service.rollback_app(self.app_id)
+        self.assertIn("代码已回滚到", str(ctx.exception), "要说清盘上已经是目标版本")
+        self.assertIn("但服务没起来", str(ctx.exception))
+        self.assertIn("没能稳定存活", str(ctx.exception))
+        self.assertEqual(await apps_service._current_sha(self.repo), self.sha_v1,
+                         "报错不该把工作区偷偷改回去，用户要能就地排查")
 
     async def test_no_older_version_reports_clearly(self):
         # 部署历史只有当前 commit：应明确报错而不是静默"成功"

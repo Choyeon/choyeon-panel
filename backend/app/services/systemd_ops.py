@@ -67,6 +67,11 @@ async def unit_states(units: list) -> dict:
     应用列表原本每个 app 起两次 systemctl（is-active + show MainPID），
     N 个应用就是 2N 个进程；批量后固定一次，返回
     {unit: {"active": bool, "mainPid": int}}，缺失的 unit 按未运行补默认值。
+
+    必须先把每个空行分隔的块整体解析成属性表，再按块里的 Id 归属：
+    `systemctl show` 输出的属性顺序是 systemd 自己定的（实测 MainPID 排在 Id 前面），
+    "见到 Id 才开始建块"的写法会把排在 Id 之前的属性整个丢掉（MainPID 恒为 0），
+    多 unit 时还会串到上一个块里去。
     """
     if not units:
         return {}
@@ -76,28 +81,20 @@ async def unit_states(units: list) -> dict:
         timeout=10,
     )
     out: dict[str, dict] = {}
-    cur: dict | None = None
-    for line in r["out"].split("\n"):
-        if not line.strip():
-            cur = None  # 空行分隔各 unit 的属性块
+    for block in r["out"].split("\n\n"):
+        props: dict[str, str] = {}
+        for line in block.splitlines():
+            key, sep, val = line.partition("=")
+            if sep:
+                props[key.strip()] = val.strip()
+        unit = props.get("Id")
+        if not unit:
             continue
-        key, sep, val = line.partition("=")
-        if not sep:
-            continue
-        val = val.strip()
-        if key == "Id":
-            cur = {"active": False, "mainPid": 0}
-            out[val] = cur
-            continue
-        if cur is None:
-            continue
-        if key == "ActiveState":
-            cur["active"] = val == "active"
-        elif key == "MainPID":
-            try:
-                cur["mainPid"] = int(val)
-            except ValueError:
-                cur["mainPid"] = 0
+        try:
+            pid = int(props.get("MainPID") or 0)
+        except ValueError:
+            pid = 0
+        out[unit] = {"active": props.get("ActiveState") == "active", "mainPid": pid}
     for u in units:
         out.setdefault(u, {"active": False, "mainPid": 0})
     return out

@@ -8,6 +8,7 @@
 5. app_action 把 is_active 当 ok 返回：停止成功后对外报 ok:false。
 6. save_unit 文件写一份、库里写另一份（多一个换行），每存一次库里再长一个换行；
    首次保存失败时坏 unit 残留在 UNIT_DIR，之后任何 daemon-reload 都会把它读进去。
+7. 部署把 systemctl restart 的返回码当作"已上线"：崩溃循环的服务照样记 success。
 """
 
 import contextlib
@@ -72,6 +73,15 @@ async def _noop(*_args, **_kw):
 
 async def _active(_unit):
     return True
+
+
+async def _pid(_unit):
+    """restart_and_verify 用的"活着的主进程"替身：给一个固定 pid。"""
+    return 4321
+
+
+async def _dead(_unit):
+    return 0
 
 
 async def _inactive(_unit):
@@ -437,6 +447,8 @@ class TestDeploymentGuards(unittest.IsolatedAsyncioTestCase):
         """非空验证：不能写成"永远拒绝"，否则上面几条也一样"通过"。"""
         with (
             mock.patch.object(apps_service, "service_action", _noop),
+            mock.patch.object(apps_service, "_live_pid", _pid),
+            mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01),
             mock.patch.object(apps_service.systemd_ops, "is_active", _active),
         ):
             res = await apps_service.app_action(self.app_id, "restart")
@@ -467,10 +479,30 @@ class TestAppActionResult(unittest.IsolatedAsyncioTestCase):
     async def test_start_reports_active_true(self):
         with (
             mock.patch.object(apps_service, "service_action", _noop),
+            mock.patch.object(apps_service, "_live_pid", _pid),
+            mock.patch.object(apps_service, "is_active", _active),
+            mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01),
             mock.patch.object(apps_service.systemd_ops, "is_active", _active),
         ):
             res = await apps_service.app_action(self.app_id, "start")
         self.assertEqual(res, {"ok": True, "active": True})
+
+    async def test_start_that_crashes_immediately_is_reported_as_failure(self):
+        """点「启动」的用户等着看效果：systemctl 返回 0 而主进程立刻退出，不能说成功。"""
+        async def boom(unit, verb):
+            return ""
+
+        with (
+            mock.patch.object(apps_service, "service_action", boom),
+            mock.patch.object(apps_service, "_live_pid", _dead),
+            mock.patch.object(apps_service, "is_active", _inactive),
+            mock.patch.object(apps_service, "run", _noop),
+            mock.patch.object(apps_service, "UNIT_START_GRACE_SEC", 0.05),
+            mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                await apps_service.app_action(self.app_id, "start")
+        self.assertIn("没能稳定存活", str(ctx.exception))
 
     async def test_failure_is_raised_not_reported_in_ok(self):
         async def boom(unit, verb):
@@ -779,9 +811,17 @@ class TestDeployFailureNotice(unittest.IsolatedAsyncioTestCase):
                 return {"code": 0, "out": ""}
             return await real_run(cmd, args, cwd=cwd, timeout=timeout, env=env)
 
+        # 部署成功路径现在会回读服务活性（restart_and_verify）。无特权测试机上
+        # "systemctl is-active panel-xxx.service" 必然非 0，三条用例就全在测
+        # "这台机器不让我查状态"；活性本身由 TestDeploymentLiveness 专测。
+        async def port_of_record(_unit, force=False):
+            return (apps_service.get_app(self.app_id) or {}).get("port")
+
+        mocks = {"is_active": _active, "detect_port": port_of_record, "_live_pid": _pid,
+                 "UNIT_SAMPLE_SEC": 0.01, **extra_mocks}
         with contextlib.ExitStack() as st:
             st.enter_context(mock.patch.object(apps_service, "run", run_no_systemctl))
-            for name, impl in extra_mocks.items():
+            for name, impl in mocks.items():
                 st.enter_context(mock.patch.object(apps_service, name, impl))
             yield
 
@@ -871,10 +911,127 @@ class TestRollbackStillWorks(unittest.IsolatedAsyncioTestCase):
         for sha in self.shas:
             dbm.execute("INSERT INTO deployments(app_id,status,commit_sha) VALUES(?,'success',?)",
                         (self.app_id, sha))
-        with mock.patch.object(apps_service, "service_action", _noop):
+        with mock.patch.object(apps_service, "service_action", _noop), \
+             mock.patch.object(apps_service, "is_active", _active), \
+             mock.patch.object(apps_service, "_live_pid", _pid), \
+             mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01):
             res = await apps_service.rollback_app(self.app_id)
         self.assertEqual(res["commit"], self.shas[0])
         self.assertEqual(res["ok"], True)
+
+
+# ---------------------------------------------------------------- 部署成功 = 服务真的活着
+class TestDeploymentLiveness(unittest.IsolatedAsyncioTestCase):
+    """"restart 返回 0"不等于"服务起来了"。
+
+    Type=simple + Restart=always 的单元"起来就崩"时，systemctl restart 照样返回 0
+    （它只负责把激活请求投递出去），旧实现于是把崩溃循环写成"部署完成"：界面全绿、
+    端口空着、域名 502，用户只能靠访问失败反推部署其实没成功。
+    反过来，端口监听与否不能当判据——worker 型应用本就不监听。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="cp_live_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.created: list[int] = []
+        self.addCleanup(lambda: [_drop_app(i) for i in self.created])
+        self._old_grace = apps_service.UNIT_START_GRACE_SEC
+        apps_service.UNIT_START_GRACE_SEC = 0.05
+        self.addCleanup(setattr, apps_service, "UNIT_START_GRACE_SEC", self._old_grace)
+
+    def _app(self, **kw) -> int:
+        app_id = _mk_app(_aname("live"), self.dir, install_cmd="true", **kw)
+        self.created.append(app_id)
+        return app_id
+
+    async def _run(self, app_id, **mocks) -> dict:
+        """跑一次真实部署流程，只把外部命令换成记账的假实现。
+
+        `run` 也被记账：既要能断言 restart 之前先 reset-failed，也要避免测试机
+        真的去执行 systemctl（CI 上没有 systemd）。
+        """
+        dep = dbm.execute("INSERT INTO deployments(app_id,status) VALUES(?,'running')", (app_id,))
+        app = apps_service.get_app(app_id)
+        self.calls = []
+
+        async def fake_run(cmd, args, cwd=None, timeout=120, env=None):
+            self.calls.append((cmd, list(args)))
+            return {"code": 0, "out": ""}
+
+        async def fake_action(unit, verb):
+            self.calls.append(("service_action", [verb, unit]))
+
+        async def port_of_record(_unit, force=False):
+            return (apps_service.get_app(app_id) or {}).get("port")
+
+        defaults = {"is_active": _active, "service_action": fake_action, "run": fake_run,
+                    "write_env_file": lambda *_: None, "ensure_unit": _noop,
+                    "detect_port": port_of_record, "_live_pid": _pid,
+                    "UNIT_SAMPLE_SEC": 0.01}
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.object(apps_service.nginx_ops, "apply_vhost", _noop))
+            for name, impl in {**defaults, **mocks}.items():
+                st.enter_context(mock.patch.object(apps_service, name, impl))
+            await apps_service._run_deployment(app, dep)
+        return dbm.query_one("SELECT status, log FROM deployments WHERE id=?", (dep,))
+
+    async def test_crash_loop_is_recorded_as_failed(self):
+        """生产实测：Type=simple + Restart=always 的单元崩溃循环时 is-active 依然回 active，
+        restart 也返回 0。判据只能是主进程持续存活，而不是 systemctl 的返回码。"""
+        row = await self._run(self._app(port=8123), _live_pid=_dead)
+        self.assertEqual(row["status"], "failed", "服务没活着就不能记 success")
+        self.assertIn("没能稳定存活", row["log"])
+        self.assertIn("请看运行日志", row["log"], "要告诉用户下一步去哪看")
+
+    async def test_port_mismatch_warns_but_does_not_fail(self):
+        async def wrong_port(_unit, **kw):
+            return 9999
+
+        row = await self._run(self._app(port=8123), detect_port=wrong_port)
+        self.assertEqual(row["status"], "success", f"监听端口只是提醒，不能判失败\n{row['log'][-500:]}")
+        self.assertIn("9999", row["log"])
+        self.assertIn("8123", row["log"])
+        self.assertIn("502", row["log"])
+
+    async def test_worker_without_port_is_not_warned(self):
+        """没填端口（后台 worker）就没有"应当监听"的 expectation，不该报不一致。"""
+        async def some_port(_unit, **kw):
+            return 9999
+
+        row = await self._run(self._app(), detect_port=some_port)
+        self.assertEqual(row["status"], "success", row["log"][-500:])
+        self.assertNotIn("不一致", row["log"])
+
+    async def test_start_limit_is_reset_before_restart(self):
+        """崩到 systemd 启动上限后 restart 会被直接拒绝（"Start request repeated too quickly"），
+        而最容易撞上它的正是"把坏启动命令改对了再保存"那一次——所以先清失败计数。
+        """
+        seen = []
+
+        async def flap_once(_unit):
+            seen.append(1)
+            return len(seen) > 1  # restart 之前查一次：不在跑 → 需要先 reset-failed
+
+        app_id = self._app(port=8123)
+        unit = f"panel-{apps_service.get_app(app_id)['name']}.service"
+        row = await self._run(app_id, is_active=flap_once)
+        self.assertEqual(row["status"], "success", row["log"][-500:])
+        self.assertEqual([a[0] for _c, a in self.calls if a[0] in ("reset-failed", "restart")],
+                         ["reset-failed", "restart"], "必须先 reset-failed 再 restart")
+        self.assertIn(("systemctl", ["reset-failed", unit]), self.calls)
+
+    async def test_running_service_is_not_reset_failed(self):
+        """本来就在跑的服务不需要清计数：不该为每次重启多跑一条 systemctl。"""
+        row = await self._run(self._app(port=8123))
+        self.assertEqual(row["status"], "success", row["log"][-500:])
+        self.assertNotIn("reset-failed", [a[0] for _c, a in self.calls])
+
+    async def test_domain_without_port_says_why_nginx_was_skipped(self):
+        """域名配了却没端口：不配反代是无奈，但必须写在日志里，否则"部署完成"配着打不开的域名。"""
+        row = await self._run(self._app(domain="live.example.com", port=None))
+        self.assertEqual(row["status"], "success", row["log"][-500:])
+        self.assertIn("未填端口", row["log"])
+        self.assertIn("live.example.com", row["log"])
 
 
 if __name__ == "__main__":

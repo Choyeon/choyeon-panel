@@ -230,7 +230,7 @@ async function load() {
 async function save() {
   saving.value = true;
   try {
-    await api.updateApp(id, {
+    const r: any = await api.updateApp(id, {
       name: edit.value.name,
       type: edit.value.type,
       repo_url: edit.value.repo_url || '',
@@ -244,7 +244,13 @@ async function save() {
       db_names: dbSel.value.join(',') || null,
       env: env.value.filter((x) => x && typeof x.k === 'string' && x.k),
     });
-    msg.success('已保存');
+    // 「已保存」和「已生效」是两件事：后端会把改动重新渲染进 unit / .panel.env / nginx，
+    // 服务在跑就顺带重启。这一步失败或压根不该做（外部 unit）时只报"已保存"，
+    // 用户会以为新配置已经在跑，于是把"改了没反应"当成玄学问题去排查。
+    const ap = r?.applied || {};
+    if (ap.note) msg.warning(ap.note);
+    else if (ap.restarted) msg.success('已保存，配置已同步并重启服务');
+    else msg.success('已保存');
     await load();
   } catch (e: any) {
     msg.error(e.message);
@@ -465,7 +471,7 @@ watch(
 
       <div v-else-if="tab === 'env'">
         <NSpace vertical :size="12" style="width: 100%">
-          <div class="cp-help">写入应用目录的 .env 并由 systemd EnvironmentFile 加载；保存后重启应用生效。</div>
+          <div class="cp-help">写入应用目录的 .panel.env 并由 systemd EnvironmentFile 加载。服务正在运行时，保存会自动同步 unit 并重启生效；停止状态则下次启动时生效。</div>
           <!-- 1Panel 的参数抽屉是「只读详情 / 编辑」互斥切换：默认只读，敏感值先遮罩 -->
           <NButton v-if="isAdmin" size="small" tertiary round :icon="ico(envView === 'edit' ? 'EyeOutline' : 'PencilOutline')" style="align-self: flex-start" @click="envView = envView === 'edit' ? 'detail' : 'edit'">
             {{ envView === 'edit' ? '详情' : '编辑' }}

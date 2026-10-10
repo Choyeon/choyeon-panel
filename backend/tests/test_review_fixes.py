@@ -2,7 +2,8 @@
 
 覆盖：应用安装目录不得指向面板自身要害目录、部署模板端口/安装命令自洽、
 证书续期失败必须报错、二进制上传不被毁、viewer 看不到应用密钥与审计、
-改名后旧 unit/站点被拆除并按新名重建、仓库地址里的凭据不外泄、备份目标应用被删后要在列表里露出来、
+编辑应用会把 unit/.panel.env/站点真正重写并在服务运行时重启（改名时先拆旧再建新）、
+仓库地址里的凭据不外泄、备份目标应用被删后要在列表里露出来、
 公开状态接口不回显管理员用户名、CLI 的 --json 契约与部署等待、
 文件接口对 viewer 全面关闭、写入不跟随符号链接、审计字段长度受约束、
 终端会话计数不漏、psql 管道不互等，接口错误不留半成品变更，
@@ -10,6 +11,7 @@
 """
 
 import asyncio
+import contextlib
 import itertools
 import json
 import os
@@ -32,7 +34,7 @@ from app import config, templates  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.routers import apps as apps_router  # noqa: E402
 from app.routers import extras
-from app.services import apps_service, backup_service, cert_ops, files_service, nginx_ops, pg_service  # noqa: E402
+from app.services import apps_service, backup_service, cert_ops, files_service, nginx_ops, pg_service, systemd_ops  # noqa: E402
 from app.util import redact_creds, sub_port  # noqa: E402
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -273,54 +275,143 @@ class TestViewerPermission(unittest.TestCase):
         self.assertNotIn("s3cr3t", json.dumps(viewer))
 
 
-class TestRenameCleansStaleUnit(unittest.IsolatedAsyncioTestCase):
-    """改名必须"拆旧 + 建新"成对发生。
+class TestApplyEdited(unittest.IsolatedAsyncioTestCase):
+    """PATCH 之后要把改动真正落到 systemd / .panel.env / nginx，并如实报告生效没有。
 
-    只拆不建：旧 unit disable --now 停掉、新名字的 unit 还没写，服务当场消失、
-    域名 502，而 PATCH 只回一句"已保存"。
+    两处都是"一半问题"：
+    - 只拆不建：旧 unit disable --now 停掉、新名字的 unit 还没写，服务当场消失、
+      域名 502，而 PATCH 只回一句"已保存"。
+    - 改名以外的字段干脆不同步：数据库里换了启动命令/端口/域名/环境变量，进程还按
+      老的 ExecStart 跑着，"改了没反应"成了常态——用户只能再点一次几分钟的「部署」。
     """
 
-    OLD = {"id": 7, "name": "before", "domain": "a.example.com", "path": "/tmp/cp-x", "port": 8124}
+    OLD = {"id": 7, "name": "before", "type": "node", "path": "/tmp/cp-x", "port": 8124,
+           "domain": "a.example.com", "start_cmd": "node x.js", "env": "[]"}
 
-    async def _run(self, new_name, active):
-        new = {**self.OLD, "id": 7, "name": new_name, "path": "/tmp/cp-x", "port": 8124,
-               "domain": "a.example.com", "start_cmd": "node x.js", "type": "node"}
-        with mock.patch.object(apps_service, "is_active", lambda *_: asyncio.sleep(0, active)), \
-             mock.patch.object(apps_service, "remove_unit") as rm_unit, \
-             mock.patch.object(apps_service, "ensure_unit") as en_unit, \
-             mock.patch.object(apps_service, "service_action") as act, \
-             mock.patch.object(apps_service.nginx_ops, "remove_vhost") as rm_vhost, \
-             mock.patch.object(apps_service.nginx_ops, "apply_vhost") as ap_vhost:
-            await apps_service.cleanup_renamed(self.OLD, new)
-        return rm_unit, en_unit, rm_vhost, ap_vhost, act
+    async def _run(self, changes=None, active=True, fail_on=None):
+        new = {**self.OLD, **(changes or {})}
+        patches = {
+            "is_active": mock.patch.object(apps_service, "is_active", lambda *_: asyncio.sleep(0, active)),
+            # restart_and_verify 判的是"主进程持续存活"，测试机上没有真进程，给一个固定 pid
+            "_live_pid": mock.patch.object(apps_service, "_live_pid", lambda *_: asyncio.sleep(0, 4321)),
+            "UNIT_SAMPLE_SEC": mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01),
+            "remove_unit": mock.patch.object(apps_service, "remove_unit"),
+            "ensure_unit": mock.patch.object(apps_service, "ensure_unit"),
+            "write_env_file": mock.patch.object(apps_service, "write_env_file"),
+            "service_action": mock.patch.object(apps_service, "service_action"),
+            "remove_vhost": mock.patch.object(apps_service.nginx_ops, "remove_vhost"),
+            "apply_vhost": mock.patch.object(apps_service.nginx_ops, "apply_vhost"),
+        }
+        with contextlib.ExitStack() as st:
+            m = {k: st.enter_context(p) for k, p in patches.items()}
+            if fail_on:
+                m[fail_on].side_effect = RuntimeError("systemd-analyze verify 不通过")
+            out = await apps_service.apply_edited(self.OLD, new)
+        return SimpleNamespace(**m, out=out)
 
-    async def test_old_unit_and_vhost_removed(self):
-        rm_unit, _, rm_vhost, _, _ = await self._run("after", True)
-        rm_unit.assert_called_once()
-        self.assertEqual(rm_unit.call_args.args[0]["name"], "before")
-        rm_vhost.assert_called_once_with("before")
+    async def test_old_unit_and_vhost_removed_on_rename(self):
+        r = await self._run({"name": "after"})
+        r.remove_unit.assert_called_once()
+        self.assertEqual(r.remove_unit.call_args.args[0]["name"], "before")
+        r.remove_vhost.assert_called_once_with("before")
 
-    async def test_new_unit_and_vhost_rebuilt(self):
-        _, en_unit, _, ap_vhost, act = await self._run("after", True)
-        en_unit.assert_called_once()
-        self.assertEqual(en_unit.call_args.args[0]["name"], "after")
-        ap_vhost.assert_called_once()
-        self.assertEqual(ap_vhost.call_args.args[0]["name"], "after")
-        # 改名前在跑 → 新名字得接着跑
-        act.assert_called_once_with("panel-after.service", "restart")
+    async def test_new_unit_env_and_vhost_rebuilt_on_rename(self):
+        r = await self._run({"name": "after"})
+        r.ensure_unit.assert_called_once()
+        self.assertEqual(r.ensure_unit.call_args.args[0]["name"], "after")
+        self.assertEqual(r.write_env_file.call_args.args[0]["name"], "after")
+        self.assertEqual(r.apply_vhost.call_args.args[0]["name"], "after")
+        self.assertTrue(r.out["applied"])
+        # 改名前在跑 → 新名字得接着跑，否则改名等于把服务停了
+        self.assertEqual(r.service_action.call_args.args, ("panel-after.service", "restart"))
+        self.assertTrue(r.out["restarted"])
 
     async def test_inactive_app_is_not_started_by_rename(self):
-        _, en_unit, _, _, act = await self._run("after", False)
-        en_unit.assert_called_once()
-        act.assert_not_called()
+        r = await self._run({"name": "after"}, active=False)
+        r.ensure_unit.assert_called_once()
+        r.service_action.assert_not_called()
+        self.assertFalse(r.out["restarted"])
+        self.assertIn("服务当前没有运行", r.out["note"], "停止状态保存要说清改动何时生效，别让人以为已经生效")
 
-    async def test_same_name_does_nothing(self):
-        rm_unit, en_unit, rm_vhost, ap_vhost, act = await self._run(self.OLD["name"], True)
-        rm_unit.assert_not_called()
-        rm_vhost.assert_not_called()
-        en_unit.assert_not_called()
-        ap_vhost.assert_not_called()
-        act.assert_not_called()
+    async def test_same_name_edit_still_reapplies_unit_and_vhost(self):
+        """本批次的核心：不改名也要重新渲染 unit、重写 .panel.env、重配站点并重启。"""
+        r = await self._run({"start_cmd": "node y.js --port 8124", "port": 8124})
+        r.remove_unit.assert_not_called()
+        r.remove_vhost.assert_not_called()
+        r.ensure_unit.assert_called_once()
+        r.write_env_file.assert_called_once()
+        r.apply_vhost.assert_called_once()
+        self.assertEqual(r.service_action.call_args.args, ("panel-before.service", "restart"))
+        self.assertTrue(r.out["restarted"], "正在运行的服务必须跟着这次编辑重启，否则改动不生效")
+
+    async def test_stopped_service_is_not_started_by_an_edit(self):
+        r = await self._run({"start_cmd": "node y.js"}, active=False)
+        r.ensure_unit.assert_called_once()
+        r.service_action.assert_not_called()
+        self.assertIn("下一次启动或部署时生效", r.out["note"])
+
+    async def test_cleared_domain_removes_the_vhost(self):
+        """域名清空后留着那个 server 块，就是一个指向死端口的 502。"""
+        r = await self._run({"domain": None})
+        r.apply_vhost.assert_not_called()
+        r.remove_vhost.assert_called_once_with("before")
+
+    async def test_unit_override_only_changes_the_record(self):
+        """外部 unit 的 ExecStart 不归面板写，也不该擅自重启别人的服务。"""
+        r = await self._run({"unit_override": "their-app.service"})
+        r.ensure_unit.assert_not_called()
+        r.write_env_file.assert_not_called()
+        r.service_action.assert_not_called()
+        self.assertFalse(r.out["applied"])
+        self.assertIn("外部 unit", r.out["note"])
+
+    async def test_sync_failure_is_reported_instead_of_silent_saved(self):
+        r = await self._run({"start_cmd": "node y.js"}, fail_on="ensure_unit")
+        r.service_action.assert_not_called()
+        self.assertFalse(r.out["applied"])
+        self.assertIn("没能同步", r.out["note"])
+        self.assertIn("systemd-analyze verify 不通过", r.out["note"])
+
+    async def test_failed_restart_keeps_note_but_leaves_config_written(self):
+        r = await self._run({"start_cmd": "node y.js"}, fail_on="service_action")
+        r.ensure_unit.assert_called_once()
+        self.assertTrue(r.out["applied"], "unit 已经写成功了，不能报成没保存")
+        self.assertFalse(r.out["restarted"])
+        self.assertIn("没能重启成功", r.out["note"])
+
+
+class TestUnitStatesParsing(unittest.IsolatedAsyncioTestCase):
+    """systemctl show 的属性顺序由 systemd 自己定，MainPID 实测排在 Id **前面**。
+
+    旧解析器"见到 Id 才开始建块"，于是排在 Id 之前的 MainPID 被整块丢弃：
+    应用列表的 pid 恒为 0，而 restart_and_verify 靠主进程判活性，于是
+    "服务明明在跑、面板却说主进程没稳定存活"（多 unit 时还会串到上一个块）。
+    """
+
+    REAL = ("MainPID=571180\nId=choyeon-panel.service\nActiveState=active\n\n"
+            "MainPID=6507\nId=nginx.service\nActiveState=active\n\n"
+            "MainPID=0\nId=gone.service\nActiveState=inactive")
+
+    async def _call(self, out, units):
+        async def fake_run(cmd, args, cwd=None, timeout=120, env=None):
+            return {"code": 0, "out": out}
+
+        with mock.patch.object(systemd_ops, "run", fake_run):
+            return await systemd_ops.unit_states(units)
+
+    async def test_properties_before_id_are_kept(self):
+        got = await self._call(self.REAL, ["choyeon-panel.service", "nginx.service", "gone.service"])
+        self.assertEqual(got["choyeon-panel.service"], {"active": True, "mainPid": 571180})
+        self.assertEqual(got["nginx.service"], {"active": True, "mainPid": 6507})
+        self.assertEqual(got["gone.service"], {"active": False, "mainPid": 0})
+
+    async def test_missing_unit_gets_not_running_default(self):
+        got = await self._call("MainPID=1\nId=a.service\nActiveState=active", ["a.service", "b.service"])
+        self.assertEqual(got["b.service"], {"active": False, "mainPid": 0})
+
+    async def test_single_block_without_separators(self):
+        got = await self._call("MainPID=42\nId=x.service\nActiveState=active", ["x.service"])
+        self.assertEqual(got["x.service"], {"active": True, "mainPid": 42})
 
 
 class TestCredentialRedaction(unittest.IsolatedAsyncioTestCase):

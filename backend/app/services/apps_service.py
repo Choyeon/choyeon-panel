@@ -113,8 +113,12 @@ def write_env_file(app: dict):
         if isinstance(x, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", x.get("k") or "")
     )
     target = Path(app["path"]) / ".panel.env"
+    if not target.parent.is_dir():
+        # 应用还没部署过（目录都不存在）时不要顺手把目录建出来：git clone 拒绝往
+        # "已存在且非空"的目录里写，而这里正是那份非空内容，用户会看到"部署失败"却
+        # 完全不知道和刚才保存配置有关。目录会由部署自己创建，届时再写这个文件。
+        return
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body + "\n", encoding="utf-8")
         os.chmod(target, 0o600)  # 环境变量常含密钥，禁止同机其他用户读取
     except OSError as e:
@@ -143,17 +147,17 @@ async def remove_unit(app: dict):
 _ss_cache: tuple[float, list[str]] | None = None
 
 
-async def _listen_lines() -> list[str]:
+async def _listen_lines(force: bool = False) -> list[str]:
     """读取监听端口表（5 秒内复用），异步执行避免阻塞事件循环。"""
     global _ss_cache
-    if _ss_cache and time.time() - _ss_cache[0] < 5:
+    if not force and _ss_cache and time.time() - _ss_cache[0] < 5:
         return _ss_cache[1]
     out = await run_shell_async("ss -tlnp", timeout=4)
     _ss_cache = (time.time(), out.split("\n"))
     return _ss_cache[1]
 
 
-async def detect_port(unit: str):
+async def detect_port(unit: str, force: bool = False):
     r = await run("systemctl", ["show", unit, "-p", "MainPID", "--value"], timeout=5)
     try:
         main = int(r["out"].strip())
@@ -161,7 +165,7 @@ async def detect_port(unit: str):
         main = 0
     if main <= 0:
         return None
-    return await _port_for_pid(main, await _listen_lines())
+    return await _port_for_pid(main, await _listen_lines(force))
 
 
 def _pid_tree(main: int) -> set:
@@ -433,29 +437,62 @@ def _check_not_protected(path: str):
             raise RuntimeError(f"安装目录不能位于{label}（{root}）之内或与之相同")
 
 
-async def cleanup_renamed(old: dict, new_app: dict):
-    """改名后拆掉旧名残留并**立刻按新名重建**：`panel-<旧名>.service` 带 Restart=always，
-    旧 nginx 站点也还在监听同端口，而面板记录里已经没有这个名字——
-    旧进程继续跑着占端口，界面上再也管不到它。
+async def apply_edited(old: dict, new_app: dict) -> dict:
+    """PATCH 之后把改动真正落到 systemd / .panel.env / nginx，服务在跑就顺手重启。
 
-    只拆不建是另一半问题：旧 unit 被 disable --now 停掉、新名字的 unit 还没写，
-    服务当场消失、域名 502，而 PATCH 只回一句"已保存"，用户得再点一次部署才恢复。
+    旧写法只有"改名"才会重建 unit 与站点（原来的 cleanup_renamed），其余字段只进
+    数据库：改了启动命令、端口、域名或环境变量，界面显示"已保存"，进程却还按老
+    配置跑着，要生效只能再点一次「部署」——而部署连依赖都要重装，几分钟起步，
+    用户既不敢点也等不到，于是"改了没反应"成了常态。
+
+    返回 {"applied","restarted","note"}，让路由如实说这次到底生效了没有：外部
+    unit（unit_override）的 ExecStart 不归面板写，也不该擅自重启别人的服务，
+    这种情况只能讲清"本次只改了记录"。
     """
-    if not old or old["name"] == new_app["name"]:
-        return
-    stale = dict(old)
+    out = {"applied": True, "restarted": False, "note": ""}
+    if not old:
+        return out
+    renamed = old["name"] != new_app["name"]
     # 改名前没在跑的应用不该被改名"顺手启动"，所以先记下状态再拆
-    was_active = await is_active(unit_name(stale))
-    await remove_unit(stale)
-    if old.get("domain"):
+    was_active = await is_active(unit_name(old))
+    if renamed:
+        # 只拆不建是一半问题，只建不拆是另一半：旧 unit 带 Restart=always 会继续
+        # 占着端口、旧站点还在把域名转过去，而面板记录里已经没有这个名字，
+        # 界面上再也管不到这两个孤儿。
+        await remove_unit(old)
         await nginx_ops.remove_vhost(old["name"])
-    await ensure_unit(new_app)
-    if new_app.get("domain") and new_app.get("port"):
-        await nginx_ops.apply_vhost(
-            {"name": new_app["name"], "domain": new_app["domain"], "port": new_app["port"]}
-        )
-    if was_active:
-        await service_action(unit_name(new_app), "restart")
+    if new_app.get("unit_override"):
+        out["applied"] = False
+        out["note"] = "外部 unit：unit 与环境变量文件不由面板写入，本次只改了记录"
+        return out
+    try:
+        write_env_file(new_app)
+        await ensure_unit(new_app)
+        if new_app.get("domain") and new_app.get("port"):
+            await nginx_ops.apply_vhost(
+                {"name": new_app["name"], "domain": new_app["domain"], "port": new_app["port"]}
+            )
+        elif old.get("domain") and not renamed:
+            # 域名被清空、或只剩域名没有端口：留着那个 server 块就是一个指向死端口的 502
+            await nginx_ops.remove_vhost(new_app["name"])
+    except Exception as e:  # noqa: BLE001
+        out["applied"] = False
+        out["note"] = f"配置已保存，但没能同步到 systemd/nginx：{str(e)[:160]}（下次部署会补上）"
+        return out
+    # daemon-reload 只改"下次启动用什么"，跑着的进程还是旧的 ExecStart，
+    # 所以在服务本来就在跑的时候必须重启一次，否则这次编辑依旧不生效。
+    if was_active and renamed or await is_active(unit_name(new_app)):
+        try:
+            await restart_and_verify(unit_name(new_app), new_app["port"])
+            out["restarted"] = True
+        except Exception as e:  # noqa: BLE001
+            out["note"] = f"配置已写入，但服务没能重启成功：{str(e)[:160]}"
+    else:
+        # 应用本来就没在跑（包括"上一次保存写了坏命令、服务已经崩掉"这种）：
+        # 不擅自启动，但必须说清这次改动要等下一次启动或部署才生效，
+        # 否则界面只剩一句"已保存"，用户会以为新配置已经在跑了。
+        out["note"] = "配置已写入，但服务当前没有运行，改动在下一次启动或部署时生效"
+    return out
 
 
 def _check_purge_target(path: str) -> str:
@@ -521,17 +558,99 @@ async def app_action(app_id: int, verb: str) -> dict:
     # 部署流程自己会在结束时 restart；这时用户再点一次停止/重启，
     # 两边抢同一个服务，出现"部署日志说成功、服务实际没起来"的现场。
     _ensure_no_deployment(app_id, f"{_VERB_CN.get(verb, verb)}服务")
-    await service_action(unit_name(app), verb)
+    unit = unit_name(app)
+    if verb in ("start", "restart"):
+        # 同 restart_and_verify：崩过一次的应用会被 systemd 的启动上限直接拒掉
+        # （"Start request repeated too quickly"），用户分不清是自己命令写错还是面板坏了。
+        if not await is_active(unit):
+            await run("systemctl", ["reset-failed", unit], timeout=30)
+    await service_action(unit, verb)
+    if verb in ("start", "restart"):
+        # 只信 systemctl 的返回码会把"起来就崩"说成启动成功（见 restart_and_verify）。
+        # 手动点「启动/重启」的正是等着看效果的用户，这里必须等到进程稳定存活。
+        await _wait_stable(unit)
     # service_action 失败会抛异常，走到这里就代表命令确实执行成功了。
     # 旧实现把 is_active 的返回值同时当作 ok：stop 成功后服务不再是 active，
     # 于是对外报 ok:false（HTTP 200），而 AGENTS.md 的约定是失败走 4xx/5xx，
     # 成功响应里的 ok 必须为 true——否则 CLI/前端按字段判断会把正常停止当失败。
-    return {"ok": True, "active": await systemd_ops.is_active(unit_name(app))}
+    return {"ok": True, "active": await systemd_ops.is_active(unit)}
 
 
 def _append_log(dep_id: int, text: str):
     # 单一落库入口，凭据在这里挡掉：git 的命令行与 stderr 都可能回显带 token 的仓库地址
     dbm.append_deploy_log(dep_id, redact_creds(text))
+
+
+# 重启后给进程留多少时间起立。不能只信 systemctl 的返回码：Type=simple +
+# Restart=always 的单元"起来就崩"时 restart 照样返回 0，于是部署写着"完成"、
+# 界面全绿，端口却空着、域名 502——用户只能靠访问失败反推部署其实没成功。
+UNIT_START_GRACE_SEC = 15
+# 判定"起来了"要在连续两次采样里看到同一个主进程活着。
+UNIT_STABLE_SAMPLES = 2
+# 采样间隔：生产上 1s 足够让 python/node 完成 bind；测试把它调小以免每个用例等两秒。
+UNIT_SAMPLE_SEC = 1
+# 刚重启完就查端口必然读到空值：进程已 fork 但还没 bind。给绑定的这几秒留出余量，
+# 否则每次正常部署都配一句"域名反代可能 502"的假警报，真出错时反而没人信。
+PORT_WAIT_TRIES = 5
+
+
+async def _live_pid(unit: str) -> int:
+    """服务处于 active 且主进程确实还活着时返回它的 pid，否则 0。
+
+    只看 `systemctl is-active` 不够：实测 Restart=always 的单元在崩溃自动重启的
+    间隙里也会回 active，"起来就崩"的应用于是照样被判部署成功。
+    """
+    st = (await systemd_ops.unit_states([unit])).get(unit) or {}
+    pid = int(st.get("mainPid") or 0)
+    return pid if st.get("active") and pid > 0 and os.path.exists(f"/proc/{pid}") else 0
+
+
+async def _wait_stable(unit: str) -> None:
+    """等主进程连续 UNIT_STABLE_SAMPLES 次采样存活（且是同一个 pid），超时则抛错。
+
+    只看 `systemctl is-active` 或 restart 的返回码都不够：实测 Restart=always 的单元
+    在崩溃自动重启的间隙里也会回 active，"起来就崩"的应用于是照样被判部署成功——
+    界面全绿、端口空着、域名 502，用户只能靠访问失败反推。
+    要求"连续两次是同一个进程"是因为崩溃循环每 3 秒换一个新 pid。
+    """
+    deadline = time.monotonic() + UNIT_START_GRACE_SEC
+    last, stable = 0, 0
+    while time.monotonic() < deadline:
+        await asyncio.sleep(UNIT_SAMPLE_SEC)
+        pid = await _live_pid(unit)
+        stable = stable + 1 if pid and pid == last else (1 if pid else 0)
+        last = pid
+        if stable >= UNIT_STABLE_SAMPLES:
+            return
+    raise RuntimeError(f"{unit} 在 {UNIT_START_GRACE_SEC}s 内主进程没能稳定存活，请看运行日志")
+
+
+async def restart_and_verify(unit: str, port=None, *, warn=None) -> None:
+    """重启并确认主进程稳定活着；端口对不上只作提醒，不判失败。
+
+    端口是否监听没法当判据：worker 型应用本就不监听，而填错端口的代价只是 nginx
+    502，把它做成硬失败会把一次正常上线说成失败。
+    """
+    # 崩到 systemd 的启动上限（默认 10s 内 5 次）之后，restart 会被直接拒绝：
+    # "Start request repeated too quickly"。最容易撞上它的正是"把坏启动命令改对了再保存"
+    # 这一次——配置已经写对了，服务却起不来，用户看不出两者没关系。
+    # 既然这次调用就是要主动把服务拉起来，先把失败计数清掉（对正常停止的服务是空操作）。
+    if not await is_active(unit):
+        await run("systemctl", ["reset-failed", unit], timeout=30)
+    await service_action(unit, "restart")
+    await _wait_stable(unit)
+
+    if port and warn:
+        listening = None
+        for attempt in range(PORT_WAIT_TRIES):
+            listening = await detect_port(unit, force=attempt > 0)
+            if listening == port:
+                return
+            await asyncio.sleep(UNIT_SAMPLE_SEC)
+        if listening is None:
+            warn(f"!!> {unit} 未检测到监听端口，而面板记录的是 {port}，域名反代可能 502")
+        else:
+            warn(f"!!> {unit} 监听在 {listening}，与面板记录的 {port} 不一致，域名反代可能 502")
 
 
 async def deploy_app(app_id: int) -> int:
@@ -606,7 +725,12 @@ async def rollback_app(app_id: int) -> dict:
     r = await run("git", ["reset", "--hard", target["commit_sha"]], cwd=app["path"], timeout=120)
     if r["code"] != 0:
         raise RuntimeError(f"回滚失败：{r['out']}")
-    await service_action(unit_name(app), "restart")
+    try:
+        await restart_and_verify(unit_name(app), app["port"])
+    except RuntimeError as e:
+        # 工作区已经切到目标版本了，只说"回滚失败"会让人以为再点一次就好，
+        # 实际要处理的是那个起不来的进程。
+        raise RuntimeError(f"代码已回滚到 {target['commit_sha']}，但服务没起来：{e}") from None
     return {"ok": True, "commit": target["commit_sha"], "deployment": target["id"], "from": current}
 
 
@@ -688,8 +812,8 @@ async def sync_app(app_id: int) -> dict:
         elif before and after == before:
             log("==> 远端无新提交，工作区版本未变化")
 
-        log(f"==> 重启服务 {unit_name(app)}")
-        await service_action(unit_name(app), "restart")
+        log(f"==> 重启并确认服务 {unit_name(app)}")
+        await restart_and_verify(unit_name(app), app["port"], warn=log)
         dbm.execute(
             "UPDATE deployments SET status='success', commit_sha=?, finished_at=datetime('now') WHERE id=?",
             (after, dep_id),
@@ -758,12 +882,17 @@ async def _run_deployment(app: dict, dep_id: int):
         write_env_file(app)
         await ensure_unit(app)
 
-        if app["domain"] and app["port"]:
-            _append_log(dep_id, f"==> 应用 nginx 反代 {app['domain']} -> 127.0.0.1:{app['port']}")
-            await nginx_ops.apply_vhost({"name": app["name"], "domain": app["domain"], "port": app["port"]})
+        if app["domain"]:
+            if app["port"]:
+                _append_log(dep_id, f"==> 应用 nginx 反代 {app['domain']} -> 127.0.0.1:{app['port']}")
+                await nginx_ops.apply_vhost({"name": app["name"], "domain": app["domain"], "port": app["port"]})
+            else:
+                # 反代必须知道往哪个端口转，缺端口就只能不配；不写这一行的话
+                # 用户只看到"部署完成"，域名却始终打不开，无从猜起是证书还是应用的问题。
+                _append_log(dep_id, f"!!> 已配置域名 {app['domain']} 但未填端口，跳过 nginx 反代（补上端口后重新部署）")
 
-        _append_log(dep_id, f"==> 重启服务 {unit_name(app)}")
-        await service_action(unit_name(app), "restart")
+        _append_log(dep_id, f"==> 重启并确认服务 {unit_name(app)}")
+        await restart_and_verify(unit_name(app), app["port"], warn=lambda t: _append_log(dep_id, t))
         sha = await _current_sha(app["path"])
         if sha:
             dbm.execute("UPDATE deployments SET commit_sha=? WHERE id=?", (sha, dep_id))

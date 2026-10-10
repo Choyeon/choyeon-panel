@@ -123,9 +123,12 @@ async def app_update(app_id: int, req: Request):
     try:
         old = apps_service.get_app(app_id)
         a = apps_service.update_app(app_id, await _body(req))
-        await apps_service.cleanup_renamed(old, a)
-        await aio_db.audit(req.state.cp_sub, "app:update", a["name"])
-        return a
+        # 行里的新值要重新渲染 unit / .panel.env / nginx 才真正生效，服务在跑就顺手重启一次。
+        # 结果原样带回前端：「已保存」和「已生效」不是一回事，同步失败时必须显示 note，
+        # 否则用户只能等下一次部署才发现配置其实没写进去。
+        applied = await apps_service.apply_edited(old, a)
+        await aio_db.audit(req.state.cp_sub, "app:update", a["name"] + ("" if applied["applied"] else " (未同步)"))
+        return {**a, "applied": applied}
     except Exception as e:  # noqa: BLE001
         return err_json(e)
 
