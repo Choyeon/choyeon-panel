@@ -480,12 +480,17 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
     # 恢复会把目标库整份覆盖，出事时用户唯一能退回的就是覆盖前的那一版，
     # 所以这一步不能省、也不能放在覆盖之后。用在线备份 API 而不是 cp：
     # 正在被写入的库直接复制出来的文件恢复时会报 database image is malformed。
-    cands = backup_runner.find_sqlite_dbs(app["path"])
+    # 整目录 walk 在几千文件的 node_modules 上要几百毫秒，不该压着事件循环。
+    cands = await run_in_threadpool(backup_runner.find_sqlite_dbs, app["path"])
     if not cands:
         raise RuntimeError(f"{app['path']} 下没有找到数据库文件（*.db / *.sqlite*）")
     m = _SQLITE_NAME_RE.match(os.path.basename(src_file))
     if m:
         stem = m.group(1)
+        # 留档名带来源库的名字再加 -pre-restore 后缀（见下方 pre 的命名），
+        # 这样点它的"恢复"能退回被本次覆盖掉的那一版，而不是报找不到库。
+        if stem.endswith("-pre-restore"):
+            stem = stem[: -len("-pre-restore")]
         dst = next((c for c in cands if os.path.splitext(os.path.basename(c))[0] == stem), None)
         if not dst:
             raise RuntimeError(f"目录里找不到与备份同名的数据库 {stem}.db；现有候选：{', '.join(cands[:4])}")
@@ -494,7 +499,15 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
         dst = cands[0]
         log.append(f"!! 备份文件名未记录源库名，按目录内最大库定位：{dst}")
 
-    pre = f"{dst}.pre-restore-{ts}.sqlite.gz"
+    # 留档写在备份目录里、用 bk<id>-<时间戳>-<库名>-pre-restore 命名：备份文件页只列这个
+    # 目录，界面又写着"可退回本次自动留存的 pre-restore 快照"——快照落在应用目录里
+    # 就等于用户看不见它，恢复失败后既找不到也点不动。名字排在最新一位，
+    # prune 按名字排序删最旧的，它要等真实备份轮替过 keep 名额才会被清掉。
+    # 必须走 _free_path 而不是直接拼名：从留档回滚时两次的时间戳可能落在同一秒，
+    # 而留档名与源文件名同形——把留档写在源文件上等于先把它覆盖成当前内容，
+    # 于是"退回上一版"变成原地不动，且唯一的回滚数据就此消失。
+    db_stem = os.path.splitext(os.path.basename(dst))[0]
+    pre = backup_runner._free_path(bk["id"], ts, f"-{db_stem}-pre-restore.sqlite.gz", os.path.dirname(src_file))
     # 下面三步都是百 MB 级的同步读改写（在线备份 + gzip、解压、全库 quick_check），
     # 直接在事件循环里跑会让整个面板在恢复期间停响应，所以全部丢给工作线程。
     await run_in_threadpool(backup_runner.sqlite_snapshot, dst, pre)
@@ -534,11 +547,16 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
                     os.unlink(p)
         raise
     finally:
-        try:
-            await systemd_ops.service_action(unit, "start")
-            log.append(f"==> 已启动 {unit}" + ("（恢复前为运行状态）" if stopped else ""))
-        except Exception as e:  # noqa: BLE001
-            log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
+        # 只有真的停过才去启动：service_action("stop") 自己失败时服务从未被我们动过，
+        # 这时补一个 start 等于把运维特意停着的服务悄悄拉起来（与 _restore_app 保持一致）。
+        if stopped:
+            try:
+                await systemd_ops.service_action(unit, "start")
+                log.append(f"==> 已启动 {unit}")
+            except Exception as e:  # noqa: BLE001
+                log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
+        else:
+            log.append(f"==> {unit} 恢复前未在运行，保持停止")
 
 
 def _tar_checked(tf: tarfile.TarFile) -> list:
@@ -576,8 +594,10 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
     if os.path.exists(env):
         # 归档里的 .panel.env 是备份当时的环境变量，而口令/端口可能早就改过了，
         # 覆盖回去会让服务突然起不来且毫无提示。先留存现值，解包后再还原现值。
-        env_keep = f"{env}.pre-restore-{ts}"
-        shutil.copy2(env, env_keep)
+        # 暂存写在备份目录（root 0700）而不是应用目录里：那里是一份含口令的副本，
+        # 落在应用可读路径上、恢复完还一直躺着，prune 与备份页也都看不见它。
+        env_keep = backup_runner._free_path(bk["id"], ts, "-pre-restore.env", os.path.dirname(src_file))
+        await run_in_threadpool(shutil.copy2, env, env_keep)
 
     # 读索引和解包都是整份归档量级的同步读写（一个 node_modules 就是几百 MB），
     # 在循环上跑会让整个面板在恢复期间停响应。三步共用同一个 TarFile 句柄：
@@ -586,6 +606,7 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
     try:
         members = await run_in_threadpool(_tar_checked, tf)
         stopped = False
+        restored = False
         try:
             if await systemd_ops.is_active(unit):
                 await systemd_ops.service_action(unit, "stop")
@@ -594,17 +615,27 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
             else:
                 log.append(f"==> {unit} 未在运行，跳过停止")
             await run_in_threadpool(tf.extractall, dest, members)
+            restored = True
             log.append(f"==> 已解包 {len(members)} 个条目到 {dest}")
-            if env_keep:
-                shutil.copy2(env_keep, env)
-                log.append("==> 保留当前 .panel.env（未使用归档内的环境变量）")
         finally:
-            if stopped:
+            if env_keep:
+                # 不管解包成没成，环境变量都得回到现值：半程失败时归档里那份
+                # 旧 .panel.env 可能已经落下去了，留着它服务下次起来用的是别的口令。
+                with suppress(Exception):
+                    await run_in_threadpool(shutil.copy2, env_keep, env)
+                with suppress(OSError):
+                    os.unlink(env_keep)
+                log.append("==> 保留当前 .panel.env（未使用归档内的环境变量）")
+            if stopped and restored:
                 try:
                     await systemd_ops.service_action(unit, "start")
                     log.append(f"==> 已启动 {unit}")
                 except Exception as e:  # noqa: BLE001
                     log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
+            elif stopped:
+                # 半恢复的目录里可能缺几百个文件，把它启动起来等于让服务在残骸上
+                # 写数据、跑迁移。宁可停在停止态并说清楚，也不要"看起来恢复了"。
+                log.append(f"!! 解包中断：{dest} 可能处于半恢复状态，服务保持停止；请重跑恢复或改用更早的备份")
     finally:
         tf.close()
 
@@ -619,7 +650,7 @@ async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
     # 文件名保持 bk<id>-<时间戳>-pre-restore.dump.gz：prune 是按名字排序删最旧的，
     # 这里用当前时间戳正好排在末尾；写成 bk<id>-pre-restore-... 会排到所有真实备份之后，
     # 等于每次恢复都留下一个永不轮替的文件把 keep 名额吃掉。
-    pre = os.path.join(BACKUP_DIR, f"bk{bk['id']}-{ts}-pre-restore.dump.gz")
+    pre = backup_runner._free_path(bk["id"], ts, "-pre-restore.dump.gz", BACKUP_DIR)
     # 恢复会 drop 目标库，先给当前内容做一份同目录的 dump 作为退路
     code = (await _sh_script(backup_runner.dump_cmd(f"su -s /bin/sh postgres -c 'pg_dump -Fc {db}'", pre)))["code"]
     if code != 0:
@@ -638,18 +669,44 @@ async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
     def su(inner: str) -> str:
         return f"su -s /bin/sh postgres -c {sh_escape(inner)}"
 
-    script = "\n".join(
-        [
-            "set -e",
-            f"{su(f'dropdb --if-exists --force {db}')} || {su(f'dropdb --if-exists {db}')}",
-            su(f"createdb -O {owner} {db}"),
-            f"gzip -dc {sh_escape(src_file)} | {su(f'pg_restore -d {db} --no-privileges --exit-on-error')}",
-        ]
-    )
-    r = await _sh_script(script, timeout=3600)
+    def drop_create() -> str:
+        """drop → createdb 一段。set -e 保证 drop 没成功就不会建库。
+
+        原来 drop/createdb/restore 与恢复数据写在同一段脚本里，一次非零退出既可能是
+        "drop 被占用的人挡住、现库完好"，也可能是"现库已删、新内容只 restore 了一半"，
+        而这两种情况该做的事完全相反。拆成两段就分得清：第一段失败没碰过库，
+        第二段失败库已经是空壳，必须用留档重建。
+        """
+        return "\n".join(
+            [
+                "set -e",
+                f"{su(f'dropdb --if-exists --force {db}')} || {su(f'dropdb --if-exists {db}')}",
+                su(f"createdb -O {owner} {db}"),
+            ]
+        )
+
+    def load(restore_src: str, exit_on_error: bool = True) -> str:
+        eo = " --exit-on-error" if exit_on_error else ""
+        return f"gzip -dc {sh_escape(restore_src)} | {su(f'pg_restore -d {db} --no-privileges{eo}')}"
+
+    # 先换成空库，再灌数据：分成两段才知道现库到底有没有被碰过
+    r = await _sh_script(drop_create(), timeout=600)
     if r["code"] != 0:
+        raise RuntimeError(f"重建空库失败（退出码 {r['code']}），当前库未被改动：{r['out'][-500:]}")
+
+    r = await _sh_script(load(src_file), timeout=3600)
+    if r["code"] != 0:
+        # 此刻库已被 drop 且 restore 只走了一半：只报"失败"等于留下一个没人接管的空壳。
+        # 恢复前那份留档就是为这一步准备的，先尽力装回去，再如实报告两次退出码。
+        rb = await _sh_script(drop_create() + "\n" + load(pre, exit_on_error=False), timeout=3600)
+        if rb["code"] == 0:
+            raise RuntimeError(
+                f"恢复失败（退出码 {r['code']}），已用 {os.path.basename(pre)} 把恢复前的库重建回去：{r['out'][-500:]}"
+            )
         raise RuntimeError(
-            f"恢复失败（退出码 {r['code']}），当前库已被删除，可用 {os.path.basename(pre)} 重试恢复：{r['out'][-500:]}"
+            f"恢复与回退均失败（{r['code']}/{rb['code']}），库 {db} 现为空壳或不完整；"
+            f"请手工执行 gzip -dc {os.path.basename(pre)} | sudo -u postgres pg_restore -d {db} "
+            f"--clean --if-exists：{r['out'][-300:]} / {rb['out'][-300:]}"
         )
     log.append(f"==> 库 {db} 已从 {os.path.basename(src_file)} 恢复（属主 {owner}）")
 

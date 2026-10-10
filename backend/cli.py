@@ -35,7 +35,7 @@ BACKEND_DIR = Path(__file__).resolve().parent
 ROOT = BACKEND_DIR.parent
 sys.path.insert(0, str(BACKEND_DIR))
 
-from app import config, security  # noqa: E402
+from app import avatars, config, security  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.routers.meta import run_checks  # noqa: E402
 
@@ -316,13 +316,12 @@ async def cmd_user(a: argparse.Namespace) -> dict:
     if a.user_cmd == "create":
         if not a.name or not a.password:
             Out.error("create 需要 <name> 与 --password", EXIT_USAGE)
-        if not a.password or len(a.password) < 8:
-            Out.error("密码至少 8 位", EXIT_USAGE)
-        import re
-
-        if not security.USERNAME_RE.match(a.name):
+        pw_err = security.password_error(a.password)
+        if pw_err:
+            Out.error(pw_err, EXIT_USAGE)
+        if not security.USERNAME_RE.match(str(a.name)):
             Out.error("用户名只能包含字母、数字、下划线与连字符（3-32 位）", EXIT_USAGE)
-        role = "viewer" if a.role == "viewer" else "admin"
+        role = a.role  # argparse 已用 choices 限定 admin/viewer
         if dbm.query_one("SELECT id FROM users WHERE username=?", (a.name,)):
             Out.error(f"用户 {a.name} 已存在", EXIT_FAIL)
         dbm.execute(
@@ -339,8 +338,9 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         u = dbm.query_one("SELECT * FROM users WHERE username=?", (a.name,))
         if not u:
             Out.error(f"用户 {a.name} 不存在", EXIT_FAIL)
-        if len(a.password) < 8:
-            Out.error("密码至少 8 位", EXIT_USAGE)
+        pw_err = security.password_error(a.password)
+        if pw_err:
+            Out.error(pw_err, EXIT_USAGE)
         dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (security.hash_pass(a.password), a.name))
         # 改密后吊销该用户所有已签发 token，避免旧凭证继续可用
         security.bump_user_epoch(a.name)
@@ -357,6 +357,9 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         if not a.yes:
             Out.error(f"删除用户不可撤销，确认请加 --yes：choyeonctl user delete {a.name} --yes", EXIT_USAGE)
         dbm.execute("DELETE FROM users WHERE username=?", (a.name,))
+        # 头像文件也要跟着走：/api/avatars/<id>.png 免登录可取，行删了图还在，
+        # 这张脸就永久挂在一个已不存在的账号上，面板里没有任何地方能清它。
+        avatars.purge(u["id"])
         security.bump_user_epoch(a.name)
         dbm.audit(a.name, "cli:user:delete")
         # 删掉最后一个管理员后，面板回到「未创建管理员」状态——此时任何能访问到面板的人

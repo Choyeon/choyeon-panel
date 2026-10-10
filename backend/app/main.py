@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, errors, security
+from . import avatars, config, errors, security
 from . import database as dbm
 from .deps import AuthMiddleware
 from .log import warn
@@ -113,12 +113,15 @@ async def setup(req: Request):
         # 只数 admin：机器上只剩 viewer 时（删过管理员），按 COUNT(*) 判定会永远 403，
         # 于是既进不去后台也建不出管理员，只能登服务器用 CLI 救。
         return JSONResponse(status_code=403, content={"error": "管理员已存在"})
-    username = (body.get("username") or "").strip()
-    password = body.get("password") or ""
+    # str() 兜的是 JSON 里 {"username": 123} 这种合法但离谱的输入：不转的话
+    # 123.strip() 直接 AttributeError，一个未登录请求换来 500 和一条脏审计。
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
     if not security.USERNAME_RE.match(username):
         return JSONResponse(status_code=400, content={"error": "用户名只能包含字母、数字、下划线与连字符（3-32 位）"})
-    if len(password) < 8:
-        return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
+    pw_err = security.password_error(password)
+    if pw_err:
+        return JSONResponse(status_code=400, content={"error": pw_err})
     dbm.execute(
         "INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)",
         (username, await security.hash_pass_async(password), "admin"),
@@ -134,12 +137,15 @@ async def login(req: Request):
     if security.rate_limited(ip):
         return JSONResponse(status_code=429, content={"error": "尝试过多，请稍后再试"})
     body = await _json_body(req)
-    username = (body.get("username") or "").strip()
+    username = str(body.get("username") or "").strip()
     user = dbm.query_one("SELECT * FROM users WHERE username=?", (username,))
-    password = body.get("password") or ""
+    password = str(body.get("password") or "")
     # scrypt(n=2^14) 单次约 16MB/几十毫秒：直接在 async 里跑会冻住整个事件循环，
     # 两三个人同时登录就能把仪表盘轮询一起拖死。
-    ok = bool(user) and bool(password) and await security.check_pass_async(password, user["pass_hash"])
+    # 长到离谱的口令连 scrypt 都不进：那是对方挑着打的 CPU 放大，
+    # 而 LOGIN_PW_MAX_LEN 比任何真实口令都宽，正常账号不会被挡在外面。
+    plausible = bool(password) and len(password) <= security.LOGIN_PW_MAX_LEN
+    ok = bool(user) and plausible and await security.check_pass_async(password, user["pass_hash"])
     if not ok:
         dbm.audit(username or "?", "login_failed", ip)
         return JSONResponse(status_code=401, content={"error": "用户名或密码错误"})
@@ -187,12 +193,15 @@ def client_ip(req: Request) -> str:
 async def change_password(req: Request):
     me = dbm.query_one("SELECT * FROM users WHERE username=?", (req.state.cp_sub,))
     body = await _json_body(req)
-    old = body.get("old") or ""
-    ok = bool(me) and bool(old) and await security.check_pass_async(old, me["pass_hash"])
+    old = str(body.get("old") or "")
+    # 与登录同一把尺子：原密码长到离谱就当不对，不进 scrypt
+    ok = bool(me) and bool(old) and len(old) <= security.LOGIN_PW_MAX_LEN \
+        and await security.check_pass_async(old, me["pass_hash"])
     if not ok:
         return JSONResponse(status_code=400, content={"error": "原密码错误"})
-    if not body.get("new") or len(body["new"]) < 8:
-        return JSONResponse(status_code=400, content={"error": "新密码至少 8 位"})
+    pw_err = security.password_error(body.get("new"), "新密码")
+    if pw_err:
+        return JSONResponse(status_code=400, content={"error": pw_err})
     role = me["role"] or "admin"
     new_hash = await security.hash_pass_async(body["new"])
     dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (new_hash, me["username"]))
@@ -266,10 +275,8 @@ async def upload_avatar(req: Request):
 
     os.makedirs(config.AVATAR_DIR, exist_ok=True)
     # 文件名只用用户自增 id：不采用用户名（可能含 . 与 ..），也不采用客户端给的扩展名。
-    for f in os.listdir(config.AVATAR_DIR):
-        if f.startswith(f"{me['id']}."):
-            with suppress(OSError):
-                os.unlink(os.path.join(config.AVATAR_DIR, f))
+    # 旧文件先清掉，否则换一种扩展名重传会同时留下两张脸，公开路由按文件名各取各的。
+    avatars.purge(me["id"])
     path = os.path.join(config.AVATAR_DIR, f"{me['id']}.{ext}")
     with open(path, "wb") as fh:
         fh.write(data)

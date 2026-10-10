@@ -46,6 +46,34 @@ async def check_pass_async(password: str, stored: str) -> bool:
         return await asyncio.to_thread(check_pass, password, stored)
 
 
+# 口令长度的上下限。四条设置路径（setup / 建号 / 管理员改密 / 自助改密）必须用同一把尺子，
+# 否则一处放行、另一处拒绝，用户按提示改完还是 400。
+PW_MIN_LEN = 8
+PW_MAX_LEN = 128
+# 登录时的纯防放大上限：比 PW_MAX_LEN 宽一个数量级，放行历史上用超长口令建过的账号，
+# 同时挡掉"拿一条 200MB 的口令让我算 scrypt"这种 CPU 放大。
+LOGIN_PW_MAX_LEN = 1024
+
+
+def password_error(password, label: str = "密码") -> str | None:
+    """口令能不能拿来建号/改密的唯一判据；合法返回 None。
+
+    上限不是洁癖：scrypt 的耗时随输入长度增长，一次大输入就是一场 DoS。
+    编码检查也不是走过场：JSON 里的孤立代理字符（无法用 UTF-8 表达的那类码点）
+    照样是合法输入，但它 encode() 就抛 UnicodeEncodeError —— 不设防的话用户在
+    hash_pass 里收到的是 500，而不是"口令不合法"。
+    """
+    if not isinstance(password, str) or len(password) < PW_MIN_LEN:
+        return f"{label}至少 {PW_MIN_LEN} 位"
+    if len(password) > PW_MAX_LEN:
+        return f"{label}最多 {PW_MAX_LEN} 位"
+    try:
+        password.encode()
+    except UnicodeEncodeError:
+        return f"{label}含无法编码的字符"
+    return None
+
+
 def hash_pass(password: str) -> str:
     salt = secrets.token_hex(16)
     key = hashlib.scrypt(password.encode(), salt=salt.encode(), n=2**14, r=8, p=1, dklen=64, maxmem=32 * 1024 * 1024)
@@ -60,7 +88,9 @@ def check_pass(password: str, stored: str) -> bool:
             password.encode(), salt=salt.encode(), n=2**14, r=8, p=1, dklen=64, maxmem=32 * 1024 * 1024
         )
         return hmac.compare_digest(got.hex(), key)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, UnicodeEncodeError):
+        # UnicodeEncodeError 来自 password.encode()：登录接口不能因为对方送来一个
+        # 孤立代理字符就抛 500，那既不是"密码错误"也不是可重试的状态码。
         return False
 
 

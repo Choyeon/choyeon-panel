@@ -355,7 +355,7 @@ class TestRestoreOffEventLoop(unittest.TestCase):
     """恢复路径的两处重 I/O（整库快照+解压+quick_check、tar 索引+解包）必须在工作线程里做。
 
     移出事件循环不许改变既有语义：留档先于覆盖、路径校验先于停服务、失败不留半成品、
-    服务无论如何都被重新拉起、.panel.env 保持当前值。
+    .panel.env 保持当前值；服务只在"确实被我们停过且覆盖成功"时才拉起。
     """
 
     def setUp(self):
@@ -430,9 +430,22 @@ class TestRestoreOffEventLoop(unittest.TestCase):
         self.assertEqual(self._sqlite_rows(cur), [("from-snapshot",)])
         self.assertNotIn(self.main_ident, idents, "整库快照不该跑在事件循环上")
         # 覆盖前的那一版必须留存，且不留 .restoring- 半成品
-        self.assertTrue([f for f in os.listdir(self.app) if "pre-restore" in f], log)
+        pre = [f for f in os.listdir(self.dir) if f.endswith("-pre-restore.sqlite.gz")]
+        self.assertEqual(len(pre), 1, log)
+        # 留档必须落在备份目录里、用 bk<id>- 前缀命名：备份页只列这个目录，
+        # 界面又写着"可退回本次自动留存的 pre-restore 快照"，落在应用目录等于看不见。
+        self.assertTrue(pre[0].startswith(f"bk{self.aid}-"), pre[0])
+        self.assertTrue(B._restoreable("sqlite", pre[0]), pre[0])
+        # 名字还要带来源库的 stem：备份页对 .sqlite.gz 一律给"恢复"按钮，
+        # 不带来源名点开就会报"找不到与备份同名的数据库 pre-restore.db"。
+        self.assertIn("-app-pre-restore.sqlite.gz", pre[0], pre[0])
+        self.assertEqual([f for f in os.listdir(self.app) if "pre-restore" in f], [])
         self.assertEqual([f for f in os.listdir(self.dir) if ".restoring-" in f], [])
-        self.assertEqual(self.calls, ["start"], "未在运行时也要拉起，别把服务留在停止态")
+        self.assertEqual(self.calls, [], "恢复前没在跑的服务不该被恢复流程顺手启动")
+
+        # 留档必须真能当回滚目标用：从它恢复，写回的是被本次覆盖掉的那一版
+        asyncio.run(B._restore_sqlite(self.bk, os.path.join(self.dir, pre[0]), []))
+        self.assertEqual(self._sqlite_rows(cur), [("current",)], "pre-restore 留档要能退回覆盖前的内容")
 
     def test_sqlite_restore_rejects_corrupt_snapshot_without_touching(self):
         cur = os.path.join(self.app, "app.db")
@@ -500,6 +513,64 @@ class TestRestoreOffEventLoop(unittest.TestCase):
         self.assertIn("不支持的条目类型", str(cm.exception))
         self.assertEqual(self.calls, [], "校验不过时不该已经把服务停下来")
         self.assertFalse(os.path.exists(os.path.join(self.app, "link")))
+
+    def test_app_restore_failure_leaves_service_stopped_and_env_intact(self):
+        """解包中断时不许把服务拉起来：半恢复的目录跑起来会在残骸上写数据。
+
+        真实触发是磁盘写满 / 权限导致 extractall 抛错，此时 .panel.env 可能已经被
+        归档里那份旧值覆盖过，必须回到现值并被清理，否则下次启动用的是别的口令。
+        """
+        self.active = True
+        env = os.path.join(self.app, ".panel.env")
+        with open(env, "w") as f:
+            f.write("PORT=3999\n")
+        src = self._tar_gz("app2.tar.gz", [("sub", None), ("sub/a.txt", "x"),
+                                           (".panel.env", "PORT=1111\n")])
+
+        def full(*a, **kw):
+            raise OSError(28, "No space left on device")
+
+        log = []
+        with (mock.patch.object(tarfile.TarFile, "extractall", full),
+              self.assertRaises(OSError)):
+            asyncio.run(B._restore_app(self.bk, src, log))
+
+        self.assertEqual(self.calls, ["stop"], "半恢复时不能 start")
+        self.assertIn("半恢复", "\n".join(log))
+        with open(env) as f:
+            self.assertEqual(f.read(), "PORT=3999\n", "环境变量必须回到恢复前的现值")
+        self.assertEqual([f for f in os.listdir(self.app) if "pre-restore" in f], [],
+                         "暂存文件不该留在应用目录里")
+        self.assertEqual([f for f in os.listdir(self.dir) if "pre-restore" in f], [])
+
+    def test_sqlite_restore_does_not_start_when_stop_fails(self):
+        """stop 自己失败 = 服务从未被我们动过，这时补 start 等于偷偷拉起特意停着的服务。"""
+        from app.services import systemd_ops as SYS
+
+        self.active = True
+        cur = os.path.join(self.app, "app.db")
+        con = sqlite3.connect(cur)
+        con.executescript("CREATE TABLE t(v TEXT); INSERT INTO t VALUES('current');")
+        con.commit()
+        con.close()
+        snap_db = os.path.join(self.dir, "src.db")
+        con = sqlite3.connect(snap_db)
+        con.executescript("CREATE TABLE t(v TEXT); INSERT INTO t VALUES('from-snapshot');")
+        con.commit()
+        con.close()
+        src = os.path.join(self.dir, f"bk{self.aid}-2026-01-01-00-00-00-app.sqlite.gz")
+        R.sqlite_snapshot(snap_db, src)
+
+        async def refusing_stop(unit, verb):
+            self.calls.append(verb)
+            raise RuntimeError("Unit is masked")
+
+        log = []
+        with mock.patch.object(SYS, "service_action", refusing_stop):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(B._restore_sqlite(self.bk, src, log))
+        self.assertEqual(self.calls, ["stop"], "停失败后不能再补一次 start")
+        self.assertEqual(self._sqlite_rows(cur), [("current",)], "没停成功就不该覆盖现库")
 
 
 if __name__ == "__main__":

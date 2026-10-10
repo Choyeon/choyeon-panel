@@ -22,6 +22,11 @@ PUBLIC_PREFIXES = (
 )
 MUTATIONS = {"POST", "PATCH", "PUT", "DELETE"}
 
+# 只读账号唯一能写的东西是"自己的账号"：改密、改资料、换头像。
+# 头像必须和 profile 同批放行——上传入口就在资料弹窗里，漏掉它的话 viewer
+# 点"上传头像"得到的是「只读账号不能执行写操作」，而同一个弹窗里改昵称是好的。
+SELF_SERVICE_PREFIXES = ("/api/auth/password", "/api/auth/profile", "/api/auth/avatar")
+
 # 面板自身托管静态资源，全部同源加载；禁用 object/frame 嵌入与外域脚本
 CSP = (
     "default-src 'self'; "
@@ -104,7 +109,8 @@ class AuthMiddleware:
       ?token= 只在 GET 与 WebSocket 握手被接受（下载/SSE/终端带不了 Header）
     - WebSocket 握手额外校验 Origin 同源，挡跨站网页接管 root 终端
     - 401 文案区分：未登录 / 登录已过期；WS 用 close 码 4401/4498 表达同样的区分
-    - viewer 角色禁止一切写操作（POST/PATCH/PUT/DELETE），/api/auth/password 自助改密除外
+    - viewer 角色禁止一切写操作（POST/PATCH/PUT/DELETE），SELF_SERVICE_PREFIXES
+      列出的"改自己"接口除外
     - 统一注入安全响应头；WebSocket 连接同样写入 scope["state"]，供终端鉴权
     """
 
@@ -154,8 +160,7 @@ class AuthMiddleware:
                 scope["type"] == "http"
                 and scope["method"] in MUTATIONS
                 and role != "admin"
-                and not path.startswith("/api/auth/password")
-                and not path.startswith("/api/auth/profile")
+                and not path.startswith(SELF_SERVICE_PREFIXES)
             ):
                 await _json(403, "只读账号不能执行写操作")(scope, receive, send)
                 return

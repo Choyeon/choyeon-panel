@@ -38,7 +38,8 @@ function reload() {
 }
 
 async function createUser() {
-  if (!userForm.value.username || userForm.value.password.length < 8) return msg.error('用户名必填，密码至少 8 位');
+  if (!userForm.value.username || userForm.value.password.length < 8 || userForm.value.password.length > 128)
+    return msg.error('用户名必填，密码需 8–128 位');
   try {
     await api.createUser(userForm.value.username, userForm.value.password, userForm.value.role);
     msg.success('已创建');
@@ -64,7 +65,7 @@ function openReset(u: any) {
   showReset.value = true;
 }
 async function confirmReset() {
-  if (resetPwd.value.length < 8) return msg.error('密码至少 8 位');
+  if (resetPwd.value.length < 8 || resetPwd.value.length > 128) return msg.error('密码需 8–128 位');
   try {
     await api.updateUser(resetTarget.value.id, { password: resetPwd.value });
     msg.success('密码已重置，该用户的旧 token 已失效');
@@ -161,8 +162,8 @@ const filtered = computed(() => {
     <NModal v-model:show="showUser" preset="card" title="新建用户" style="width: 420px; max-width: 94vw">
       <NForm label-placement="left" label-width="70">
         <NSpace vertical :size="12">
-          <NFormItem label="用户名"><NInput v-model:value="userForm.username" placeholder="字母/数字/-/_，3-32 位" :input-props="{ 'aria-label': '用户名' }" /></NFormItem>
-          <NFormItem label="密码"><NInput v-model:value="userForm.password" type="password" show-password-on="click" placeholder="至少 8 位" :input-props="{ 'aria-label': '密码' }" /></NFormItem>
+          <NFormItem label="用户名"><NInput v-model:value="userForm.username" placeholder="字母/数字/-/_，3-32 位" maxlength="32" :input-props="{ 'aria-label': '用户名' }" /></NFormItem>
+          <NFormItem label="密码"><NInput v-model:value="userForm.password" type="password" show-password-on="click" placeholder="8–128 位" maxlength="128" :input-props="{ 'aria-label': '密码' }" /></NFormItem>
           <NFormItem label="角色">
             <NSelect v-model:value="userForm.role" :options="[{ label: '只读 viewer', value: 'viewer' }, { label: '管理员 admin', value: 'admin' }]" aria-label="用户角色" />
           </NFormItem>
@@ -174,7 +175,7 @@ const filtered = computed(() => {
     <NModal v-model:show="showReset" preset="card" :title="`重置密码 · ${resetTarget?.username || ''}`" style="width: 420px; max-width: 94vw">
       <NSpace vertical :size="12">
         <NText depth="3" style="font-size: var(--fs-xs)">重置后该用户的旧登录令牌立即失效，需要重新登录。</NText>
-        <NInput v-model:value="resetPwd" type="password" show-password-on="click" placeholder="新密码（至少 8 位）" :input-props="{ 'aria-label': '新密码' }" @keyup.enter="confirmReset" />
+        <NInput v-model:value="resetPwd" type="password" show-password-on="click" placeholder="新密码（8–128 位）" maxlength="128" :input-props="{ 'aria-label': '新密码' }" @keyup.enter="confirmReset" />
         <NSpace justify="end">
           <NButton tertiary @click="showReset = false">取消</NButton>
           <NButton type="primary" class="cp-press" :icon="icon('SaveOutline', 14)" @click="confirmReset">确认重置</NButton>

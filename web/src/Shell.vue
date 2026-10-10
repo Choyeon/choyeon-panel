@@ -401,13 +401,15 @@ function toggleTheme(ev: MouseEvent) {
           type="password"
           placeholder="原密码"
           autocomplete="current-password"
+          maxlength="1024"
           :input-props="{ 'aria-label': '原密码' }"
           @keyup.enter="doChangePwd"
         />
         <NInput
           v-model:value="newPwd"
           type="password"
-          placeholder="新密码（至少 8 位）"
+          placeholder="新密码（8–128 位）"
+          maxlength="128"
           autocomplete="new-password"
           :input-props="{ 'aria-label': '新密码' }"
           @keyup.enter="doChangePwd"

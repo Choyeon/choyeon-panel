@@ -3,8 +3,10 @@ import sqlite3
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from .. import aio_db
+from .. import avatars
 from .. import database as dbm
 from .. import security
 from ..deps import need_admin as _need_admin
@@ -53,12 +55,13 @@ async def users_create(req: Request):
     if r := _need_admin(req):
         return r
     body = await _body(req)
-    username = body.get("username") or ""
-    password = body.get("password") or ""
+    username = str(body.get("username") or "")
+    password = body.get("password")
     if not security.USERNAME_RE.match(username):
         return JSONResponse(status_code=400, content={"error": "用户名不合法"})
-    if not password or len(password) < 8:
-        return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
+    pw_err = security.password_error(password)
+    if pw_err:
+        return JSONResponse(status_code=400, content={"error": pw_err})
     role = body.get("role") or "admin"
     if role not in security.ROLES:
         # 不能写成 `"viewer" if role == "viewer" else "admin"`：脚本里把 role 打成
@@ -111,8 +114,9 @@ async def users_update(uid: str, req: Request):
             new_role = None  # 传了等于没传：不算变更，免得一次空保存把人踢下线
     new_hash = None
     if body.get("password"):
-        if len(body["password"]) < 8:
-            return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
+        pw_err = security.password_error(body["password"])
+        if pw_err:
+            return JSONResponse(status_code=400, content={"error": pw_err})
         new_hash = await security.hash_pass_async(body["password"])
     new_nickname = None
     if "nickname" in body:
@@ -155,6 +159,7 @@ async def users_delete(uid: str, req: Request):
     if u["username"] == req.state.cp_sub:
         return JSONResponse(status_code=400, content={"error": "不能删除自己"})
     dbm.execute("DELETE FROM users WHERE id=?", (u["id"],))
+    await run_in_threadpool(avatars.purge, u["id"])
     security.bump_user_epoch(u["username"])
     await aio_db.audit(req.state.cp_sub, "user:delete", u["username"])
     return {"ok": True}
