@@ -310,10 +310,6 @@ def _validate(i: dict, ignore_id: int = -1):
         raise RuntimeError("域名不合法")
     if not i.get("start_cmd") or len(i["start_cmd"]) > 500:
         raise RuntimeError("启动命令必填且不超过 500 字符")
-    if i.get("path"):
-        # 拒绝 `..` 并要求绝对路径；见 clean_abs_path 的说明
-        clean_abs_path(i["path"], "安装目录")
-        _check_not_protected(i["path"])
     if i.get("unit_template"):
         if len(i["unit_template"]) > 4000:
             raise RuntimeError("unit 模板过长")
@@ -335,6 +331,10 @@ def _validate(i: dict, ignore_id: int = -1):
             if d and not re.match(r"^[a-z0-9_]{1,63}$", d):
                 raise RuntimeError(f"关联数据库名不合法: {d}")
     path = _app_path(i)
+    # 要害目录检查按"最终目录"做，而不是只看用户填没填 path：不填时默认值是
+    # {APP_ROOT}/{name}，而 name 允许 choyeon-panel——那条记录会指向面板自己的
+    # 代码目录，点一次部署就把自己 git reset 掉，purge 更是直接 rmtree。
+    _check_not_protected(path)
     dup = dbm.query_one(
         "SELECT id FROM apps WHERE id IS NOT ?"
         " AND (name=? OR path=? OR (domain IS NOT NULL AND domain=? AND domain!=''))",
@@ -365,9 +365,26 @@ def _ensure_no_deployment(app_id: int, action: str):
         raise RuntimeError(f"部署进行中，不能{action}")
 
 
+def _ensure_app_dir(i: dict, path: str) -> None:
+    """没有仓库就没有 clone 去建目录，所以在这里把它补建出来。
+
+    线上实测：`choyeonctl app create p5g-hang --start-cmd "sleep 30"` 之后点部署，
+    日志走到「跳过拉取（未配置仓库，使用现有目录 /root/www/p5g-hang）」，紧接着
+    "!!! 部署失败: 目录不存在"——应用记录留下了，部署却永远跑不通，而这条路径是
+    CLI 明确支持的（--start-cmd 不带 --repo/--path），前端建应用时只填目录也一样。
+    带仓库时不建：git clone 自己会建，且目录已存在且非空时它会拒绝，那个拒绝是有
+    意义的（不覆盖别人的工作区）。要害目录已由 _validate 里的 _check_not_protected
+    挡掉，这里不会把面板自己的代码目录当成应用目录创建。
+    """
+    if i.get("repo_url") or os.path.isdir(path):
+        return
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
 def create_app(i: dict) -> dict:
     _validate(i)
     path = _app_path(i)
+    _ensure_app_dir(i, path)
     parent_id = None
     if i.get("parent_id"):
         parent_id = int(i["parent_id"])

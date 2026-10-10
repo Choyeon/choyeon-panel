@@ -8,21 +8,28 @@
 - 只读账号能 tail 全机 journal，而 admin 从应用详情可以把别的（包括面板自己的）
   nginx 配置当成"我的配置"整份写进 nginx 并 reload；
 - uvicorn 的访问日志会把带 ?token= 的完整请求目标原样写进 journald（已实测）。
+- 建应用的目录守卫：默认目录 {APP_ROOT}/{name} 从来没做过要害检查，name 写成
+  choyeon-panel 就得到一条指向面板自己代码目录的应用记录（点部署 = 把自己
+  git reset / purge = rmtree 自己）；而不带仓库的应用谁也不建目录，部署必然
+  卡在「目录不存在」，这条路径还是 CLI 明确支持的（--start-cmd 不带 --repo）。
 """
 
 import asyncio
 import inspect
 import itertools
 import os
+import shutil
 import tempfile
 import unittest
 from contextlib import ExitStack, suppress
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_5g_ut_"))
 os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_5g_roots_"))
 
+from app import config  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app import main as main_mod  # noqa: E402
 from app.routers import apps as apps_router  # noqa: E402
@@ -236,6 +243,53 @@ class TestHousekeepingWiring(unittest.IsolatedAsyncioTestCase):
             with suppress(BaseException):
                 await t
         self.assertTrue(reap.called, "housekeeping 里没有调用 reap_orphan_deployments")
+
+
+class TestCreateAppPathGuards(unittest.TestCase):
+    """建应用这一步就要把目录问题说清楚，而不是留一条永远部署不通的记录。"""
+
+    def test_default_dir_cannot_point_at_the_panel_itself(self):
+        """不填 path 时默认值是 {APP_ROOT}/{name}，而 name 允许写成 choyeon-panel，
+        于是那条记录指向面板自己的代码目录：点一次部署就把自己 git reset 掉。"""
+        name = str(Path(config.BASE).name)
+        with mock.patch.object(apps_service, "APP_ROOT", str(Path(config.BASE).parent)):
+            with self.assertRaises(RuntimeError) as cm:
+                apps_service._validate({"name": name, "type": "node", "start_cmd": "true"})
+        self.assertIn("安装目录不能位于", str(cm.exception))
+
+    def test_default_dir_is_created_when_there_is_no_repo(self):
+        """线上实测：--start-cmd 建的应用既没仓库也没目录，部署必然报「目录不存在」。"""
+        root = tempfile.mkdtemp(prefix="cp_5g_root_")
+        with mock.patch.object(apps_service, "APP_ROOT", root):
+            a = apps_service.create_app({"name": "p5g-node", "type": "node", "start_cmd": "sleep 1"})
+            try:
+                self.assertEqual(a["path"], os.path.join(root, "p5g-node"))
+                self.assertTrue(os.path.isdir(a["path"]), "无仓库应用的默认目录应被建出来")
+            finally:
+                _drop(a["id"])
+        shutil.rmtree(root, ignore_errors=True)
+
+    def test_explicit_missing_dir_is_created_at_creation(self):
+        """显式填一个还没建好的目录（先建应用再放代码）：建应用时补出来，
+        而不是留到点部署那一刻才看到「目录不存在」。"""
+        missing = os.path.join(tempfile.mkdtemp(prefix="cp_5g_out_"), "not-here")
+        a = apps_service.create_app({
+            "name": "p5g-missing", "type": "node", "start_cmd": "true", "path": missing,
+        })
+        try:
+            self.assertTrue(os.path.isdir(missing), a["path"])
+        finally:
+            _drop(a["id"])
+            shutil.rmtree(missing, ignore_errors=True)
+
+    def test_existing_external_path_is_left_alone(self):
+        """托管已在跑的目录（Rosetta 那类）：不该被拒绝，也不该被动过。"""
+        root = tempfile.mkdtemp(prefix="cp_5g_ext_")
+        a = apps_service.create_app({"name": "p5g-ext", "type": "node", "start_cmd": "true", "path": root})
+        try:
+            self.assertEqual(os.listdir(root), [])
+        finally:
+            _drop(a["id"])
 
 
 class TestUnitOverrideGrammar(unittest.TestCase):
