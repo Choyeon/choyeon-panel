@@ -577,10 +577,14 @@ async def _unit_results(bases: list[str]) -> dict[str, dict]:
         if not uid.endswith(".service"):
             continue
         start = _local_ts(block.get("ExecMainStartTimestamp", ""))
+        # Type=oneshot 正在执行时 ActiveState 是 **activating**（生产实测），跑完才回 inactive。
+        # 只认 active 会让重叠闸形同虚设：面板说"没在跑"，然后和定时器那一轮同时执行。
+        running = block.get("ActiveState") in ("activating", "active")
         out[uid[: -len(".service")]] = {
             "start": start,
-            "status": _exec_result(block),
-            "running": block.get("ActiveState") == "active",
+            # 这一轮还没结束就没有"结果"可言：提前报 ok 会把上一次真正的失败盖成成功
+            "status": "" if running else _exec_result(block),
+            "running": running,
         }
     return out
 
@@ -626,7 +630,8 @@ async def run_log(tid: int) -> dict:
     base = _unit_base(tid)
     res = (await _unit_results([base])).get(base) or {}
     stored = {"unit": f"{base}.service", "source": "stored", "start": row["last_run"] or "",
-              "status": row["last_status"] or "", "log": redact_creds(row["log_tail"] or "")}
+              "status": row["last_status"] or "", "running": bool(res.get("running")),
+              "log": redact_creds(row["log_tail"] or "")}
     if not res.get("start") or (row["last_run"] or "") >= res["start"]:
         return stored
     args = ["-u", f"{base}.service", "--no-pager", "-o", "cat", "-n", "400", "--since", res["start"]]
@@ -641,6 +646,8 @@ async def run_log(tid: int) -> dict:
         "source": "journal",
         "start": res.get("start", ""),
         "status": res.get("status", ""),
+        # 正在跑的那一轮还没有退出码，界面按"执行中"显示，而不是"未执行"
+        "running": bool(res.get("running")),
         "log": text[-LOG_TAIL_BYTES * 2:],
     }
 

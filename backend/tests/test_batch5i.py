@@ -120,13 +120,25 @@ class TestShowParsing(unittest.TestCase):
     def test_unit_results_maps_service_blocks(self):
         results = ("Result=success\nExecMainStatus=0\nActiveState=inactive\n"
                    "ExecMainStartTimestamp=Sun 2026-10-11 03:00:00 CST\nId=panel-cron-9.service\n"
-                   "\nResult=success\nExecMainStatus=-\nActiveState=active\n"
+                   "\nResult=success\nExecMainStatus=-\nActiveState=activating\n"
                    "ExecMainStartTimestamp=Sun 2026-10-11 04:00:00 CST\nId=panel-cron-10.service\n")
         with mock.patch.object(C, "run", _run_dispatcher(results=results)):
             got = asyncio.run(C._unit_results(["panel-cron-9", "panel-cron-10"]))
         self.assertEqual(got["panel-cron-9"]["status"], "ok")
         self.assertFalse(got["panel-cron-9"]["running"])
-        self.assertTrue(got["panel-cron-10"]["running"], "oneshot 正在跑时 ActiveState=active")
+        # 生产实测：Type=oneshot 执行中 ActiveState 是 activating（不是 active），
+        # SubState=start。只认 active 时重叠闸永不触发，这条断言就是那件事的守门人。
+        self.assertTrue(got["panel-cron-10"]["running"], "oneshot 正在跑时 ActiveState=activating")
+        self.assertEqual(got["panel-cron-10"]["status"], "",
+                         "还在跑的一轮没有结果，提前报 ok 会把上一次的失败盖成成功")
+
+    def test_unit_results_treats_lingering_active_as_running(self):
+        results = ("Result=success\nExecMainStatus=0\nActiveState=active\n"
+                   "ExecMainStartTimestamp=Sun 2026-10-11 03:00:00 CST\nId=panel-cron-11.service\n")
+        with mock.patch.object(C, "run", _run_dispatcher(results=results)):
+            got = asyncio.run(C._unit_results(["panel-cron-11"]))
+        self.assertTrue(got["panel-cron-11"]["running"])
+        self.assertEqual(got["panel-cron-11"]["status"], "")
 
 
 # ------------------------------------------------------------------ 留痕合并
@@ -155,6 +167,14 @@ class TestMergeLastRun(unittest.TestCase):
         item = {"last_run": "", "last_status": ""}
         C._merge_last_run(item, {"start": "", "status": "", "running": True})
         self.assertTrue(item["running"])
+
+    def test_running_round_does_not_masquerade_as_previous_result(self):
+        # 上一次失败、这一轮正在跑：行上必须还是"执行中 + 上次 exit 1"，不能变成 ok
+        item = {"last_run": "2026-10-10 03:00:00", "last_status": "exit 1"}
+        C._merge_last_run(item, {"start": "2026-10-11 03:00:00", "status": "", "running": True})
+        self.assertTrue(item["running"])
+        self.assertEqual(item["last_run"], "2026-10-10 03:00:00")
+        self.assertEqual(item["last_status"], "exit 1")
 
 
 class TestListTaskProvenance(unittest.TestCase):
@@ -226,6 +246,25 @@ class TestRunLog(unittest.TestCase):
         self.assertEqual(got["source"], "stored")
         self.assertIn("刚刚手动跑的这份", got["log"])
 
+    def test_running_round_reads_journald_and_marks_running(self):
+        row = _mk_task(log_tail="上一次的手动输出", last_run="2026-09-01 03:00:00", last_status="exit 1")
+        self.addCleanup(_drop_task, row["id"])
+        results = ("ExecMainStatus=-\nResult=success\nActiveState=activating\n"
+                   f"ExecMainStartTimestamp=Sun 2026-10-11 03:00:00 CST\nId=panel-cron-{row['id']}.service\n")
+        with mock.patch.object(C, "run", _run_dispatcher(results=results, journal="这一轮还在跑\n")):
+            got = asyncio.run(C.run_log(row["id"]))
+        self.assertEqual(got["source"], "journal")
+        self.assertTrue(got["running"])
+        self.assertEqual(got["status"], "", "没跑完就没有状态可报")
+        self.assertIn("这一轮还在跑", got["log"])
+
+    def test_stored_branch_reports_not_running(self):
+        row = _mk_task(log_tail="输出", last_run=time.strftime("%Y-%m-%d %H:%M:%S"))
+        self.addCleanup(_drop_task, row["id"])
+        with mock.patch.object(C, "run", _run_dispatcher(results="")):
+            got = asyncio.run(C.run_log(row["id"]))
+        self.assertFalse(got["running"])
+
     def test_journal_failure_falls_back_to_stored(self):
         row = _mk_task(log_tail="库里的一份", last_run="2026-09-01 03:00:00")
         self.addCleanup(_drop_task, row["id"])
@@ -247,7 +286,7 @@ class TestRunNowOverlap(unittest.TestCase):
         self.lock.parent.mkdir(parents=True, exist_ok=True)
 
     def test_refuses_while_timer_round_is_active(self):
-        results = ("ExecMainStatus=-\nActiveState=active\n"
+        results = ("ExecMainStatus=-\nActiveState=activating\n"
                    f"ExecMainStartTimestamp=Sun 2026-10-11 03:00:00 CST\nId=panel-cron-{self.row['id']}.service\n")
         with mock.patch.object(C, "run", _run_dispatcher(results=results)), \
                 mock.patch.object(C, "_resolve_binary", lambda n: "/usr/bin/true"), \

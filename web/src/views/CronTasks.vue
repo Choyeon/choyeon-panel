@@ -22,7 +22,7 @@ type Task = {
   timer_active: boolean; timer_next: string; timer_unit_state: string; argv_list: string[];
   running: boolean; last_source: string;
 };
-type RunLog = { unit: string; source: string; start: string; status: string; log: string };
+type RunLog = { unit: string; source: string; start: string; status: string; running: boolean; log: string };
 type Options = { allowed: string[]; presets: any[]; units: string[]; note: string };
 type Preview = { expr: string; human: string; oncalendar: string | null; error: string | null };
 
@@ -41,6 +41,8 @@ const logRow = ref<Task | null>(null);
 // 手动执行写得出，被定时器唤醒的那一轮在 journald 里，只读 log_tail 会把"天天在跑"显示成"从未执行"。
 const logData = ref<RunLog | null>(null);
 const logLoading = ref(false);
+// 正在跑的那一轮还没有退出码，按"执行中"显示，而不是空成"未执行"。
+const logStatusText = computed(() => (logData.value?.running ? '执行中…' : logData.value?.status || '—'));
 
 // 预设里只有 `choyeonctl logs` 带一个可调参数（尾读行数）。白名单接受
 // `logs --lines N` 和 `logs --lines=N`，但 logs 后面挂第二个参数就会被拒，
@@ -224,10 +226,15 @@ async function runNow(r: Task) {
   err.value = '';
   try {
     const res = await req(`/cron/${r.id}/run`, { body: {}, timeout: 660000 });
-    // 手动这一轮由面板当场捕获输出，直接放进抽屉，不必再回读 journald（那里没有它）
-    logData.value = { unit: '', source: 'stored', start: '', status: res?.status || '', log: res?.log || '' };
-    logRow.value = r;
     await reload();
+    // 手动这一轮由面板当场捕获输出，直接放进抽屉，不必再回读 journald（那里没有它）。
+    // 开始时间取刷新后的行：run 的响应里没有它，写死空串会让抽屉显示"未执行"。
+    const row = rows.value.find((i) => i.id === r.id);
+    logData.value = {
+      unit: '', source: 'stored', start: row?.last_run || '', status: res?.status || '',
+      running: false, log: res?.log || '',
+    };
+    logRow.value = row || r;
   } catch (e: any) {
     err.value = e.message || String(e);
   } finally {
@@ -481,7 +488,7 @@ const cols: any[] = [
           <DescriptionsCard
             :items="[
               { label: '开始时间', value: logData?.start ? fmtDateTime(logData.start) : (logLoading ? '读取中…' : '未执行') },
-              { label: '状态', value: logData?.status || '—' },
+              { label: '状态', value: logStatusText },
               { label: '来源', value: logData?.source === 'journal' ? 'systemd timer（journald）' : logData?.source === 'stored' ? '面板手动执行记录' : '—' },
             ]"
           />
