@@ -127,8 +127,8 @@ html[data-theme='dark'] {
   --cp-ring-track: rgba(255, 255, 255, 0.06);
   --cp-brand-grad-from: #6eaaff;
   --cp-menu-bg: #242633;
-  --cp-menu-item-bg: #2e313d;
-  --cp-menu-item-active: #434552;
+  /* 胶囊底色/ hover / 选中三档颜色在 theme.ts 的 Menu 变量里（naive 只认那套），
+     这里只留侧栏底色与胶囊外阴影。 */
   --cp-menu-shadow-color: rgba(36, 38, 51, 0.72);
   --cp-footer-border: #5b5e6a;
   --shadow-card: 0 0 4px rgba(36, 38, 51, 0.72);
@@ -176,8 +176,8 @@ html[data-theme='light'] {
   --cp-ring-track: rgba(0, 94, 235, 0.05);
   --cp-brand-grad-from: #4c8ef1;
   --cp-menu-bg: rgba(0, 94, 235, 0.1);
-  --cp-menu-item-bg: rgba(255, 255, 255, 0.3);
-  --cp-menu-item-active: #ffffff;
+  /* 胶囊底色/ hover / 选中三档颜色在 theme.ts 的 Menu 变量里（naive 只认那套）。 */
+  --cp-menu-shadow-color: rgba(0, 94, 235, 0.1);
   --cp-menu-shadow-color: rgba(0, 94, 235, 0.1);
   --cp-footer-border: #e4e7ed;
   color-scheme: light;

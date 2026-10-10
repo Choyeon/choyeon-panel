@@ -73,6 +73,7 @@ const surfaces = {
     thColor: '#2e313d',
     inputColor: '#2e313d',
     menuBg: '#242633',
+    menu: { item: '#2e313d', hover: '#434552', active: '#434552' },
     shadowCard: '0 0 4px rgba(36,38,51,0.72)',
   },
   light: {
@@ -85,19 +86,29 @@ const surfaces = {
     thColor: '#fafafa',
     inputColor: '#ffffff',
     menuBg: 'rgba(0,94,235,0.1)',
+    /* 1Panel 浅色 hover 只换文字/图标颜色，底色不动；那样 hover 完全看不出来，
+       所以给同一支白色提一档不透明度——仍是白胶囊，不引入 naive 的灰底。 */
+    menu: { item: 'rgba(255,255,255,0.3)', hover: 'rgba(255,255,255,0.55)', active: '#ffffff' },
     shadowCard: '0 0 4px rgba(0,94,235,0.1)',
   },
 };
 
 /* 侧栏菜单：1Panel 的菜单项是一颗颗胶囊（42px 高、4px 圆角、自带底色与外阴影），
-   选中项再加 2px 内描边 + 4×14px 竖条。描边与竖条 naive 表达不了，在 Shell.vue
-   用 :deep() 补；这里只给能表达的颜色与高度。 */
-const menuFor = (p: typeof darkSemantic, active: string): GlobalThemeOverrides['Menu'] => ({
+   选中项再加 2px 内描边 + 竖条。描边与竖条 naive 表达不了，在 Shell.vue 用 :deep() 补。
+   底色必须走这里而不是 CSS：naive 把 base/hover/selected/--hover 四态都画在
+   .n-menu-item-content::before 上，其中 `.n-menu ... :not(禁用):hover::before` 的权重
+   和我们带 scoped 属性的选择器打平，而它的 <style> 是运行时注入、排在构建 CSS 之后，
+   平权重时后者胜——用 CSS 覆盖会在 hover 到选中项时被 naive 的灰色抢走。 */
+const menuFor = (p: typeof darkSemantic, m: { item: string; hover: string; active: string }): GlobalThemeOverrides['Menu'] => ({
   itemHeight: '42px',
   borderRadius: '4px',
-  itemColorActive: active,
-  itemColorActiveHover: active,
-  itemColorActiveCollapsed: active,
+  /* 胶囊底色这一档在 naive 里就叫 color（菜单项 ::before 的默认底色），
+     没有 itemColor 这个键——写成 itemColor 会被 vue-tsc 拒掉。 */
+  color: m.item,
+  itemColorHover: m.hover,
+  itemColorActive: m.active,
+  itemColorActiveHover: m.active,
+  itemColorActiveCollapsed: m.active,
   itemTextColorActive: p.brand,
   itemIconColorActive: p.brand,
   itemTextColorChildActive: p.brand,
@@ -121,7 +132,7 @@ export const darkOverrides: GlobalThemeOverrides = {
     headerColor: surfaces.dark.bg1,
     headerBorderColor: surfaces.dark.border,
   },
-  Menu: menuFor(darkSemantic, '#434552'),
+  Menu: menuFor(darkSemantic, surfaces.dark.menu),
 };
 
 export const lightOverrides: GlobalThemeOverrides = {
@@ -138,7 +149,7 @@ export const lightOverrides: GlobalThemeOverrides = {
     headerColor: surfaces.light.bg1,
     headerBorderColor: surfaces.light.border,
   },
-  Menu: menuFor(lightSemantic, surfaces.light.bg1),
+  Menu: menuFor(lightSemantic, surfaces.light.menu),
 };
 
 /** 运行时读取当前主题的 CSS 变量（供 canvas / xterm 等 JS 侧配色使用） */

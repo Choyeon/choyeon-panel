@@ -472,27 +472,38 @@ function toggleTheme(ev: MouseEvent) {
 .cp-sider :deep(.n-menu .n-menu-item-content) {
   margin: 7px 0;
   border-radius: var(--radius-lg);
-  background: var(--cp-menu-item-bg);
+}
+/* naive 把底色画在 .n-menu-item-content::before 上，且默认 left/right 各缩 8px；
+   胶囊是整行的，所以这一层必须撑满——否则 hover/选中会在 166px 的胶囊里只盖住中间
+   150px，两边各留 8px 原色，看着像"hover 不全"。颜色交给 theme.ts 的 Menu 变量：
+   naive 的 :hover / --hover / 选中四态规则权重不低于这里，平权重时它运行时注入的
+   style 排在后面会赢，所以 CSS 只补形状和描边。 */
+.cp-sider :deep(.n-menu .n-menu-item-content::before) {
+  left: 0;
+  right: 0;
+  border-radius: var(--radius-lg);
   box-shadow: 0 0 4px var(--cp-menu-shadow-color);
 }
-.cp-sider :deep(.n-menu-item-content--selected) {
+.cp-sider :deep(.n-menu .n-menu-item-content--selected::before) {
   box-shadow: 0 0 4px var(--cp-menu-shadow-color), inset 0 0 0 2px var(--cp-brand);
-  background: var(--cp-menu-item-active);
 }
+/* 选中竖条：图标从 16px 起，所以条放在 7px、宽 3px，中间留 6px 走道；
+   原来 12px 起、4px 宽会直接贴在图标左边，看着像多出来的一块色斑。 */
 .cp-sider :deep(.n-menu .n-menu-item-content--selected > .n-menu-item-content-header::before) {
   content: '';
   position: absolute;
-  left: 12px;
+  left: 7px;
   top: 50%;
   transform: translateY(-50%);
-  width: 4px;
-  height: 14px;
-  border-radius: var(--radius-lg);
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
   background: var(--cp-brand);
 }
-/* 折叠态下胶囊会挤成一条，去掉左右留白，竖条也不显示 */
+/* 折叠态下胶囊会挤成一条，去掉左右留白与竖条 */
 .cp-sider :deep(.n-menu--collapsed) { padding: 0; }
-.cp-sider :deep(.n-menu--collapsed .n-menu-item-content) { margin: 6px 0; box-shadow: none; }
+.cp-sider :deep(.n-menu--collapsed .n-menu-item-content) { margin: 6px 0; }
+.cp-sider :deep(.n-menu--collapsed .n-menu-item-content::before) { box-shadow: none; }
 .logo {
   display: flex;
   align-items: center;
