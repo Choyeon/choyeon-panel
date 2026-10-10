@@ -6,14 +6,16 @@
 - 分块/谎报尺寸：边读边量，只回一个 413，应用自己那份响应必须被丢弃
 - 未超限的 body 要逐字节原样送达——中间件不能改变正常请求的语义
 - 非 /api/ 路径与 websocket 不包 body
+- 答复之前先收尾：短路响应（403/404/超限 413）不许在正文还在发时挂断连接
 - 真栈：超大 JSON 登录得到 413（不是 500/200），且响应头仍然齐全
 """
 import asyncio
 import json
 import unittest
+from unittest import mock
 
-from app import config, security
-from app.deps import BodyCapMiddleware, cap_for
+from app import config, deps, security
+from app.deps import AuthMiddleware, BodyCapMiddleware, cap_for
 
 
 def _scope(path="/api/auth/login", method="POST", headers=None, type="http"):
@@ -180,8 +182,8 @@ class TestMiddleware(unittest.TestCase):
         self.assertEqual(seen.get("message"), {"type": "websocket.accept"})
 
 
-class TestUploadRouteDrains(unittest.TestCase):
-    """files 路由自己的 8MB 判定也必须"先读完再答"，否则浏览器只看到连接被重置。"""
+class TestUploadRouteCaps(unittest.TestCase):
+    """files 路由自己的 8MB 判定仍要成立（超限的字节不能进内存、不许落盘）。"""
 
     def _write(self, chunks, declared=None):
         from starlette.requests import Request
@@ -210,20 +212,99 @@ class TestUploadRouteDrains(unittest.TestCase):
         resp = asyncio.run(files.files_write(Request(scope, feed)))
         return resp, feed
 
-    def test_declared_oversize_is_read_out_before_413(self):
+    def test_declared_oversize_returns_413_without_touching_the_disk(self):
         big = config.MAX_UPLOAD_BYTES + 1024 * 1024
         chunk = b"a" * (512 * 1024)
-        resp, feed = self._write([chunk] * (big // len(chunk)), declared=big)
+        resp, _ = self._write([chunk] * (big // len(chunk)), declared=big)
         self.assertEqual(resp.status_code, 413)
         self.assertIn("文件超过", json.loads(resp.body.decode())["error"])
-        self.assertEqual(feed.n, big // len(chunk), "对端的每一块都要被读过，否则连接上还剩半截 body")
 
-    def test_lying_content_length_is_still_capped_and_drained(self):
+    def test_lying_content_length_is_still_capped(self):
         chunk = b"b" * (config.MAX_UPLOAD_BYTES // 8)
         chunks = [chunk] * 12  # 总量远超 8MB，但 Content-Length 谎报为 1KB
         resp, feed = self._write(chunks, declared=1024)
         self.assertEqual(resp.status_code, 413)
-        self.assertEqual(feed.n, len(chunks))
+        self.assertLess(feed.n, len(chunks), "读到超限就停手，剩下的字节由中间件收尾")
+
+
+class RejectApp:
+    """假应用：正文一眼都不看就直接答复——403、404、路由的超限 413 都是这个形状。"""
+
+    def __init__(self, status=403):
+        self.status = status
+        self.calls = 0
+
+    async def __call__(self, scope, receive, send):
+        self.calls += 1
+        await send({"type": "http.response.start", "status": self.status, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"error":"no"}', "more_body": False})
+
+
+class OrderCollector(Collector):
+    """记下响应发出时"对端已经交出了几块"，用来证明收尾发生在答复之前。"""
+
+    def __init__(self, feed):
+        super().__init__()
+        self.feed = feed
+        self.chunks_at_start = None
+
+    async def __call__(self, message):
+        if message["type"] == "http.response.start" and self.chunks_at_start is None:
+            self.chunks_at_start = self.feed.n
+        self.messages.append(message)
+
+
+class TestRespondAfterDraining(unittest.TestCase):
+    """答复之前先把正文收尾，否则仍在上传的浏览器只看到连接重置，看不见错误文案。"""
+
+    def _run(self, app, chunks, *, wrap=BodyCapMiddleware, path="/api/files/content", method="PUT", headers=None):
+        feed = Feed(chunks)
+        out = OrderCollector(feed)
+        asyncio.run(wrap(app)(_scope(path=path, method=method, headers=headers), feed, out))
+        return out, feed
+
+    def test_short_circuit_reply_waits_for_the_pending_body(self):
+        chunks = [b"a" * 4096] * 8
+        out, _ = self._run(RejectApp(), chunks)
+        self.assertEqual(out.starts[0]["status"], 403)
+        self.assertEqual(out.chunks_at_start, len(chunks), "正文没读干净之前，响应不许发出")
+
+    def test_request_without_body_is_not_delayed(self):
+        # 无正文时收尾只是取一次早已入队的终止块，不该变成一次等待。
+        out, _ = self._run(RejectApp(), [])
+        self.assertEqual(len(out.starts), 1)
+        self.assertEqual(out.chunks_at_start, 0)
+
+    def test_viewer_403_from_auth_drains_too(self):
+        # Auth 在 BodyCap 外层，它那三个短路响应到不了上面的 send 包装，只能自己收尾。
+        token = security.sign_token("probe", "viewer")
+        chunks = [b"u" * 4096] * 5
+        out, _ = self._run(
+            RejectApp(),
+            chunks,
+            wrap=AuthMiddleware,
+            headers={"authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(out.starts[0]["status"], 403)
+        self.assertEqual(out.chunks_at_start, len(chunks))
+
+    def test_stalled_client_still_gets_its_response(self):
+        """发了请求头就吊着不写完的客户端，不该把已经算好的响应一起拖死。"""
+
+        class Hang:
+            def __init__(self):
+                self.n = 0
+
+            async def __call__(self):
+                if self.n == 0:
+                    self.n += 1
+                    return {"type": "http.request", "body": b"x" * 1024, "more_body": True}
+                await asyncio.sleep(3600)
+
+        out = Collector()
+        with mock.patch.object(deps, "SETTLE_WAIT_SEC", 0.05):
+            asyncio.run(BodyCapMiddleware(RejectApp())(_scope(path="/api/files/content", method="PUT"), Hang(), out))
+        self.assertEqual(out.starts[0]["status"], 403, "收尾超时也要照常答复")
 
 
 class TestRealStack(unittest.TestCase):
