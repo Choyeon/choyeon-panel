@@ -57,7 +57,12 @@ async def unit_files(force: bool = False) -> dict:
 
 
 async def is_active(unit: str) -> bool:
-    r = await run("systemctl", ["is-active", unit])
+    # `--` 结束选项解析：unit 名即使以 - 开头（旧版本校验放宽时写进库的记录）
+    # 也只会被当作单元名，不会被 systemctl 当命令行选项吃掉。
+    # 实测 `systemctl status -ping.service` 返回 0 并打印整机状态——
+    # 少了这道标记，面板会把"选项解析成功"当成"服务在跑"。
+    # 已在本机验证 start/stop/restart/reload/enable/disable/is-active/show/reset-failed 都接受 `--`。
+    r = await run("systemctl", ["is-active", "--", unit])
     return r["code"] == 0
 
 
@@ -77,7 +82,7 @@ async def unit_states(units: list) -> dict:
         return {}
     r = await run(
         "systemctl",
-        ["show", "-p", "Id", "-p", "ActiveState", "-p", "MainPID", *units],
+        ["show", "-p", "Id", "-p", "ActiveState", "-p", "MainPID", "--", *units],
         timeout=10,
     )
     out: dict[str, dict] = {}
@@ -103,7 +108,7 @@ async def unit_states(units: list) -> dict:
 async def service_action(unit: str, verb: str) -> str:
     if verb not in VERBS:
         raise RuntimeError(f"verb not allowed: {verb}")
-    r = await run("systemctl", [verb, unit], timeout=60)
+    r = await run("systemctl", [verb, "--", unit], timeout=60)
     if r["code"] != 0:
         raise RuntimeError(r["out"] or f"systemctl {verb} failed")
     return r["out"]

@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import time
+from contextlib import suppress
 from pathlib import Path
 
 from .. import aio_db
@@ -16,6 +17,7 @@ from ..util import (
     is_git_url,
     is_name,
     is_port,
+    is_unit,
     redact_creds,
     run,
     run_shell_async,
@@ -29,6 +31,29 @@ APP_ROOT = config.APP_ROOT
 UNIT_DIR = config.UNIT_DIR
 
 _DEPLOY_TASKS: set = set()
+# 后台任务对应的部署 id：只有进程内还在跑的部署才在这个集合里。
+# 看门狗据此区分"慢"和"孤儿"（见 reap_orphan_deployments）。
+_RUNNING_DEPS: set[int] = set()
+
+# 部署各步骤的命令超时。集中定义不是为了好看，是因为下面两件事都必须由它推导：
+#   1) CLI 等待部署结束的时间（wait_deployment 默认值）
+#   2) 看门狗判定一条 running 记录是否已经是孤儿
+# 各写一个"看着够用"的数就是批次⑤G 修的那个 bug：CLI 的 1800s 小于
+# clone(600)+install(1800) 的最坏路径，CLI 先放弃并随 asyncio.run 退出把部署任务取消，
+# 记录停在 running，而 _ensure_no_deployment 让这个应用此后无法删除/回滚/改配置。
+GIT_CLONE_T = 600
+GIT_FETCH_T = 300
+GIT_CHECKOUT_T = 120
+GIT_RESET_T = 120
+INSTALL_T = 1800
+# 写 unit、渲染 .panel.env、应用 nginx 反代，再到重启并确认主进程稳定存活
+DEPLOY_ONLINE_T = 300
+
+# 取最坏路径：首次 clone（或 fetch+checkout+reset）+ 安装依赖 + 上线确认。
+# 这是"一次部署最多可能占用多久"的上界，不是期望耗时。
+DEPLOY_BUDGET_SEC = (
+    max(GIT_CLONE_T, GIT_FETCH_T + GIT_CHECKOUT_T + GIT_RESET_T) + INSTALL_T + DEPLOY_ONLINE_T
+)
 
 TEMPLATE_TOKENS = ("{{name}}", "{{path}}", "{{start_cmd}}", "{{port}}")
 
@@ -294,8 +319,17 @@ def _validate(i: dict, ignore_id: int = -1):
             raise RuntimeError("unit 模板过长")
         if re.search(r"\$\{|\$\(|`", i["unit_template"]):
             raise RuntimeError("unit 模板不允许 shell 替换语法")
-    if i.get("unit_override") and not re.match(r"^[A-Za-z0-9@:._-]{1,64}\.service$", i["unit_override"]):
-        raise RuntimeError("unit 名不合法")
+    if i.get("unit_override") and not (
+        is_unit(i["unit_override"]) and i["unit_override"].endswith(".service")
+    ):
+        # 旧写法自己写了一份正则，比 util.UNIT_RE 宽：首字符允许 -@:. 三种。
+        # 而 '-' 开头的 unit 名会被 systemctl 当命令行选项解析，实测
+        # `systemctl status -ping.service` 返回 0 并打印整机状态——
+        # 面板把"选项解析成功"读成"这个应用在跑"，列表显示运行中、
+        # 重启按钮一路绿灯，实际那个应用从来没有被碰过。
+        # 现在与读接口共用 util.is_unit（首字符必须是字母/数字）并要求 .service 后缀，
+        # systemctl 侧另加 `--` 结束选项标记（见 systemd_ops.is_active）。
+        raise RuntimeError("unit 名不合法：需以字母或数字开头，仅含 A-Za-z0-9@:._-，并以 .service 结尾")
     if i.get("db_names"):
         for d in i["db_names"].split(","):
             if d and not re.match(r"^[a-z0-9_]{1,63}$", d):
@@ -563,7 +597,7 @@ async def app_action(app_id: int, verb: str) -> dict:
         # 同 restart_and_verify：崩过一次的应用会被 systemd 的启动上限直接拒掉
         # （"Start request repeated too quickly"），用户分不清是自己命令写错还是面板坏了。
         if not await is_active(unit):
-            await run("systemctl", ["reset-failed", unit], timeout=30)
+            await run("systemctl", ["reset-failed", "--", unit], timeout=30)
     await service_action(unit, verb)
     if verb in ("start", "restart"):
         # 只信 systemctl 的返回码会把"起来就崩"说成启动成功（见 restart_and_verify）。
@@ -636,7 +670,7 @@ async def restart_and_verify(unit: str, port=None, *, warn=None) -> None:
     # 这一次——配置已经写对了，服务却起不来，用户看不出两者没关系。
     # 既然这次调用就是要主动把服务拉起来，先把失败计数清掉（对正常停止的服务是空操作）。
     if not await is_active(unit):
-        await run("systemctl", ["reset-failed", unit], timeout=30)
+        await run("systemctl", ["reset-failed", "--", unit], timeout=30)
     await service_action(unit, "restart")
     await _wait_stable(unit)
 
@@ -661,18 +695,27 @@ async def deploy_app(app_id: int) -> int:
         raise RuntimeError("该应用已有部署任务在运行")
     res = dbm.execute("INSERT INTO deployments(app_id,status) VALUES(?,'running')", (app_id,))
     dep_id = res
+    _RUNNING_DEPS.add(dep_id)
     task = asyncio.create_task(_run_deployment(app, dep_id))
     _DEPLOY_TASKS.add(task)
-    task.add_done_callback(_DEPLOY_TASKS.discard)
+
+    def _done(_t):
+        _DEPLOY_TASKS.discard(_t)
+        _RUNNING_DEPS.discard(dep_id)
+
+    task.add_done_callback(_done)
     return dep_id
 
 
-async def wait_deployment(dep_id: int, app_id: int, timeout: int = 1800) -> dict:
+async def wait_deployment(dep_id: int, app_id: int, timeout: int = DEPLOY_BUDGET_SEC) -> dict:
     """等一次部署真正结束。
 
     CLI 与脚本都在自己的事件循环里调用 deploy_app；`asyncio.run` 退出时会取消
-    尚未跑完的后台任务，部署停在 status='running'，而 _ensure_no_deployment
-    会让这个应用此后无法删除/回滚/改配置，直到面板重启才被 main.py 的自愈逻辑纠正。
+    尚未跑完的后台任务。等待时间必须覆盖 _run_deployment 的最坏路径（见
+    DEPLOY_BUDGET_SEC 的说明），否则调用方先放弃，任务被取消，记录停在 running，
+    而 _ensure_no_deployment 会让这个应用此后无法删除/回滚/改配置。
+    超时不再抛错后无人收摊：CancelledError 会让记录落到 failed，
+    进程被 kill 的残留则由 reap_orphan_deployments 回收。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -680,7 +723,57 @@ async def wait_deployment(dep_id: int, app_id: int, timeout: int = 1800) -> dict
         if row and row["status"] != "running":
             return row
         await asyncio.sleep(1)
-    raise RuntimeError(f"部署 #{dep_id} 超过 {timeout}s 仍未结束（应用 #{app_id}）")
+    raise RuntimeError(
+        f"部署 #{dep_id} 超过 {timeout}s 仍未结束（应用 #{app_id}）。"
+        f"若面板进程仍在运行，可用 app logs --id {app_id} 继续观察；"
+        "面板会把它回收为失败，届时即可重新部署或删除。"
+    )
+
+
+def reap_orphan_deployments() -> list[int]:
+    """把没有后台任务在跑、却又停在 running 的部署记录判为失败。
+
+    两种成因：面板被 kill/OOM/升级重启（进程没了，任务也没了），
+    以及旧版 CLI 提前退出把任务取消。main.py 只在进程启动时清一次，
+    所以"启动后不久被 kill、之后一直没重启"的实例里，这个应用会永久无法
+    删除/回滚/改配置——_ensure_no_deployment 拦住所有动作，用户只能等下一次重启。
+    判定条件用 started_at 超过 DEPLOY_BUDGET_SEC，且 id 不在本进程的
+    _RUNNING_DEPS 里：前者排除还在正常跑的慢部署，后者排除本进程正在跑的任务，
+    两者都满足才认为它已经是孤儿。
+    """
+    rows = dbm.query(
+        "SELECT id,app_id FROM deployments WHERE status='running'"
+        " AND started_at < datetime('now', ?)",
+        (f"-{DEPLOY_BUDGET_SEC} seconds",),
+    )
+    reaped: list[int] = []
+    for row in rows:
+        if row["id"] in _RUNNING_DEPS:
+            continue
+        _append_log(row["id"], "!!! 部署已中止：超过最坏耗时上限且面板内没有对应任务，回收为失败")
+        dbm.execute(
+            "UPDATE deployments SET status='failed', finished_at=datetime('now') WHERE id=? AND status='running'",
+            (row["id"],),
+        )
+        reaped.append(row["id"])
+    return reaped
+
+
+async def cancel_inflight_deployments() -> None:
+    """进程退出前取消在跑的部署任务，让记录当场落到 failed。
+
+    reap_orphan_deployments 的判定要求 started_at 已超过 DEPLOY_BUDGET_SEC，
+    所以「部署中被 systemctl restart」这一类只靠回收器要再等 45 分钟才解锁
+    删除/回滚/改配置。这里在 lifespan shutdown 阶段主动取消：CancelledError
+    分支会写日志并把状态收尾，gather 保证这条 UPDATE 在事件循环关闭前跑完。
+    """
+    tasks = [t for t in _DEPLOY_TASKS if not t.done()]
+    if not tasks:
+        return
+    for t in tasks:
+        t.cancel()
+    with suppress(Exception):
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _current_sha(path: str) -> str | None:
@@ -843,20 +936,24 @@ async def _run_deployment(app: dict, dep_id: int):
         if app["repo_url"]:
             if os.path.exists(f"{app['path']}/.git"):
                 _append_log(dep_id, f"==> git fetch/checkout {app['branch']}")
-                r = await run("git", ["fetch", "origin", app["branch"]], cwd=app["path"], timeout=300)
+                r = await run("git", ["fetch", "origin", app["branch"]], cwd=app["path"], timeout=GIT_FETCH_T)
                 if r["code"] != 0:
                     raise RuntimeError(r["out"])
-                r = await run("git", ["checkout", app["branch"]], cwd=app["path"])
+                r = await run("git", ["checkout", app["branch"]], cwd=app["path"], timeout=GIT_CHECKOUT_T)
                 if r["code"] != 0:
                     raise RuntimeError(r["out"])
-                r = await run("git", ["reset", "--hard", f"origin/{app['branch']}"], cwd=app["path"])
+                r = await run(
+                    "git", ["reset", "--hard", f"origin/{app['branch']}"], cwd=app["path"], timeout=GIT_RESET_T
+                )
                 if r["code"] != 0:
                     raise RuntimeError(r["out"])
                 _append_log(dep_id, r["out"])
             else:
                 _append_log(dep_id, f"==> git clone -b {app['branch']} {app['repo_url']} -> {app['path']}")
                 r = await run(
-                    "git", ["clone", "--depth", "1", "-b", app["branch"], app["repo_url"], app["path"]], timeout=600
+                    "git",
+                    ["clone", "--depth", "1", "-b", app["branch"], app["repo_url"], app["path"]],
+                    timeout=GIT_CLONE_T,
                 )
                 if r["code"] != 0:
                     raise RuntimeError(r["out"])
@@ -873,7 +970,7 @@ async def _run_deployment(app: dict, dep_id: int):
             else "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
         )
         install = app["install_cmd"] or default_install
-        ir = await run("/bin/bash", ["-lc", install], cwd=app["path"], timeout=1800)
+        ir = await run("/bin/bash", ["-lc", install], cwd=app["path"], timeout=INSTALL_T)
         _append_log(dep_id, ir["out"] or "(no output)")
         if ir["code"] != 0:
             raise RuntimeError(f"安装依赖失败 (exit {ir['code']})")
@@ -899,6 +996,17 @@ async def _run_deployment(app: dict, dep_id: int):
             _append_log(dep_id, f"==> 当前 commit {sha}（可在部署记录中回滚到此版本）")
         _append_log(dep_id, "==> 部署完成")
         finish(True)
+    except asyncio.CancelledError:
+        # CancelledError 继承 BaseException，下面的 except Exception 抓不到它。
+        # 不接住时任务被取消（CLI 提前退出、面板优雅关闭）就什么都不写，
+        # 记录永远停在 running，而 _ensure_no_deployment 会拦住这个应用的
+        # 删除/回滚/改配置——只能等面板重启才自愈。
+        # 这里尽力落终态；进程正在退出、写不动时也照样把取消传播出去，
+        # 剩下的交给 reap_orphan_deployments 和启动自愈收摊。
+        with suppress(Exception):
+            _append_log(dep_id, "!!! 部署任务被取消（调用方退出或面板关闭）")
+            finish(False)
+        raise
     except Exception as e:  # noqa: BLE001
         _append_log(dep_id, f"!!! 部署失败: {e}")
         # 实测：git fetch/reset 之后安装依赖失败（exit 7）时，

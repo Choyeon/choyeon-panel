@@ -279,6 +279,34 @@ def _safe_conf_path(p: str) -> str:
     return real
 
 
+def app_conf_paths(port, domain) -> set:
+    """该应用自己的 nginx 配置文件集合（realpath，便于与 _safe_conf_path 的结果比对）。"""
+    out = set()
+    for c in find_app_configs(port, domain):
+        with suppress(OSError):
+            out.add(os.path.realpath(c["file"]))
+    return out
+
+
+def assert_app_conf(path: str, port, domain) -> None:
+    """应用详情页的编辑器只能改这个应用自己的 nginx 配置。
+
+    _safe_conf_path 只保证"落在 conf.d / sites-available 里面"，而这两个接口的
+    file 参数直接来自请求体：从应用 #1 的页面可以把 #2 的 vhost，甚至把面板自己的
+    choyeon-panel.conf（面板的对外反代 + TLS）当成"我的配置"整份改掉，
+    nginx -t 通过就立刻 reload——写坏面板那一份，全站再也进不来。
+    前端本来就只把 GET 返回的 configs 列表里的文件交给保存接口，所以这里按
+    同一份匹配结果（域名或反代端口）收口，不改变正常使用。
+    """
+    real = _safe_conf_path(path)
+    allowed = app_conf_paths(port, domain)
+    if real not in allowed:
+        raise RuntimeError(
+            "只能编辑该应用自己的 nginx 配置（按域名/反代端口匹配到的文件）。"
+            "若刚改过域名或端口，请回到本页重新加载配置列表后再编辑。"
+        )
+
+
 async def save_app_config(path: str, content: str) -> dict:
     real = _safe_conf_path(path)
     if not content.strip():

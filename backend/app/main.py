@@ -18,7 +18,7 @@ from .log import warn
 from .routers import (
     alerts, apps, backups, cron, dbops, extras, files, meta, metrics, sites, system, terminal,
 )
-from .services import alerts_service, metrics_store
+from .services import alerts_service, apps_service, metrics_store
 
 START = time.time()
 
@@ -46,6 +46,10 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        # 在跑的部署任务必须在这里收尾：不取消的话记录会停在 running，
+        # 而回收器要求超过最坏耗时上限才动手，这期间该应用删不掉也回滚不了。
+        with suppress(Exception):
+            await apps_service.cancel_inflight_deployments()
         sampler.cancel()
         with suppress(asyncio.CancelledError, Exception):
             await sampler
@@ -333,8 +337,10 @@ async def _housekeeping():
         await asyncio.sleep(600)
         try:
             security.cleanup_attempts()
-            # 必须在别的工作线程里跑：直接在循环上 prune，审计/指标表一大就会把整站
-            # 冻住几十秒（metrics_store.loop 里的同类清理早已走 to_thread）。
+            # 先回收孤儿部署，再 prune：两者都是同步 sqlite 调用，必须在别的工作线程里跑
+            # （直接在循环上 prune，审计/指标表一大就会把整站冻住几十秒；
+            # metrics_store.loop 里的同类清理早已走 to_thread）。
+            await asyncio.to_thread(apps_service.reap_orphan_deployments)
             await asyncio.to_thread(_prune_all)
         except Exception as e:  # noqa: BLE001
             warn("housekeeping failed:", e)
@@ -428,6 +434,12 @@ def run():
         proxy_headers=config.TRUST_PROXY,
         forwarded_allow_ips="*" if config.TRUST_PROXY else None,
         log_level="info" if config.LOG else "warning",
+        # uvicorn 的访问日志打印的是原始 request target，包含整串查询参数：
+        # 已在本机实测 `INFO: 127.0.0.1:x - "GET /x?token=SECRET123 HTTP/1.1" 200 OK`
+        # 原样进入 stdout。面板的下载/EventSource/WebSocket 走 ?token= 鉴权，
+        # 于是 CP_LOG=1 时长期凭证会被写进 journald（同机可读、按保留策略留存）。
+        # 面板自己在 AuthMiddleware 里记了一条只含 path 的访问日志，关掉这份不会失去可观测性。
+        access_log=False,
         server_header=False,
         date_header=False,
     )

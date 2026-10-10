@@ -77,7 +77,9 @@ const filtered = computed(() => {
 
 const tabs = computed(() => [
   { key: 'services', label: '系统服务' },
-  { key: 'logs', label: '单元日志', badge: !!logUnit.value },
+  // 单元日志走 /api/system/services/{unit}/logs，服务端要求 admin（journal 是全机内容）。
+  // 不给只读账号留这个页签，否则他点进来的是一片 403。
+  ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
 ]);
 
 // 选项从实际返回的 active 值里取，systemd 状态枚举（如 reloading）出现也不至于漏
@@ -124,6 +126,7 @@ function askConfirm(unit: string, verb: 'stop' | 'restart') {
 }
 
 function openLog(unit: string) {
+  if (!isAdmin) return;
   logUnit.value = unit;
   tab.value = 'logs';
 }
@@ -132,8 +135,9 @@ function rowButtons(r: any): RowAction[] {
   const running = r.active === 'active';
   const dis = unitBusy(r.unit);
   const masked = isMasked(r);
-  const list: RowAction[] = [{ label: '查看', run: () => openLog(r.unit) }];
-  // 服务端对全部 MUTATION 拦 403，只读账号只留「查看」，不把必然失败的按钮摆出来
+  const list: RowAction[] = isAdmin ? [{ label: '查看', run: () => openLog(r.unit) }] : [];
+  // 服务端对全部 MUTATION 拦 403，只读账号既没有「查看」（日志要 admin）也没有按钮，
+  // 不把必然失败的入口摆出来
   if (!isAdmin) return list;
   // 屏蔽中的 unit 连 start 都会被 systemd 拒绝，按钮不摆（比摆了报错更诚实）
   if (!masked) {
@@ -161,7 +165,11 @@ const columns: any[] = [
           h(NIcon, { component: icons.ServerOutline, size: 17, color: r.active === 'active' ? 'var(--cp-ok)' : r.active === 'failed' ? 'var(--cp-err)' : 'var(--cp-text-mute)' }),
         ]),
         h('div', { class: 'cell-txt' }, [
-          h(NButton, { text: true, type: 'primary', class: 'cell-name', title: r.unit, onClick: () => openLog(r.unit) }, () => r.unit),
+          // 服务名的点击行为就是"看它的实时日志"，只读账号拿不到日志，
+          // 所以这里渲染成普通文本，不给一个点了只会 403 的链接样式
+          isAdmin
+            ? h(NButton, { text: true, type: 'primary', class: 'cell-name', title: r.unit, onClick: () => openLog(r.unit) }, () => r.unit)
+            : h('span', { class: 'cell-name', title: r.unit }, r.unit),
           h('div', { class: 'cell-sub', title: r.desc || '—' }, r.desc || '—'),
         ]),
       ]),
@@ -222,7 +230,7 @@ const paging = { pageSize: 50, showSizePicker: false, showQuickJumper: false };
       </template>
 
       <NAlert type="info" :bordered="false" style="margin-bottom: var(--space-3)">
-        systemd 服务 {{ services.length }} 个 · {{ activeCount }} 个运行中<template v-if="failedCount"> · {{ failedCount }} 个异常</template>，点击服务名可看实时日志
+        systemd 服务 {{ services.length }} 个 · {{ activeCount }} 个运行中<template v-if="failedCount"> · {{ failedCount }} 个异常</template><template v-if="isAdmin">，点击服务名可看实时日志</template>
       </NAlert>
 
       <NDataTable

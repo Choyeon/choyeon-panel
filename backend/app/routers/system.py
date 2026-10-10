@@ -147,6 +147,10 @@ def log_stream_response(unit: str, lines: int) -> StreamingResponse:
 
 @router.get("/api/system/services/{unit}/logs")
 async def service_logs(unit: str, request: Request):
+    # 与 /api/system/logs 同一口径：journal 里能读出别的服务的环境变量、请求 URL
+    # 乃至口令，"viewer 只读"不等于"能读全机日志"，所以这里显式要求 admin。
+    if r := need_admin(request):
+        return r
     if not is_unit(unit):
         return JSONResponse(status_code=400, content={"error": "unit 名不合法"})
     lines = parse_lines(request.query_params.get("lines"))

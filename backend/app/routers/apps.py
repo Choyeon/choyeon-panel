@@ -201,21 +201,36 @@ async def app_ssl(app_id: int, req: Request):
         return err_json(e)
 
 
+async def _nginx_scope(a: dict) -> tuple:
+    """这个应用当前的 (反代端口, 域名)——GET 列配置与 PUT 保存必须用同一个口径。
+
+    端口没填时用运行中的实际监听端口，与列表页/域名检测保持一致；
+    两处算法不一致会出现"页面上列出来的文件保存时被拒"。
+    """
+    unit = apps_service.unit_name(a)
+    running = await systemd_ops.is_active(unit)
+    port = a["port"] if a["port"] is not None else (await apps_service.detect_port(unit) if running else None)
+    return port, a["domain"]
+
+
 @router.get("/api/apps/{app_id}/nginx")
 async def app_nginx(app_id: int):
     a = apps_service.get_app(app_id)
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
-    unit = apps_service.unit_name(a)
-    running = await systemd_ops.is_active(unit)
-    port = a["port"] if a["port"] is not None else (await apps_service.detect_port(unit) if running else None)
-    return {"domain": a["domain"], "port": port, "configs": nginx_ops.find_app_configs(port, a["domain"])}
+    port, domain = await _nginx_scope(a)
+    return {"domain": a["domain"], "port": port, "configs": nginx_ops.find_app_configs(port, domain)}
 
 
 @router.put("/api/apps/{app_id}/nginx")
 async def app_nginx_save(app_id: int, req: Request):
+    a = apps_service.get_app(app_id)
+    if not a:
+        return JSONResponse(status_code=404, content={"error": "应用不存在"})
     body = await _body(req)
     try:
+        # file 来自请求体，先收进"这个应用自己的配置"，见 nginx_ops.assert_app_conf
+        nginx_ops.assert_app_conf(body.get("file", ""), *await _nginx_scope(a))
         r = await nginx_ops.save_app_config(body.get("file", ""), body.get("content", ""))
         await aio_db.audit(req.state.cp_sub, "app:nginx-save", body.get("file"))
         return r
@@ -225,6 +240,9 @@ async def app_nginx_save(app_id: int, req: Request):
 
 @router.post("/api/apps/{app_id}/nginx/quick")
 async def app_nginx_quick(app_id: int, req: Request):
+    a = apps_service.get_app(app_id)
+    if not a:
+        return JSONResponse(status_code=404, content={"error": "应用不存在"})
     body = await _body(req)
     kind = body.get("kind") or ""
     file = body.get("file") or ""
@@ -235,6 +253,7 @@ async def app_nginx_quick(app_id: int, req: Request):
     if kind not in ("ws", "body", "redirect"):
         return JSONResponse(status_code=400, content={"error": "未知的快捷操作类型"})
     try:
+        nginx_ops.assert_app_conf(file, *await _nginx_scope(a))
         r = await nginx_ops.quick_edit_config(file, kind, body.get("value"))
         await aio_db.audit(req.state.cp_sub, f"app:nginx-{kind}", file)
         return r
@@ -270,6 +289,9 @@ async def app_proc(app_id: int):
 
 @router.get("/api/apps/{app_id}/logs")
 async def app_logs(app_id: int, request: Request):
+    # 与 /api/system/logs、/api/system/services/{unit}/logs 不同，这里不要求 admin：
+    # unit 取自应用记录本身（不是用户传入的名字），读到的只是这一个应用自己打印的东西，
+    # 而 viewer 本来就能看到这个应用的状态与部署记录。
     a = apps_service.get_app(app_id)
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})

@@ -713,10 +713,22 @@ class TestAuditFieldsTruncated(unittest.TestCase):
 class TestNginxQuickKindWhitelisted(unittest.IsolatedAsyncioTestCase):
     """回归：kind 是拼进审计动作名的请求体字段，且未知值会被当成"强制 HTTPS 跳转"执行。"""
 
+    @staticmethod
+    def _app():
+        # 路由现在先取应用记录（保存范围要按这个应用的端口/域名收口），
+        # 这里只关心 kind/file 的校验，给一个假记录即可。
+        from app.routers import apps as apps_router
+
+        return mock.patch.object(
+            apps_router.apps_service,
+            "get_app",
+            lambda _id: {"id": 1, "name": "a", "unit_override": None, "port": 8000, "domain": "x.example.com"},
+        )
+
     async def test_unknown_kind_rejected_before_touching_nginx(self):
         from app.routers import apps as apps_router
 
-        with mock.patch.object(nginx_ops, "quick_edit_config") as edit:
+        with self._app(), mock.patch.object(nginx_ops, "quick_edit_config") as edit:
             resp = await apps_router.app_nginx_quick(1, _req(body={"file": "/etc/nginx/conf.d/a", "kind": "rm-all"}))
         self.assertEqual(resp.status_code, 400)
         edit.assert_not_called()
@@ -729,7 +741,7 @@ class TestNginxQuickKindWhitelisted(unittest.IsolatedAsyncioTestCase):
     async def test_missing_file_rejected(self):
         from app.routers import apps as apps_router
 
-        with mock.patch.object(nginx_ops, "quick_edit_config") as edit:
+        with self._app(), mock.patch.object(nginx_ops, "quick_edit_config") as edit:
             resp = await apps_router.app_nginx_quick(1, _req(body={"kind": "ws"}))
         self.assertEqual(resp.status_code, 400)
         edit.assert_not_called()

@@ -62,8 +62,7 @@ const onMq = (e: MediaQueryListEvent) => { isMobile.value = e.matches; };
 
 const navTabs = computed(() => {
   const t = [{ key: '/settings', label: '系统设置' }];
-  if (isAdmin.value) t.push({ key: '/users', label: '用户管理' }, { key: '/audit', label: '操作审计' });
-  t.push({ key: '/logs', label: '面板日志' });
+  if (isAdmin.value) t.push({ key: '/users', label: '用户管理' }, { key: '/audit', label: '操作审计' }, { key: '/logs', label: '面板日志' });
   return t;
 });
 

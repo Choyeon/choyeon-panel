@@ -1018,7 +1018,7 @@ class TestDeploymentLiveness(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "success", row["log"][-500:])
         self.assertEqual([a[0] for _c, a in self.calls if a[0] in ("reset-failed", "restart")],
                          ["reset-failed", "restart"], "必须先 reset-failed 再 restart")
-        self.assertIn(("systemctl", ["reset-failed", unit]), self.calls)
+        self.assertIn(("systemctl", ["reset-failed", "--", unit]), self.calls)
 
     async def test_running_service_is_not_reset_failed(self):
         """本来就在跑的服务不需要清计数：不该为每次重启多跑一条 systemctl。"""
