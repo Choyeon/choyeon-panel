@@ -600,6 +600,61 @@ class TestRedisPasswordCanBeCleared(unittest.IsolatedAsyncioTestCase):
             pg_service.set_redis_password("has space")
 
 
+class TestRedisPasswordCache(unittest.TestCase):
+    """回归：redis_password() 曾站在每条 Redis 命令的热路径上，每次都做一遍
+    「带全局锁的 SELECT + 读整份 /etc/redis/redis.conf」。改成带 TTL 的进程内缓存后，
+    要锁死两件事：热路径不重复读盘，而改口令必须立刻生效（不能等缓存过期）。
+    """
+
+    def setUp(self):
+        from app.services import pg_service
+
+        self.pg = pg_service
+        pg_service.forget_redis_password()
+        self.addCleanup(pg_service.forget_redis_password)
+        self.addCleanup(dbm.set_setting, "redis_password", "")
+
+    def _counting(self, value):
+        hits = []
+
+        def fake():
+            hits.append(1)
+            return value
+
+        return hits, fake
+
+    def test_hot_path_reads_once(self):
+        hits, fake = self._counting("pw")
+        with mock.patch.object(self.pg, "_read_redis_password", fake):
+            for _ in range(20):
+                self.assertEqual(self.pg.redis_password(), "pw")
+        self.assertEqual(len(hits), 1, "20 条命令不该读 20 次盘")
+
+    def test_unset_password_is_also_cached(self):
+        # 没配口令才是最常见状态：若把 None 当"没查过"，每条命令还是会落到盘上。
+        hits, fake = self._counting(None)
+        with mock.patch.object(self.pg, "_read_redis_password", fake):
+            for _ in range(5):
+                self.assertIsNone(self.pg.redis_password())
+        self.assertEqual(len(hits), 1)
+
+    def test_expired_cache_rereads(self):
+        hits, fake = self._counting("pw")
+        with mock.patch.object(self.pg, "_read_redis_password", fake):
+            self.pg.redis_password()
+            # 运维手工改了 redis.conf 时没有任何进程内事件可依，只能靠 TTL 到点重读。
+            self.pg._redis_pw_cache = (
+                self.pg.time.monotonic() - self.pg._REDIS_PW_TTL - 1, "pw")
+            self.pg.redis_password()
+        self.assertEqual(len(hits), 2)
+
+    def test_set_invalidates_immediately(self):
+        dbm.set_setting("redis_password", "old-pw")
+        self.assertEqual(self.pg.redis_password(), "old-pw")
+        self.pg.set_redis_password("new-pw")
+        self.assertEqual(self.pg.redis_password(), "new-pw", "改完口令必须立刻生效")
+
+
 class TestTerminalSessionAccounting(unittest.IsolatedAsyncioTestCase):
     """回归：accept() 抛异常时额度不归还，终端会被永久占满。"""
 

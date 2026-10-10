@@ -160,13 +160,6 @@ MAX_ITEM_CHARS = 1500
 _ABS_TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}(:\d{2})?$")
 _REL_TIME_RE = re.compile(r"^(\d{1,6})(min|h|d)$")
 _REL_SEC = {"min": 60, "h": 3600, "d": 86400}
-# util.UNIT_RE 允许首字符是 '-' 或 '.'，但这类值塞进 `journalctl -u <值>` 会被当成
-# 另一个选项而不是单元名，systemd 本身也不接受这样的名字，所以在检索接口里再收紧一次。
-_UNIT_STRICT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@:._-]{0,63}$")
-
-
-def _unit_ok(name: str) -> bool:
-    return bool(is_unit(name) and _UNIT_STRICT_RE.match(name))
 
 
 def _resolve_time(raw: str | None, label: str) -> tuple[str | None, str | None]:
@@ -233,7 +226,7 @@ async def logs_search(request: Request):
         return r
     qp = request.query_params
     unit = (qp.get("unit") or "").strip()
-    if unit and not _unit_ok(unit):
+    if unit and not is_unit(unit):
         return _bad("unit 名不合法：只能使用字母、数字、@ : . _ -，且必须以字母或数字开头")
     since, err = _resolve_time(qp.get("since"), "since")
     if err:

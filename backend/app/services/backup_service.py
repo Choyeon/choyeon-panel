@@ -10,6 +10,8 @@ import tarfile
 from contextlib import suppress
 from pathlib import Path
 
+from starlette.concurrency import run_in_threadpool
+
 from .. import backup_runner
 from .. import config
 from .. import database as dbm
@@ -455,6 +457,19 @@ async def _sh_script(script: str, timeout: int = 1800) -> dict:
     return await run("/bin/bash", ["-o", "pipefail", "-c", script], timeout=timeout)
 
 
+def _gunzip_to(src_file: str, dest: str) -> None:
+    with gzip.open(src_file, "rb") as g, open(dest, "wb") as f:
+        shutil.copyfileobj(g, f, 1024 * 1024)
+
+
+def _quick_check(path: str) -> str:
+    con = sqlite3.connect(path)
+    try:
+        return con.execute("PRAGMA quick_check").fetchone()[0]
+    finally:
+        con.close()
+
+
 async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
     from . import apps_service, systemd_ops
 
@@ -480,19 +495,16 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
         log.append(f"!! 备份文件名未记录源库名，按目录内最大库定位：{dst}")
 
     pre = f"{dst}.pre-restore-{ts}.sqlite.gz"
-    backup_runner.sqlite_snapshot(dst, pre)
+    # 下面三步都是百 MB 级的同步读改写（在线备份 + gzip、解压、全库 quick_check），
+    # 直接在事件循环里跑会让整个面板在恢复期间停响应，所以全部丢给工作线程。
+    await run_in_threadpool(backup_runner.sqlite_snapshot, dst, pre)
     log.append(f"==> 已留存当前库：{os.path.basename(pre)}")
 
     tmp = f"{src_file}.restoring-{ts}"
-    with gzip.open(src_file, "rb") as g, open(tmp, "wb") as f:
-        shutil.copyfileobj(g, f, 1024 * 1024)
+    await run_in_threadpool(_gunzip_to, src_file, tmp)
     mode = os.stat(dst).st_mode & 0o777
     try:
-        con = sqlite3.connect(tmp)
-        try:
-            ok = con.execute("PRAGMA quick_check").fetchone()[0]
-        finally:
-            con.close()
+        ok = await run_in_threadpool(_quick_check, tmp)
     except sqlite3.Error as e:
         os.unlink(tmp)
         raise RuntimeError(f"快照文件无法打开，未做任何改动：{e}")
@@ -529,6 +541,24 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
             log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
 
 
+def _tar_checked(tf: tarfile.TarFile) -> list:
+    """整份归档索引 → 可解包的成员列表，不安全的一律拒绝。
+
+    链接型条目会把写入引到目录之外（备份里一个 node_modules 软链就能覆盖系统文件），
+    所以只放行普通文件与目录。
+    """
+    members = []
+    for m in tf.getmembers():
+        name = m.name.replace("\\", "/")
+        parts = [p for p in name.split("/") if p]
+        if name.startswith("/") or ".." in parts or not parts:
+            raise RuntimeError(f"归档含不安全路径：{m.name}")
+        if not (m.isfile() or m.isdir()):
+            raise RuntimeError(f"归档含不支持的条目类型：{m.name}")
+        members.append(m)
+    return members
+
+
 async def _restore_app(bk: dict, src_file: str, log: list) -> None:
     from . import apps_service, systemd_ops
 
@@ -549,24 +579,21 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
         env_keep = f"{env}.pre-restore-{ts}"
         shutil.copy2(env, env_keep)
 
-    with tarfile.open(src_file, "r:gz") as tf:
-        members = []
-        for m in tf.getmembers():
-            name = m.name.replace("\\", "/")
-            parts = [p for p in name.split("/") if p]
-            if name.startswith("/") or ".." in parts or not parts:
-                raise RuntimeError(f"归档含不安全路径：{m.name}")
-            if not (m.isfile() or m.isdir()):
-                # 链接型条目会把写入引到目录之外（备份里一个 node_modules 软链就能覆盖系统文件）
-                raise RuntimeError(f"归档含不支持的条目类型：{m.name}")
-            members.append(m)
+    # 读索引和解包都是整份归档量级的同步读写（一个 node_modules 就是几百 MB），
+    # 在循环上跑会让整个面板在恢复期间停响应。三步共用同一个 TarFile 句柄：
+    # 成员条目的数据偏移量是按它自己的文件对象算的，换个实例再解包就会读错位置。
+    tf = await run_in_threadpool(tarfile.open, src_file, "r:gz")
+    try:
+        members = await run_in_threadpool(_tar_checked, tf)
         stopped = False
         try:
             if await systemd_ops.is_active(unit):
                 await systemd_ops.service_action(unit, "stop")
                 stopped = True
                 log.append(f"==> 已停止 {unit}")
-            tf.extractall(path=dest, members=members)
+            else:
+                log.append(f"==> {unit} 未在运行，跳过停止")
+            await run_in_threadpool(tf.extractall, dest, members)
             log.append(f"==> 已解包 {len(members)} 个条目到 {dest}")
             if env_keep:
                 shutil.copy2(env_keep, env)
@@ -578,6 +605,8 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
                     log.append(f"==> 已启动 {unit}")
                 except Exception as e:  # noqa: BLE001
                     log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
+    finally:
+        tf.close()
 
 
 async def _restore_pg(bk: dict, src_file: str, log: list) -> None:

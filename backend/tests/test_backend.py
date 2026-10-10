@@ -54,6 +54,20 @@ class TestValidators(unittest.TestCase):
         self.assertTrue(is_git_url("/srv/local-repo"))
         self.assertFalse(is_git_url("ssh://bad with space"))
 
+    def test_unit_cannot_start_with_dash(self):
+        """unit 名以 argv 进 systemctl / journalctl，而面板以 root 运行。
+
+        这两个工具把以 - 开头的参数当**选项**解析，所以 `-x`、`--all`、`--force`
+        都能借 unit 名混进命令行；systemd 本身也不接受这样的单元名。
+        """
+        for bad in ("-x", "--all", "--force", ".hidden", "_pad", ":file", "@srv"):
+            self.assertFalse(is_unit(bad), f"{bad} 会被当成 systemctl 的选项")
+        self.assertTrue(is_unit("a"))
+        self.assertTrue(is_unit("redis@6379.service"))
+        # 收紧只动首字符，长度口径与原来一致（基础名 64，可再带 .service）
+        self.assertTrue(is_unit("a" * 64))
+        self.assertFalse(is_unit("a" * 65))
+
 
 class TestShEscape(unittest.TestCase):
     def test_quotes(self):

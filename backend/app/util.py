@@ -6,19 +6,20 @@ from contextlib import suppress
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}$")
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
-UNIT_RE = re.compile(r"^[A-Za-z0-9@:._-]{1,64}(\.service)?$")
+# unit 名会以 argv 塞进 systemctl / journalctl，而面板以 root 运行 —— 这两个工具把以
+# '-' 开头的参数当**选项**解析（`-x`、`--all`、`--force` 都能混进命令行），systemd 本身
+# 也不接受这样的单元名。所以首字符必须是字母或数字，收紧在唯一的正则里，而不是每个调用点各补一层。
+UNIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@:._-]{0,63}(\.service)?$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
 GIT_URL_RE = re.compile(r"^(https?://\S+|git@[\w.-]+:\S+)$")
 IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{2,200}$")
-UNIT_NAME_FILE_RE = re.compile(r"^[A-Za-z0-9@:._-]{1,64}\.service$")
 CRED_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/@:\s]*)(:[^@/\s]*)?@")
 
 
 def is_name(s): return bool(NAME_RE.match(s or ""))
 def is_domain(s): return bool(DOMAIN_RE.match(s or ""))
 def is_unit(s): return bool(UNIT_RE.match(s or ""))
-def is_unit_file(s): return bool(UNIT_NAME_FILE_RE.match(s or ""))
 def is_port(p): return isinstance(p, int) and 1024 <= p <= 65535
 def is_branch(s): return bool(BRANCH_RE.match(s or ""))
 def is_ident(s): return bool(IDENT_RE.match(s or ""))

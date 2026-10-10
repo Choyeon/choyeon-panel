@@ -194,7 +194,18 @@ async def query_sql(sql: str) -> str:
     return await psql(sql)
 
 
-def redis_password():
+# redis_password() 在每条 Redis 命令的热路径上（key 浏览器翻一页就发好几条），旧实现
+# 每次都做一遍「全局锁 SELECT + 读整份 /etc/redis/redis.conf」。改成带 TTL 的进程内缓存：
+# 面板里的写入只有 set_redis_password 一处，它精确失效缓存；配置文件是运维手工改的，
+# 没人通知进程，所以靠 TTL 兜陈旧，而不是永久缓存。
+_REDIS_PW_TTL = 60.0
+# 哨兵区分「没查过」和「查过、确实没配口令」：后者也是一次有效读取，不缓存就每条
+# 命令都回到盘上，而"没设口令"恰恰是最常见的状态。
+_PW_UNSET = object()
+_redis_pw_cache: tuple[float, object] = (0.0, _PW_UNSET)
+
+
+def _read_redis_password():
     p = dbm.get_setting("redis_password")
     if p:
         return p
@@ -207,6 +218,21 @@ def redis_password():
         except OSError:
             pass
     return None
+
+
+def redis_password():
+    global _redis_pw_cache
+    ts, cached = _redis_pw_cache
+    if cached is not _PW_UNSET and time.monotonic() - ts < _REDIS_PW_TTL:
+        return cached
+    p = _read_redis_password()
+    _redis_pw_cache = (time.monotonic(), p)
+    return p
+
+
+def forget_redis_password() -> None:
+    global _redis_pw_cache
+    _redis_pw_cache = (0.0, _PW_UNSET)
 
 
 async def redis_info() -> dict:
@@ -278,6 +304,8 @@ def set_redis_password(p: str):
     if p and not re.match(r"^\S{1,512}$", p):
         raise RuntimeError("Redis 口令不能包含空白字符，且不超过 512 位")
     dbm.set_setting("redis_password", p)
+    # 缓存不失效就是"保存成功但仍卡在 NOAUTH 60 秒"，正是下面注释里那条老 bug 的翻版。
+    forget_redis_password()
     return {"ok": True}
 
 

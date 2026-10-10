@@ -301,15 +301,22 @@ app.include_router(metrics.router)
 
 
 # ---------- background housekeeping ----------
+def _prune_all() -> None:
+    # 四个 prune 都是带子查询的 DELETE，走 database.py 那把全局 RLock 的同步 sqlite。
+    dbm.prune_audit()
+    dbm.prune_deployments()
+    dbm.prune_alerts()
+    dbm.prune_metrics()
+
+
 async def _housekeeping():
     while True:
         await asyncio.sleep(600)
         try:
             security.cleanup_attempts()
-            dbm.prune_audit()
-            dbm.prune_deployments()
-            dbm.prune_alerts()
-            dbm.prune_metrics()
+            # 必须在别的工作线程里跑：直接在循环上 prune，审计/指标表一大就会把整站
+            # 冻住几十秒（metrics_store.loop 里的同类清理早已走 to_thread）。
+            await asyncio.to_thread(_prune_all)
         except Exception as e:  # noqa: BLE001
             warn("housekeeping failed:", e)
 

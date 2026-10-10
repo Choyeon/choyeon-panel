@@ -13,10 +13,14 @@
 import asyncio
 import gzip
 import inspect
+import io
 import itertools
 import os
 import shutil
+import sqlite3
+import tarfile
 import tempfile
+import threading
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_bk_ut_"))
 
@@ -345,6 +349,157 @@ class TestHttpContract(unittest.TestCase):
         r = self.client.delete("/api/backups/999999", headers=self.headers)
         self.assertEqual(r.status_code, 400, r.text)
         self.assertIn("备份任务不存在", r.json()["error"])
+
+
+class TestRestoreOffEventLoop(unittest.TestCase):
+    """恢复路径的两处重 I/O（整库快照+解压+quick_check、tar 索引+解包）必须在工作线程里做。
+
+    移出事件循环不许改变既有语义：留档先于覆盖、路径校验先于停服务、失败不留半成品、
+    服务无论如何都被重新拉起、.panel.env 保持当前值。
+    """
+
+    def setUp(self):
+        from app.services import systemd_ops as SYS
+
+        self.dir = tempfile.mkdtemp(prefix="cp_rs_bk_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.app = tempfile.mkdtemp(prefix="cp_rs_app_")
+        self.addCleanup(shutil.rmtree, self.app, True)
+        name = _uid("rsapp")
+        self.aid = dbm.execute(
+            "INSERT INTO apps(name,type,repo_url,branch,path,start_cmd) VALUES(?,'node','','main',?,'node x')",
+            (name, self.app),
+        )
+        self.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (self.aid,))
+        self.bk = {"id": self.aid, "target": name}
+        self.calls = []
+        self.active = False
+        for attr, fn in (("is_active", self._is_active), ("service_action", self._service_action)):
+            p = mock.patch.object(SYS, attr, fn)
+            self.addCleanup(p.stop)
+            p.start()
+        self.main_ident = threading.get_ident()
+
+    async def _is_active(self, unit):
+        return self.active
+
+    async def _service_action(self, unit, verb):
+        self.calls.append(verb)
+        return ""
+
+    def _off_loop(self, obj, attr):
+        """把 obj.attr 换成同功能的替身，并记录它跑在哪个线程上。"""
+        real = getattr(obj, attr)
+        idents = []
+
+        def wrapper(*a, **kw):
+            idents.append(threading.get_ident())
+            return real(*a, **kw)
+
+        p = mock.patch.object(obj, attr, wrapper)
+        self.addCleanup(p.stop)
+        p.start()
+        return idents
+
+    def _sqlite_rows(self, path):
+        con = sqlite3.connect(path)
+        try:
+            return con.execute("SELECT v FROM t ORDER BY v").fetchall()
+        finally:
+            con.close()
+
+    def test_sqlite_restore_runs_off_loop_and_keeps_fallback(self):
+        # 当前库（要被覆盖的）与快照（要写回的）内容不同，才看得出谁赢了
+        cur = os.path.join(self.app, "app.db")
+        con = sqlite3.connect(cur)
+        con.executescript("CREATE TABLE t(v TEXT); INSERT INTO t VALUES('current');")
+        con.commit()
+        con.close()
+        snap_db = os.path.join(self.dir, "src.db")
+        con = sqlite3.connect(snap_db)
+        con.executescript("CREATE TABLE t(v TEXT); INSERT INTO t VALUES('from-snapshot');")
+        con.commit()
+        con.close()
+        src = os.path.join(self.dir, f"bk{self.aid}-2026-01-01-00-00-00-app.sqlite.gz")
+        R.sqlite_snapshot(snap_db, src)
+
+        idents = self._off_loop(R, "sqlite_snapshot")
+        log = []
+        asyncio.run(B._restore_sqlite(self.bk, src, log))
+
+        self.assertEqual(self._sqlite_rows(cur), [("from-snapshot",)])
+        self.assertNotIn(self.main_ident, idents, "整库快照不该跑在事件循环上")
+        # 覆盖前的那一版必须留存，且不留 .restoring- 半成品
+        self.assertTrue([f for f in os.listdir(self.app) if "pre-restore" in f], log)
+        self.assertEqual([f for f in os.listdir(self.dir) if ".restoring-" in f], [])
+        self.assertEqual(self.calls, ["start"], "未在运行时也要拉起，别把服务留在停止态")
+
+    def test_sqlite_restore_rejects_corrupt_snapshot_without_touching(self):
+        cur = os.path.join(self.app, "app.db")
+        con = sqlite3.connect(cur)
+        con.executescript("CREATE TABLE t(v TEXT); INSERT INTO t VALUES('current');")
+        con.commit()
+        con.close()
+        buf = io.BytesIO()
+        with gzip.open(buf, "wb") as g:
+            g.write(b"this is not a sqlite image")
+        src = os.path.join(self.dir, f"bk{self.aid}-2026-01-01-00-00-00-app.sqlite.gz")
+        with open(src, "wb") as f:
+            f.write(buf.getvalue())
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(B._restore_sqlite(self.bk, src, []))
+        self.assertEqual(self._sqlite_rows(cur), [("current",)], "检查没过就不该动过现库")
+        self.assertEqual([f for f in os.listdir(self.dir) if ".restoring-" in f], [])
+        self.assertEqual(self.calls, [], "校验没过时不该已经把服务停下来")
+
+    def _tar_gz(self, name, members):
+        """members: (归档内路径, 内容)，内容 None=目录、以 "LINK:" 开头=软链。"""
+        path = os.path.join(self.dir, name)
+        with tarfile.open(path, "w:gz") as tf:
+            for rel, content in members:
+                ti = tarfile.TarInfo(rel)
+                ti.mode = 0o644
+                if content is None:
+                    ti.type = tarfile.DIRTYPE
+                    ti.mode = 0o755
+                    tf.addfile(ti)
+                elif content.startswith("LINK:"):
+                    ti.type = tarfile.SYMTYPE
+                    ti.linkname = content[5:]
+                    tf.addfile(ti)
+                else:
+                    raw = content.encode()
+                    ti.size = len(raw)
+                    tf.addfile(ti, io.BytesIO(raw))
+        return path
+
+    def test_app_restore_extracts_off_loop_and_keeps_current_env(self):
+        self.active = True
+        with open(os.path.join(self.app, ".panel.env"), "w") as f:
+            f.write("PORT=3999\n")
+        src = self._tar_gz("app.tar.gz", [("sub", None), ("sub/a.txt", "from-archive"),
+                                          (".panel.env", "PORT=1111\n")])
+
+        idents = self._off_loop(B, "_tar_checked")
+        log = []
+        asyncio.run(B._restore_app(self.bk, src, log))
+
+        self.assertNotIn(self.main_ident, idents, "读整份归档索引不该跑在事件循环上")
+        with open(os.path.join(self.app, "sub", "a.txt")) as f:
+            self.assertEqual(f.read(), "from-archive")
+        with open(os.path.join(self.app, ".panel.env")) as f:
+            self.assertEqual(f.read(), "PORT=3999\n", "归档里的旧环境变量不许覆盖现值")
+        self.assertEqual(self.calls, ["stop", "start"])
+
+    def test_app_restore_refuses_link_entries_before_stopping(self):
+        self.active = True
+        src = self._tar_gz("bad.tar.gz", [("link", "LINK:/etc/passwd")])
+        with self.assertRaises(RuntimeError) as cm:
+            asyncio.run(B._restore_app(self.bk, src, []))
+        self.assertIn("不支持的条目类型", str(cm.exception))
+        self.assertEqual(self.calls, [], "校验不过时不该已经把服务停下来")
+        self.assertFalse(os.path.exists(os.path.join(self.app, "link")))
 
 
 if __name__ == "__main__":
