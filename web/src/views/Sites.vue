@@ -36,6 +36,7 @@ const loadingSites = ref(false);
 const loadingCerts = ref(false);
 const busy = ref<{ key: string; verb: string } | null>(null);
 const renewLog = ref('');
+const renewSummary = ref('');
 const showConfig = ref(false);
 const cfg = ref<any>(null);
 const cfgLoading = ref(false);
@@ -141,7 +142,11 @@ async function renew(c: any) {
   try {
     const r = await api.renew(c.name);
     renewLog.value = r.log || '（certbot 无输出）';
-    msg.success('续期已执行');
+    // 「续期已执行」不等于「续到了」：certbot 对未到期的证书同样正常退出，
+    // 结论取后端按到期日变化算出来的 summary。
+    renewSummary.value = r.summary || '';
+    if (r.reloaded === false && r.renewed?.length) msg.warning(`${r.summary}（nginx 重载失败，请手动 reload）`);
+    else msg.success(r.summary || 'certbot 已执行');
     loadCerts();
   } catch (e: any) {
     msg.error(e.message);
@@ -375,7 +380,7 @@ onMounted(refresh);
         </NDataTable>
 
         <div v-if="renewLog">
-          <NText depth="3" style="font-size: var(--fs-xs)">最近一次续期输出（已隐去本机路径）</NText>
+          <NText depth="3" style="font-size: var(--fs-xs)">{{ renewSummary || '最近一次续期输出' }}（输出已隐去本机路径）</NText>
           <div class="log-view" style="max-height: 240px; margin-top: var(--space-2)">{{ renewLog }}</div>
         </div>
       </NSpace>

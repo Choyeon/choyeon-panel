@@ -35,6 +35,10 @@ def _cmd_error(exc: Exception) -> str:
     raw = str(exc).strip() or exc.__class__.__name__
     detail = _mask(redact_creds(raw))[:400]
     low = raw.lower()
+    if "配置已删除" in raw:
+        # remove_vhost 已经把状态讲清楚了（文件删了、面板没重载）。这里不能再套
+        # "已回滚该文件"的模板：删除场景没有回滚可言，说反了用户会以为旧配置还在。
+        return detail
     if "reload" in low:
         return f"nginx 配置校验通过，但重载失败（服务可能未运行）：{detail}"
     if "test failed" in low or "emerg" in low:
@@ -245,9 +249,17 @@ async def ssl_renew(name: str, req: Request):
     if not cert_ops.valid_cert_name(name):
         return JSONResponse(status_code=400, content={"error": "证书名称不合法"})
     try:
-        log = await nginx_ops.renew_certs()
+        res = await nginx_ops.renew_certs()
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": _cmd_error(e)})
     # 审计写在执行之后：续期失败也先记一条"已续期"，事后无法区分成功与失败
     await aio_db.audit(req.state.cp_sub, "site:renew", name)
-    return {"ok": True, "log": _mask(redact_creds(log))[:4000]}
+    # summary/renewed 说明"这次到底续到了没有"：certbot 对没到期的证书同样返回 0，
+    # 只回一句"续期已执行"用户会以为证书换新了，实际上什么都没发生。
+    return {
+        "ok": True,
+        "log": _mask(redact_creds(res["log"]))[:4000],
+        "summary": res["summary"],
+        "renewed": res["renewed"],
+        "reloaded": res["reloaded"],
+    }

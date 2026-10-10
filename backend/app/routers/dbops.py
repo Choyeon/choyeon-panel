@@ -60,12 +60,21 @@ async def pg_manage(req: Request):
 
 @router.post("/api/db/pg/query")
 async def pg_query(req: Request):
+    """SQL 控制台。db 决定语句跑在哪个库，缺省 postgres。
+
+    没有这个参数时控制台只能摸到 psql 的默认库：用户在「PG 数据浏览」里选中业务库、
+    切到控制台敲同样的表名，得到的是 relation does not exist —— 面板没说它在别的库，
+    看着像浏览器的表列表错了。返回体回带 db，界面据此写明执行位置。
+    """
     body = await _body(req)
     sql = body.get("sql") or ""
+    db = str(body.get("db") or "postgres").strip()
+    if not pg_service.is_ident(db):
+        return JSONResponse(status_code=400, content={"error": "库名不合法"})
     try:
-        out = await pg_service.query_sql(sql)
-        await aio_db.audit(req.state.cp_sub, "db:sql", sql[:80])
-        return {"result": out}
+        out = await pg_service.query_sql(sql, db)
+        await aio_db.audit(req.state.cp_sub, "db:sql", f"{db}: {sql[:70]}")
+        return {"result": out, "db": db}
     except Exception as e:  # noqa: BLE001
         return err_json(e)
 

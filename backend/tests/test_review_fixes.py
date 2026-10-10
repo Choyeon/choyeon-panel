@@ -32,7 +32,7 @@ from app import config, templates  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.routers import apps as apps_router  # noqa: E402
 from app.routers import extras
-from app.services import apps_service, backup_service, files_service, nginx_ops, pg_service  # noqa: E402
+from app.services import apps_service, backup_service, cert_ops, files_service, nginx_ops, pg_service  # noqa: E402
 from app.util import redact_creds, sub_port  # noqa: E402
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -176,8 +176,36 @@ class TestCertbotRenewFailsLoudly(unittest.TestCase):
         async def fake_run(*_a, **_k):
             return {"code": 0, "out": "Certificate not yet due for renewal", "err": ""}
 
-        with mock.patch.object(nginx_ops, "run", fake_run):
-            self.assertIn("renewal", asyncio.run(nginx_ops.renew_certs()))
+        async def _certs():
+            return {"certs": [{"name": "demo.example.com", "expiry": "2026-11-01"}]}
+
+        with mock.patch.object(nginx_ops, "run", fake_run), mock.patch.object(cert_ops, "list_certs", _certs):
+            r = asyncio.run(nginx_ops.renew_certs())
+        self.assertIn("renewal", r["log"])
+        # 退出码 0 且到期日没变 = certbot 什么都没做。旧实现把它报成"已续期"，
+        # 用户以为证书换了，实际上原证书还在跑。
+        self.assertEqual(r["renewed"], [])
+        self.assertFalse(r["reloaded"])
+        self.assertIn("没有证书到期", r["summary"])
+
+    def test_real_renewal_is_detected_and_nginx_reloaded(self):
+        """到期日真的往后推了才算续到，并且必须 reload nginx（文件换了≠进程在用）。"""
+        seq = iter(["2026-10-20", "2027-01-19"])
+        calls: list[str] = []
+
+        async def fake_run(cmd, args, **_k):
+            calls.append(" ".join([cmd, *args]))
+            return {"code": 0, "out": "Certificate is due for renewal, updating", "err": ""}
+
+        async def _certs():
+            return {"certs": [{"name": "demo.example.com", "expiry": next(seq)}]}
+
+        with mock.patch.object(nginx_ops, "run", fake_run), mock.patch.object(cert_ops, "list_certs", _certs):
+            r = asyncio.run(nginx_ops.renew_certs())
+        self.assertEqual(r["renewed"], ["demo.example.com"])
+        self.assertTrue(r["reloaded"])
+        self.assertIn("systemctl reload nginx", calls)
+        self.assertIn("已续期 1 张", r["summary"])
 
     def test_route_returns_400_and_no_audit_on_failure(self):
         before = dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("certbot:renew",))["c"]
@@ -186,6 +214,16 @@ class TestCertbotRenewFailsLoudly(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         after = dbm.query_one("SELECT COUNT(*) c FROM audit WHERE action=?", ("certbot:renew",))["c"]
         self.assertEqual(after, before, "失败的续期不该留下一条已执行审计")
+
+    def test_route_audits_the_conclusion(self):
+        """审计里要能看到这次到底续没续上，只记"已执行"事后无从区分。"""
+        res = {"log": "x", "renewed": ["demo.example.com"], "unchanged": [],
+               "reloaded": True, "summary": "已续期 1 张：demo.example.com，nginx 已重载"}
+        with mock.patch.object(nginx_ops, "renew_certs", mock.AsyncMock(return_value=res)), \
+             mock.patch.object(extras.aio_db, "audit") as audit_stub:
+            r = asyncio.run(extras.certbot_renew(_req()))
+        self.assertEqual(r["renewed"], ["demo.example.com"])
+        self.assertEqual(audit_stub.call_args.args[2], res["summary"])
 
 
 class TestBodySizeAcceptsGigabyte(unittest.TestCase):

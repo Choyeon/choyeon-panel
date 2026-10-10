@@ -108,8 +108,10 @@ async def setup(req: Request):
     if security.rate_limited(ip):
         return JSONResponse(status_code=429, content={"error": "尝试过多，请稍后再试"})
     body = await _json_body(req)
-    existing = dbm.query_one("SELECT COUNT(*) c FROM users")
+    existing = dbm.query_one("SELECT COUNT(*) c FROM users WHERE role='admin'")
     if existing and existing["c"] > 0:
+        # 只数 admin：机器上只剩 viewer 时（删过管理员），按 COUNT(*) 判定会永远 403，
+        # 于是既进不去后台也建不出管理员，只能登服务器用 CLI 救。
         return JSONResponse(status_code=403, content={"error": "管理员已存在"})
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""

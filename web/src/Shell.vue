@@ -76,8 +76,10 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
 async function renewNow() {
   renewing.value = true;
   try {
-    await api.certbotRenew();
-    msg.success('certbot 续期检查完成');
+    const r = await api.certbotRenew();
+    // 后端按到期日的实际变化给出结论，这里照它说：写死「续期检查完成」会把
+    // 「一张都没到期」说成像是续好了。
+    msg.success(r.summary || 'certbot 已执行');
   } catch (e: any) {
     msg.error(e.message);
   } finally {

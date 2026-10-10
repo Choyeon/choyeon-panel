@@ -21,6 +21,9 @@ const dbs = ref<any[]>([]);
 const roles = ref<any[]>([]);
 const redis = ref<any>(null);
 const sql = ref('');
+// 控制台必须有明确的执行库：服务端曾经没有这个参数，语句一律跑在 psql 的默认库上，
+// 用户在浏览标签选了业务库、切到控制台查同一张表却报「表不存在」，界面一个字也没提库名。
+const sqlDb = ref('postgres');
 const sqlOut = ref('');
 const sqlBusy = ref(false);
 const showDb = ref(false);
@@ -137,7 +140,7 @@ async function runSql() {
   if (!sql.value.trim()) return;
   sqlBusy.value = true;
   try {
-    const r = await api.pgQuery(sql.value);
+    const r = await api.pgQuery(sql.value, sqlDb.value || 'postgres');
     sqlOut.value = r.result || '(无返回)';
   } catch (e: any) {
     sqlOut.value = '错误: ' + e.message;
@@ -191,6 +194,11 @@ const rowInsert = ref(false);
 const rowFocus = ref<string | null>(null);
 
 const dbOptions = computed(() => (Array.isArray(dbs.value) ? dbs.value : []).map((d: any) => ({ label: d.name, value: d.name })));
+// PG 未运行时 dbs 是空数组：控制台至少要有 postgres 可选，否则下拉是空的、执行库显示成空白。
+const sqlOptions = computed(() => {
+  const o = dbOptions.value;
+  return o.some((x: any) => x.value === 'postgres') ? o : [{ label: 'postgres', value: 'postgres' }, ...o];
+});
 const browseCols: any[] = [
   { title: '表', key: 'name', render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub', title: r.schema }, r.schema)])]) },
   { title: '行数（估）', key: 'row_estimate', width: 110, render: (r: any) => h('span', { class: 'mono-dim' }, String(r.row_estimate ?? '—')) },
@@ -421,6 +429,11 @@ async function delKeys(keys: string[]) {
 
         <NTabPane v-if="isAdmin" name="sql" tab="SQL 控制台">
           <NSpace vertical :size="12" style="width: 100%">
+            <NSpace align="center" :size="10">
+              <NText depth="3" style="font-size: var(--fs-xs)">执行库</NText>
+              <NSelect v-model:value="sqlDb" :options="sqlOptions" size="small" style="width: 200px" placeholder="选择数据库" aria-label="SQL 执行的数据库" />
+              <NText depth="3" style="font-size: var(--fs-xs)">语句只在上面选中的库里执行</NText>
+            </NSpace>
             <NInput
               v-model:value="sql" type="textarea" :autosize="{ minRows: 4, maxRows: 9 }"
               placeholder="SELECT * FROM some_table LIMIT 20;"
@@ -429,7 +442,7 @@ async function delKeys(keys: string[]) {
             />
             <NSpace align="center">
               <NButton type="primary" class="cp-press" :loading="sqlBusy" :icon="ico('PlayOutline')" @click="runSql">执行</NButton>
-              <NText depth="3" style="font-size: var(--fs-xs)">Ctrl+Enter 快速执行 · 以 postgres 超级用户运行，请谨慎操作</NText>
+              <NText depth="3" style="font-size: var(--fs-xs)">Ctrl+Enter 快速执行 · 以 postgres 超级用户连接 {{ sqlDb || 'postgres' }}，请谨慎操作</NText>
             </NSpace>
             <div class="log-view" style="max-height: 380px" role="region" aria-live="polite" aria-label="SQL 执行结果">{{ sqlOut || '结果将显示在这里…' }}</div>
           </NSpace>

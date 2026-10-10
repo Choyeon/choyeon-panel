@@ -266,7 +266,10 @@ async def timer_status() -> dict:
         for d in _TIMER_UNIT_DIRS:
             for u in _TIMER_UNITS:
                 if os.path.exists(f"{d}/{u}"):
-                    return {"status": "installed", "checked": "systemd-unit", "detail": f"存在 {u} 单元文件"}
+                    # unit 带出去给自检用：文件在 list-timers 里没出现，说明它没被装载
+                    # （多半没 enable），修复命令就是 enable 这一个单元，不能说成"已托管"。
+                    return {"status": "installed", "checked": "systemd-unit", "unit": u,
+                            "detail": f"存在 {u} 单元文件"}
         cron = await _check_cron()
         if cron:
             return cron

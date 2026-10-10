@@ -336,13 +336,20 @@ class TestRenewEndpoint(unittest.TestCase):
 
     def test_success_masks_paths_and_audits_only_the_name(self):
         async def _ok():
-            return "Certificate not yet due for renewal; log at /var/log/letsencrypt/letsencrypt.log"
+            return {
+                "log": "Certificate not yet due for renewal; log at /var/log/letsencrypt/letsencrypt.log",
+                "renewed": [], "unchanged": ["a.example.com"], "reloaded": False,
+                "summary": "没有证书到期，certbot 未做任何变更（这是正常结果，不是失败）",
+            }
 
         with mock.patch.object(sites.nginx_ops, "renew_certs", _ok), \
              mock.patch.object(sites.aio_db, "audit") as audit_stub:
             r = asyncio.run(sites.ssl_renew("a.example.com", _req(sub="renew_tester")))
         self.assertEqual(r["ok"], True)
         self.assertIsNone(ABS_PATH_RE.search(r["log"]))
+        # 接口必须把"到底续到了没有"一起带回去，只回 ok 会让界面把空操作说成已续期
+        self.assertIn("没有证书到期", r["summary"])
+        self.assertEqual(r["renewed"], [])
         audit_stub.assert_called_once_with("renew_tester", "site:renew", "a.example.com")
 
 

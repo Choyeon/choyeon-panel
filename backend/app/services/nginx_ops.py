@@ -102,9 +102,16 @@ async def remove_vhost(name: str):
     if os.path.exists(path):
         os.unlink(path)
     check = await run("nginx", ["-t"])
-    if check["code"] == 0:
-        await run("systemctl", ["reload", "nginx"])
-        invalidate_domain_cache()
+    if check["code"] != 0:
+        # 文件已经删了但配置没通过校验：这时 nginx 仍在按内存里的旧配置反代该域名。
+        # 静默返回会让调用方（sites.py）回 ok/removed:true，界面显示"已移除"，
+        # 而域名照旧可访问，直到下一次成功 reload 才暴露——运维完全看不出两个状态不一致。
+        raise RuntimeError(
+            "配置已删除，但 nginx 校验未通过，面板没有重载（该域名可能仍在按旧配置提供服务）："
+            f"{(check['out'] or '').strip()[:200]}"
+        )
+    await run("systemctl", ["reload", "nginx"])
+    invalidate_domain_cache()
 
 
 async def issue_cert(domain: str, email: str | None = None) -> str:
@@ -119,11 +126,37 @@ async def issue_cert(domain: str, email: str | None = None) -> str:
     return r["out"]
 
 
-async def renew_certs() -> str:
+async def renew_certs() -> dict:
+    """跑一次 `certbot renew`，并用法器到期日的实际变化确认到底续到了没有。
+
+    certbot 在「还没到期、所以什么都没做」时同样返回退出码 0，只看退出码就等于把
+    「什么都没发生」报成「已续期」；证书文件更新了也不等于进程里换了证书，
+    所以确实有更新时补一次 nginx reload（certbot 自带的 deploy-hook 不保证配了）。
+    """
+    from . import cert_ops  # 延迟导入：cert_ops 侧不需要知道 nginx_ops
+
+    async def _expiries() -> dict:
+        return {c["name"]: c.get("expiry") for c in (await cert_ops.list_certs())["certs"]}
+
+    before = await _expiries()
     r = await run("certbot", ["renew", "--non-interactive"], timeout=600)
     if r["code"] != 0:
         raise RuntimeError(f"证书续期失败 (exit {r['code']}): {r['out'] or r['err']}")
-    return r["out"]
+    after = await _expiries()
+    renewed = sorted(n for n, e in after.items() if e and before.get(n) and e != before.get(n))
+    reloaded = False
+    if renewed:
+        reloaded = (await run("systemctl", ["reload", "nginx"]))["code"] == 0
+    return {
+        "log": r["out"],
+        "renewed": renewed,
+        "unchanged": sorted(set(after) - set(renewed)),
+        "reloaded": reloaded,
+        "summary": (
+            f"已续期 {len(renewed)} 张：" + "、".join(renewed) + ("，nginx 已重载" if reloaded else "，nginx 重载失败")
+            if renewed else "没有证书到期，certbot 未做任何变更（这是正常结果，不是失败）"
+        ),
+    }
 
 
 def analyze_config(content: str) -> dict:

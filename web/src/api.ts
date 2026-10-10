@@ -183,7 +183,7 @@ export const api = {
   pgManage: (body: any) => req('/db/pg/manage', { body, timeout: 40000 }),
   // 服务端 psql 自己在 30s 放弃，前端必须比它慢一点：
   // 定成默认 15s 时用户看到的是"请求超时"，而真实结果（错误原因/成功）已经丢了。
-  pgQuery: (sql: string) => req('/db/pg/query', { body: { sql }, timeout: 40000 }),
+  pgQuery: (sql: string, db: string) => req('/db/pg/query', { body: { sql, db }, timeout: 40000 }),
   pgTables: (db: string) => req(`/db/pg/${encodeURIComponent(db)}/tables`),
   pgTable: (db: string, schema: string, name: string, page: number, size: number) =>
     req(`/db/pg/${encodeURIComponent(db)}/table?schema=${encodeURIComponent(schema)}&name=${encodeURIComponent(name)}&page=${page}&size=${size}`),

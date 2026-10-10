@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   NSpace, useMessage, NInput, NForm, NFormItem,
-  NInputNumber, NSwitch, NDrawer, NDrawerContent,
+  NInputNumber, NSwitch, NDrawer, NDrawerContent, NText,
 } from 'naive-ui';
 import { useRoute, useRouter } from 'vue-router';
 import { NButton } from '../ui';
@@ -20,6 +20,7 @@ const router = useRouter();
 const isAdmin = computed(() => getRole() === 'admin');
 const renewing = ref(false);
 const renewLog = ref('');
+const renewSummary = ref('');
 // 阈值类配置在库里可能根本没写过（值为空串），巡检侧用的是代码默认值。
 // 这里把空值显示成那个默认值，界面和真实生效的阈值才是一致的；保存后就是显式值。
 const ALERT_DEFAULTS: Record<string, string> = {
@@ -90,7 +91,11 @@ async function renew() {
   try {
     const r = await api.certbotRenew();
     renewLog.value = r.log;
-    msg.success('certbot 执行完成');
+    // 「执行完成」不等于「续到了」：certbot 对没到期的证书同样成功退出，
+    // 结论由后端按到期日实际变化算出来，界面照它说，不要自己下判断。
+    renewSummary.value = r.summary || '';
+    if (r.reloaded === false && r.renewed?.length) msg.warning(`${r.summary}（nginx 重载失败，请手动 reload）`);
+    else msg.success(r.summary || 'certbot 已执行');
   } catch (e: any) {
     msg.error(e.message);
   } finally {
@@ -320,6 +325,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </div>
         <span class="cp-help">certbot renew 检查所有已安装证书并自动续期。是否真的有人定时跑它，看安全自检页的「证书续期」一项（它会去查 certbot.timer 与 crontab，查不到就如实标 warn）；这里只用于手动触发验证。</span>
         <NSpace vertical :size="12" style="margin-top: var(--space-3)">
+          <NText v-if="renewSummary" depth="3" style="font-size: var(--fs-xs)">{{ renewSummary }}</NText>
           <div v-if="renewLog" class="log-view" style="max-height: 220px">{{ renewLog }}</div>
           <EmptyBox v-else text="本次会话还没有执行过续期，点击上方按钮后即可看到 certbot 输出" />
         </NSpace>

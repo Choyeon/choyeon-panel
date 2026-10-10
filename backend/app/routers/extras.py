@@ -9,7 +9,7 @@ from .. import database as dbm
 from .. import security
 from ..deps import need_admin as _need_admin
 from ..services import alerts_service, nginx_ops
-from ..util import is_http_url
+from ..util import is_http_url, redact_creds
 from ..errors import err_json
 
 router = APIRouter()
@@ -59,7 +59,11 @@ async def users_create(req: Request):
         return JSONResponse(status_code=400, content={"error": "用户名不合法"})
     if not password or len(password) < 8:
         return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
-    role = "viewer" if body.get("role") == "viewer" else "admin"
+    role = body.get("role") or "admin"
+    if role not in security.ROLES:
+        # 不能写成 `"viewer" if role == "viewer" else "admin"`：脚本里把 role 打成
+        # "readonly" 时请求照样 200，账号却被静默升成 admin——降权笔误变成提权。
+        return JSONResponse(status_code=400, content={"error": f"角色只能是 {'、'.join(security.ROLES)}"})
     # scrypt 放线程里：async 处理函数里直接算会卡住整个事件循环（见 main.py 登录）
     pw_hash = await security.hash_pass_async(password)
     try:
@@ -96,7 +100,11 @@ async def users_update(uid: str, req: Request):
     # 用户权限却已经掉了一级，而且这条分支连审计都不写，事后无从排查。
     new_role = None
     if body.get("role"):
-        new_role = "viewer" if body["role"] == "viewer" else "admin"
+        if body["role"] not in security.ROLES:
+            # 同 users_create：`"viewer" if x=="viewer" else "admin"` 会把笔误的
+            # "readonly" 当成"不是 viewer"，于是降权请求实际把人升成 admin 还返回 200。
+            return JSONResponse(status_code=400, content={"error": f"角色只能是 {'、'.join(security.ROLES)}"})
+        new_role = body["role"]
         if new_role != u["role"] and u["username"] == req.state.cp_sub:
             return JSONResponse(status_code=400, content={"error": "不能修改自己的角色"})
         if new_role == u["role"]:
@@ -277,9 +285,13 @@ async def certbot_renew(req: Request):
     if r := _need_admin(req):
         return r
     try:
-        log = await nginx_ops.renew_certs()
+        res = await nginx_ops.renew_certs()
     except Exception as e:  # noqa: BLE001
         return err_json(e)
     # 审计写在执行之后：续期失败也先记一条"已执行"，事后无法区分成功与失败。
-    await aio_db.audit(req.state.cp_sub, "certbot:renew")
-    return {"ok": True, "log": log}
+    # detail 记的是续期结论（几张/没几张），只记"已执行"的话，事后翻审计
+    # 仍然分不清这次到底是续到了还是压根没到期。
+    await aio_db.audit(req.state.cp_sub, "certbot:renew", res["summary"])
+    # certbot 输出里可能带 --key-path 之类的参数值，出接口前统一脱敏；
+    # renewed/unchanged/summary 是给界面直接用的，log 只在失败排查时看。
+    return {"ok": True, **res, "log": redact_creds(res["log"])[:4000]}

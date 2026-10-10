@@ -440,6 +440,23 @@ class TestPgServiceWithClient(PgAgainstFake):
         # SET 与补 TTL 的 PEXPIRE 在同一条往返里，中间插不进别的请求
         self.assertEqual(seen[seen.index(["SET", "s", "v"]) + 1], ["PEXPIRE", "s", "5000"])
 
+    async def test_redis_set_on_key_without_ttl_still_writes(self):
+        """永不过期的 key（PTTL -1，最常见的一类）：只有一条 SET， kinds 也必须跟着缩。
+
+        写死 ["text","int"] 时 _rp 因为命令数≠回复数直接抛错，线上表现是
+        「编辑任何没有 TTL 的 string 都保存失败」——整条字符串编辑功能不可用。
+        """
+        seen = []
+
+        def handler(args):
+            seen.append(args)
+            return {"TYPE": simple("string"), "PTTL": integer(-1)}.get(args[0], simple("OK"))
+
+        out, _ = await self._call(handler, lambda: pg_service.redis_set("p", "v"))
+        self.assertEqual(out, {"ok": True, "ttl_kept": False})
+        self.assertIn(["SET", "p", "v"], seen)
+        self.assertNotIn("PEXPIRE", [c[0] for c in seen], "没有 TTL 就不该补 PEXPIRE")
+
     async def test_wrong_type_error_text_reaches_the_caller_unmodified(self):
         fake = await start_fake(lambda args: err(TestRespParser.WRONGTYPE))
         with (mock.patch.object(pg_service, "REDIS_HOST", "127.0.0.1"),

@@ -188,10 +188,10 @@ async def grant(name: str, db: str):
     await psql(f"GRANT ALL PRIVILEGES ON DATABASE {db} TO {name};")
 
 
-async def query_sql(sql: str) -> str:
+async def query_sql(sql: str, db: str | None = None) -> str:
     if not sql.strip():
         raise RuntimeError("空查询")
-    return await psql(sql)
+    return await psql(sql, db)
 
 
 # redis_password() 在每条 Redis 命令的热路径上（key 浏览器翻一页就发好几条），旧实现
@@ -838,7 +838,11 @@ async def redis_set(k: str, value: str) -> dict:
     keep = pttl if isinstance(pttl, int) and pttl > 0 else 0
     # SET 与补 TTL 的 PEXPIRE 也在同一条往返里：中间不能插入别的请求，
     # 否则两条命令之间 key 被别人改写就会补错对象。
-    await _rp([["SET", k, value]] + ([["PEXPIRE", k, str(keep)]] if keep else []), ["text", "int"])
+    # kinds 必须跟着 cmds 一起变：写死 ["text","int"] 时，没有 TTL 的 key（最常见的一类）
+    # 只有一条 SET，_rp 立刻因数量不一致抛错——实测线上编辑任何永不过期的 string key
+    # 都固定失败，等于字符串编辑功能整体不可用。
+    cmds = [["SET", k, value]] + ([["PEXPIRE", k, str(keep)]] if keep else [])
+    await _rp(cmds, ["text"] + (["int"] if keep else []))
     return {"ok": True, "ttl_kept": bool(keep)}
 
 

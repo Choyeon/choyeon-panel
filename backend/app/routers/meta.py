@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from .. import config
 from .. import aio_db
 from .. import database as dbm
-from ..services import systemd_ops
+from ..services import cert_ops, systemd_ops
 from ..templates import list_templates
 from ..util import disk_usage_pct, run
 
@@ -78,15 +78,17 @@ async def _check_listen() -> dict:
 
 
 async def _check_admin() -> dict:
-    row = dbm.query_one("SELECT COUNT(*) c FROM users")
-    n = row["c"] if row else 0
-    if n == 0:
+    # 判据是「有没有 admin」而不是「有没有用户」：只剩 viewer 的机器（删过管理员）
+    # 用 COUNT(*) 会显示 pass、setup 接口又回 403「管理员已存在」，谁也进不去。
+    total = dbm.query_one("SELECT COUNT(*) c FROM users")["c"]
+    admins = dbm.query_one("SELECT COUNT(*) c FROM users WHERE role='admin'")["c"]
+    if admins == 0:
         return {
             "status": "fail",
-            "detail": "未创建管理员，任何人都能抢注",
-            "fix": "choyeonctl user create <name> --password <pw>",
+            "detail": f"没有管理员账号（共 {total} 个账号）" if total else "未创建管理员，任何人都能抢注",
+            "fix": "choyeonctl user create <name> --password <pw> --role admin",
         }
-    return {"status": "pass", "detail": f"已创建 {n} 个账号", "fix": ""}
+    return {"status": "pass", "detail": f"{admins} 个管理员 / 共 {total} 个账号", "fix": ""}
 
 
 async def _check_service() -> dict:
@@ -98,7 +100,10 @@ async def _check_service() -> dict:
         }
     active = await systemd_ops.is_active(f"{SERVICE_NAME}.service")
     if not active:
-        return {"status": "fail", "detail": f"{SERVICE_NAME} 未在运行", "fix": f"systemctl restart {SERVICE_NAME}"}
+        # 带上 reset-failed：进入 failed（StartLimitBurst=5）后光 restart 会被拒，
+        # 照着这条 fix 敲的人会遇到第二个错误，以为修好了其实还没。
+        return {"status": "fail", "detail": f"{SERVICE_NAME} 未在运行",
+                "fix": f"systemctl reset-failed {SERVICE_NAME} && systemctl restart {SERVICE_NAME}"}
     return {"status": "pass", "detail": f"{SERVICE_NAME} 运行中", "fix": ""}
 
 
@@ -211,27 +216,40 @@ async def _check_cli() -> dict:
 async def _check_cert_renewal() -> dict:
     """证书装了不代表会自动续期——面板 UI 曾写着"每日定时任务已托管"，而机器上并没有 timer。
 
-    这里只回答一个问题：有没有人（系统 timer / cron / 面板自建 timer）会按期续期。
-    查不到就如实 warn，不猜、也不算 pass。
+    判定口径复用 cert_ops.timer_status()：站点页的续期提示和自检各查一套的话，会出现
+    「网页说已托管、自检说没有」这种互相打脸的结果，而用户只会相信先看到的那个。
     """
     if not shutil.which("certbot"):
         return {"status": "pass", "detail": "未安装 certbot，无续期需求", "fix": ""}
     live = Path("/etc/letsencrypt/live")
-    certs = sorted(live.glob("*/fullchain.pem")) if live.is_dir() else []
+    certs = sorted(p.parent.name for p in live.glob("*/fullchain.pem")) if live.is_dir() else []
     if not certs:
         return {"status": "pass", "detail": "certbot 已装但暂无证书", "fix": ""}
-    names = ", ".join(p.parent.name for p in certs[:5])
-    for unit in ("certbot.timer", "certbot-renew.timer", "choyeon-certbot.timer"):
-        r = await run("systemctl", ["is-enabled", unit], timeout=10)
-        if (r["out"] or "").strip() == "enabled":
-            return {"status": "pass", "detail": f"{len(certs)} 张证书由 {unit} 续期（{names}）", "fix": ""}
-    cron = await run("crontab", ["-l"], timeout=10)
-    if "certbot" in (cron["out"] or ""):
-        return {"status": "pass", "detail": f"{len(certs)} 张证书由 crontab 续期（{names}）", "fix": ""}
+    names = ", ".join(certs[:5])
+    t = await cert_ops.timer_status()
+    if t["status"] == "installed":
+        if t.get("checked") == "systemd-unit":
+            # 单元文件在，但 list-timers 里没有它 = 没被 systemd 装载（没 enable），
+            # 到期照样不会有人去续——这种情况不能说 pass。
+            unit = t.get("unit") or "certbot.timer"
+            return {
+                "status": "warn",
+                "detail": f"{len(certs)} 张证书的 {unit} 只有单元文件、未被 systemd 装载，不会自动续期",
+                "fix": f"systemctl enable --now {unit}",
+            }
+        return {"status": "pass", "detail": f"{len(certs)} 张证书有自动续期（{names}）：{t['detail']}", "fix": ""}
+    if t["status"] == "unknown":
+        # 查不了 ≠ 没有。说成"没有"会让人去装一个其实已经在跑的定时器
+        return {
+            "status": "warn",
+            "detail": f"无法确认 {len(certs)} 张证书有没有自动续期：{t['detail']}",
+            "fix": "systemctl list-timers --all | grep -iE 'certbot|letsencrypt'",
+        }
     return {
         "status": "warn",
         "detail": f"{len(certs)} 张证书没有任何自动续期入口，到期会直接失效",
-        "fix": "choyeonctl app ... 或 systemctl enable --now certbot.timer",
+        "fix": "面板「定时任务」页新建 certbot renew（每日一次），"
+               "或写入 cron：0 3 * * * certbot renew --non-interactive",
     }
 
 
@@ -322,8 +340,13 @@ async def doctor_fix(req: Request):
         async def _restart():
             # 延迟 1s：先把 JSON 响应发完再 kill，否则客户端只会收到连接中断
             await asyncio.sleep(1)
+            # 必须先 reset-failed：unit 配了 StartLimitBurst=5，服务反复崩溃进入 failed
+            # 之后，systemctl restart 会直接被 "Start request repeated too quickly" 拒绝。
+            # 旧代码在这种情况下照样回"正在重启"，按钮按下去面板永远起不来——而这正是
+            # 这个按钮唯一要救的场景。
             await asyncio.create_subprocess_shell(
-                f"systemctl restart {SERVICE_NAME}", start_new_session=True,
+                f"systemctl reset-failed {SERVICE_NAME}; systemctl restart {SERVICE_NAME}",
+                start_new_session=True,
             )
 
         asyncio.create_task(_restart())

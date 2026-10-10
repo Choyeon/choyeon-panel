@@ -359,8 +359,12 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         dbm.execute("DELETE FROM users WHERE username=?", (a.name,))
         security.bump_user_epoch(a.name)
         dbm.audit(a.name, "cli:user:delete")
-        Out.result({"ok": True, "username": a.name}, f"已删除 {a.name}")
-        return {"ok": True}
+        # 删掉最后一个管理员后，面板回到「未创建管理员」状态——此时任何能访问到面板的人
+        # 都可以先一步把管理员注册走。只说"已删除"没人会意识到这一点。
+        left = dbm.query_one("SELECT COUNT(*) c FROM users WHERE role='admin'")["c"]
+        note = "" if left else "；本机已无管理员，请立即 choyeonctl user create <name> --password <pw> --role admin"
+        Out.result({"ok": True, "username": a.name, "adminLeft": left}, f"已删除 {a.name}{note}")
+        return {"ok": True, "adminLeft": left}
 
     Out.error(f"未知子命令: {a.user_cmd}", EXIT_USAGE)
     return {}
