@@ -73,6 +73,8 @@ const surfaces = {
     thColor: '#2e313d',
     inputColor: '#2e313d',
     menuBg: '#242633',
+    /* item 画在元素自身（style.css 的 --cp-menu-item-bg），hover/active 画在 naive 的
+       ::before 上层， opaque 直接覆盖，所以深色档三档都是实色。 */
     menu: { item: '#2e313d', hover: '#434552', active: '#434552' },
     shadowCard: '0 0 4px rgba(36,38,51,0.72)',
   },
@@ -87,24 +89,28 @@ const surfaces = {
     inputColor: '#ffffff',
     menuBg: 'rgba(0,94,235,0.1)',
     /* 1Panel 浅色 hover 只换文字/图标颜色，底色不动；那样 hover 完全看不出来，
-       所以给同一支白色提一档不透明度——仍是白胶囊，不引入 naive 的灰底。 */
-    menu: { item: 'rgba(255,255,255,0.3)', hover: 'rgba(255,255,255,0.55)', active: '#ffffff' },
+       所以给同一支白色提一档不透明度——仍是白胶囊，不引入 naive 的灰底。
+       0.35 是叠在 0.3 常态白之上的那一层，合成后约 0.55。 */
+    menu: { item: 'rgba(255,255,255,0.3)', hover: 'rgba(255,255,255,0.35)', active: '#ffffff' },
     shadowCard: '0 0 4px rgba(0,94,235,0.1)',
   },
 };
 
-/* 侧栏菜单：1Panel 的菜单项是一颗颗胶囊（42px 高、4px 圆角、自带底色与外阴影），
+/* 侧栏菜单：1Panel 的菜单项是一颗颗胶囊（42px 高、4px 圆角、自带底色），
    选中项再加 2px 内描边 + 竖条。描边与竖条 naive 表达不了，在 Shell.vue 用 :deep() 补。
-   底色必须走这里而不是 CSS：naive 把 base/hover/selected/--hover 四态都画在
-   .n-menu-item-content::before 上，其中 `.n-menu ... :not(禁用):hover::before` 的权重
-   和我们带 scoped 属性的选择器打平，而它的 <style> 是运行时注入、排在构建 CSS 之后，
-   平权重时后者胜——用 CSS 覆盖会在 hover 到选中项时被 naive 的灰色抢走。 */
+   状态色（hover/选中）必须走这里而不是 CSS：naive 把它们画在
+   .n-menu-item-content::before 上，其中 :hover/--hover 两档的选择器权重不低于我们带
+   scoped 属性的写法，而它的 <style> 是运行时注入、排在构建 CSS 之后，平权重后者胜——
+   用 CSS 覆盖会在 hover 到选中项时被 naive 的灰底抢走。
+   但胶囊"常态"底色不能也放这里：naive 没有 item 常态色变量（实测 ::before 常态是
+   transparent，hover/选中才有 background-color），它唯一的 color 变量是菜单容器整块
+   背景——写成胶囊底色会把 7px 间距一起染掉，胶囊就糊成一片。所以这里把容器设透明，
+   常态底色由 Shell.vue 画在元素自身上（::before 是它的上层，状态色正好覆盖）。 */
 const menuFor = (p: typeof darkSemantic, m: { item: string; hover: string; active: string }): GlobalThemeOverrides['Menu'] => ({
   itemHeight: '42px',
   borderRadius: '4px',
-  /* 胶囊底色这一档在 naive 里就叫 color（菜单项 ::before 的默认底色），
-     没有 itemColor 这个键——写成 itemColor 会被 vue-tsc 拒掉。 */
-  color: m.item,
+  /* m.item 不在这里用：它是胶囊常态底色，走 --cp-menu-item-bg（见 Shell.vue）。 */
+  color: 'rgba(0,0,0,0)',
   itemColorHover: m.hover,
   itemColorActive: m.active,
   itemColorActiveHover: m.active,

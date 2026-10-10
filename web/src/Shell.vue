@@ -466,14 +466,18 @@ function toggleTheme(ev: MouseEvent) {
 .cp-shell { height: 100vh; }
 .cp-sider { background: var(--cp-menu-bg); }
 /* 菜单胶囊：1Panel 的每一项都是独立圆角块（42px、4px 圆角、7px 上下间距、
-   0 0 4px 外阴影），选中项再加 2px 内描边 + 4×14px 左竖条。naive 的 Menu
-   themeOverrides 只能给颜色，形状只能在这里补。 */
+   0 0 4px 外阴影），选中项再加 2px 内描边 + 竖条。naive 的 Menu themeOverrides
+   只能给颜色，形状只能在这里补。 */
 .cp-sider :deep(.n-menu) { padding: 0 var(--menu-pad-x); }
 .cp-sider :deep(.n-menu .n-menu-item-content) {
   margin: 7px 0;
   border-radius: var(--radius-lg);
+  /* 常态底色只能画在元素上：naive 的 ::before 常态是 transparent，只有 hover/选中
+     才有 background-color，而它的容器色 --n-color（themeOverrides.Menu.color）是整块
+     菜单背景——用它当胶囊底色会把 7px 间距一起染掉，实测就是这样糊成一片的。 */
+  background: var(--cp-menu-item-bg);
 }
-/* naive 把底色画在 .n-menu-item-content::before 上，且默认 left/right 各缩 8px；
+/* naive 把状态底色画在 .n-menu-item-content::before 上，且默认 left/right 各缩 8px；
    胶囊是整行的，所以这一层必须撑满——否则 hover/选中会在 166px 的胶囊里只盖住中间
    150px，两边各留 8px 原色，看着像"hover 不全"。颜色交给 theme.ts 的 Menu 变量：
    naive 的 :hover / --hover / 选中四态规则权重不低于这里，平权重时它运行时注入的
