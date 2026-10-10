@@ -303,9 +303,12 @@ def prune_audit(keep: int | None = None) -> int:
 
 
 def prune_deployments(keep_per_app: int = 20) -> int:
+    # 除了"每个应用只留最近 N 条"，还要清掉**应用已不存在**的记录：
+    # 部署列表与详情都按 app_id 过滤，这些行没有任何入口能读到，但每行都带完整部署日志，
+    # 而按 app_id 分组的保留策略会永远给孤儿留着位置（实测线上残留 10 条）。
     with _lock:
         cur = conn.execute(
-            "DELETE FROM deployments WHERE id NOT IN ("
+            "DELETE FROM deployments WHERE app_id NOT IN (SELECT id FROM apps) OR id NOT IN ("
             "  SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY app_id ORDER BY id DESC) rn FROM deployments)"
             "  WHERE rn <= ?)",
             (keep_per_app,),

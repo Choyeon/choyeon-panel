@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -285,7 +286,9 @@ class TestConfigParsers(unittest.TestCase):
 # ---------------------------------------------------------------- 令牌吊销
 class TestTokenRevocation(unittest.TestCase):
     def setUp(self):
-        self.user = f"revoke_user_{os.getpid()}_{id(self)}"
+        # 用户名必须落在 security.USERNAME_RE（3-32 位）内：verify_token 现在按同一
+        # 规则校验主体，用 id(self) 拼出的 33+ 位名字会让 token 自己签出来就验不过。
+        self.user = _uid("revoke_user_")
         dbm.execute(
             "INSERT OR REPLACE INTO users(username,pass_hash,role) VALUES(?,?,?)",
             (self.user, security.hash_pass("Password123"), "viewer"),
@@ -352,6 +355,83 @@ class TestTokenRevocation(unittest.TestCase):
             for _ in range(5):
                 self.assertEqual(dbm.get_setting(f"token_epoch:{self.user}"), "123")
         self.assertEqual(spy.call_count, 0, "TTL 内应命中缓存，不该重复 SELECT")
+
+    def _raw(self, **claims):
+        return jwt.encode(
+            {"sub": self.user, "role": "viewer", "ver": security._user_epoch(self.user),
+             "exp": int(time.time()) + 300, **claims},
+            security.jwt_secret(),
+            algorithm=security.ALGO,
+        )
+
+    def test_empty_subject_is_rejected(self):
+        """回归：`require: ["exp","sub"]` 只检查 claim **存在**，空串照样过。
+        实测一把 sub=""、role=admin 的 token 能通过中间件并真的执行了建应用/部署/删应用，
+        而审计表里记不到任何主体——出事后无法追责，身份层必须自己把关。
+        """
+        with self.assertRaises(jwt.InvalidTokenError, msg="空主体 token 不该算认证通过"):
+            security.verify_token(security.sign_token("", "admin"))
+
+    def test_illegal_subject_shapes_rejected(self):
+        for bad in ("ab", "a" * 33, "has space", "drop;table", "主用户名", "user.name"):
+            with self.assertRaises(jwt.InvalidTokenError, msg=f"主体 {bad!r} 不是合法用户名"):
+                security.verify_token(self._raw(sub=bad))
+
+    def test_legal_subject_for_unused_user_still_passes(self):
+        """收紧只能收在"是不是一个用户名"这一层：登录/注册都不要求账号已在 users 表里
+        （CLI 与测试会先签 token），把主体校验扩成查表会让所有合法 token 一起失效。"""
+        sub = f"synthetic_{os.getpid()}"
+        self.assertEqual(security.verify_token(self._raw(sub=sub))["sub"], sub)
+
+    def test_unknown_role_rejected(self):
+        with self.assertRaises(jwt.InvalidTokenError, msg="角色必须是 admin/viewer 之一"):
+            security.verify_token(self._raw(role="superuser"))
+
+
+class TestLegacyUsernameLogin(unittest.TestCase):
+    """库里若残留老规则放行过的用户名，登录必须**显式拒绝**。
+
+    verify_token 现在按 security.USERNAME_RE 校验主体，照签下去就是"登录返回 200 +
+    token，然后每个请求 401"——用户界面上完全看不出问题出在身份层。
+    """
+
+    PW = "Password123"
+
+    def setUp(self):
+        from starlette.testclient import TestClient
+
+        from app import main as _main
+
+        self.client = TestClient(_main.app)
+        # 37 位：超出 3-32 规则，正是老规则可能放行过的形状（长度只由字符集决定，
+        # 用 pid/id 拼出来的名字长度不稳定，会随机让前提断言失效）
+        self.legacy = "legacy_" + "u" * 30
+        self.legal = _uid("legacy_ok_")
+        self.assertFalse(security.USERNAME_RE.match(self.legacy), "用例前提：这个用户名必须不合法")
+        for name in (self.legacy, self.legal):
+            dbm.execute(
+                "INSERT OR REPLACE INTO users(username,pass_hash,role) VALUES(?,?,?)",
+                (name, security.hash_pass(self.PW), "admin"),
+            )
+            self.addCleanup(dbm.execute, "DELETE FROM users WHERE username=?", (name,))
+
+    def _login(self, username):
+        return self.client.post("/api/auth/login", json={"username": username, "password": self.PW})
+
+    def test_illegal_username_rejected_at_login(self):
+        resp = self._login(self.legacy)
+        self.assertEqual(resp.status_code, 403, resp.text)
+        self.assertNotIn("token", resp.json(), "不能把用不了的 token 发给客户端")
+
+    def test_legal_username_still_signs_in(self):
+        resp = self._login(self.legal)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(security.verify_token(resp.json()["token"])["sub"], self.legal)
+
+    def test_wrong_password_still_401(self):
+        """拒绝必须发生在口令校验之后，否则这个接口变成用户名存在性探针。"""
+        resp = self.client.post("/api/auth/login", json={"username": self.legacy, "password": "WrongPass9"})
+        self.assertEqual(resp.status_code, 401)
 
 
 # ---------------------------------------------------- 用户改角色/改密（HTTP 层）
@@ -681,6 +761,48 @@ class TestDataPruning(unittest.TestCase):
 
         dbm.execute("DELETE FROM deployments WHERE app_id=?", (app["id"],))
         dbm.execute("DELETE FROM apps WHERE id=?", (app["id"],))
+
+    def _app(self, name):
+        dbm.execute(
+            "INSERT INTO apps(name,type,repo_url,branch,path,start_cmd) VALUES(?,?,?,?,?,?)",
+            (name, "node", "https://x/y.git", "main", f"/tmp/{name}", "node index.js"),
+        )
+        app_id = dbm.query_one("SELECT id FROM apps WHERE name=?", (name,))["id"]
+        self.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (app_id,))
+        return app_id
+
+    def _dep(self, app_id):
+        return dbm.execute("INSERT INTO deployments(app_id,status,log) VALUES(?,'success',?)",
+                           (app_id, "部署日志正文"))
+
+    def test_prune_drops_orphans_of_deleted_apps(self):
+        """应用被删掉后，它的部署记录必须一起消失。
+
+        部署列表和详情都按 app_id 过滤，孤儿行没有任何入口能读到，但每行都带着完整
+        部署日志；而「按 app_id 分组只留最近 N 条」的保留策略会永远给孤儿留着位置，
+        于是它们只能一直涨（实测线上残留 10 条）。
+        """
+        app_id = self._app("prune-orph")
+        ids = [self._dep(app_id) for _ in range(3)]
+        dbm.execute("DELETE FROM apps WHERE id=?", (app_id,))
+
+        dbm.prune_deployments(keep_per_app=9999)  # 只验证孤儿清扫，不触发条数裁剪
+        self.assertIsNone(
+            dbm.query_one("SELECT id FROM deployments WHERE app_id=?", (app_id,)),
+            "孤儿 deployments 必须被 prune_deployments 清掉",
+        )
+        for i in ids:
+            self.assertIsNone(dbm.query_one("SELECT id FROM deployments WHERE id=?", (i,)))
+
+    def test_prune_keeps_newest_per_app(self):
+        app_id = self._app("prune-keep")
+        old = [self._dep(app_id) for _ in range(3)]
+        dbm.prune_deployments(keep_per_app=2)
+        left = dbm.query_one("SELECT COUNT(*) c FROM deployments WHERE app_id=?", (app_id,))["c"]
+        self.assertEqual(left, 2, "每个应用只保留最近 N 条")
+        for i in old[:1]:
+            self.assertIsNone(dbm.query_one("SELECT id FROM deployments WHERE id=?", (i,)),
+                              "最旧的一条应被裁掉")
 
     def test_prune_audit(self):
         for i in range(30):

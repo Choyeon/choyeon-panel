@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from .util import sub_port
+
 # type 受 apps 表 CHECK 约束限制，只能是 node / python
 # env 条目结构必须与 apps_service.write_env_file 一致：{"k": ..., "v": ...}。
 # 用 {"key","value"} 的话 write_env_file 会静默过滤掉整条，
@@ -90,8 +92,8 @@ def apply_template(i: dict) -> dict:
     # 而面板显示"部署成功"。这里把模板默认端口同步替换成实际端口。
     eff = str(merged.get("port") or tpl["port"])
     if eff != str(tpl["port"]):
-        merged["start_cmd"] = str(merged["start_cmd"]).replace(str(tpl["port"]), eff)
+        merged["start_cmd"] = sub_port(merged["start_cmd"], tpl["port"], eff)
         merged["env"] = [
-            {**e, "v": str(e.get("v", "")).replace(str(tpl["port"]), eff)} for e in (merged.get("env") or [])
+            {**e, "v": sub_port(e.get("v", ""), tpl["port"], eff)} for e in (merged.get("env") or [])
         ]
     return merged

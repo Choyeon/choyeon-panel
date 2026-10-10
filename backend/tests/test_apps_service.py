@@ -344,10 +344,15 @@ class TestDeleteAppOrdering(unittest.IsolatedAsyncioTestCase):
         target = f"{self.dir}/gone"
         os.makedirs(target)
         app_id = _mk_app(_aname("ord2"), target)
+        dbm.execute("INSERT INTO deployments(app_id,status,log) VALUES(?,'success',?)", (app_id, "部署日志正文"))
         with mock.patch.object(apps_service, "remove_unit", _noop):
             await apps_service.delete_app(app_id, True)
         self.assertFalse(os.path.exists(target))
         self.assertIsNone(dbm.query_one("SELECT id FROM apps WHERE id=?", (app_id,)))
+        self.assertIsNone(
+            dbm.query_one("SELECT id FROM deployments WHERE app_id=?", (app_id,)),
+            "应用删除后它的部署记录（含日志）没有任何入口能读到，必须一并删掉",
+        )
 
     async def test_without_purge_keeps_directory(self):
         target = f"{self.dir}/keep"

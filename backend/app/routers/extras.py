@@ -55,7 +55,7 @@ async def users_create(req: Request):
     body = await _body(req)
     username = body.get("username") or ""
     password = body.get("password") or ""
-    if not re.match(r"^[A-Za-z0-9_-]{3,32}$", username):
+    if not security.USERNAME_RE.match(username):
         return JSONResponse(status_code=400, content={"error": "用户名不合法"})
     if not password or len(password) < 8:
         return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})

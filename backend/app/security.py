@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import hmac
+import re
 import secrets
 import time
 from weakref import WeakKeyDictionary
@@ -12,6 +13,11 @@ from .database import jwt_secret
 from .database import token_epoch as _global_epoch
 
 ALGO = "HS256"
+
+# 用户名的唯一权威写法：注册、建号（main.py / cli.py）与 token 主体校验（verify_token）
+# 必须用同一个表达式，否则会出现"能建号但签发的 token 自己验不过"这种死锁。
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+ROLES = ("admin", "viewer")
 
 # scrypt 的参数是 32MB 临时内存/次。放到线程池后并行度不再受事件循环限制，
 # 不加约束的话一次登录风暴就能占掉几百 MB（实测 6 并发把 cgroup 顶到 108MB）。
@@ -88,7 +94,16 @@ def sign_token(username: str, role: str) -> str:
 
 def verify_token(token: str) -> dict:
     payload = jwt.decode(token, jwt_secret(), algorithms=[ALGO], options={"require": ["exp", "sub"]})
-    if payload.get("ver") != _user_epoch(payload.get("sub", "")):
+    sub = payload.get("sub")
+    # `require: sub` 只保证这个 claim **存在**，空串照样过：实测一把 sub="" 且 role=admin
+    # 的 token 能通过中间件并真的执行了建应用/部署/删应用，而审计里记不到任何主体
+    # ——出事后无法追责。签名密钥泄露本已是最高危，但身份层必须自己把关：主体要么
+    # 是合法用户名，要么这个 token 就不算认证通过。
+    if not isinstance(sub, str) or not USERNAME_RE.match(sub):
+        raise jwt.InvalidTokenError("token subject invalid")
+    if payload.get("role") not in ROLES:
+        raise jwt.InvalidTokenError("token role invalid")
+    if payload.get("ver") != _user_epoch(sub):
         raise jwt.InvalidTokenError("token revoked")
     return payload
 

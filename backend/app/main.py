@@ -113,7 +113,7 @@ async def setup(req: Request):
         return JSONResponse(status_code=403, content={"error": "管理员已存在"})
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
-    if not re.match(r"^[A-Za-z0-9_-]{3,32}$", username):
+    if not security.USERNAME_RE.match(username):
         return JSONResponse(status_code=400, content={"error": "用户名只能包含字母、数字、下划线与连字符（3-32 位）"})
     if len(password) < 8:
         return JSONResponse(status_code=400, content={"error": "密码至少 8 位"})
@@ -141,9 +141,14 @@ async def login(req: Request):
     if not ok:
         dbm.audit(username or "?", "login_failed", ip)
         return JSONResponse(status_code=401, content={"error": "用户名或密码错误"})
+    role = user["role"] or "admin"
+    if not security.USERNAME_RE.match(user["username"]):
+        # 老版本放行过的用户名可能不符合当前规则，而 verify_token 会拒绝这种主体。
+        # 照签的话用户看到的是"登录成功，然后每个请求 401"，无从下手；在这里说清楚。
+        dbm.audit(user["username"], "login_rejected", ip)
+        return JSONResponse(status_code=403, content={"error": "该账号的用户名不符合当前规则，请由管理员用 choyeonctl user create 重建账号"})
     dbm.audit(user["username"], "login")
     security.clear_attempts(ip)
-    role = user["role"] or "admin"
     return _user_token(user["username"], role, user.get("nickname", ""), user.get("avatar", ""))
 
 

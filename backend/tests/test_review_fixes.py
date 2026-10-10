@@ -6,7 +6,7 @@
 公开状态接口不回显管理员用户名、CLI 的 --json 契约与部署等待、
 文件接口对 viewer 全面关闭、写入不跟随符号链接、审计字段长度受约束、
 终端会话计数不漏、psql 管道不互等，接口错误不留半成品变更，
-以及下拉菜单的动作确实挂在能被触发的那个钩子上。
+以及下拉菜单的动作确实挂在能被触发的那个钩子上、编辑端口时启动命令里的旧端口被一起换掉。
 """
 
 import asyncio
@@ -33,7 +33,7 @@ from app import database as dbm  # noqa: E402
 from app.routers import apps as apps_router  # noqa: E402
 from app.routers import extras
 from app.services import apps_service, backup_service, files_service, nginx_ops, pg_service  # noqa: E402
-from app.util import redact_creds  # noqa: E402
+from app.util import redact_creds, sub_port  # noqa: E402
 
 BACKEND = Path(__file__).resolve().parent.parent
 
@@ -105,6 +105,60 @@ class TestDeployTemplateConsistency(unittest.TestCase):
             {"template": "static-site", "name": "p3", "port": 9000, "start_cmd": "caddy run --config ./Caddyfile"}
         )
         self.assertEqual(merged["start_cmd"], "caddy run --config ./Caddyfile")
+
+
+class TestPortEditKeepsCommandInSync(unittest.TestCase):
+    """回归：建应用时模板会把端口写进 start_cmd/env，但**编辑端口时不会**。
+    结果是库里记新端口、进程还在听旧端口，nginx 反代过去直接 502，
+    而面板上一切显示正常（端口、状态、部署成功）。
+    """
+
+    def _seed(self, name: str, port: int, start_cmd: str, env: list) -> int:
+        res = dbm.execute(
+            "INSERT INTO apps(name,type,repo_url,branch,path,port,domain,install_cmd,start_cmd,env)"
+            " VALUES(?,?,?,?,?,?,NULL,NULL,?,?)",
+            (name, "python", "", "main", f"/tmp/{name}", port, start_cmd, json.dumps(env)),
+        )
+        app_id = res if isinstance(res, int) else res.lastrowid
+        self.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (app_id,))
+        return app_id
+
+    def test_port_only_patch_retargets_command_and_env(self):
+        app_id = self._seed(
+            _uid("port-a"), 3456, "python3 -m http.server 3456 --bind 127.0.0.1",
+            [{"k": "PORT", "v": "3456"}],
+        )
+        out = apps_service.update_app(app_id, {"port": 3457})
+        self.assertEqual(out["port"], 3457)
+        self.assertIn("http.server 3457", out["start_cmd"])
+        self.assertNotIn("3456", out["start_cmd"])
+        self.assertEqual(json.loads(out["env"])[0]["v"], "3457")
+
+    def test_explicit_start_cmd_wins(self):
+        """用户自己重写过启动命令时不再猜端口，避免把显式输入改坏。"""
+        app_id = self._seed(_uid("port-b"), 3456, "python3 -m http.server 3456", [])
+        out = apps_service.update_app(app_id, {"port": 3457, "start_cmd": "gunicorn -b 127.0.0.1:9000 app:app"})
+        self.assertEqual(out["start_cmd"], "gunicorn -b 127.0.0.1:9000 app:app")
+
+    def test_explicit_env_wins(self):
+        app_id = self._seed(_uid("port-c"), 3456, "python3 -m http.server 3456", [{"k": "PORT", "v": "3456"}])
+        out = apps_service.update_app(app_id, {"port": 3457, "env": [{"k": "PORT", "v": "8080"}]})
+        self.assertEqual(json.loads(out["env"]), [{"k": "PORT", "v": "8080"}])
+
+    def test_contained_port_digits_not_corrupted(self):
+        """13456 里包含 3456：必须按整词替换，不能 str.replace 把它改成 13457。"""
+        app_id = self._seed(_uid("port-d"), 3456, "python3 -m http.server 3456 --other-app-port 13456", [])
+        out = apps_service.update_app(app_id, {"port": 3457})
+        self.assertIn("--other-app-port 13456", out["start_cmd"])
+        self.assertIn("http.server 3457", out["start_cmd"])
+
+    def test_helper_edges(self):
+        self.assertEqual(sub_port("node dist/index.js", 3000, 3001), "node dist/index.js")
+        self.assertEqual(sub_port(None, 3000, 3001), None)
+        self.assertEqual(sub_port("", 3000, 3001), "")
+        self.assertEqual(sub_port("PORT=3000", 3000, None), "PORT=3000")
+        self.assertEqual(sub_port("PORT=3000", 3000, 3000), "PORT=3000")
+        self.assertEqual(sub_port("--port 3000,", 3000, 3001), "--port 3001,")
 
 
 class TestCertbotRenewFailsLoudly(unittest.TestCase):

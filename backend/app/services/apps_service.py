@@ -19,6 +19,7 @@ from ..util import (
     redact_creds,
     run,
     run_shell_async,
+    sub_port,
     unit_exec_arg_escape,
 )
 from . import nginx_ops, systemd_ops
@@ -368,6 +369,18 @@ def update_app(app_id: int, i: dict) -> dict:
     merged.update({k: v for k, v in i.items() if k != "env"})
     _validate(merged, app_id)
     vars_ = i["env"] if "env" in i and i["env"] is not None else json.loads(cur["env"] or "[]")
+    # 改端口时同步 start_cmd / env 里写死的旧端口，与建号期的模板替换同款。
+    # 不这样做的话面板记录的是新端口、进程仍监听旧端口，套上 nginx 就是 502，
+    # 而 UI 上一切正常。显式改了 start_cmd 或 env 时以用户输入为准，不再猜。
+    old_port, new_port = cur.get("port"), merged.get("port")
+    if None not in (old_port, new_port) and str(old_port) != str(new_port):
+        if "start_cmd" not in i or i.get("start_cmd") in (None, ""):
+            merged["start_cmd"] = sub_port(merged["start_cmd"], old_port, new_port)
+        if "env" not in i or i["env"] is None:
+            vars_ = [
+                {**e, "v": sub_port(e.get("v", ""), old_port, new_port)} if isinstance(e, dict) else e
+                for e in vars_
+            ]
     dbm.execute(
         "UPDATE apps SET name=?,type=?,repo_url=?,branch=?,path=?,port=?,domain=?,install_cmd=?,start_cmd=?,env=?,"
         "unit_override=?,db_names=?,unit_template=?,parent_id=?,component_role=?,updated_at=datetime('now') WHERE id=?",
@@ -493,6 +506,8 @@ async def delete_app(app_id: int, purge: bool):
     if app.get("domain"):
         await nginx_ops.remove_vhost(app["name"])
     dbm.execute("DELETE FROM apps WHERE id=?", (app_id,))
+    # 部署记录只属于这个应用，删掉应用后没有任何入口能读到它们（含完整日志文本）。
+    dbm.execute("DELETE FROM deployments WHERE app_id=?", (app_id,))
     if purge:
         _purge_app_dir(app["path"])
 

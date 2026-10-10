@@ -320,7 +320,7 @@ async def cmd_user(a: argparse.Namespace) -> dict:
             Out.error("密码至少 8 位", EXIT_USAGE)
         import re
 
-        if not re.match(r"^[A-Za-z0-9_-]{3,32}$", a.name):
+        if not security.USERNAME_RE.match(a.name):
             Out.error("用户名只能包含字母、数字、下划线与连字符（3-32 位）", EXIT_USAGE)
         role = "viewer" if a.role == "viewer" else "admin"
         if dbm.query_one("SELECT id FROM users WHERE username=?", (a.name,)):

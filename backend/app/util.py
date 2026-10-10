@@ -27,6 +27,18 @@ def is_path(s): return bool(PATH_RE.match(s or ""))
 def is_git_url(s): return bool(s) and (bool(GIT_URL_RE.match(s)) or s.startswith("/"))
 
 
+def sub_port(text, old, new):
+    """把命令/env 文本里**独立成词**的旧端口换成新端口。
+
+    模板把端口同时写进 `port` 字段和 `start_cmd`/`env`，两边一旦不同步，nginx 就反代到
+    一个没人监听的端口（面板显示"部署成功"，实际 502）。用 `(?<!\\d)…(?!\\d)` 而不是
+    `str.replace`：后者会把 `13456` 里的 `3456` 一起换掉，把好好的端口改成别的数字。
+    """
+    if not text or old in (None, "") or new in (None, "") or str(old) == str(new):
+        return text
+    return re.sub(rf"(?<!\d){re.escape(str(old))}(?!\d)", str(new), str(text))
+
+
 def redact_creds(s):
     """打码 URL 里的 `user:password@` 凭据段，只保留用户名。
 
