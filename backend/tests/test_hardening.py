@@ -277,7 +277,7 @@ class TestConfigParsers(unittest.TestCase):
         allowed = {
             "version", "host", "port", "trustProxy", "log", "dataDir", "appRoot",
             "backupDir", "fileRoots", "unitDir", "python", "webDist", "webBuilt",
-            "tokenTtlHours", "maxUploadBytes", "terminalMaxSessions",
+            "tokenTtlHours", "maxUploadBytes", "maxBodyBytes", "terminalMaxSessions",
         }
         self.assertEqual(set(config.as_dict()) - allowed, set(), "as_dict 出现了未登记的配置项")
         self.assertTrue(config.VERSION, "版本号不应为空")

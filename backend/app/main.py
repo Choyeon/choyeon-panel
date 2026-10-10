@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import avatars, config, errors, security
 from . import database as dbm
-from .deps import AuthMiddleware
+from .deps import AuthMiddleware, BodyCapMiddleware
 from .log import warn
 from .routers import (
     alerts, apps, backups, cron, dbops, extras, files, meta, metrics, sites, system, terminal,
@@ -61,6 +61,9 @@ app = FastAPI(
     openapi_url=None,
     lifespan=lifespan,
 )
+# 先加的先被包住：BodyCap 在 Auth 内侧，所以它的 413 照样带上安全响应头并进访问日志，
+# 而 Auth 的 401/403 短路发生在读 body 之前（不认证也能把 body 读完的那类路由本来就没有）。
+app.add_middleware(BodyCapMiddleware)
 app.add_middleware(AuthMiddleware)
 errors.install_handlers(app)
 

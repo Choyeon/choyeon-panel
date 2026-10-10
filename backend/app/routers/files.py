@@ -24,6 +24,26 @@ async def _read_capped(field, cap: int) -> bytes | None:
             return None
 
 
+async def _drain(request: Request, ceiling: int) -> None:
+    """把对端还在发的请求体读完并丢掉（最多读到 ceiling 字节）。
+
+    超限请求不能直接 return 413：此时 body 还没读完，响应一发完服务器就关连接，
+    仍在写入的浏览器收到的是 RST，界面只剩"上传失败"，看不见那句
+    「文件超过 8MB 上限」。读完只花带宽不占内存，而这里的量级由中间件
+    （/api/files 按 CP_MAX_UPLOAD_MB+4MB 封顶）卡在十几 MB。
+
+    尽力而为：收尾失败（流已被消费、客户端提前断开）也不能把一次 413 变成 500。
+    """
+    try:
+        read = 0
+        async for chunk in request.stream():
+            read += len(chunk)
+            if read > ceiling:
+                return
+    except Exception:  # noqa: BLE001
+        return
+
+
 @router.get("/api/files")
 async def files_list(request: Request):
     # 文件接口能直接读到应用目录下的 .env（数据库口令、第三方 key 都在里面），
@@ -54,6 +74,7 @@ async def files_write(request: Request):
     try:
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES:
+            await _drain(request, int(declared) + 1)
             return JSONResponse(
                 status_code=413,
                 content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
@@ -64,10 +85,16 @@ async def files_write(request: Request):
         async for chunk in request.stream():
             raw += chunk
             if len(raw) > config.MAX_UPLOAD_BYTES:
-                return JSONResponse(
-                    status_code=413,
-                    content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
-                )
+                # 先 break 再读干净：在 stream() 的循环里直接 return 会把半截 body
+                # 留在连接上，对端仍在写就撞上 RST（见 _drain）。
+                raw = None
+                break
+        if raw is None:
+            await _drain(request, config.MAX_UPLOAD_BYTES)
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"文件超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},
+            )
         path = request.query_params.get("path") or ""
         # 原样按字节写入：解码成字符串再落盘会把二进制文件（图片/zip/db）毁成 U+FFFD，
         # 而接口仍返回 200，用户以为上传成功。
@@ -129,6 +156,7 @@ async def files_upload(request: Request):
         # multipart 除文件内容外还有 boundary/头部，留 1MB 余量，否则刚好贴限额的
         # 单个文件会因为这几百字节被误判超限。
         if declared and declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES + 1024 * 1024:
+            await _drain(request, int(declared) + 1)
             return JSONResponse(
                 status_code=413,
                 content={"error": f"整个请求超过 {config.MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限"},

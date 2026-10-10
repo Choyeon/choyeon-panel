@@ -133,6 +133,7 @@ AGENTS.md              AI 智能体部署规则（确定性步骤 + 验收标准
 | `CP_TOKEN_TTL_HOURS` | `12` | 登录有效期（1-72） |
 | `CP_LOGIN_LIMIT` | `10` | 每 IP 每分钟登录尝试上限 |
 | `CP_MAX_UPLOAD_MB` | `8` | 单文件上限（nginx `client_max_body_size` 需 ≥ 此值） |
+| `CP_MAX_BODY_MB` | `2` | 非上传接口的请求体上限（超出返回 413；上传类按 `CP_MAX_UPLOAD_MB`+4MB） |
 | `CP_TERMINAL_MAX_SESSIONS` | `4` | 并发终端会话上限 |
 | `CP_AUDIT_KEEP` | `5000` | 审计日志保留条数 |
 | `CP_PYTHON` | `python3` | 系统指标采集解释器 |

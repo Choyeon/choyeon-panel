@@ -122,6 +122,9 @@ LOGIN_LIMIT = _int("CP_LOGIN_LIMIT", 10, 1, 100)          # 每 IP 每分钟
 LOGIN_WINDOW_SEC = 60
 AUDIT_KEEP = _int("CP_AUDIT_KEEP", 5000, 100)             # 审计日志保留条数
 MAX_UPLOAD_BYTES = _int("CP_MAX_UPLOAD_MB", 8, 1, 512) * 1024 * 1024
+# 非上传接口的请求体上限：面板的 JSON 路由最大也就是设置页与 SQL 控制台，
+# 2MB 足够宽松，又能挡住"未登录发几百 MB 让面板吞进内存"这种 OOM。
+MAX_BODY_BYTES = _int("CP_MAX_BODY_MB", 2, 1, 64) * 1024 * 1024
 # 解压上限：压缩包本身被 CP_MAX_UPLOAD_MB 卡住，但 8MB 的 zip 能在头部声明
 # 5GB 的解压后尺寸（zip bomb）。面板是 root 进程，写满磁盘只需要用户点一次"解压"。
 MAX_EXTRACT_BYTES = _int("CP_MAX_EXTRACT_MB", 512, 16, 8192) * 1024 * 1024
@@ -153,6 +156,7 @@ def as_dict() -> dict:
         "fileRoots": FILE_ROOTS,
         # 前端上传前先按这个额度拦一道，免得用户传完 300MB 才被服务端拒绝
         "maxUploadBytes": MAX_UPLOAD_BYTES,
+        "maxBodyBytes": MAX_BODY_BYTES,
         "terminalMaxSessions": TERMINAL_MAX_SESSIONS,
         "unitDir": UNIT_DIR,
         "python": PYTHON,

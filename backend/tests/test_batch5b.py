@@ -300,7 +300,9 @@ class TestUploadRouteGuards(unittest.IsolatedAsyncioTestCase):
             r = await files_router.files_write(Req())
         self.assertEqual(r.status_code, 413)
         pool.assert_not_called()  # 超限的正文不该被交给写盘
-        self.assertLess(len(sent) * 65536, 16 * 1024 * 1024, "应当在刚超限时就停手")
+        cap_chunks = config.MAX_UPLOAD_BYTES // 65536 + 1
+        self.assertGreater(len(sent), cap_chunks, "超限后要把对端剩下的正文读完再答，否则浏览器只看到连接被重置")
+        self.assertLess(len(sent), 400, "收尾也要有上限，不能替对方无限搬运")
 
 
 # ------------------------------------------------------------------ WS 鉴权

@@ -56,6 +56,109 @@ def _json(status: int, msg: str) -> Response:
     return Response(json.dumps({"error": msg}, ensure_ascii=False), status_code=status, media_type="application/json")
 
 
+# 上传类端点自带更宽的额度（multipart 的边界与伴随字段要在文件本体之外再留一截），
+# 其余 /api/ 一律按"一份表单/一条 SQL"的量给。
+UPLOAD_PREFIXES = ("/api/files", "/api/backups", "/api/auth/avatar")
+UPLOAD_HEADROOM = 4 * 1024 * 1024
+
+
+def cap_for(path: str) -> int:
+    if path.startswith(UPLOAD_PREFIXES):
+        return config.MAX_UPLOAD_BYTES + UPLOAD_HEADROOM
+    return config.MAX_BODY_BYTES
+
+
+def _mb(n: int) -> str:
+    return f"{max(1, n // (1024 * 1024))}MB"
+
+
+# 愿意为"把话说清楚"多读的字节数：超过这个量就当对方是拿尺寸当武器，
+# 直接把连接判死，不再替它免费搬运。
+DISCARD_SLACK = 32 * 1024 * 1024
+
+
+async def discard_body(receive, ceiling: int) -> bool:
+    """把对端还在发的请求体读完并丢弃，返回"是否读到了结尾"。
+
+    超限请求**不能**直接回 413：此时 body 还没读完，服务器一发完响应就关连接，
+    仍在写入的客户端收到的是 RST，浏览器给出 net::ERR_CONNECTION_RESET——
+    那句精心写的「文件超过 8MB 上限」永远到不了用户眼前，而用户只会看到"上传失败"。
+    读完只花带宽，不占内存（一块丢一块），所以对真实的大文件上传要读干净再答。
+    ceiling 是给谎报尺寸或纯粹来打带宽的客户端设的闸：超过它就不再配合，
+    接受连接被重置这一后果。
+    """
+    read = 0
+    while read < ceiling:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            return True
+        read += len(message.get("body") or b"")
+        if not message.get("more_body"):
+            return True
+    return False
+
+
+class BodyCapMiddleware:
+    """全局请求体上限：一道口子兜住所有 await req.json()。
+
+    为什么做在中间件而不是每个 handler：JSON 读体现在是 8 个路由各写一遍的
+    `try: body = await req.json()`，靠约定逐个加尺寸检查迟早漏一个；而未登录
+    也能发一个几百 MB 的 JSON 让面板整个吞进内存，那是 OOM 而不是 400。
+    上限本身很宽（默认 2MB，真实表单与 SQL 远在此之下），它量的是尺寸，
+    不管格式——格式仍由各路由判。
+
+    Content-Length 预检挡掉"老老实实报尺寸"的请求；分块传输或谎报尺寸的走
+    计数路径：读到超线就停止把字节交给应用。两条路径都先把 body 处理干净
+    再发 413（见 discard_body），并且同一个连接只回一个响应——应用随后自己
+    那份一律丢弃。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+        cap = cap_for(scope["path"])
+        too_big = f"请求体超过 {_mb(cap)}"
+        declared = Headers(scope=scope).get("content-length")
+        if declared and declared.isdigit() and int(declared) > cap:
+            # 尺寸是对方自己写的，先判断这次值不值得配合：真实上传（几十 MB 以内）
+            # 读干净再答 413，用户能看到明确原因；离谱的直接拒，不替攻击者搬运。
+            if int(declared) <= cap + DISCARD_SLACK:
+                await discard_body(receive, int(declared) + 1)
+            await _json(413, too_big)(scope, receive, send)
+            return
+
+        seen = 0
+        over = []
+
+        async def capped_receive():
+            nonlocal seen
+            message = await receive()
+            if message["type"] != "http.request":
+                return message
+            seen += len(message.get("body") or b"")
+            if seen <= cap:
+                return message
+            if not over:
+                over.append(True)
+                # 此刻应用正卡在 receive() 上等 body：把剩下的读完再答，于是既不
+                # 越界进内存，也不会让对端撞上 RST。读不完（对方一直在发）也照回
+                # 413——总好过让这个连接干挂着，谁也不说话。
+                await discard_body(receive, DISCARD_SLACK)
+                await _json(413, too_big)(scope, receive, send)
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send_once(message):
+            if over and message["type"].startswith("http.response."):
+                return
+            await send(message)
+
+        await self.app(scope, capped_receive, send_once)
+
+
 def need_admin(req: Request) -> JSONResponse | None:
     """中间件只挡得住写操作，读接口得自己表态。
 
