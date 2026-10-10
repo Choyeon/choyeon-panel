@@ -9,6 +9,11 @@
 4. 告警只有"出事"没有"已恢复"，收到通知的人只能自己登录面板确认。
 5. 盘上残留没有主人的 unit = 一个既看不见也关不掉的定时器（本机残留过一对，
    每 5 分钟真的跑一次 certbot renew）。
+6. Type=oneshot 执行中 ActiveState 是 **activating**（不是 active），而此时
+   ExecMainStatus 已经是 0：只认 active 时重叠闸永不触发，照读退出码还会把
+   上一次真正的失败盖成 ok。两条都是线上探针实测出来的。
+7. 执行中就把任务删掉，unit 会以 failed 收尾，而 failed 记录不随文件删除消失，
+   之后每轮告警都指着一个不存在的服务报 crit。
 """
 
 import asyncio
@@ -322,6 +327,41 @@ class TestRunNowOverlap(unittest.TestCase):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             self.fail("执行结束后锁没释放，之后每次手动执行都会被自己挡住")
+
+
+class TestCleanupLeavesNoFailedUnit(unittest.TestCase):
+    """停用/删除要停掉正在跑的那一轮，并在 systemd 里清干净。
+
+    线上出现过：任务执行中就被删除，unit 文件在 ExecStart 期间消失，systemd 把该轮
+    记成 failed，而 failed 记录不随文件删除而消失——之后每轮告警都报
+    "存在 failed 状态服务: panel-cron-N.service"，指向一个已经不存在的任务。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="cp_b5i_clean_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        patcher = mock.patch.object(config, "UNIT_DIR", self.dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.calls = []
+
+        async def run(cmd, args, cwd=None, timeout=120, env=None):
+            self.calls.append([cmd, *args])
+            return {"code": 0, "out": ""}
+
+        p2 = mock.patch.object(C, "run", run)
+        p2.start()
+        self.addCleanup(p2.stop)
+
+    def test_stop_and_reset_failed_are_issued(self):
+        tid = 4242
+        for ext in ("service", "timer"):
+            Path(f"{self.dir}/panel-cron-{tid}.{ext}").write_text("[Unit]\n")
+        asyncio.run(C._cleanup_units({"id": tid, "enabled": 1}))
+        base = f"panel-cron-{tid}.service"
+        self.assertIn(["systemctl", "stop", base], self.calls, "执行中的那轮必须先停")
+        self.assertIn(["systemctl", "reset-failed", base], self.calls, "否则 failed 记录长期挂在 list-units 里")
+        self.assertEqual(os.listdir(self.dir), [], "两份 unit 文件都要清掉")
 
 
 class TestCronLogRoute(unittest.TestCase):

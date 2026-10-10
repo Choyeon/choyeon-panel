@@ -423,10 +423,15 @@ async def _sync_units(task: dict) -> None:
     base = _unit_base(task["id"])
     if not task["enabled"]:
         await run("systemctl", ["disable", "--now", f"{base}.timer"], timeout=30)
+        # 正在跑的这一轮必须先停：unit 文件在执行中被删，systemd 会把该轮记成 failed，
+        # 而 failed 记录在文件删除后仍留在 list-units 里——之后每轮告警都报
+        # "存在 failed 状态服务: panel-cron-N.service"，指着一个已经不存在的任务。
+        await run("systemctl", ["stop", f"{base}.service"], timeout=30)
         for f in (svc, tmr):
             if Path(f).exists():
                 Path(f).unlink()
         await run("systemctl", ["daemon-reload"])
+        await run("systemctl", ["reset-failed", f"{base}.service"], timeout=30)
         return
     argv = _validate_argv(json.loads(task["argv"] or "[]"))
     cal = to_oncalendar(parse_expr(task["expr"]))
