@@ -461,6 +461,34 @@ def forget_app(name: str) -> None:
         dbm.delete_setting(key)
 
 
+def rename_app(old_name: str, new_name: str) -> None:
+    """应用改名时，把按名字编的告警标记搬到新名字下。
+
+    这四个键只由应用名决定（见 `probe_marker_keys`），而改名走的是普通的
+    `UPDATE apps SET name=?`，没有任何代码会跟着动它们，实测后果是三种"面板看着
+    正常、告警已经坏了"：
+    - `probe_expect:<旧名>`：管理员单独给这个应用设过的预期状态码就此失效，探活悄悄
+      回落到全局 `alert_probe_expect`；Settings 里那条覆写还在、看着是生效的。
+    - `notified:probe:<旧名>`：改名前正处于"已发过告警"的状态时，这个标记此后再无人
+      消费（新 code 是 `probe:<新名>`），「已恢复」永远不发——约定 5 断在这里。
+    - `sent:probe-<旧名>`：留在旧名上是死行，新名字从"今天没发过"重新开始，
+      改名当天同一次故障可能收到两条通知。
+
+    搬的是值，不是历史：`alerts_log` 里 `probe:<旧名>` 的行不跟着改（约定 4，
+    历史属于改名那一刻已经发生的事）。空值（`get_setting` 拿到 None/""）不覆盖
+    新名字上已有的值，只把旧行删掉——新键有值说明它自己已经在用了。
+    """
+    old_keys = probe_marker_keys(old_name)
+    new_keys = probe_marker_keys(new_name)
+    if old_keys == new_keys:
+        return
+    for old_key, new_key in zip(old_keys, new_keys):
+        val = dbm.get_setting(old_key)
+        if val:
+            dbm.set_setting(new_key, val)
+        dbm.delete_setting(old_key)
+
+
 async def run_probes() -> list[dict]:
     """对所有配了端口的应用做存活探测，结果走同一套 alerts_log 去重路径。
 

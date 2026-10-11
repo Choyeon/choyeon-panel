@@ -237,6 +237,26 @@ def _validate_target(kind: str, target):
             raise RuntimeError("SQLite 备份目标应用不存在")
 
 
+def rename_app(old_name: str, new_name: str) -> None:
+    """应用改名后，把按应用名存目标的备份任务一起改名。
+
+    `kind='app'` 的 target 存的就是应用名——`backup_runner` 按
+    `SELECT path FROM apps WHERE name=?` 找目录，`_restore_app` 也一样。应用改名时
+    这一行不会跟着动，于是它指向一个已经不存在的名字：timer 每晚跑一次 runner 就
+    SystemExit 一次（"应用 x 不存在"），面板上这条任务还是"已启用"，只有翻
+    journalctl 才发现备份早就不产出了。⑤L 加的 `target_missing` 只是把坏状态**显示**
+    出来，改名这件事本身应该让任务继续跟着应用走。
+
+    `kind='sqlite'` 现在按 app_id 存（改名不影响它），但 `_validate_target` 明写了
+    "兼容历史的名型写法"，库里真有这种行，所以名型的那一份也一起带走。
+    匹配用精确等值而不是 LIKE：应用名允许连字符，模糊匹配会误伤别的任务。
+    """
+    dbm.execute(
+        "UPDATE backups SET target=? WHERE kind IN ('app','sqlite') AND target=?",
+        (new_name, old_name),
+    )
+
+
 def _validate_fields(i: dict):
     if i.get("schedule") is not None and i["schedule"] not in ("manual", "daily", "weekly"):
         raise RuntimeError("schedule 必须是 manual/daily/weekly")

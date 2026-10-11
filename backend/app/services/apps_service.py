@@ -460,6 +460,15 @@ def update_app(app_id: int, i: dict) -> dict:
             app_id,
         ),
     )
+    if cur["name"] != merged["name"]:
+        # 改名在这一步已经进库了，后面两件事必须跟着做，而且要放在这里而不是
+        # apply_edited：apply_edited 有 unit_override、域名冲突等多条提前返回的路径，
+        # 少跑一次就留下按旧名字编的状态——路由那边照样报"已保存"。
+        # systemd unit 与 nginx 站点也在改名范围内，但那部分由 apply_edited 负责。
+        from . import alerts_service, backup_service
+
+        alerts_service.rename_app(cur["name"], merged["name"])
+        backup_service.rename_app(cur["name"], merged["name"])
     return get_app(app_id)
 
 
