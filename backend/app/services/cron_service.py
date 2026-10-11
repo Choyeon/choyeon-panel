@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import json
 import os
@@ -24,8 +25,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .. import aio_db
-from .. import config
+from .. import aio_db, config
 from .. import database as dbm
 from ..errors import BadInput, NotFound
 from ..util import kill_group, redact_creds, run, unit_env_value, unit_exec_arg_escape, unit_pct_escape
@@ -278,8 +278,8 @@ def to_oncalendar(spec: dict) -> str:
             "该表达式同时限定了「几号」和「星期几」：cron 是满足其一即执行，"
             "systemd timer 是两者都满足才执行。为避免按错误的时间执行，请拆成两条任务"
         )
-    date = "*-{0}-{1}".format(_set_txt(spec["mon"], 1, 12), _set_txt(spec["dom"], 1, 31))
-    clock = "{0}:{1}:00".format(_set_txt(spec["hour"], 0, 23), _set_txt(spec["minute"], 0, 59))
+    date = "*-{}-{}".format(_set_txt(spec["mon"], 1, 12), _set_txt(spec["dom"], 1, 31))
+    clock = "{}:{}:00".format(_set_txt(spec["hour"], 0, 23), _set_txt(spec["minute"], 0, 59))
     dow = "" if _is_full(spec["dow"], 0, 6) else _dow_txt(spec["dow"]) + " "
     return f"{dow}{date} {clock}"
 
@@ -711,10 +711,9 @@ async def update_task(tid: int, body: dict) -> dict:
         await aio_db.execute(
             "UPDATE cron_task SET expr=?,argv=?,enabled=? WHERE id=?", (cur["expr"], cur["argv"], cur["enabled"], tid)
         )
-        try:
+        # 还原时还同步不上就是环境问题，别盖掉原始报错
+        with contextlib.suppress(Exception):
             await _sync_units(cur)
-        except Exception:  # noqa: BLE001
-            pass  # 还原时还同步不上就是环境问题，别盖掉原始报错
         raise BadInput(f"定时任务更新失败，已还原为改动前的配置：{e}") from e
     return _row_out(row)
 

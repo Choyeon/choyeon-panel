@@ -30,8 +30,7 @@ import re
 import urllib.request
 from contextlib import suppress
 
-from .. import aio_db
-from .. import config
+from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
 from ..util import disk_usage_pct, is_http_url, is_unit, run
@@ -482,7 +481,7 @@ def rename_app(old_name: str, new_name: str) -> None:
     new_keys = probe_marker_keys(new_name)
     if old_keys == new_keys:
         return
-    for old_key, new_key in zip(old_keys, new_keys):
+    for old_key, new_key in zip(old_keys, new_keys, strict=False):
         val = dbm.get_setting(old_key)
         if val:
             dbm.set_setting(new_key, val)

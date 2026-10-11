@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import time
 from urllib.parse import urlsplit
@@ -111,10 +112,8 @@ async def _settle(receive) -> None:
     正常请求一拍就读完（GET 的结尾帧早已入队）；走满超时的只有"发了请求头就吊着
     不发正文"的客户端，那种连接不值得让它把已经算好的响应一起拖死。
     """
-    try:
+    with contextlib.suppress(Exception):
         await asyncio.wait_for(discard_body(receive, DISCARD_SLACK), SETTLE_WAIT_SEC)
-    except Exception:  # noqa: BLE001
-        pass
 
 
 async def _settled_json(status: int, msg: str, scope, receive, send) -> None:

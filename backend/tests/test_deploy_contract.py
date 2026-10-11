@@ -120,7 +120,7 @@ class TestEnvSync(unittest.TestCase):
                           CP_PORT="3300")
         lines = dict(
             (k, v) for k, v in (
-                l.split("=", 1) for l in body.splitlines() if "=" in l and not l.startswith("#")
+                ln.split("=", 1) for ln in body.splitlines() if "=" in ln and not ln.startswith("#")
             )
         )
         self.assertEqual(lines["CP_PORT"], "3300")
@@ -172,8 +172,8 @@ class TestCliContract(unittest.TestCase):
         return out
 
     def _schema(self):
-        import io
         import contextlib
+        import io
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             return asyncio.run(self.cli.cmd_schema(argparse.Namespace()))

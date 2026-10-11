@@ -498,10 +498,9 @@ class TestAppActionResult(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(apps_service, "is_active", _inactive),
             mock.patch.object(apps_service, "run", _noop),
             mock.patch.object(apps_service, "UNIT_START_GRACE_SEC", 0.05),
-            mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01),
+            mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01),self.assertRaises(RuntimeError) as ctx
         ):
-            with self.assertRaises(RuntimeError) as ctx:
-                await apps_service.app_action(self.app_id, "start")
+            await apps_service.app_action(self.app_id, "start")
         self.assertIn("没能稳定存活", str(ctx.exception))
 
     async def test_failure_is_raised_not_reported_in_ok(self):

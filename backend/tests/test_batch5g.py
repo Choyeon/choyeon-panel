@@ -307,9 +307,8 @@ class TestUnitOverrideGrammar(unittest.TestCase):
 
     def test_dash_leading_name_rejected(self):
         for bad in ("-ping.service", "--all.service", "@x.service", ".hidden.service"):
-            with self.subTest(bad=bad):
-                with self.assertRaises(RuntimeError):
-                    self._check(bad)
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                self._check(bad)
 
     def test_suffix_and_length_still_required(self):
         with self.assertRaises(RuntimeError):
@@ -442,10 +441,9 @@ class TestAppNginxScopedToOwnFiles(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 # 目录外的路径由 _safe_conf_path 先拦下（不是"不属于本应用"，而是根本不能写）
                 nginx_ops.assert_app_conf("/tmp/x.conf", 8000, "app.example.com")
-        with mock.patch.object(nginx_ops, "find_app_configs", lambda *_a: []):
-            with self.assertRaises(RuntimeError):
-                # 没有反代（匹配不到任何文件）时，应用详情页也没有可编辑的配置
-                nginx_ops.assert_app_conf(self.OWN, None, None)
+        with mock.patch.object(nginx_ops, "find_app_configs", lambda *_a: []), self.assertRaises(RuntimeError):
+            # 没有反代（匹配不到任何文件）时，应用详情页也没有可编辑的配置
+            nginx_ops.assert_app_conf(self.OWN, None, None)
 
 
 if __name__ == "__main__":

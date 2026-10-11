@@ -27,7 +27,8 @@ from unittest import mock
 
 from starlette.testclient import TestClient
 
-from app import config, database as dbm, main, security
+from app import config, main, security
+from app import database as dbm
 from app.routers import alerts as alerts_router
 from app.services import alerts_service
 
@@ -545,7 +546,7 @@ class TestAppProbe(_HistoryCase):
               mock.patch("asyncio.open_connection", connected),
               mock.patch.object(alerts_service, "notify", mock.AsyncMock())):
             first = asyncio.run(alerts_service.run_probes())
-            second = asyncio.run(alerts_service.run_probes())
+            asyncio.run(alerts_service.run_probes())
         self.assertEqual(first[0]["level"], "ok")
         rows = _rows(code)
         self.assertEqual(len(rows), 1, "存活状态没变化就不该再多一行")

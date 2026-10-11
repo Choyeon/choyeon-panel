@@ -379,7 +379,7 @@ def _sql_lit(v) -> str:
 
 
 def _count_affected(out: str) -> int:
-    return len([l for l in (out or "").split("\n") if l != ""])
+    return len([ln for ln in (out or "").split("\n") if ln != ""])
 
 
 def _row_predicate(key, pk: list) -> str:
@@ -473,7 +473,7 @@ async def write_row(db: str, schema: str, table: str, action: str, key, values) 
         out = await psql(f"INSERT INTO {quoted} ({col_sql}) VALUES ({val_sql}) RETURNING {ret};", db, quiet=True)
         first = (out or "").split("\n")[0]
         got = first.split("|") if first else []
-        newpk = dict(zip(meta["pk"], got)) if meta["pk"] and len(got) == len(meta["pk"]) else {}
+        newpk = dict(zip(meta["pk"], got, strict=False)) if meta["pk"] and len(got) == len(meta["pk"]) else {}
         return {"affected": 1, "pk": newpk}
 
     pred = _row_predicate(key, meta["pk"])
@@ -565,7 +565,7 @@ async def _rcli(args: list) -> str:
 
 
 def _lines(out: str) -> list:
-    return [l for l in out.split("\n") if l != ""]
+    return [ln for ln in out.split("\n") if ln != ""]
 
 
 async def _rcli_exact(args: list) -> str:
@@ -701,11 +701,11 @@ async def _rp(cmds: list, kinds: list | None = None) -> list:
         # 回退同样会卡在同一个口令上，直接把服务端原文给用户。
         raise RuntimeError(str(e)) from None
     except redis_client.RedisConnectionError:
-        return [await _r_cli([str(a) for a in cmd], kind) for cmd, kind in zip(cmds, kinds)]
+        return [await _r_cli([str(a) for a in cmd], kind) for cmd, kind in zip(cmds, kinds, strict=False)]
     for rep in reps:
         if isinstance(rep, redis_client.RedisError):
             raise RuntimeError(str(rep))
-    return [_shape(rep, kind) for rep, kind in zip(reps, kinds)]
+    return [_shape(rep, kind) for rep, kind in zip(reps, kinds, strict=False)]
 
 
 async def _r(cmd: list, kind: str = "value"):
@@ -740,7 +740,10 @@ async def redis_scan(cursor: str = "0", pattern: str = "*", count: int = 200) ->
 
 
 def _pairs(flat: list) -> list:
-    return [{"field": flat[i], "value": flat[i + 1] if i + 1 < len(flat) else ""} for i in range(0, len(flat) - len(flat) % 2, 2)]
+    return [
+        {"field": flat[i], "value": flat[i + 1] if i + 1 < len(flat) else ""}
+        for i in range(0, len(flat) - len(flat) % 2, 2)
+    ]
 
 
 async def _redis_key_cli(k: str) -> dict:
@@ -769,7 +772,11 @@ async def _redis_key_cli(k: str) -> dict:
     elif ktype == "set":
         n = int(await _rcli(["SCARD", k]) or 0)
         truncated = n > 200
-        data = _lines(await _rcli(["SSCAN", k, "0", "COUNT", "200"]))[1:] if truncated else _lines(await _rcli(["SMEMBERS", k]))
+        data = (
+            _lines(await _rcli(["SSCAN", k, "0", "COUNT", "200"]))[1:]
+            if truncated
+            else _lines(await _rcli(["SMEMBERS", k]))
+        )
     elif ktype == "zset":
         n = int(await _rcli(["ZCARD", k]) or 0)
         truncated = n > 200
@@ -793,7 +800,7 @@ async def redis_key(k: str) -> dict:
         return await _redis_key_cli(k)
     except redis_client.RedisError as e:
         raise RuntimeError(str(e)) from None
-    reps = [_shape(r, kind) for r, kind in zip(raw, kinds)]
+    reps = [_shape(r, kind) for r, kind in zip(raw, kinds, strict=False)]
     if isinstance(reps[0], redis_client.RedisError):
         raise RuntimeError(str(reps[0]))
     ktype = reps[0]

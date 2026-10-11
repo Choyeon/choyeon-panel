@@ -368,8 +368,8 @@ class TestPgServiceWithClient(PgAgainstFake):
         self.assertFalse(out["truncated"])
 
     async def test_list_and_set_and_zset_details_keep_the_old_shapes(self):
-        l, _ = await self._call(detail_handler("list", 5000, ["m0", "m1"]), lambda: pg_service.redis_key("l"))
-        self.assertEqual((l["value"], l["truncated"]), (["m0", "m1"], True))
+        lst, _ = await self._call(detail_handler("list", 5000, ["m0", "m1"]), lambda: pg_service.redis_key("l"))
+        self.assertEqual((lst["value"], lst["truncated"]), (["m0", "m1"], True))
         s, _ = await self._call(detail_handler("set", 1, ["x", "y"]), lambda: pg_service.redis_key("s"))
         self.assertEqual((s["value"], s["truncated"]), (["x", "y"], False))
         z, _ = await self._call(detail_handler("zset", 2, ["a", "1", "b", "2"]),

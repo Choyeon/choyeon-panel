@@ -30,9 +30,14 @@ if str(BACKEND) not in sys.path:
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_5c_ut_"))
 os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_5c_roots_"))
 
-from app import avatars, config, deps, security  # noqa: E402
+from app import (  # noqa: E402
+    avatars,
+    config,
+    deps,
+    main,  # noqa: E402
+    security,
+)
 from app import database as dbm  # noqa: E402
-from app import main  # noqa: E402
 from app.routers import extras  # noqa: E402
 from app.services import backup_service as B  # noqa: E402
 
@@ -427,9 +432,8 @@ class TestAvatarPurge(unittest.TestCase):
 
         for pw, why in (("short", "至少 8 位"), ("A" * 200, "最多 128 位")):
             args = cli.build_parser().parse_args(["user", "create", _uid("cc"), "--password", pw, "--json"])
-            with mock.patch.object(cli.Out, "json_mode", True):
-                with self.assertRaises(SystemExit) as cm:
-                    asyncio.run(cli.cmd_user(args))
+            with mock.patch.object(cli.Out, "json_mode", True), self.assertRaises(SystemExit) as cm:
+                asyncio.run(cli.cmd_user(args))
             self.assertEqual(cm.exception.code, cli.EXIT_USAGE, why)
         self.assertEqual([f for f in os.listdir(self.dir)], [])
 

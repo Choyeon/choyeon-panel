@@ -295,9 +295,8 @@ class TestRunNowOverlap(unittest.TestCase):
                    f"ExecMainStartTimestamp=Sun 2026-10-11 03:00:00 CST\nId=panel-cron-{self.row['id']}.service\n")
         with mock.patch.object(C, "run", _run_dispatcher(results=results)), \
                 mock.patch.object(C, "_resolve_binary", lambda n: "/usr/bin/true"), \
-                mock.patch.object(asyncio, "create_subprocess_exec") as sub:
-            with self.assertRaises(BadInput) as ctx:
-                asyncio.run(C.run_now(self.row["id"]))
+                mock.patch.object(asyncio, "create_subprocess_exec") as sub, self.assertRaises(BadInput) as ctx:
+            asyncio.run(C.run_now(self.row["id"]))
         self.assertIn("定时器正在执行", str(ctx.exception))
         sub.assert_not_called()
 
@@ -307,9 +306,8 @@ class TestRunNowOverlap(unittest.TestCase):
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with mock.patch.object(C, "run", _run_dispatcher(results="")), \
-                mock.patch.object(C, "_resolve_binary", lambda n: "/usr/bin/true"):
-            with self.assertRaises(BadInput) as ctx:
-                asyncio.run(C.run_now(self.row["id"]))
+                mock.patch.object(C, "_resolve_binary", lambda n: "/usr/bin/true"), self.assertRaises(BadInput) as ctx:
+            asyncio.run(C.run_now(self.row["id"]))
         self.assertIn("正在执行中", str(ctx.exception))
 
     def test_lock_released_after_run(self):
@@ -369,6 +367,7 @@ class TestCronLogRoute(unittest.TestCase):
 
     def setUp(self):
         from fastapi import FastAPI, Request
+
         from app.routers.cron import router as cron_router
 
         api = FastAPI()

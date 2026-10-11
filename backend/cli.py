@@ -415,7 +415,9 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         # 删掉最后一个管理员后，面板回到「未创建管理员」状态——此时任何能访问到面板的人
         # 都可以先一步把管理员注册走。只说"已删除"没人会意识到这一点。
         left = dbm.query_one("SELECT COUNT(*) c FROM users WHERE role='admin'")["c"]
-        note = "" if left else "；本机已无管理员，请立即 printf '%s' \"$PW\" | choyeonctl user create <name> --password-stdin --role admin"
+        note = "" if left else (
+            "；本机已无管理员，请立即 printf '%s' \"$PW\" | choyeonctl user create <name> --password-stdin --role admin"
+        )
         Out.result({"ok": True, "username": a.name, "adminLeft": left}, f"已删除 {a.name}{note}")
         return {"ok": True, "adminLeft": left}
 
@@ -611,7 +613,8 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
         "conventions": {
             "json": "所有命令支持全局 --json，输出结构化结果",
             "exitCodes": {"0": "成功", "1": "执行失败", "2": "用法错误", "3": "前置条件不满足"},
-            "nonInteractive": "口令通过 --password-stdin 从标准输入传入（argv 形式仅限手工排障，会留在 ps 与 shell 历史里）；破坏性操作需显式 --yes",
+            "nonInteractive": "口令通过 --password-stdin 从标准输入传入"
+            "（argv 形式仅限手工排障，会留在 ps 与 shell 历史里）；破坏性操作需显式 --yes",
         },
         "commands": [
             {"name": "deploy", "args": ["--prefix", "--port", "--branch", "--skip-nginx", "--no-deps"],

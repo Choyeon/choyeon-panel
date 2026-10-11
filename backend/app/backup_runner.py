@@ -1,4 +1,5 @@
 """CLI 备份执行器：python3 -m app.backup_runner <backupId>（由 systemd timer 调用）。"""
+import contextlib
 import datetime
 import gzip
 import os
@@ -123,17 +124,13 @@ def sqlite_snapshot(src: str, dest: str) -> None:
     except BaseException:
         for p in (tmp, dest):
             if os.path.exists(p):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(p)
-                except OSError:
-                    pass
         raise
     # 成功也要删掉中间库：它是未压缩的整库副本，留在备份目录里白占一倍空间，
     # 而且在备份文件页只会显示成一个"仅可下载"的读不了的文件。
-    try:
+    with contextlib.suppress(OSError):
         os.unlink(tmp)
-    except OSError:
-        pass
 
 
 def main(bk: dict):
@@ -214,10 +211,8 @@ def _sqlite_target_app(target):
 
 def _cleanup(path: str):
     if os.path.exists(path):
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(path)
-        except OSError:
-            pass
 
 
 def _prune_order(bid: int) -> list:

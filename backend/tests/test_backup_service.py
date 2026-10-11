@@ -587,9 +587,8 @@ class TestRestoreOffEventLoop(unittest.TestCase):
             raise RuntimeError("Unit is masked")
 
         log = []
-        with mock.patch.object(SYS, "service_action", refusing_stop):
-            with self.assertRaises(RuntimeError):
-                asyncio.run(B._restore_sqlite(self.bk, src, log))
+        with mock.patch.object(SYS, "service_action", refusing_stop), self.assertRaises(RuntimeError):
+            asyncio.run(B._restore_sqlite(self.bk, src, log))
         self.assertEqual(self.calls, ["stop"], "停失败后不能再补一次 start")
         self.assertEqual(self._sqlite_rows(cur), [("current",)], "没停成功就不该覆盖现库")
 

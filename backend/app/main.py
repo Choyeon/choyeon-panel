@@ -16,7 +16,18 @@ from . import database as dbm
 from .deps import AuthMiddleware, BodyCapMiddleware
 from .log import warn
 from .routers import (
-    alerts, apps, backups, cron, dbops, extras, files, meta, metrics, sites, system, terminal,
+    alerts,
+    apps,
+    backups,
+    cron,
+    dbops,
+    extras,
+    files,
+    meta,
+    metrics,
+    sites,
+    system,
+    terminal,
 )
 from .services import alerts_service, apps_service, metrics_store
 
@@ -106,7 +117,13 @@ async def auth_status():
 
 
 def _user_token(username: str, role: str, nickname: str = '', avatar: str = '') -> dict:
-    return {"token": security.sign_token(username, role), "role": role, "username": username, "nickname": nickname, "avatar": avatar}
+    return {
+        "token": security.sign_token(username, role),
+        "role": role,
+        "username": username,
+        "nickname": nickname,
+        "avatar": avatar,
+    }
 
 
 @app.post("/api/auth/setup")
@@ -172,7 +189,10 @@ async def login(req: Request):
         # 老版本放行过的用户名可能不符合当前规则，而 verify_token 会拒绝这种主体。
         # 照签的话用户看到的是"登录成功，然后每个请求 401"，无从下手；在这里说清楚。
         await aio_db.audit(user["username"], "login_rejected", ip)
-        return JSONResponse(status_code=403, content={"error": "该账号的用户名不符合当前规则，请由管理员用 choyeonctl user create 重建账号"})
+        return JSONResponse(
+            status_code=403,
+            content={"error": "该账号的用户名不符合当前规则，请由管理员用 choyeonctl user create 重建账号"},
+        )
     await aio_db.audit(user["username"], "login")
     security.clear_attempts(ip)
     return _user_token(user["username"], role, user.get("nickname", ""), user.get("avatar", ""))

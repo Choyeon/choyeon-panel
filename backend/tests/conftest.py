@@ -18,6 +18,7 @@ setdefault 就全部失效，整轮用例会直接读写生产库。2026-10-11 �
 `/root/backups/panel/manual/panel-pre-update-*.tar.gz` 才恢复。这里不接受任何外部值。
 """
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -38,8 +39,8 @@ os.environ["CP_DATA_DIR"] = tempfile.mkdtemp(prefix="cp_data_guard_")
 if _external_data_dir:
     # print 而不是 raise：静默改写更危险，运行的人必须看得见"我传的路径被忽略了"。
     print(
-        "[conftest] 忽略外部 CP_DATA_DIR=%r，已改用会话临时目录；"
-        "要跑线上探针请用 .venv/bin/python <script>，不要 -m pytest。" % (_external_data_dir,)
+        f"[conftest] 忽略外部 CP_DATA_DIR={_external_data_dir!r}，已改用会话临时目录；"
+        "要跑线上探针请用 .venv/bin/python <script>，不要 -m pytest。"
     )
 
 
@@ -59,7 +60,5 @@ def pytest_sessionfinish(session, exitstatus):
         if os.path.isdir(p) and not os.path.islink(p):
             shutil.rmtree(p, ignore_errors=True)
         else:
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(p)
-            except OSError:
-                pass

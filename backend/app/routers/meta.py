@@ -16,8 +16,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .. import config
-from .. import aio_db
+from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
 from ..services import cert_ops, systemd_ops
@@ -418,5 +417,8 @@ async def doctor_fix(req: Request):
     if check:
         res = await check()
         title = next((t for cid, t, _ in _CHECKS if cid == fid), fid)
-        item = {"id": fid, "title": title, "status": res["status"], "detail": res["detail"], "fix": res["fix"], "fixable": True}
+        item = {
+            "id": fid, "title": title, "status": res["status"],
+            "detail": res["detail"], "fix": res["fix"], "fixable": True,
+        }
     return {"ok": r["code"] == 0, "message": msg, "item": item}

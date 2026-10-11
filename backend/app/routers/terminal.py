@@ -12,10 +12,8 @@ import threading
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import config
-from .. import aio_db
+from .. import aio_db, config, security
 from .. import database as dbm
-from .. import security
 from ..log import warn
 
 router = APIRouter()

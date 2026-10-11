@@ -33,10 +33,15 @@ if str(BACKEND) not in sys.path:
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_5r_ut_"))
 os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_5r_roots_"))
 
-from app import config, deps, security  # noqa: E402
+from app import (  # noqa: E402
+    config,
+    deps,
+    main,  # noqa: E402
+    security,
+)
 from app import database as dbm  # noqa: E402
-from app import main  # noqa: E402
-from app.routers import apps as apps_router, dbops, extras, meta, system  # noqa: E402
+from app.routers import apps as apps_router  # noqa: E402
+from app.routers import dbops, extras, meta, system  # noqa: E402
 
 _seq = itertools.count()
 LOGIN_IP = "10.0.0.9"

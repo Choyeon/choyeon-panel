@@ -5,14 +5,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from .. import aio_db
-from .. import avatars
+from .. import aio_db, avatars, security
 from .. import database as dbm
-from .. import security
 from ..deps import need_admin as _need_admin
+from ..errors import err_json
 from ..services import alerts_service, nginx_ops
 from ..util import is_http_url, redact_creds
-from ..errors import err_json
 
 router = APIRouter()
 

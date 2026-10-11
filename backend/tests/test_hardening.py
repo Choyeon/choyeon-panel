@@ -362,6 +362,18 @@ class TestTokenRevocation(unittest.TestCase):
                 self.assertEqual(dbm.get_setting(f"token_epoch:{self.user}"), "123")
         self.assertEqual(spy.call_count, 0, "TTL 内应命中缓存，不该重复 SELECT")
 
+    def test_jwt_secret_survives_a_cached_empty_read(self):
+        """回归：_auth_cache 里残留 None 时（读失败/竞态造成的空读会活满 TTL），
+        jwt_secret 必须绕过缓存直读库中真值，而不是再生成一把新密钥——
+        那会把所有已签发 token 一起作废，表现为「刚登录就掉线」。
+        实测：test_batch5r 的 viewer 详情用例 mock 掉 query_one 后单跑必红，
+        全量跑则看前序用例的真实读取是否落在 3 秒缓存窗口内，红绿随机器速度漂。
+        """
+        s1 = security.jwt_secret()
+        dbm._auth_cache["jwt_secret"] = (None, time.monotonic())
+        self.assertEqual(security.jwt_secret(), s1, "缓存 None 不能触发密钥再生成")
+        self.assertEqual(dbm._auth_cache["jwt_secret"][0], s1, "直读真值后缓存要被刷正")
+
     def _raw(self, **claims):
         return jwt.encode(
             {"sub": self.user, "role": "viewer", "ver": security._user_epoch(self.user),
@@ -1020,9 +1032,8 @@ class TestRollback(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(apps_service, "is_active", new=mock.AsyncMock(return_value=False)), \
              mock.patch.object(apps_service, "_live_pid", new=mock.AsyncMock(return_value=0)), \
              mock.patch.object(apps_service, "UNIT_START_GRACE_SEC", 0.02), \
-             mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01):
-            with self.assertRaises(RuntimeError) as ctx:
-                await apps_service.rollback_app(self.app_id)
+             mock.patch.object(apps_service, "UNIT_SAMPLE_SEC", 0.01), self.assertRaises(RuntimeError) as ctx:
+            await apps_service.rollback_app(self.app_id)
         self.assertIn("代码已回滚到", str(ctx.exception), "要说清盘上已经是目标版本")
         self.assertIn("但服务没起来", str(ctx.exception))
         self.assertIn("没能稳定存活", str(ctx.exception))

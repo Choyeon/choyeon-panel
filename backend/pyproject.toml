@@ -25,7 +25,10 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "BLE"]
 ignore = ["B008", "SIM108"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["E501"]
+# 测试夹具有意为之的形态，逐条 noqa 只会淹没测试正文：
+# SIM115 故意持有 fd（模拟占用/泄漏场景）、SIM117 嵌套 arrange 更可读、
+# B017 失败路径故意宽断言、B023 闭包在同一迭代内即被调用。
+"tests/*" = ["E501", "SIM115", "SIM117", "B017", "B023"]
 
 [tool.mypy]
 python_version = "3.11"

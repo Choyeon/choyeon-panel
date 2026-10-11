@@ -188,7 +188,9 @@ async def files_archive(request: Request):
         paths = body.get("paths") or []
         if not isinstance(paths, list):
             return JSONResponse(status_code=400, content={"error": "paths 要是数组"})
-        r = await run_in_threadpool(files_service.make_archive, [str(x) for x in paths], str(body.get("name") or "archive.tar.gz"))
+        r = await run_in_threadpool(
+            files_service.make_archive, [str(x) for x in paths], str(body.get("name") or "archive.tar.gz")
+        )
         await aio_db.audit(request.state.cp_sub, "file:archive", f"{len(paths)} 项")
         return r
     except Exception as e:  # noqa: BLE001

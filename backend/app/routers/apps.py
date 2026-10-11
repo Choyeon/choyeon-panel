@@ -1,3 +1,4 @@
+import contextlib
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -6,10 +7,10 @@ from fastapi.responses import JSONResponse
 from .. import aio_db
 from .. import database as dbm
 from ..deps import need_admin
+from ..errors import err_json
 from ..services import apps_service, nginx_ops, systemd_ops
 from ..templates import apply_template
 from ..util import parse_lines, redact_creds
-from ..errors import err_json
 from .system import log_stream_response
 
 router = APIRouter()
@@ -73,7 +74,10 @@ async def app_get(app_id: int, req: Request):
             if p:
                 fam.insert(0, p)
         if not kids and not any(x["id"] == a["id"] for x in fam):
-            fam.insert(0, {"id": a["id"], "name": a["name"], "type": a["type"], "parent_id": a["parent_id"], "component_role": a.get("component_role") or ""})
+            fam.insert(0, {
+                "id": a["id"], "name": a["name"], "type": a["type"],
+                "parent_id": a["parent_id"], "component_role": a.get("component_role") or "",
+            })
         out["components"] = fam
     else:
         out["components"] = []
@@ -116,10 +120,8 @@ async def _create_group(req: Request, comps: list):
     except Exception as e:  # noqa: BLE001
         # 半途失败要把已建的组件清掉，否则留下没有父的孤儿应用
         for a in created:
-            try:
+            with contextlib.suppress(Exception):
                 await apps_service.delete_app(a["id"], False)
-            except Exception:  # noqa: BLE001
-                pass
         return err_json(e)
 
 

@@ -32,7 +32,9 @@ from unittest import mock
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_5j_ut_"))
 
 from app import config, errors  # noqa: E402
-from app.services import nginx_ops, pg_service as P, system_metrics as M  # noqa: E402
+from app.services import nginx_ops  # noqa: E402
+from app.services import pg_service as P
+from app.services import system_metrics as M
 from app.util import redact_creds  # noqa: E402
 
 

@@ -170,17 +170,15 @@ class TestExtractLimits(unittest.TestCase):
     def test_declared_bomb_is_rejected_before_any_write(self):
         src = self._zip("big.zip", [("a.txt", b"x" * 4096)])
         dest = os.path.join(self.root, "out")
-        with mock.patch.object(config, "MAX_EXTRACT_BYTES", 1024):
-            with self.assertRaises(RuntimeError) as cm:
-                files_service.extract_archive(src, dest)
+        with mock.patch.object(config, "MAX_EXTRACT_BYTES", 1024), self.assertRaises(RuntimeError) as cm:
+            files_service.extract_archive(src, dest)
         self.assertIn("总大小超过上限", str(cm.exception))
         self.assertFalse(os.path.exists(os.path.join(dest, "a.txt")), "拒绝解压不该留下产物")
 
     def test_member_count_cap(self):
         src = self._zip("many.zip", [(f"m{i}.txt", b"x") for i in range(6)])
-        with mock.patch.object(config, "MAX_EXTRACT_FILES", 3):
-            with self.assertRaises(RuntimeError) as cm:
-                files_service.extract_archive(src)
+        with mock.patch.object(config, "MAX_EXTRACT_FILES", 3), self.assertRaises(RuntimeError) as cm:
+            files_service.extract_archive(src)
         self.assertIn("条目数", str(cm.exception))
 
 

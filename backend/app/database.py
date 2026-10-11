@@ -264,8 +264,18 @@ def jwt_secret() -> str:
     with _lock:
         s = get_setting("jwt_secret")
         if not s:
+            # 缓存里的 None 可能只是 TTL 内的一次空读（读失败/竞态），库里其实有真值：
+            # 直接再生成会覆盖旧密钥、把所有已签发 token 一起作废，所以先绕过缓存直读。
+            s = _read_setting("jwt_secret")
+            if s:
+                _auth_cache["jwt_secret"] = (s, time.monotonic())  # 顺手把被污染的 None 刷掉
+        if not s:
             s = secrets.token_hex(32)
             set_setting("jwt_secret", s)
+            # 写库后必须同步刷缓存：否则缓存残留的 None 活满 _AUTH_TTL，这 3 秒内
+            # 每次读取都当空处理——实测表现为刚签发的 token 当场验签失败，且
+            # 全量测试红绿随机器速度漂（前序用例的真实读取落在缓存窗口内就侥幸绿）。
+            _auth_cache["jwt_secret"] = (s, time.monotonic())
         return s
 
 

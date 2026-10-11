@@ -29,8 +29,10 @@ os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_ut_"))
 
 import unittest
 
-from app import database as dbm, main, security
-from app.routers import apps as apps_router, dbops, terminal
+from app import database as dbm
+from app import main, security
+from app.routers import apps as apps_router
+from app.routers import dbops, terminal
 from app.services import alerts_service
 
 _seq = itertools.count()

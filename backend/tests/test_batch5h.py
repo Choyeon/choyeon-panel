@@ -29,8 +29,10 @@ from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_5h_ut_"))
 
-from app import config  # noqa: E402
-from app import util  # noqa: E402
+from app import (
+    config,  # noqa: E402
+    util,  # noqa: E402
+)
 from app.routers import apps as apps_router  # noqa: E402
 from app.services import apps_service, nginx_ops  # noqa: E402
 

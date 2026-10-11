@@ -245,9 +245,8 @@ class TestBackupUpload(unittest.TestCase):
 
     def test_size_cap_is_enforced_before_writing(self):
         bid = self._job("pg", "appdb")
-        with mock.patch.object(config, "MAX_UPLOAD_BYTES", 4):
-            with self.assertRaises(RuntimeError) as ctx:
-                backup_service.save_upload(bid, "big.dump.gz", b"12345")
+        with mock.patch.object(config, "MAX_UPLOAD_BYTES", 4), self.assertRaises(RuntimeError) as ctx:
+            backup_service.save_upload(bid, "big.dump.gz", b"12345")
         self.assertIn("MB", str(ctx.exception))
         self.assertEqual(os.listdir(self.dir), [])
 

@@ -20,7 +20,6 @@ os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_5a_ut_"))
 os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_5a_roots_"))
 
 from app import database as dbm  # noqa: E402
-from app import security  # noqa: E402
 from app.routers import dbops, extras, meta, sites  # noqa: E402
 from app.services import nginx_ops, pg_service  # noqa: E402
 
@@ -180,9 +179,8 @@ class TestRemoveVhostFailsLoudly(unittest.TestCase):
             code = 1 if cmd == "nginx" else 0
             return {"code": code, "out": 'nginx: [emerg] unknown directive in /etc/nginx/nginx.conf:20'}
 
-        with mock.patch.object(nginx_ops, "run", fake_run):
-            with self.assertRaises(RuntimeError) as ctx:
-                asyncio.run(nginx_ops.remove_vhost(name))
+        with mock.patch.object(nginx_ops, "run", fake_run), self.assertRaises(RuntimeError) as ctx:
+            asyncio.run(nginx_ops.remove_vhost(name))
         self.assertIn("恢复", str(ctx.exception))
         self.assertTrue(path.exists(), "校验不过必须把文件放回去，域名照旧由它服务")
         self.assertEqual(path.read_text(), "# 保留我\nserver {};\n")
@@ -210,9 +208,8 @@ class TestRemoveVhostFailsLoudly(unittest.TestCase):
         async def fake_run(cmd, args, **_kw):
             return {"code": 1, "out": "nginx is not running"} if cmd == "systemctl" else {"code": 0, "out": "ok"}
 
-        with mock.patch.object(nginx_ops, "run", fake_run):
-            with self.assertRaises(RuntimeError) as ctx:
-                asyncio.run(nginx_ops.remove_vhost(name))
+        with mock.patch.object(nginx_ops, "run", fake_run), self.assertRaises(RuntimeError) as ctx:
+            asyncio.run(nginx_ops.remove_vhost(name))
         self.assertIn("重载失败", str(ctx.exception))
         self.assertFalse(path.exists(), "这一步不回收文件：配置是对的，nginx 一起来就按新配置走")
 

@@ -287,7 +287,8 @@ def extract_archive(p: str, into: str | None = None) -> dict:
         import tarfile
 
         try:
-            tf = tarfile.open(src)
+            # open 失败要单独转成"只支持"文案；with 包住整个 body 会把解包中途的 ReadError 也吞进这个文案
+            tf = tarfile.open(src)  # noqa: SIM115
         except tarfile.ReadError:
             raise RuntimeError("只支持 .zip 与 .tar/.tar.gz/.tar.bz2/.tar.xz") from None
         with tf:

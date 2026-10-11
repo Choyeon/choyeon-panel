@@ -7,8 +7,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-from .. import aio_db
-from .. import config
+from .. import aio_db, config
 from .. import database as dbm
 from ..util import (
     clean_abs_path,
@@ -644,11 +643,10 @@ async def app_action(app_id: int, verb: str) -> dict:
     # 两边抢同一个服务，出现"部署日志说成功、服务实际没起来"的现场。
     _ensure_no_deployment(app_id, f"{_VERB_CN.get(verb, verb)}服务")
     unit = unit_name(app)
-    if verb in ("start", "restart"):
-        # 同 restart_and_verify：崩过一次的应用会被 systemd 的启动上限直接拒掉
-        # （"Start request repeated too quickly"），用户分不清是自己命令写错还是面板坏了。
-        if not await is_active(unit):
-            await run("systemctl", ["reset-failed", "--", unit], timeout=30)
+    # 同 restart_and_verify：崩过一次的应用会被 systemd 的启动上限直接拒掉
+    # （"Start request repeated too quickly"），用户分不清是自己命令写错还是面板坏了。
+    if verb in ("start", "restart") and not await is_active(unit):
+        await run("systemctl", ["reset-failed", "--", unit], timeout=30)
     await service_action(unit, verb)
     if verb in ("start", "restart"):
         # 只信 systemctl 的返回码会把"起来就崩"说成启动成功（见 restart_and_verify）。
@@ -1005,7 +1003,11 @@ async def sync_app(app_id: int) -> dict:
         )
         dbm.execute("UPDATE apps SET updated_at=datetime('now') WHERE id=?", (app_id,))
         log("==> 同步完成")
-        return {"ok": True, "commit": after, "from": before, "changed": bool(before and after and before != after), "deployment": dep_id, "out": "\n".join(out)}
+        return {
+            "ok": True, "commit": after, "from": before,
+            "changed": bool(before and after and before != after),
+            "deployment": dep_id, "out": "\n".join(out),
+        }
     except Exception as e:  # noqa: BLE001
         # 服务没起来却把记录留在 running，前端会一直显示"部署中"，
         # 且 _ensure_no_deployment 会让这个应用此后无法再同步/回滚。

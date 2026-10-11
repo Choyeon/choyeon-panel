@@ -318,9 +318,8 @@ class TestArgvWhitelist(unittest.TestCase):
             ["choyeonctl", "logs", "--lines=99999"],
             ["choyeonctl", "logs", "--lines", "0"],
         ):
-            with self.subTest(argv=argv):
-                with self.assertRaises(BadInput):
-                    C._validate_argv(argv)
+            with self.subTest(argv=argv), self.assertRaises(BadInput):
+                C._validate_argv(argv)
 
     def test_certbot_and_journalctl_are_narrow(self):
         with self.assertRaises(BadInput):
@@ -416,9 +415,8 @@ class TestUnitFiles(_Case):
             {"name": _uid("ex"), "expr": "@daily", "argv": ["certbot", "renew"]},
             {"name": "Bad Name", "expr": "0 3 * * *", "argv": ["certbot", "renew"]},
         ):
-            with self.subTest(name=body["name"]):
-                with self.assertRaises(BadInput):
-                    asyncio.run(C.create_task(body))
+            with self.subTest(name=body["name"]), self.assertRaises(BadInput):
+                asyncio.run(C.create_task(body))
         self.assertEqual(dbm.query_one("SELECT COUNT(*) c FROM cron_task")["c"], n0)
 
     def test_sync_units_rejects_dirty_stored_argv(self):
@@ -431,9 +429,8 @@ class TestUnitFiles(_Case):
             self.calls.append([cmd, *args])
             return {"code": 1, "out": "Failed to enable unit"}
 
-        with mock.patch.object(C, "run", failing):
-            with self.assertRaises(BadInput) as cm:
-                asyncio.run(C.create_task({"name": _uid("rf"), "expr": "0 3 * * *", "argv": ["certbot", "renew"]}))
+        with mock.patch.object(C, "run", failing), self.assertRaises(BadInput) as cm:
+            asyncio.run(C.create_task({"name": _uid("rf"), "expr": "0 3 * * *", "argv": ["certbot", "renew"]}))
         self.assertIn("已撤销", str(cm.exception))
         self.assertIsNone(dbm.query_one("SELECT id FROM cron_task WHERE name=?", (_uid("rf"),)))
 
@@ -477,9 +474,8 @@ class TestUnitFiles(_Case):
     def test_unknown_id_is_not_found(self):
         # delete_task 只要 id，update_task 还要 body——两个入口都必须认不出就 404
         for fn, args in ((C.delete_task, (999999,)), (C.update_task, (999999, {}))):
-            with self.subTest(fn=fn.__name__):
-                with self.assertRaises(NotFound):
-                    asyncio.run(fn(*args))
+            with self.subTest(fn=fn.__name__), self.assertRaises(NotFound):
+                asyncio.run(fn(*args))
 
 
 # ---------------------------------------------------------------- 立即执行

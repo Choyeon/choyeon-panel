@@ -1,5 +1,5 @@
-import gzip
 import errno
+import gzip
 import os
 import re
 import shutil
@@ -13,8 +13,7 @@ from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
 
-from .. import backup_runner
-from .. import config
+from .. import backup_runner, config
 from .. import database as dbm
 from ..log import warn
 from ..util import is_name, run, sh_escape, unit_env_value, unit_pct_escape
@@ -647,7 +646,7 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
         ok = await run_in_threadpool(_quick_check, tmp)
     except sqlite3.Error as e:
         os.unlink(tmp)
-        raise RuntimeError(f"快照文件无法打开，未做任何改动：{e}")
+        raise RuntimeError(f"快照文件无法打开，未做任何改动：{e}") from e
     if ok != "ok":
         os.unlink(tmp)
         raise RuntimeError(f"快照完整性检查未通过（{ok}），已放弃恢复")

@@ -9,8 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from .. import aio_db
-from .. import config
+from .. import aio_db, config
 from ..deps import need_admin
 from ..errors import err_json
 from ..services import system_metrics, systemd_ops
@@ -310,10 +309,7 @@ TAIL_BYTES = 512 * 1024
 
 
 def _inside_roots(real: str) -> bool:
-    for root in config.FILE_ROOTS:
-        if real == root or real.startswith(root.rstrip("/") + "/"):
-            return True
-    return False
+    return any(real == root or real.startswith(root.rstrip("/") + "/") for root in config.FILE_ROOTS)
 
 
 def nginx_log_files() -> list:

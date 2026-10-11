@@ -337,9 +337,8 @@ class TestRestoreResultContract(_Tmp):
             raise RuntimeError("tar 解压失败")
 
         with self._row(bk), mock.patch.object(B, "_restore_app", fake), \
-                mock.patch.object(dbm, "audit", lambda *a, **kw: None):
-            with self.assertRaises(RuntimeError) as cm:
-                asyncio.run(B.restore_backup(bk["id"], name))
+                mock.patch.object(dbm, "audit", lambda *a, **kw: None), self.assertRaises(RuntimeError) as cm:
+            asyncio.run(B.restore_backup(bk["id"], name))
         msg = str(cm.exception)
         self.assertIn("tar 解压失败", msg)
         self.assertIn("服务保持停止", msg, f"失败响应里丢了现场说明：{msg}")

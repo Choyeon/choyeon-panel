@@ -143,7 +143,7 @@ class TestRenameMarkerMigration(_Case):
 
     def test_all_four_markers_move(self):
         vals = ["404", "2026-10-11", "3", "2026-10-11"]
-        for key, v in zip(alerts_service.probe_marker_keys(self.old), vals):
+        for key, v in zip(alerts_service.probe_marker_keys(self.old), vals, strict=False):
             dbm.set_setting(key, v)
         alerts_service.rename_app(self.old, self.new)
         self.assertEqual([dbm.get_setting(k) for k in alerts_service.probe_marker_keys(self.new)], vals)
