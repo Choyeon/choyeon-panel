@@ -43,6 +43,17 @@ def _drop(bid: int):
     dbm.execute("DELETE FROM backups WHERE id=?", (bid,))
 
 
+def _mk_target_app(tc: unittest.TestCase, name: str) -> str:
+    """kind=app / sqlite 的备份任务要求目标应用真的存在（批次⑤O），
+    所以"合法路径必须放行"这几条用例得先有一行应用可指。"""
+    aid = dbm.execute(
+        "INSERT INTO apps(name,type,repo_url,branch,path,start_cmd) VALUES(?,'node','','main',?,'node x')",
+        (name, tempfile.mkdtemp(prefix="cp_bk_target_")),
+    )
+    tc.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (aid,))
+    return name
+
+
 async def _no_timer(b):
     return None
 
@@ -110,16 +121,18 @@ class TestTargetPairValidation(unittest.TestCase):
     # ---- 合法路径必须放行，否则"永远拒绝"也能通过以上所有测试 ----
 
     def test_create_accepts_legal_values(self):
+        app = _mk_target_app(self, _uid("legal-app"))
         self.addCleanup(_drop, asyncio.run(B.create_backup({"kind": "pg", "target": "app_db"}))["id"])
         self.addCleanup(_drop, asyncio.run(B.create_backup({"kind": "pg", "target": "all"}))["id"])
-        self.addCleanup(_drop, asyncio.run(B.create_backup({"kind": "app", "target": "my-app"}))["id"])
+        self.addCleanup(_drop, asyncio.run(B.create_backup({"kind": "app", "target": app}))["id"])
 
     def test_update_accepts_legal_target_and_pair(self):
+        app = _mk_target_app(self, _uid("legal-app"))
         bid = self._mk(target="app_db")
         out = asyncio.run(B.update_backup(bid, {"target": "other_db", "kind": "pg", "keep": 3}))
         self.assertEqual((out["target"], out["kind"], out["keep"]), ("other_db", "pg", 3))
-        out2 = asyncio.run(B.update_backup(bid, {"kind": "app", "target": "my-app"}))
-        self.assertEqual((out2["kind"], out2["target"]), ("app", "my-app"))
+        out2 = asyncio.run(B.update_backup(bid, {"kind": "app", "target": app}))
+        self.assertEqual((out2["kind"], out2["target"]), ("app", app))
 
     def test_update_without_kind_or_target_keeps_stored_pair(self):
         """只改 schedule 不应因为"合并出的 pair 缺字段"被误杀。"""

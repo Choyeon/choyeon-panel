@@ -210,7 +210,7 @@ async def _sync_timer(b: dict):
         raise RuntimeError(r["out"])
 
 
-def _validate_target(kind: str, target):
+def _validate_target(kind: str, target, *, app_must_exist: bool = True):
     """kind/target 的配对校验，create 与 update 必须共用同一份。
 
     旧写法只在 create_backup 里校验，update_backup 只查了 schedule/hour/minute/keep，
@@ -221,19 +221,34 @@ def _validate_target(kind: str, target):
     kind 同样能在 PATCH 里改成表 CHECK 之外的值——那时抛的是 sqlite3.IntegrityError，
     面板路由的宽 except 会把它兜成 400，可是任何直接调服务层的地方（sync_all_timers、
     以后的 CLI）拿到的是一个未捕获的数据库异常，而不是业务错误。
+
+    `app_must_exist` 是"目标应用这一行还在不在"的开关，只有把 target **换成了别的值**
+    时才该查（create 总是，update 见调用处）。线上探针实测：
+    `kind='app'` 过去连格式都过、名字不存在也照样建（返回 200，跑一次备份才
+    「应用 x 不存在」退出码 1），写错一个字母就变成一条每晚失败的任务。
+    但反过来，把存在性校验无条件套在 update 上会拆掉 ⑤L 的 `target_missing`：
+    应用删掉之后那条任务连"改备份时间"和"停用"都做不了（sqlite 类就是这样，
+    `merged target` 永远是非空的历史 id），只剩删除一条路，而用户想留产物、
+    先把计划关掉。所以：名字写错当场就挡，指向已删应用的老行仍然可以改配置。
+    pg 库名只查格式不查存在性——面板自己能建库，"先配好备份计划再建库"是
+    一条合理路径，而库不存在时 pg_dump 的失败在备份日志里看得见。
     """
     if kind == "pg" and target != "all" and not is_ident(target or ""):
         raise RuntimeError("PG 库名不合法")
-    if kind == "app" and not is_name(target or ""):
-        raise RuntimeError("应用名不合法")
+    if kind == "app":
+        t = str(target or "")
+        if not is_name(t):
+            raise RuntimeError("应用名不合法")
+        if app_must_exist and not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (t,)):
+            raise RuntimeError(f"应用 {t} 不存在")
     if kind == "sqlite":
         # sqlite 的 target 存 app_id（应用改名后 name 型 target 会指向不存在的目录），
         # 同时兼容按应用名配置的历史写法。
         t = str(target or "")
         if t.isdigit():
-            if not dbm.query_one("SELECT 1 FROM apps WHERE id=?", (int(t),)):
+            if app_must_exist and not dbm.query_one("SELECT 1 FROM apps WHERE id=?", (int(t),)):
                 raise RuntimeError("应用不存在")
-        elif not is_name(t) or not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (t,)):
+        elif not is_name(t) or (app_must_exist and not dbm.query_one("SELECT 1 FROM apps WHERE name=?", (t,))):
             raise RuntimeError("SQLite 备份目标应用不存在")
 
 
@@ -321,8 +336,14 @@ async def update_backup(bid: int, i: dict) -> dict:
     }
     if merged["kind"] not in KINDS:
         raise RuntimeError("kind 必须是 pg/app/sqlite")
-    # create 有、update 没有——这道不对称就是上面 _validate_target 说的漏洞，补齐
-    _validate_target(merged["kind"], merged["target"])
+    # create 有、update 没有——这道不对称就是上面 _validate_target 说的漏洞，补齐。
+    # 存在性只在 target **真的被换了** 时才查：换一个目标就得指对东西。
+    # 编辑弹窗是把当前行整份回传的（Backups.vue 的 form 一直带着 target），
+    # 若按"请求体有没有 target"判断，⑤L 的 target_missing 行就会连"改备份时间"
+    # 和"停用"都做不了——只剩删除一条路，而用户可能想先留产物、把计划关掉。
+    _validate_target(
+        merged["kind"], merged["target"], app_must_exist=str(merged["target"]) != str(cur["target"])
+    )
     dbm.execute(
         "UPDATE backups SET kind=?,target=?,schedule=?,hour=?,minute=?,keep=?,enabled=? WHERE id=?",
         (
