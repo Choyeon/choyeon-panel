@@ -221,7 +221,18 @@ def _cleanup(path: str):
 
 
 def prune(bk: dict):
-    files = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith(f"bk{bk['id']}-"))
+    """按 keep 名额删这个任务**自动生成**的最旧备份。
+
+    筛选必须认时间戳形状，不能只认 `bk<id>-` 前缀。旧写法把前缀下的所有文件一起
+    排序，人工上传的产物（`bk<id>-manual-xxx`，见 backup_service.save_upload）也在其中，
+    而 'manual' 的 'm' 排在时间戳的 '2' 之后 = "最新"：keep=1 时刚写完的真备份会被当成
+    "最旧那一份"当场删掉，界面报「备份完成」而目录里永远只剩那个上传文件。
+    同理，一次崩溃留下的 `.restoring-*` 之类非时间戳名也不该占掉保留名额。
+    上传的产物由用户在备份文件页自己删。
+    """
+    bid = int(bk["id"])
+    auto = re.compile(rf"^bk{bid}-\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}")
+    files = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith(f"bk{bid}-") and auto.match(f))
     while len(files) > int(bk["keep"]):
         f = files.pop(0)
         try:

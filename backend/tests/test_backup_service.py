@@ -421,6 +421,12 @@ class TestRestoreOffEventLoop(unittest.TestCase):
         finally:
             con.close()
 
+    def _no_tmp(self):
+        """恢复流程的中间产物必须就地清干净（两个目录都查）。"""
+        for d in (self.dir, self.app):
+            left = [f for f in os.listdir(d) if ".restoring-" in f or ".cp-restore-" in f]
+            self.assertEqual(left, [], f"{d} 里留下了恢复中间产物：{left}")
+
     def test_sqlite_restore_runs_off_loop_and_keeps_fallback(self):
         # 当前库（要被覆盖的）与快照（要写回的）内容不同，才看得出谁赢了
         cur = os.path.join(self.app, "app.db")
@@ -453,7 +459,9 @@ class TestRestoreOffEventLoop(unittest.TestCase):
         # 不带来源名点开就会报"找不到与备份同名的数据库 pre-restore.db"。
         self.assertIn("-app-pre-restore.sqlite.gz", pre[0], pre[0])
         self.assertEqual([f for f in os.listdir(self.app) if "pre-restore" in f], [])
-        self.assertEqual([f for f in os.listdir(self.dir) if ".restoring-" in f], [])
+        # 暂存写在目标库同目录（跨挂载时 os.replace 会 EXDEV），用完必须消失；
+        # 备份目录里也不许留恢复中间产物，它会出现在备份文件页上。
+        self._no_tmp()
         self.assertEqual(self.calls, [], "恢复前没在跑的服务不该被恢复流程顺手启动")
 
         # 留档必须真能当回滚目标用：从它恢复，写回的是被本次覆盖掉的那一版
@@ -476,7 +484,7 @@ class TestRestoreOffEventLoop(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             asyncio.run(B._restore_sqlite(self.bk, src, []))
         self.assertEqual(self._sqlite_rows(cur), [("current",)], "检查没过就不该动过现库")
-        self.assertEqual([f for f in os.listdir(self.dir) if ".restoring-" in f], [])
+        self._no_tmp()
         self.assertEqual(self.calls, [], "校验没过时不该已经把服务停下来")
 
     def _tar_gz(self, name, members):

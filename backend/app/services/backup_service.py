@@ -7,6 +7,7 @@ import sqlite3
 import stat
 import sys
 import tarfile
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 
@@ -501,6 +502,10 @@ async def _sh_script(script: str, timeout: int = 1800) -> dict:
 def _gunzip_to(src_file: str, dest: str) -> None:
     with gzip.open(src_file, "rb") as g, open(dest, "wb") as f:
         shutil.copyfileobj(g, f, 1024 * 1024)
+        # 目标是线上库文件，os.replace 只保证"重命名"这一步原子，不保证内容已经
+        # 离开页缓存：中间断电的话库里留下的就是一个截断文件，而面板已经报了成功。
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _quick_check(path: str) -> str:
@@ -554,8 +559,22 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
     await run_in_threadpool(backup_runner.sqlite_snapshot, dst, pre)
     log.append(f"==> 已留存当前库：{os.path.basename(pre)}")
 
-    tmp = f"{src_file}.restoring-{ts}"
-    await run_in_threadpool(_gunzip_to, src_file, tmp)
+    # 暂存必须写在**目标库所在的同一个目录**里。旧写法写在备份目录
+    # （f"{src_file}.restoring-<ts>"），而下一步是 os.replace(tmp, dst)——
+    # 跨文件系统时它直接抛 OSError(EXDEV)。把 CP_BACKUP_DIR 放到另一块盘或 NFS
+    # 上是很常见的配置（备份目录的存在意义就是和数据分开），于是恢复偏偏在
+    # 最危险的那一步失败：此刻服务已经停了、目标库的 -wal/-shm 已经删了，
+    # 用户拿到一句 "Cross-device link"，还要自己猜数据现在是什么状态。
+    # hidden + .tmp 的名字不会被 find_sqlite_dbs 认成候选库（它按 *.db/*.sqlite*
+    # 的后缀筛），异常残留时也不会再躺进备份文件页。
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst), prefix=".cp-restore-", suffix=".tmp")
+    os.close(fd)
+    try:
+        await run_in_threadpool(_gunzip_to, src_file, tmp)
+    except Exception:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
     mode = os.stat(dst).st_mode & 0o777
     try:
         ok = await run_in_threadpool(_quick_check, tmp)
@@ -662,11 +681,22 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
             if env_keep:
                 # 不管解包成没成，环境变量都得回到现值：半程失败时归档里那份
                 # 旧 .panel.env 可能已经落下去了，留着它服务下次起来用的是别的口令。
+                # 这句回写可能整个失败（磁盘满、权限），而旧写法无条件记
+                # 「保留当前 .panel.env」——那句话在此刻是假的，用户会以为生效的
+                # 还是现值，实际用的是归档里备份当时的口令。按结果如实记。
+                env_kept = False
                 with suppress(Exception):
                     await run_in_threadpool(shutil.copy2, env_keep, env)
+                    env_kept = True
                 with suppress(OSError):
                     os.unlink(env_keep)
-                log.append("==> 保留当前 .panel.env（未使用归档内的环境变量）")
+                if env_kept:
+                    log.append("==> 保留当前 .panel.env（未使用归档内的环境变量）")
+                else:
+                    log.append(
+                        f"!! 当前 .panel.env 回写失败，归档里那份（备份当时的值）已生效："
+                        f"启动前请核对 {env} 里的口令与端口"
+                    )
             if stopped and restored:
                 try:
                     await systemd_ops.service_action(unit, "start")
@@ -761,15 +791,24 @@ async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict
     if not _restoreable(bk["kind"], os.path.basename(path)):
         raise RuntimeError("该备份类型不支持自动恢复，请手工恢复")
     log: list[str] = [f"==> 恢复 {os.path.basename(path)}（kind={bk['kind']}, target={bk['target']}）"]
-    if bk["kind"] == "sqlite":
-        await _restore_sqlite(bk, path, log)
-    elif bk["kind"] == "app":
-        await _restore_app(bk, path, log)
-    else:
-        await _restore_pg(bk, path, log)
+    try:
+        if bk["kind"] == "sqlite":
+            await _restore_sqlite(bk, path, log)
+        elif bk["kind"] == "app":
+            await _restore_app(bk, path, log)
+        else:
+            await _restore_pg(bk, path, log)
+    except Exception as e:  # noqa: BLE001
+        # 半途失败时 log 里那句「解包中断：目录可能处于半恢复状态，服务保持停止」是用户
+        # 唯一能照着处理的现场说明。旧写法只把异常往上抛，这段说明连同整个 log 一起丢了，
+        # 界面上一行 "恢复失败: …"，没人知道服务其实被恢复流程停掉了、目录是半新的。
+        raise RuntimeError(f"{e}\n\n执行记录：\n" + "\n".join(log)) from e
     # actor 由路由传当前登录用户：覆盖线上数据这种事记成 "system" 等于没记
     dbm.audit(actor, "backup:restore", f"{bid}:{os.path.basename(path)}")
-    return {"ok": True, "log": "\n".join(log)}
+    # 数据确实装上了，但日志里有 `!!` 行 = 有一件事要人接手（服务没起来、按最大库定位、
+    # 归档环境变量生效）。这些行过去只藏在 log 里，而界面收到 ok:true 就一律报
+    # 「恢复完成」——绿色成功提示正好把要处理的那行盖住。单独带出来给前端定调性。
+    return {"ok": True, "warn": [line for line in log if line.startswith("!!")], "log": "\n".join(log)}
 
 
 async def run_backup_now(bid: int) -> dict:

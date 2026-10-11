@@ -32,7 +32,12 @@ async def backups_files():
 
 @router.post("/api/backups/{bid}/restore")
 async def backups_restore(bid: str, req: Request):
-    """用指定备份文件覆盖目标（不可逆），恢复前服务端会自动留存当前副本。"""
+    """用指定备份文件覆盖目标（不可逆）。
+
+    pg 与 sqlite 会先自动留存当前副本（pre-restore 快照）；应用目录恢复是增量覆盖，
+    只保留当前 .panel.env，不做整目录快照（几百 MB 的 node_modules 再存一份可能当场写满盘）。
+    返回体的 warn 非空表示"数据已装上但有人要接手的一项"（服务没起来等），前端据此报警示。
+    """
     if r := need_admin(req):
         return r
     body = await _body(req)

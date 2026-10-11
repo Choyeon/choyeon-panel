@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch, h } from 'vue';
 import { useRouter } from 'vue-router';
 import {
-  NDataTable, NSpace, NTag, NDrawer, NDrawerContent, NForm, NFormItem, NInput, NInputNumber,
+  NDataTable, NSpace, NTag, NDrawer, NDrawerContent, NForm, NFormItem, NInputNumber,
   NSelect, useMessage, NIcon, NAlert, NSwitch,
 } from 'naive-ui';
 import { NButton } from '../ui';
@@ -26,7 +26,11 @@ const busy = ref<number | null>(null);
 const toggling = ref<number | null>(null);
 const submitting = ref(false);
 const editingId = ref<number | null>(null);
-const form = ref<any>({ kind: 'pg', target: 'rosetta', schedule: 'daily', hour: 3, minute: 30, keep: 7, enabled: true });
+const form = ref<any>({ kind: 'pg', target: null, schedule: 'daily', hour: 3, minute: 30, keep: 7, enabled: true });
+// pg 的 target 是库名，不预填任何值：这里曾经硬编码过一个别的项目的库名，
+// 换一台机器建任务就会带着它提交——pg 的库名只校验格式、不校验存在性，
+// 于是任务照样创建成功，每晚 pg_dump 在 runner 里失败（与批次⑤O 同一类缺陷）。
+const pgDbs = ref<any[]>([]);
 
 // 执行日志抽屉：立即备份的返回体带 log，失败也要能看输出
 const logShow = ref(false);
@@ -89,6 +93,19 @@ const appOpts = computed(() => apps.value.map((a: any) => ({ label: a.name, valu
 // sqlite 的 target 存 app_id：应用改名后按名的 target 会指向不存在的目录
 const sqliteOpts = computed(() => apps.value.map((a: any) => ({ label: a.name, value: String(a.id) })));
 const targetOptions = computed(() => (form.value.kind === 'sqlite' ? sqliteOpts.value : appOpts.value));
+// pg 目标下拉：真实库名 + all。列表拿不到（未装 PG / 连接失败）时留空，
+// 选择器仍可键入，不把这条路径堵死。
+const pgOpts = computed<any[]>(() => [
+  ...pgDbs.value.map((d: any) => ({ label: `${d.name}（${d.size || '大小未知'}）`, value: d.name })),
+  { label: 'all（整库 pg_dumpall，只能手工恢复）', value: 'all' },
+]);
+async function loadPg() {
+  try {
+    pgDbs.value = await api.pgDbs();
+  } catch {
+    pgDbs.value = [];
+  }
+}
 
 const columns: any[] = [
   {
@@ -219,11 +236,12 @@ function confirmDel(r: any) {
 }
 
 function blankForm() {
-  return { kind: 'pg', target: 'rosetta', schedule: 'daily', hour: 3, minute: 30, keep: 7, enabled: true };
+  return { kind: 'pg', target: null, schedule: 'daily', hour: 3, minute: 30, keep: 7, enabled: true };
 }
 function openCreate() {
   editingId.value = null;
   form.value = blankForm();
+  void loadPg();
   show.value = true;
 }
 function openEdit(r: any) {
@@ -237,6 +255,7 @@ function openEdit(r: any) {
     keep: r.keep,
     enabled: !!r.enabled,
   };
+  void loadPg();
   show.value = true;
 }
 async function submit() {
@@ -244,7 +263,7 @@ async function submit() {
   // 的语义是"沿用旧值"：不选目标就提交，任务会静默继续指向原来那个名字，
   // 列表上还显示着新类型 —— 必须在提交前把空目标拦下来。
   if (!form.value.target) {
-    msg.error(form.value.kind === 'pg' ? '请填写要备份的数据库名（或 all）' : '请选择要备份的应用');
+    msg.error(form.value.kind === 'pg' ? '请选择要备份的数据库（或 all）' : '请选择要备份的应用');
     return;
   }
   submitting.value = true;
@@ -299,17 +318,27 @@ async function submit() {
           <NSpace vertical :size="12">
             <NFormItem label="类型">
               <NSpace vertical :size="2" style="width: 100%">
-                <NSelect v-model:value="form.kind" :options="kindOpts" aria-label="备份类型" @update:value="form.target = form.kind === 'pg' ? 'rosetta' : null" />
+                <NSelect v-model:value="form.kind" :options="kindOpts" aria-label="备份类型" @update:value="form.target = null" />
                 <span class="cp-help">{{ KIND_DESC[form.kind] }}</span>
               </NSpace>
             </NFormItem>
             <NFormItem v-if="form.kind === 'pg'" label="数据库">
               <NSpace vertical :size="2" style="width: 100%">
                 <NSpace :size="8">
-                  <NInput v-model:value="form.target" placeholder="如 rosetta，或 all 全库" style="width: 210px" :input-props="{ 'aria-label': '数据库名称' }" />
+                  <!-- 下拉来自实例里真实存在的库；PG 没装或连不上时列表是空的，
+                       tag+filterable 让用户直接键入，不至于把这条路径整个堵死。 -->
+                  <NSelect
+                    v-model:value="form.target"
+                    :options="pgOpts"
+                    filterable
+                    tag
+                    placeholder="选择数据库"
+                    style="width: 230px"
+                    aria-label="数据库名称"
+                  />
                   <NButton size="small" tertiary @click="form.target = 'all'">全部</NButton>
                 </NSpace>
-                <span class="cp-help">填单个库名只备份该库；填 all 备份实例内全部库。</span>
+                <span class="cp-help">填单个库名只备份该库；选 all 备份实例内全部库。库名只校验格式，之后库不存在的话这个任务每晚都会失败。</span>
               </NSpace>
             </NFormItem>
             <NFormItem v-else :label="form.kind === 'sqlite' ? 'SQLite 应用' : '应用'">

@@ -36,8 +36,16 @@ const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, 
 // 恢复是不可逆覆盖，确认弹窗要按类型说清"会丢什么"，一句通用文案不够
 const RESTORE_WARN: Record<string, string> = {
   sqlite: '会先自动留存当前库，然后停止对应服务、用快照覆盖数据库文件、再启动服务。当前库里备份之后写入的数据会全部丢失。',
-  app: '会停止对应服务，并用归档覆盖应用目录下的文件（当前 .panel.env 环境变量会被保留）。',
+  app: '会停止对应服务，并用归档覆盖应用目录下的同名文件（当前 .panel.env 环境变量会被保留）。归档是增量覆盖：目录里备份之后新增的文件不会被删除。',
   pg: '会先 pg_dump 留存当前库，然后 DROP 并重建该库、用 pg_restore 导入。库里现有的表与数据全部替换。',
+};
+// "能不能退回本次覆盖之前的版本"按类型差别很大：pg 与 sqlite 会自动留 pre-restore 快照，
+// 应用目录恢复不会（整份目录快照在几百 MB 的 node_modules 上等于再吃一份磁盘，
+// 而且可能当场把盘写满）。文案不能笼统承诺"可退回"，那是给了一次不存在的安全网。
+const RESTORE_ROLLBACK: Record<string, string> = {
+  sqlite: '覆盖前会自动留存当前库为 pre-restore 快照，可再从本页退回。确认执行？',
+  pg: '覆盖前会自动留存当前库为 pre-restore 快照，可再从本页退回。确认执行？',
+  app: '应用目录不会整份留存快照（只保留当前 .panel.env），本次覆盖没有自动退路。确认执行？',
 };
 const KIND_LABEL: Record<string, string> = { pg: 'PostgreSQL', app: '应用目录', sqlite: 'SQLite' };
 const KIND_ICON: Record<string, string> = { pg: 'CubeOutline', app: 'FolderOutline', sqlite: 'ServerOutline' };
@@ -225,11 +233,13 @@ const showRestore = ref(false);
 const restoreTarget = ref<any>(null);
 const restoring = ref(false);
 const restoreLog = ref('');
+const restoreWarn = ref(false);
 const restoreErr = ref('');
 
 function openRestore(f: any) {
   restoreTarget.value = f;
   restoreLog.value = '';
+  restoreWarn.value = false;
   restoreErr.value = '';
   showRestore.value = true;
 }
@@ -242,7 +252,12 @@ async function doRestore() {
   try {
     const r = await api.restoreBackup(f.job_id, f.name);
     restoreLog.value = r.log || '恢复完成';
-    msg.success('恢复完成');
+    // ok:true 只说明数据装上了。日志里带 `!!` 的行是"有一件事必须人来接手"
+    // （服务没起来、按最大库定位、归档环境变量生效），旧写法一律报绿色"恢复完成"，
+    // 成功提示正好把这些行盖住。
+    restoreWarn.value = Array.isArray(r.warn) && r.warn.length > 0;
+    if (restoreWarn.value) msg.warning(`恢复已执行，但有 ${r.warn.length} 项需要人工确认（见执行记录）`);
+    else msg.success('恢复完成');
     load();
   } catch (e: any) {
     restoreErr.value = e.message;
@@ -359,7 +374,7 @@ onMounted(() => {
           <NFormItem label="生成时间 (UTC)"><NText style="font-size: var(--fs-sm)">{{ fmtDateTime(restoreTarget?.mtime) }} · {{ fmtBytes(restoreTarget?.size || 0) }}</NText></NFormItem>
         </NForm>
         <NAlert v-if="restoreErr" type="error" :bordered="false" size="small" role="alert">{{ restoreErr }}</NAlert>
-        <NAlert v-if="restoreLog" type="success" :bordered="false" size="small" role="status">
+        <NAlert v-if="restoreLog" :type="restoreWarn ? 'warning' : 'success'" :bordered="false" size="small" role="status">
           <pre class="mono-pre">{{ restoreLog }}</pre>
         </NAlert>
         <NSpace justify="end" :size="8">
@@ -368,7 +383,7 @@ onMounted(() => {
             <template #trigger>
               <NButton type="warning" class="cp-press" :loading="restoring" :disabled="restoring" :icon="ico('RefreshCircleOutline')">恢复覆盖</NButton>
             </template>
-            覆盖后当前数据不可找回（仅能再退回本次自动留存的 pre-restore 快照），确认执行？
+            {{ RESTORE_ROLLBACK[restoreTarget?.kind] || '覆盖后当前数据不可找回，确认执行？' }}
           </NPopconfirm>
         </NSpace>
       </NSpace>
