@@ -41,7 +41,10 @@ const themeOverrides = computed(() => (isDark.value ? darkOverrides : lightOverr
 function apply() {
   document.documentElement.dataset.theme = isDark.value ? 'dark' : 'light';
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', isDark.value ? '#101014' : '#f5f6fa');
+  // 读 token 而不是再抄一份色值：这里和 style.css 的 --cp-bg 一旦分叉，
+  // 浏览器工具栏/移动状态栏就会和页面底色对不上。
+  const bg = getComputedStyle(document.documentElement).getPropertyValue('--cp-bg').trim();
+  if (meta && bg) meta.setAttribute('content', bg);
 }
 
 function setMode(m: Mode, origin?: ThemeOrigin) {

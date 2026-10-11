@@ -25,20 +25,13 @@
   <rect width="1600" height="400" fill="url(#bn-grid)"/>
   <rect width="1600" height="400" fill="url(#bn-glow)"/>
 
-  <!-- logo -->
+  <!-- logo：与 web/public/favicon.svg、assets/logo.svg 同一套几何，此处为 128 网格（64 网格 ×2） -->
   <g transform="translate(80,74) scale(1.02)">
-    <rect width="128" height="128" rx="28" fill="url(#bn-mark)"/>
-    <rect x="22" y="28" width="84" height="72" rx="10" fill="#08224f" fill-opacity=".42"/>
-    <path d="M22 38a10 10 0 0 1 10-10h64a10 10 0 0 1 10 10v4H22z" fill="#fff" fill-opacity=".22"/>
-    <circle cx="32" cy="35" r="2.6" fill="#fff" fill-opacity=".9"/>
-    <circle cx="41" cy="35" r="2.6" fill="#fff" fill-opacity=".55"/>
-    <circle cx="50" cy="35" r="2.6" fill="#fff" fill-opacity=".35"/>
-    <rect x="22" y="42" width="20" height="58" fill="#fff" fill-opacity=".10"/>
-    <rect x="27" y="50" width="10" height="3.6" rx="1.8" fill="#fff" fill-opacity=".8"/>
-    <rect x="27" y="59" width="10" height="3.6" rx="1.8" fill="#fff" fill-opacity=".4"/>
-    <rect x="27" y="68" width="10" height="3.6" rx="1.8" fill="#fff" fill-opacity=".28"/>
-    <polyline points="49,86 58,73 67,79 76,63 86,70 98,55" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" opacity=".95"/>
-    <circle cx="98" cy="55" r="3.6" fill="#8fd460"/>
+    <rect width="128" height="128" rx="30" fill="url(#bn-mark)"/>
+    <rect x="18" y="26" width="92" height="76" rx="18" fill="#062457" fill-opacity=".5"/>
+    <path d="M18 44a18 18 0 0 1 18-18h56a18 18 0 0 1 18 18v2H18z" fill="#fff" fill-opacity=".3"/>
+    <polyline points="34,86 54,62 68,72 96,42" fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="96" cy="42" r="12" fill="#8fd460"/>
   </g>
 
   <!-- 字标 -->

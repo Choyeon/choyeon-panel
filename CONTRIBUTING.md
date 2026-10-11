@@ -66,6 +66,10 @@ Windows 也能开发：systemd / journalctl / nginx 这类 Linux 专属能力会
 - 像素级复验：用浏览器直接打开 `.svg` 文件（1:1 渲染，不套 markdown 容器），把 `getBoundingClientRect()` 按 `viewBox.width / svgRect.width` 换算回画布坐标再判重叠；朴素 `getBBox()` 会忽略祖先 `transform`，量出来是假重叠。
 - CI 与多数开发机没有中文字体和 rsvg/inkscape，**不要**指望服务端把 SVG 转 PNG。
 - `preview-light.svg` 由 `preview-dark.svg` 按设计令牌替换生成（`sed` 逐色映射，保留 `id="pd-*"` 不动），改深色版必须同步生成浅色版。
+- 品牌标记是**四处同源**：`web/public/favicon.svg`、`assets/logo.svg`、`assets/banner.svg` 的 logo 组、`assets/social.svg` 的 logo 组共用同一套 64 网格几何（后两者按 ×2 摆放），测试 `test_品牌标记三处同源且不依赖字体` 会把分叉判出来。图标一律不许用 `<text>` 画字母——缺字体的渲染器会把它整个丢掉，退化成一块纯色方块。
+- 改完标记要按 16/32px 复核：浏览器里把 SVG 序列化成 `data:` URL 交给 `<img>`，画进 canvas 后按最近邻放大，肉眼确认曲线没有糊成噪点（16px 下描边宽度换算不足 1.5px 就会断）。
+- `web/public/` 下的 PNG/ICO 兜底图标由上述 canvas 路径导出（16/32/48、`apple-touch-icon` 180 直角满幅、PWA 192/512），`favicon.ico` 是 16+32+48 三张 PNG 拼的容器格式；不要手工维护，改 SVG 后重新导出。
+- `assets/social.svg` 是 GitHub「Settings → Social preview」的图源，导出 1200×600 PNG 上传；GitHub 会缩到 640×320 显示，正文最小字号不要低于 22。
 
 ## 行为与沟通
 

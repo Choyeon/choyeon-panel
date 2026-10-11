@@ -5,6 +5,7 @@ import { NInput, NSpace, NIcon, NAlert } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, saveLoginData } from '../api';
 import { icons } from '../icons';
+import LogoMark from '../components/LogoMark.vue';
 
 const router = useRouter();
 const needsSetup = ref(false);
@@ -77,7 +78,7 @@ async function submit() {
 
     <div class="left cp-rise" style="--i: 0">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">C</div>
+        <LogoMark :size="34" />
         <span>choyeon <b>panel</b></span>
       </div>
       <h1>服务器，<br />尽在掌握。</h1>
@@ -202,18 +203,6 @@ async function submit() {
   font-size: var(--fs-lg);
 }
 .brand b { color: var(--cp-brand-soft); }
-.brand-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: var(--radius-lg);
-  background: var(--gradient-brand);
-  color: var(--cp-on-brand);
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: var(--shadow-glow);
-}
 h1 {
   font-size: var(--fs-3xl);
   line-height: 1.3;

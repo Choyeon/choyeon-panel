@@ -1,0 +1,16 @@
+{
+  "name": "choyeon panel",
+  "short_name": "choyeon",
+  "description": "原生 Linux 服务器管理面板：应用部署、进程、网站、数据库、备份与自检。",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#2e313d",
+  "theme_color": "#2e313d",
+  "icons": [
+    { "src": "/site-icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/site-icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

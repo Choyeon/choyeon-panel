@@ -8,6 +8,7 @@ import { NButton } from './ui';
 import { setToken, getRole, getUsername, getNickname, setNickname, getAvatar, setAvatar, clearSession, api, req } from './api';
 import { icon, icons } from './icons';
 import { ADMIN_ONLY, TITLES } from './router';
+import LogoMark from './components/LogoMark.vue';
 import type { ThemeOrigin } from './themeReveal';
 
 const props = defineProps<{ themeMode?: 'dark' | 'light' }>();
@@ -309,7 +310,7 @@ function toggleTheme(ev: MouseEvent) {
       @expand="collapsed = false"
     >
       <div class="logo" :class="{ mini: collapsed }">
-        <div class="logo-mark" aria-hidden="true">C</div>
+        <LogoMark />
         <span v-if="!collapsed" class="logo-text">choyeon <b>panel</b></span>
       </div>
       <NMenu
@@ -525,20 +526,6 @@ function toggleTheme(ev: MouseEvent) {
   gap: var(--space-3);
   padding: var(--space-4) var(--space-4) var(--space-3);
   min-height: var(--header-h);
-}
-.logo-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius);
-  background: var(--gradient-brand);
-  color: var(--cp-on-brand);
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: var(--fs-md);
-  flex-shrink: 0;
-  box-shadow: var(--shadow-glow);
 }
 .logo-text {
   font-size: var(--fs-md);

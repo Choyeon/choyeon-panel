@@ -233,6 +233,133 @@ class TestRepoHygiene(unittest.TestCase):
                 self.assertIn("body:", text)
                 self.assertRegex(text, r"type:\s*(textarea|input|dropdown|checkboxes|markdown)")
 
+    def test_品牌标记三处同源且不依赖字体(self):
+        """标签页图标、README logo、banner 里的品牌标记必须是同一套几何。
+
+        三处各画一份的结局是"标签页一个 logo、README 另一个"；而图标一旦用 <text>
+        画字母，没有相应字体的渲染器（GitHub 的图片代理、精简过的 Linux 系统）会把
+        字形整个丢掉，图标退化成一块纯色方块。
+        """
+        def sig(el, scale):
+            plate = next(c for c in el if _tag(c) == "rect" and c.get("fill-opacity"))
+            poly = next(c for c in el if _tag(c) == "polyline")
+            dot = [c for c in el if _tag(c) == "circle"][-1]
+            n = lambda vals: [round(float(v) / scale, 1) for v in vals]  # noqa: E731
+            return (
+                n([plate.get(k) for k in ("x", "y", "width", "height", "rx")]),
+                n(re.split(r"[,\s]+", poly.get("points").strip())),
+                n([dot.get(k) for k in ("cx", "cy", "r")]),
+            )
+
+        fav = ET.fromstring((REPO / "web/public/favicon.svg").read_text(encoding="utf-8"))
+        logo = ET.fromstring((REPO / "assets/logo.svg").read_text(encoding="utf-8"))
+        banner = ET.fromstring((REPO / "assets/banner.svg").read_text(encoding="utf-8"))
+        mark = next(
+            g for g in banner
+            if _tag(g) == "g" and "translate(80,74)" in (g.get("transform") or "")
+        )
+
+        base = sig(fav, 1)
+        self.assertEqual(sig(logo, 1), base, "assets/logo.svg 与 favicon 的几何已经分叉")
+        self.assertEqual(sig(mark, 2), base, "banner 里的品牌标记不是 favicon 的 2 倍等比")
+
+        for path in ("web/public/favicon.svg", "assets/logo.svg"):
+            root = ET.fromstring((REPO / path).read_text(encoding="utf-8"))
+            with self.subTest(asset=path):
+                self.assertFalse([e for e in root.iter() if _tag(e) == "text"],
+                                 f"{path} 用 <text> 画字形，缺字体的渲染器会画空")
+
+    def test_入口引用的图标资源存在(self):
+        """index.html 里每个 <link> 指向的本地图标都必须真在 web/public 下。
+
+        漏一个就是线上 404，而浏览器对 favicon 的 404 静默处理，只有开 DevTools 才看得到。
+        """
+        html = (REPO / "web/index.html").read_text(encoding="utf-8")
+        hrefs = re.findall(r'<link\b[^>]*\bhref="(/[^"]+)"', html)
+        self.assertGreaterEqual(len(hrefs), 5, f"入口只声明了 {len(hrefs)} 个图标链接，疑似被删")
+        for href in hrefs:
+            with self.subTest(href=href):
+                self.assertTrue((REPO / "web/public" / href.lstrip("/")).is_file(),
+                                f"{href} 在 index.html 里声明，但 web/public 下没有这个文件")
+
+    def test_theme_color_与背景token一致(self):
+        """<meta name=theme-color> 的初值要跟 style.css 的 --cp-bg 同值。
+
+        对不上时浏览器工具栏/手机状态栏会先闪一个别的颜色，再在 JS 落地后跳回页面底色。
+        """
+        css = (REPO / "web/src/style.css").read_text(encoding="utf-8")
+        html = (REPO / "web/index.html").read_text(encoding="utf-8")
+        bgs = re.findall(r"--cp-bg:\s*(#[0-9a-fA-F]{6})", css)
+        self.assertEqual(len(bgs), 2, f"--cp-bg 应当暗/亮各一处，实际 {bgs}")
+        for value in bgs:
+            with self.subTest(color=value):
+                self.assertIn(value, html, f"{value} 未出现在入口 HTML 的 theme-color 里")
+
+
+    def test_social_版式不重叠不溢出(self):
+        """assets/social.svg 是 GitHub「Social preview」的图源，会被缩到 640×320 显示。
+
+        断言三件事：胶囊行内文字不溢出、胶囊之间不互相压叠、主标题组（字标/kicker/
+        两行标语/页脚）两两不重叠——上一轮 banner 的"排版错乱"就是这几条没把住。
+        """
+        root = ET.fromstring((REPO / "assets/social.svg").read_text(encoding="utf-8"))
+        vb = [float(v) for v in root.get("viewBox").split()]
+
+        band = next(g for g in root if _tag(g) == "g" and g.get("font-size"))
+        size = float(band.get("font-size"))
+        bx, by = _translate(band)
+        chips = []
+        for chip in band:
+            if _tag(chip) != "g":
+                continue
+            rect = next((c for c in chip if _tag(c) == "rect"), None)
+            text = next((c for c in chip if _tag(c) == "text"), None)
+            if rect is None or text is None:
+                continue
+            cx, cy = _translate(chip)
+            chips.append({
+                "label": (text.text or "").strip(),
+                "x": bx + cx,
+                "y": by + cy,
+                "w": float(rect.get("width")),
+                "h": float(rect.get("height")),
+                "text_x": bx + cx + float(text.get("x") or 0),
+            })
+        self.assertGreaterEqual(len(chips), 4, f"没抓到 social 卡的 chips 行：{chips}")
+        for ch in chips:
+            need = _text_advance(ch["label"], size)
+            slack = ch["x"] + ch["w"] - (ch["text_x"] + need)
+            self.assertGreaterEqual(slack, 8, f"胶囊「{ch['label']}」字宽溢出（余量 {slack:.0f}）")
+            self.assertLess(ch["y"] + ch["h"], vb[3], f"胶囊「{ch['label']}」掉出画布下沿")
+        chips.sort(key=lambda c: c["x"])
+        for a, b in zip(chips, chips[1:], strict=False):
+            self.assertGreaterEqual(b["x"] - (a["x"] + a["w"]), 8,
+                                    f"胶囊「{a['label']}」与「{b['label']}」互相压叠")
+        self.assertLessEqual(chips[-1]["x"] + chips[-1]["w"], vb[2] - 40, "胶囊行溢出画布右缘")
+
+        def box(el):
+            s = float(el.get("font-size"))
+            ls = float(el.get("letter-spacing") or 0)
+            label = (el.text or "").strip()
+            advance = _text_advance(label, s) + ls * max(len(label) - 1, 0)
+            return float(el.get("x")), float(el.get("y")), advance, s
+
+        heads = [box(t) for t in root if _tag(t) == "text" and (t.text or "").strip()]
+        self.assertGreaterEqual(len(heads), 4, "字标/标语/页脚文本缺失")
+        for i, (x1, y1, w1, s1) in enumerate(heads):
+            for x2, y2, w2, s2 in heads[i + 1:]:
+                top1, bot1 = y1 - s1 * 0.75, y1 + s1 * 0.25
+                top2, bot2 = y2 - s2 * 0.75, y2 + s2 * 0.25
+                overlap_y = top1 < bot2 and top2 < bot1
+                overlap_x = x1 < x2 + w2 and x2 < x1 + w1
+                self.assertFalse(overlap_x and overlap_y,
+                                 f"文本块 {heads[i][:2]!r} 与 {heads[i + 1][:2]!r} 在版面上重叠")
+
+        for pat in (p for p in root.iter() if _tag(p) == "pattern"):
+            if any(_tag(c) == "path" and c.get("stroke") for c in pat):
+                self.assertTrue(pat.get("patternTransform"),
+                                "网格 pattern 缺少 patternTransform，会在卡片边缘留下贴边亮线")
+
 
 if __name__ == "__main__":
     unittest.main()

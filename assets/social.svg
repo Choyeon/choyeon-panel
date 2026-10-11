@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-label="choyeon-panel — 原生 Linux 服务器管理面板">
+  <defs>
+    <linearGradient id="so-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b1e27"/>
+      <stop offset="1" stop-color="#242633"/>
+    </linearGradient>
+    <radialGradient id="so-glow" cx=".16" cy=".18" r=".82">
+      <stop offset="0" stop-color="#005eeb" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#005eeb" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="so-mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#005eeb"/>
+      <stop offset="1" stop-color="#4c8ef1"/>
+    </linearGradient>
+    <linearGradient id="so-line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3d8eff"/>
+      <stop offset="1" stop-color="#9b7bff"/>
+    </linearGradient>
+    <pattern id="so-grid" width="40" height="40" patternUnits="userSpaceOnUse" patternTransform="translate(20,20)">
+      <path d="M40 0H0v40" fill="none" stroke="#ffffff" stroke-opacity=".035"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="600" fill="url(#so-bg)"/>
+  <rect width="1200" height="600" fill="url(#so-grid)"/>
+  <rect width="1200" height="600" fill="url(#so-glow)"/>
+
+  <!-- 品牌标记：与 favicon.svg 同一套几何，128 网格（64 ×2） -->
+  <g transform="translate(72,84)">
+    <rect width="128" height="128" rx="30" fill="url(#so-mark)"/>
+    <rect x="18" y="26" width="92" height="76" rx="18" fill="#062457" fill-opacity=".5"/>
+    <path d="M18 44a18 18 0 0 1 18-18h56a18 18 0 0 1 18 18v2H18z" fill="#fff" fill-opacity=".3"/>
+    <polyline points="34,86 54,62 68,72 96,42" fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="96" cy="42" r="12" fill="#8fd460"/>
+  </g>
+
+  <text x="232" y="164" font-family="Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" font-size="72" font-weight="700" fill="#e3e6f3" letter-spacing="-1">
+    choyeon<tspan fill="url(#so-line)">-panel</tspan>
+  </text>
+  <text x="232" y="208" font-family="Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" font-size="21" fill="#9597a4" letter-spacing="4">
+    SELF-HOSTED LINUX SERVER PANEL
+  </text>
+
+  <!-- 右上装饰：与标记里同一条上升曲线的放大版，只负责平衡构图 -->
+  <g opacity=".22">
+    <polyline points="792,176 856,120 916,148 988,84 1052,112 1128,58" fill="none" stroke="url(#so-line)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="1128" cy="58" r="9" fill="#8fd460"/>
+  </g>
+
+  <text x="72" y="292" font-family="Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" font-size="40" font-weight="600" fill="#e3e6f3">
+    原生 Linux 服务器管理面板
+  </text>
+  <text x="72" y="340" font-family="Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" font-size="24" fill="#adb0bc">
+    应用部署 · systemd 服务 · 数据库 · 备份 · 监控告警 —— 一台机器，一个面板
+  </text>
+
+  <g font-family="Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" font-size="26" transform="translate(0,398)">
+    <g transform="translate(72,0)">
+      <rect width="152" height="54" rx="27" fill="#242633" fill-opacity=".85" stroke="#5b5e6a"/>
+      <text x="26" y="35" fill="#c0c2cf">一键部署</text>
+    </g>
+    <g transform="translate(240,0)">
+      <rect width="216" height="54" rx="27" fill="#242633" fill-opacity=".85" stroke="#5b5e6a"/>
+      <text x="26" y="35" fill="#c0c2cf">systemd 直管</text>
+    </g>
+    <g transform="translate(472,0)">
+      <rect width="212" height="54" rx="27" fill="#242633" fill-opacity=".85" stroke="#5b5e6a"/>
+      <text x="26" y="35" fill="#c0c2cf">备份自动回滚</text>
+    </g>
+    <g transform="translate(700,0)">
+      <rect width="232" height="54" rx="27" fill="#242633" fill-opacity=".85" stroke="#5b5e6a"/>
+      <text x="26" y="35" fill="#c0c2cf">12 项安全自检</text>
+    </g>
+  </g>
+
+  <text x="72" y="520" font-family="Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" font-size="22" fill="#9597a4">
+    Ubuntu · Debian · Rocky · Arch · Alpine　·　Python 3.11+ · Vue 3 · MIT
+  </text>
+</svg>

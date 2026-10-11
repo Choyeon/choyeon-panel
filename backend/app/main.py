@@ -33,6 +33,10 @@ from .services import alerts_service, apps_service, metrics_store
 
 START = time.time()
 
+# 部分发行版的 /etc/mime.types 里没有 .webmanifest，回落到 application/octet-stream
+# 会让浏览器直接忽略清单，图标尺寸/主题色全部失效。
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
