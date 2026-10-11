@@ -96,16 +96,20 @@ require_root() {
   [ "$(id -u)" -eq 0 ] || die "需要 root 权限执行（面板本身要管理 systemd / nginx）"
 }
 
-# 输出：OS_FAMILY=debian|rhel|unknown，OS_ID，OS_VERSION
+# 输出：OS_FAMILY=debian|rhel|arch|suse|alpine|unknown，OS_ID，OS_VERSION
+# CP_OS_RELEASE 仅测试用：指向一份 os-release 夹具，覆盖硬编码的 /etc/os-release。
 detect_os() {
   OS_ID="unknown"; OS_VERSION=""; OS_FAMILY="unknown"
-  if [ -r /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
+  if [ -r "${CP_OS_RELEASE:-/etc/os-release}" ]; then
+    # shellcheck disable=SC1090
+    . "${CP_OS_RELEASE:-/etc/os-release}"
     OS_ID="${ID:-unknown}"; OS_VERSION="${VERSION_ID:-}"
     case "$OS_ID" in
-      ubuntu|debian|raspbian|linuxmint) OS_FAMILY=debian ;;
-      rhel|centos|rocky|almalinux|fedora|ol|amzn) OS_FAMILY=rhel ;;
+      ubuntu|debian|raspbian|linuxmint|kali) OS_FAMILY=debian ;;
+      rhel|centos|rocky|almalinux|fedora|ol|amzn|anolis|centos_stream) OS_FAMILY=rhel ;;
+      arch|manjaro|endeavouros|artix|garuda|cachyos) OS_FAMILY=arch ;;
+      opensuse-leap|opensuse-tumbleweed|opensuse|sles|sled|suse) OS_FAMILY=suse ;;
+      alpine) OS_FAMILY=alpine ;;
     esac
   fi
   export OS_ID OS_VERSION OS_FAMILY
@@ -261,6 +265,9 @@ pkg_install() { # pkg_install <pkg...>
   case "$OS_FAMILY" in
     debian) export DEBIAN_FRONTEND=noninteractive; apt-get install -y --no-install-recommends "$@" ;;
     rhel)   (dnf install -y "$@" 2>/dev/null || yum install -y "$@") ;;
+    arch)   pacman -Sy --noconfirm --needed "$@" ;;
+    suse)   zypper --non-interactive install -y "$@" ;;
+    alpine) apk add --no-cache --no-progress "$@" ;;
     *)      die "未识别的发行版（$OS_ID），请手动安装：$*" ;;
   esac
 }
@@ -269,26 +276,42 @@ pkg_update() {
   case "$OS_FAMILY" in
     debian) export DEBIAN_FRONTEND=noninteractive; apt-get update -qq ;;
     rhel)   dnf -q makecache 2>/dev/null || true ;;
+    arch)   pacman -Sy --noconfirm 2>/dev/null || true ;;
+    suse)   zypper --non-interactive refresh 2>/dev/null || true ;;
+    alpine) apk update 2>/dev/null || true ;;
     *)      warn "未识别的发行版，跳过包索引更新" ;;
   esac
 }
 
 # ---------- 运行时版本保障 ----------
-ensure_python() { # 需要 >=3.11
-  local py=""
+_find_python() { # 输出第一个 >=3.11 的解释器名，找不到输出空串
+  local c
   for c in python3.13 python3.12 python3.11 python3; do
     if have_cmd "$c"; then
-      if "$c" -c 'import sys; sys.exit(0 if sys.version_info>=(3,11) else 1)' 2>/dev/null; then py="$c"; break; fi
+      if "$c" -c 'import sys; sys.exit(0 if sys.version_info>=(3,11) else 1)' 2>/dev/null; then printf '%s' "$c"; return; fi
     fi
   done
+  printf ''
+}
+
+ensure_python() { # 需要 >=3.11
+  local py
+  py="$(_find_python)"
   if [ -z "$py" ]; then
     step "未找到 Python >= 3.11，尝试安装"
     case "$OS_FAMILY" in
       debian) pkg_install python3 python3-venv python3-pip ;;
       rhel)   pkg_install python3.11 python3.11-pip || pkg_install python3 python3-pip ;;
+      arch)   pkg_install python ;;
+      suse)   pkg_install python3 python3-pip ;;
+      alpine) pkg_install python3 py3-venv ;;
       *)      die "请手动安装 Python >= 3.11" ;;
     esac
-    py=python3
+    # 安装完必须重新探测，不能写死 py=python3：RHEL9 系（Rocky/Alma）的 python3
+    # 仍是 3.9，而上面的 pkg_install 装的是 python3.11——旧写法拿 3.9 建 venv，
+    # 后端在启动时才炸。与首查同一口径，装到了哪个 >=3.11 就用哪个。
+    py="$(_find_python)"
+    [ -n "$py" ] || die "安装后仍未找到 Python >= 3.11，请手动安装后重跑"
   fi
   PY="$py"
   export PY
@@ -303,7 +326,7 @@ ensure_node() {
     ok "Node：v$cur"
     return
   fi
-  step "未找到 Node >= $need，开始安装 NodeSource 22 LTS"
+  step "未找到 Node >= $need，开始安装"
   case "$OS_FAMILY" in
     debian)
       pkg_install ca-certificates curl gnupg
@@ -314,9 +337,22 @@ ensure_node() {
       curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
       pkg_install nodejs
       ;;
+    arch)
+      # Arch 官方仓库的 nodejs 恒为当前大版本（>=22），无需第三方源
+      pkg_install nodejs npm
+      ;;
+    suse)
+      pkg_install nodejs20 nodejs20 npm20 || pkg_install nodejs npm
+      ;;
+    alpine)
+      pkg_install nodejs npm
+      ;;
     *) die "请手动安装 Node.js >= 20" ;;
   esac
   need_cmd node
+  if ! version_ge "$(node -v | sed 's/^v//')" "$need"; then
+    die "已安装的 Node $(node -v) 低于 $need（前端构建要求 ^20.19 / >=22.12），请手动升级 Node 后重跑"
+  fi
   ok "Node：$(node -v)"
 }
 

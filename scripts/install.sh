@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # choyeon-panel 一键安装脚本（原生部署，不使用 Docker）
 #
-#   curl -fsSL https://raw.githubusercontent.com/Choyeon/choyeon-panel/main/scripts/install.sh | bash
+#   git clone https://github.com/Choyeon/choyeon-panel.git /root/choyeon-panel
+#   cd /root/choyeon-panel && bash scripts/install.sh
 #   或：CP_PREFIX=/opt/choyeon-panel bash scripts/install.sh
+#
+# 注意：本脚本 source 同目录的 common.sh，不能 `curl | bash` 直跑——先 clone 再执行。
 #
 # 可注入环境变量：CP_PREFIX / CP_REPO / CP_BRANCH / CP_PORT / CP_HOST /
 #                 CP_DATA_DIR / CP_BACKUP_DIR / CP_SKIP_NGINX=1 / CP_SKIP_DEPS=1
@@ -26,7 +29,10 @@ else
   case "$OS_FAMILY" in
     debian) pkg_install ca-certificates curl git sqlite3 nginx rsync ;;
     rhel)   pkg_install ca-certificates curl git sqlite3 nginx rsync ;;
-    *)      warn "未识别发行版，请自行确认已安装：git / nginx / sqlite3" ;;
+    arch)   pkg_install ca-certificates curl git sqlite nginx rsync ;;
+    suse)   pkg_install ca-certificates curl git sqlite3 nginx rsync ;;
+    alpine) pkg_install ca-certificates curl git sqlite nginx rsync ;;
+    *)      warn "未识别发行版（$OS_ID），请自行确认已安装：git / nginx / sqlite3" ;;
   esac
 fi
 

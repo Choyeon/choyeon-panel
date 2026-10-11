@@ -6,12 +6,26 @@
 - **前端**：Vue 3 `<script setup>` + TypeScript + Naive UI + Vite
 - **运维**：systemd unit 直管，nginx 反代，一行脚本安装/升级/备份
 
-> 运维排障手册见 [RUNBOOK.md](./RUNBOOK.md)，交接说明见 [HANDOFF.md](./HANDOFF.md)。
+> 运维排障手册见 [RUNBOOK.md](./RUNBOOK.md)。
 > **AI 智能体 / 自动化部署请直接读 [AGENTS.md](./AGENTS.md)** —— 含确定性步骤、验收字段与禁止事项。
 
 ---
 
 ## 快速开始
+
+### 支持的发行版
+
+安装脚本自动识别发行版并**自动安装全部依赖**（含 Python 3.11+ 与 Node 20+）：
+
+| 系 | 发行版 | 包管理 |
+| --- | --- | --- |
+| Debian | Debian 12+ / Ubuntu 22.04+ / Linux Mint / Kali | apt（Node 走 NodeSource 22 LTS） |
+| RHEL | CentOS Stream 9+ / Rocky / AlmaLinux / Fedora / Amazon Linux | dnf/yum（Node 走 NodeSource 22 LTS） |
+| Arch | Arch / Manjaro / EndeavourOS / CachyOS | pacman |
+| openSUSE | Leap 15.6+ / Tumbleweed | zypper |
+| Alpine | 3.20+（musl；无 systemd 时服务需手动启动） | apk |
+
+其它发行版：脚本不会中断，但会跳过依赖安装并提示自行确认 `git / nginx / sqlite3`。
 
 ### 一键安装（推荐）
 

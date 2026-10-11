@@ -346,6 +346,193 @@ class TestCliEntryThroughSymlink(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("cli.py", r.stdout, "./bin/choyeonctl 这条原有路径不能被改坏")
 
+class TestDistroSupport(unittest.TestCase):
+    """detect_os / pkg_install / ensure_python / ensure_node 的多发行版路由。
+
+    不真装任何包：包管理器全部用 shim 替身，只记录参数；os-release 用
+    CP_OS_RELEASE 指向夹具文件覆盖。重点回归一个真实缺陷——RHEL9 系的
+    python3 仍是 3.9，install 装的是 python3.11，ensure_python 旧写法装完
+    写死 py=python3，会用 3.9 建 venv 让后端启动才炸。
+    """
+
+    FAMILY = {
+        "ubuntu": "debian", "debian": "debian",
+        "centos": "rhel", "rocky": "rhel", "almalinux": "rhel", "fedora": "rhel",
+        "arch": "arch", "manjaro": "arch", "endeavouros": "arch", "cachyos": "arch",
+        "opensuse-leap": "suse", "opensuse-tumbleweed": "suse", "sles": "suse",
+        "alpine": "alpine",
+    }
+    PM = {"debian": "apt-get", "rhel": "dnf", "arch": "pacman", "suse": "zypper", "alpine": "apk"}
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="cp_distro_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.osr = os.path.join(self.dir, "os-release")
+        self.bin = os.path.join(self.dir, "bin")
+        os.makedirs(self.bin)
+        self.log = os.path.join(self.dir, "pm.log")
+        open(self.log, "w").close()
+
+    def _write_os_release(self, distro_id, version_id="1"):
+        with open(self.osr, "w", encoding="utf8") as fh:
+            fh.write(f'ID="{distro_id}"\nVERSION_ID="{version_id}"\n')
+
+    def _shim(self, name, body):
+        p = os.path.join(self.bin, name)
+        with open(p, "w", encoding="utf8", newline="\n") as fh:
+            fh.write("#!/bin/sh\n" + body + "\n")
+        os.chmod(p, 0o755)
+
+    def _pm_shims(self):
+        for name in set(self.PM.values()) | {"yum"}:
+            self._shim(name, f'echo "{name} $*" >> "$CP_SHIM_LOG"')
+
+    def _py_shim(self, name, version):
+        major = version.split(".")[0]
+        minor = version.split(".")[1]
+        self._shim(name, f'''case "$1" in
+  -c) case "$2" in *"version_info>=({major},{minor})"*) exit 0 ;; *) exit 1 ;; esac ;;
+  -V) echo "Python {version}" ;;
+esac
+exit 1''')
+
+    def _shadow_newer_pythons(self):
+        """测试机自带的 python3.13/3.12 会抢先通过探测，必须用不达标替身遮住，
+        否则测的是服务器而不是脚本的路由。"""
+        for name in ("python3.13", "python3.12"):
+            self._shim(name, "exit 1")
+
+    def _node_shim(self, version):
+        self._shim("node", f'case "$1" in -v) echo "v{version}" ;; esac')
+
+    def _pm_installs_node(self, pm_name, version):
+        """包管理器替身"装出"一个 node：让 install 路径能走完 need_cmd 与版本校验。"""
+        self._shim(pm_name, f'''echo "{pm_name} $*" >> "$CP_SHIM_LOG"
+cat > "{self.bin}/node" <<'EOS'
+#!/bin/sh
+case "$1" in -v) echo "v{version}" ;; esac
+exit 1
+EOS
+chmod +x "{self.bin}/node"''')
+
+    def _env(self):
+        env = dict(os.environ)
+        env.update({
+            "NO_COLOR": "1", "CP_OS_RELEASE": self.osr,
+            "CP_SHIM_LOG": self.log, "PATH": self.bin + os.pathsep + env["PATH"],
+        })
+        return env
+
+    def _bash(self, snippet):
+        # detect_os 是 ensure_*/pkg_* 的前置（真实 install.sh 也先跑它）；
+        # 不补这一步 OS_FAMILY 停在 unknown，路由测试测到的全是 die 分支。
+        full = f'source "{SCRIPTS}/common.sh" >/dev/null 2>&1\ndetect_os >/dev/null\n{snippet}'
+        return subprocess.run(["bash", "-c", full], capture_output=True, text=True,
+                              env=self._env(), timeout=60, stdin=subprocess.DEVNULL)
+
+    def _pm_calls(self):
+        with open(self.log, encoding="utf8") as fh:
+            return [line.split(None, 1) for line in fh.read().splitlines()]
+
+    def test_every_supported_distro_maps_to_a_family(self):
+        for distro_id, family in self.FAMILY.items():
+            self._write_os_release(distro_id)
+            r = self._bash('detect_os >/dev/null; echo "$OS_FAMILY"')
+            self.assertEqual(r.returncode, 0, distro_id + ": " + r.stderr)
+            self.assertEqual(r.stdout.strip(), family, distro_id)
+
+    def test_unknown_distro_is_reported_not_assumed(self):
+        self._write_os_release("plan9")
+        r = self._bash('detect_os >/dev/null; echo "$OS_FAMILY"')
+        self.assertEqual(r.stdout.strip(), "unknown")
+
+    def test_pkg_install_routes_to_the_family_package_manager(self):
+        for distro_id, family in self.FAMILY.items():
+            self.setUp()
+            self._write_os_release(distro_id)
+            self._pm_shims()
+            r = self._bash("detect_os >/dev/null; pkg_install git nginx 2>/dev/null")
+            self.assertEqual(r.returncode, 0, distro_id + ": " + r.stderr)
+            pm, args = self._pm_calls()[0]
+            self.assertEqual(pm, self.PM[family], distro_id)
+            self.assertIn("git", args, distro_id)
+
+    def test_arch_packages_use_arch_names(self):
+        """Arch 的 sqlite CLI 包叫 sqlite（不是 sqlite3），装错名 pacman 直接失败。"""
+        self._write_os_release("arch")
+        self._pm_shims()
+        self._bash("detect_os >/dev/null; pkg_install sqlite nginx rsync")
+        pm, args = self._pm_calls()[0]
+        self.assertEqual(pm, "pacman")
+        self.assertIn("sqlite", args)
+        self.assertNotIn("sqlite3", args)
+
+    def test_ensure_python_uses_a_runtime_that_satisfies_311(self):
+        self._write_os_release("rocky", "9.4")
+        self._shadow_newer_pythons()
+        self._py_shim("python3.11", "3.11.9")
+        r = self._bash('ensure_python >/dev/null 2>&1; echo "PY=[$PY]"')
+        self.assertIn("PY=[python3.11]", r.stdout, r.stdout + r.stderr)
+
+    def test_ensure_python_redetects_after_install_on_rhel9(self):
+        """RHEL9: python3=3.9、装的是 python3.11 —— 装完必须重新探测而不是写死 python3。"""
+        self._write_os_release("rocky", "9.4")
+        self._shadow_newer_pythons()
+        self._py_shim("python3", "3.9.18")
+        self._shim("dnf", f'''echo "dnf $*" >> "$CP_SHIM_LOG"
+cat > "{self.bin}/python3.11" <<'EOS'
+#!/bin/sh
+case "$1" in
+  -c) case "$2" in *"version_info>=(3,11)"*) exit 0 ;; *) exit 1 ;; esac ;;
+  -V) echo "Python 3.11.9" ;;
+esac
+exit 1
+EOS
+chmod +x "{self.bin}/python3.11"''')
+        r = self._bash('ensure_python >/dev/null 2>&1; echo "PY=[$PY]"')
+        self.assertIn("PY=[python3.11]", r.stdout, r.stdout + r.stderr)
+        self.assertNotIn("PY=[python3]\n", r.stdout, "旧缺陷：装了 3.11 却用 3.9 建 venv")
+        self.assertTrue(any(pm == "dnf" and "python3.11" in a for pm, a in self._pm_calls()))
+
+    def test_ensure_python_dies_when_install_yields_nothing(self):
+        self._write_os_release("rocky", "9.4")
+        self._shadow_newer_pythons()
+        self._py_shim("python3", "3.9.18")
+        self._pm_shims()  # dnf 只记录不安装
+        r = self._bash("set +e; ensure_python 2>&1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("3.11", r.stdout, r.stdout + r.stderr)
+
+    def test_ensure_node_installs_nodejs_npm_on_arch_when_missing(self):
+        self._write_os_release("arch")
+        self._node_shim("1.0.0")  # 旧版 node：逼 install 分支（机器自带的真 node 会提前返回）
+        self._pm_installs_node("pacman", "24.3.0")
+        r = self._bash("ensure_node 2>&1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self._pm_calls()
+        self.assertTrue(any(pm == "pacman" and "nodejs" in a and "npm" in a for pm, a in calls), calls)
+
+    def test_ensure_node_rejects_a_runtime_below_20(self):
+        self._write_os_release("arch")
+        self._pm_shims()
+        self._node_shim("18.20.0")
+        r = self._bash("set +e; ensure_node 2>&1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Node", r.stdout, r.stdout + r.stderr)
+
+    def test_ensure_node_suse_first_choice_is_lts_series(self):
+        self._write_os_release("opensuse-leap", "15.6")
+        self._node_shim("1.0.0")  # 逼 install 分支
+        self._pm_installs_node("zypper", "20.19.0")
+        r = self._bash("ensure_node 2>&1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        pm, args = self._pm_calls()[0]
+        self.assertEqual(pm, "zypper")
+        self.assertIn("nodejs20", args)
+
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
