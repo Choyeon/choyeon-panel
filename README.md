@@ -192,6 +192,7 @@ backend/
     util.py            子进程封装：进程组超时清理，避免僵尸进程
   cli.py               choyeonctl：命令行部署/账号/应用/备份/自检，全命令支持 --json
   backup_runner.py     备份 CLI（systemd timer 调用）
+  run_tests.py         测试入口（隔离数据目录 + 退出清理；make test 与 CI 都走它）
   python/sys_helper.py 系统指标采集（仅标准库）
   tests/               unittest 套件（依赖见 requirements-dev.txt，测试专用）
   requirements-dev.txt 测试/开发依赖（不进生产 requirements.txt，别用 venv_create 装）
@@ -256,14 +257,15 @@ Windows 本机也可开发：systemd/journalctl/nginx 等 Linux 专属能力会�
 cd backend
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt   # 测试依赖（httpx2 是 TestClient 硬需求）
                                                     # uv 建的 venv 没有 .venv/bin/pip：uv pip install --python .venv/bin/python -r requirements-dev.txt
-.venv/bin/python -m unittest discover -s tests      # 校验器、unit 渲染与转义、nginx 解析、
+.venv/bin/python run_tests.py                      # 校验器、unit 渲染与转义、nginx 解析、
                                                     # 路径守卫、令牌吊销、限速、日志裁剪、超时清理
                                                     # 部署模板、就绪探针、仓库门面一致性（README 引用/版本号/资产）
+                                                    # （入口会强制测试用临时数据目录，不碰线上库）
 cd web && npm run build                             # vue-tsc 类型检查 + vite 构建
 bash scripts/healthcheck.sh                         # 线上健康检查
 ```
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `unittest discover` 输出 **Ran 1037 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `run_tests.py` 输出 **Ran 1038 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
 
 ---
 

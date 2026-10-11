@@ -31,8 +31,8 @@ Windows 也能开发：systemd / journalctl / nginx 这类 Linux 专属能力会
 
 ## 跑测试要注意的三件事
 
-1. **测试自己决定数据目录。** 每个测试模块必须在 `from app import …` **之前**设置 `CP_DATA_DIR` / `CP_FILE_ROOTS` 默认值——配置在 import 时就读取了。CI 用 `unittest discover`（没有 conftest），先被 import 的模块说了算，漏写就会污染真实目录。
-2. **不要带 `CP_DATA_DIR` 环境变量跑测试**，尤其是生产机上；那会让测试写进真实数据目录。
+1. **用 `backend/run_tests.py` 跑测试，不要直接 `python -m unittest discover`。** 每个测试模块必须在 `from app import …` **之前**设置 `CP_DATA_DIR` / `CP_FILE_ROOTS` 默认值——配置在 import 时就读取了。`unittest discover` 不读 `conftest.py`，缺了它那道"外部 `CP_DATA_DIR` 一律忽略 + 临时目录跑完整块删除"的保护：环境里带着 `CP_DATA_DIR`（生产机上很常见，`.env` 里就有）时各模块的 `setdefault` 全部失效，整轮用例会直接读写线上库。`make test` 与 CI 都走 `run_tests.py`。
+2. **不要带 `CP_DATA_DIR` 环境变量跑测试**，尤其是生产机上；`run_tests.py` 会打印它忽略了这个变量并改用会话临时目录，看到这条提示说明你的调用方式不对。
 3. **探测解释器的测试要遮位。** CI 的 3.11 job 的 `PATH` 里一定有 `python3.11`，测试若关心版本路由就必须把 3.13/3.12/3.11 全部用不合格替身遮住，否则测的是宿主机而不是脚本。
 
 ## 代码约定

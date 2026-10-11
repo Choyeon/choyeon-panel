@@ -102,6 +102,19 @@ class TestRepoHygiene(unittest.TestCase):
             self.assertFalse(in_sample - in_config,
                              f".env.example 写明了 config.py 不认识的键：{sorted(in_sample - in_config)}")
 
+    def test_测试命令统一走_run_tests(self):
+        """Makefile 与 CI 必须用 backend/run_tests.py 跑单测。
+
+        裸 `unittest discover` 不读 conftest.py，缺"忽略外部 CP_DATA_DIR"那道保护，
+        在生产机上带着 .env 里的变量跑一次就会写坏线上库。
+        """
+        for rel in ("Makefile", ".github/workflows/ci.yml"):
+            text = (REPO / rel).read_text(encoding="utf-8")
+            with self.subTest(file=rel):
+                self.assertIn("run_tests.py", text, f"{rel} 没有通过 backend/run_tests.py 跑测试")
+                self.assertNotIn("-m unittest discover", text,
+                                 f"{rel} 仍在直接调用 unittest discover，会绕过数据目录隔离")
+
     def test_issue_模板字段完整(self):
         for path in sorted((REPO / ".github/ISSUE_TEMPLATE").glob("*.yml")):
             text = path.read_text(encoding="utf-8")

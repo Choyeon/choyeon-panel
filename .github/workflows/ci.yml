@@ -57,11 +57,11 @@ jobs:
         run: mypy app || true
 
       - name: 单元测试
-        env:
-          CP_DATA_DIR: ${{ runner.temp }}/cp-data
+        # run_tests.py 是 unittest 入口：强制把 CP_DATA_DIR 指向会话临时目录并在退出时
+        # 清理（unittest 不读 conftest.py，缺这两道保护会污染真实数据目录、在 /tmp 留残留）
         run: |
           set -o pipefail
-          python -m unittest discover -s tests -v 2>&1 | tee "${{ runner.temp }}/ut.log"
+          python run_tests.py -v 2>&1 | tee "${{ runner.temp }}/ut.log"
       # unittest 不产 GitHub 注解，失败时把失败头与异常行转成 ::error，
       # 这样不用登录就能从 API 读到失败点（公开仓库注解是公开的）。
       - name: 单元测试失败摘要
@@ -70,7 +70,7 @@ jobs:
           LOG="${{ runner.temp }}/ut.log"
           if [ ! -s "$LOG" ]; then
             echo "::error ::ut.log missing or empty"
-            CP_DATA_DIR="${{ runner.temp }}/cp-data" python -m unittest discover -s tests > /tmp/re.log 2>&1 || true
+            python run_tests.py > /tmp/re.log 2>&1 || true
             LOG=/tmp/re.log
           fi
           echo "::error ::log-lines=$(wc -l < "$LOG")"
