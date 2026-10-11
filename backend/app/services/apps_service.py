@@ -832,13 +832,44 @@ async def _current_sha(path: str) -> str | None:
     return r["out"] if r["code"] == 0 else None
 
 
+async def _commit_present(path: str, sha: str) -> bool:
+    """部署记录里这个 commit 还在不在仓库里。
+
+    浅克隆（`clone --depth 1`）与应用仓库被 force-push 后 gc 掉的提交，都不在对象库里；
+    拿它当回滚目标只会得到 `git reset --hard` 的 "bad object"，而且每次都挡在同一个位置，
+    用户既退不回更早的版本，也看不懂为什么。
+    """
+    r = await run("git", ["cat-file", "-e", sha + "^{commit}"], cwd=path, timeout=30)
+    return r["code"] == 0
+
+
+async def _is_newer_than(path: str, current: str | None, sha: str) -> bool | None:
+    """sha 是不是 current 的后代（比当前更新的版本）。git 判不出时回 None。
+
+    实测（2.47）：`merge-base --is-ancestor A B` 返回 0=A 是 B 的祖先、1=不是、128=对象不存在。
+    """
+    if not current:
+        return None
+    r = await run("git", ["merge-base", "--is-ancestor", current, sha], cwd=path, timeout=30)
+    if r["code"] == 0:
+        return True
+    if r["code"] == 1:
+        return False
+    return None
+
+
 async def rollback_app(app_id: int) -> dict:
     """回滚到**上一个**成功部署的版本，并重启服务。
 
     旧实现取"最近一条成功记录"的 commit，而部署成功时记下的正是当前正在运行的
     commit，于是 `git reset --hard <当前 commit>` 变成空操作——用户点了"回滚"却什么都没变
     （只有"最近一次部署失败"这种场景才恰好正确）。
-    现在以工作区实际 commit 为基准，往前找第一个不同的成功版本。
+    改成"以工作区实际 commit 为基准，往前找第一个不同的成功版本"之后，还剩一半没解决：
+    只看"不同"不看"先后"，**连着点两次回滚会跳到最新版本去**。线上实测（批次⑤N，
+    部署 v1 → 部署 v2 → 同步 v3 → 回滚 → 再回滚）：第一次正确退回 v2，第二次返回
+    `{"commit": v3}` 并把服务切回 v3——用户想继续退，面板却把他推到最新发布版。
+    所以候选要过三道：不是当前版本、commit 还在仓库里、不是当前的后代（即真的更早）。
+    git 判不出先后时（对象缺失之外的错误）保留旧口径当候选，宁可多退一步也不要让回滚失效。
     """
     app = get_app(app_id)
     if not app:
@@ -861,11 +892,21 @@ async def rollback_app(app_id: int) -> dict:
         if not sha or sha in seen:
             continue
         seen.add(sha)
-        if sha != current:
-            target = row
-            break
+        if sha == current:
+            continue
+        if not await _commit_present(app["path"], sha):
+            continue
+        if await _is_newer_than(app["path"], current, sha) is True:
+            continue
+        target = row
+        break
     if not target:
-        raise RuntimeError("没有更早的成功版本可回滚（当前已是最近一次成功部署）")
+        if seen == {current}:
+            raise RuntimeError("没有更早的成功版本可回滚（当前已是最近一次成功部署）")
+        raise RuntimeError(
+            "没有可回滚的版本：部署记录里的 commit 除当前版本外，要么已不在仓库中（浅克隆/历史被改写），"
+            "要么比当前更新"
+        )
     r = await run("git", ["reset", "--hard", target["commit_sha"]], cwd=app["path"], timeout=120)
     if r["code"] != 0:
         raise RuntimeError(f"回滚失败：{r['out']}")
