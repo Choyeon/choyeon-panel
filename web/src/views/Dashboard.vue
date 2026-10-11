@@ -446,7 +446,7 @@ onBeforeUnmount(() => {
           <span class="hero-host-text">{{ info.hostname || '本机' }} · {{ info.prettyName || info.platform || '加载中' }}</span>
         </div>
       </div>
-      <NSpace align="center" :size="8" :wrap="false">
+      <NSpace align="center" :size="8">
         <NTag v-if="info.node" round size="small" :bordered="false" type="info">{{ info.node }}</NTag>
         <span v-if="sideError" class="st warn"><span class="dot warn"></span>服务状态未知</span>
         <span v-else-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
@@ -495,7 +495,7 @@ onBeforeUnmount(() => {
         <NCard size="small">
           <template #header><span class="section-title">监控</span></template>
           <template #header-extra>
-            <NSpace align="center" :size="8" :wrap="false">
+            <NSpace align="center" :size="8">
               <NSelect
                 v-if="monMode === 'net'"
                 v-model:value="monNic" size="tiny" class="nic-select" :options="nicOpts"
@@ -574,7 +574,7 @@ onBeforeUnmount(() => {
     <!-- 历史曲线（持久化行） -->
     <div class="hist-head">
       <span class="section-title">历史曲线 · 网络 / 磁盘 / 负载</span>
-      <NSpace align="center" :size="8" :wrap="false">
+      <NSpace align="center" :size="8">
         <span v-if="mstat?.lastSampleTs" class="sfoot">最近采样 {{ new Date(mstat.lastSampleTs * 1000).toLocaleTimeString() }}</span>
         <NTag size="small" :bordered="false" :type="mstat?.samplerAlive ? 'success' : 'warning'">
           {{ mstat?.samplerAlive ? '采样器运行中' : '采样器未运行' }}
@@ -704,16 +704,21 @@ onBeforeUnmount(() => {
 
 /* ---------- 概览条（1Panel：卡片 166px 高，标签在上、数字在下、数字是 link 按钮） ---------- */
 .ov-card :deep(.n-card__content) { min-height: 106px; }
+/* 概览格子：用 flex + flex-grow 而不是 grid。grid 的 auto-fit 列数和格子数（管理员 5、
+   只读 4）永远除不尽，最后一段会露出容器底色，实测在 375/640/1100 档都是一块灰色空洞；
+   flex-grow 让最后一行的格子自己摊满剩余宽度，任何档数、任何格子数都不留洞。
+   分隔线改由格子自己画（右边 + 下边），容器补一圈同色描边，边缘那两条正好被描边盖住。 */
 .ov-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 1px;
-  background: var(--cp-line);
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--cp-line);
   border-radius: var(--radius-lg);
   overflow: hidden;
 }
 .ov-item {
+  flex: 1 1 105px;
   background: var(--cp-bg-1);
+  border-bottom: 1px solid var(--cp-line);
   padding: var(--space-3) var(--space-2);
   text-align: center;
   cursor: pointer;
@@ -721,6 +726,7 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 .ov-item:hover, .ov-item:focus-visible { background: var(--cp-hover); }
+.ov-item + .ov-item { border-left: 1px solid var(--cp-line); }
 .ov-item:focus-visible { outline: 2px solid var(--cp-brand); outline-offset: -2px; }
 .ov-label { font-size: var(--fs-md); color: var(--cp-text-dim); }
 .ov-num {
@@ -748,6 +754,9 @@ onBeforeUnmount(() => {
 }
 .cp-chip.down b { color: var(--cp-err); }
 .nic-select { width: 200px; }
+/* 网卡选择 200px + 段选 ~120px 在 375 档放不下（卡片头内宽 301px），实测工具条折成两行、
+   卡片头高到 150px。压到 140px 后两者同排一行，网卡名过长时选择框自己出省略号。 */
+@media (max-width: 640px) { .nic-select { width: 140px; } }
 .chart-foot { display: block; margin-top: var(--space-2); font-size: var(--fs-xs); line-height: 1.5; }
 @media (max-width: 1023px) {
   .home-grid { grid-template-columns: minmax(0, 1fr); }

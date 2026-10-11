@@ -538,6 +538,104 @@ html.cp-vt *::after {
   body { font-size: var(--fs-sm); }
 }
 
+/* ---------- 触屏档触控目标（≤900px，与侧栏收进抽屉同一档） ---------- */
+/* 375/768 两档逐路由实测：naive-ui 的 small/tiny 控件高 22-28px，每一屏都有几十个
+   拇指点不准的目标（最密的是服务页 204 个）。44px 是 WCAG 2.5.5 与 Apple HIG 的下限，
+   桌面档不动——那 28px 是鼠标换来的一屏信息密度。
+   用 min-height 而不是改 --n-height：naive 把高度写在元素自己的 height 上，
+   min-height 盖得过它，又不会把 flex 居中的文字挤歪。 */
+@media (max-width: 900px) {
+  .n-button,
+  .n-input,
+  .n-input-number,
+  .n-base-selection,
+  .n-tabs-tab,
+  .n-menu-item-content,
+  .n-checkbox,
+  .n-radio,
+  .n-pagination-item,
+  .cp-op,
+  .site-link {
+    min-height: 44px;
+  }
+  /* 表格里的行内按钮另有桌面档规则 `.n-data-table-td .n-button`（0,2,0），特异度压过上面
+     那条 `.n-button`（0,1,0）：第一轮 375/768 实测后仍剩 244 个 28x26，全在 td 里。
+     要用同一档特异度覆写才真的生效。 */
+  .n-data-table-td .n-button { min-height: 44px; }
+  /* 文字型行内按钮的宽度等于字数（`.cp-op` 把横向内边距清成 0，两字按钮只有 28px 宽），
+     高度补到 44 之后横向仍然点不准。`td .cp-op` 比 `.cp-op` 多一个元素选择器，盖得过它。
+     只补表格单元格里的那些：列宽是固定的（实测补宽前后整表宽度都是 815/1150/…，没有变化），
+     `.cp-ops` 又是 flex-wrap，多出来的宽度会在格内换行；卡片头部的工具条没有这个余量，
+     实测补宽会把最右的按钮顶出视口 10px，所以工具条维持原样。 */
+  td .cp-op { padding-inline: 8px; }
+  /* 纯图标按钮的宽度等于图标本身（实测 14-22px），高度补到 44 之后拇指仍点不准。
+     `:has(.n-icon:only-child)` 就是「里面只有图标、没有文字」的按钮；带文字的按钮其
+     图标不是 only-child，不会被误补宽。:has 在 Chrome 105+ / Safari 15.4+ 可用，
+     不支持的浏览器只是少补一点宽度，不影响布局。 */
+  .n-button:has(.n-icon:only-child) { min-width: 44px; }
+  /* 输入框后缀里的显隐口令按钮走的是 naive 的 #icon 插槽，图标不是任何元素的
+     only-child，上面那条 :has 抓不到它（实测 18x44）。后缀占的是输入框自己的内部
+     空间，补宽不撑破布局，只把图标往左挪。 */
+  .n-input__suffix .n-button { min-width: 44px; }
+  /* 勾选框：naive 把 click 绑在 .n-checkbox 根元素上，实测 16x44。选择列只有 40px 宽，
+     所以把根元素撑到刚好占满这一列并让 18px 的方框居中，不用外扩命中区——那会抢相邻行。 */
+  .n-checkbox--inside-table { min-width: 40px; justify-content: center; }
+  .n-pagination-item { min-width: 38px; }
+  /* 输入框的可见高度由内层元素撑，外层已经 44，内层只补到文字居中 */
+  .n-input__input-el { min-height: 28px; }
+  /* 清除按钮是唯一"只能靠外扩命中区"的：它缩在输入框后缀里，14x14，
+     放大自己会把图标画胖，而它四周没有兄弟控件，外扩 26px 不会抢走别人的点击。 */
+  .n-base-clear { position: relative; }
+  .n-base-clear::before {
+    content: "";
+    position: absolute;
+    inset: -13px;
+  }
+  /* 开关轨道实测 18px 高：放大自己会把轨道画胖，而 naive 在 .n-switch 根节点上没用
+     ::before（实测 content:none、position:static），所以只外扩命中区、视觉尺寸不变。
+     垂直 13px 落在所属行的空白里，水平 6px 只碰到自己的文字标签（点它也照样切这个开关）。 */
+  .n-switch { position: relative; }
+  .n-switch::before {
+    content: "";
+    position: absolute;
+    inset: -13px -6px;
+  }
+  /* 卡片头部（NCard header + header-extra）是 flex + space-between 且不换行：375 档实测
+     「监控」标题被压成 0x51（一字一行），工具条独占 301px 宽。放开换行，让整条工具条降到
+     标题下面一行，标题恢复整行可读。只有装不下的卡片会真的换行，其余版式不变。 */
+  .n-card-header { flex-wrap: wrap; row-gap: var(--space-1); }
+  .n-card-header__extra { flex: 1 1 auto; min-width: 0; }
+  /* 抽屉里的导航行本来就是给手指用的 */
+  .n-drawer .n-menu-item-content { min-height: 48px; }
+  /* 段选（流量 / 磁盘 IO、历史区间）是这批里剩下最小的自绘控件，实测 25px 高。
+     它装在卡片头部的 header-extra 里，标题行本身有余量，补到 44 只是把卡片头撑高一点。 */
+  .cp-seg > button { min-height: 44px; }
+  /* 二级页签桌面档 35px。PageTabBar 的 scoped 样式只设 padding/min-width，没设 min-height，
+     所以这里的全局规则不会和它抢；.ptb-tabs 本身 flex-wrap，补高不产生横向溢出。 */
+  .ptb-tab { min-height: 44px; }
+  /* 顶栏账号胶囊实测 38px，而同一个顶栏里的图标按钮已经是 44（--header-h 49px 装得下）。 */
+  .user-chip { min-height: 44px; }
+  /* 表格里的仓库外链是 12x12 的纯图标 <a>，补尺寸会把整行撑高，所以和清除按钮一样只外扩命中区。 */
+  .cell-repo { position: relative; }
+  .cell-repo::before { content: ""; position: absolute; inset: -13px; }
+}
+
+@media (max-width: 640px) {
+  /* 640 以下卡片头改成上下两行：标题和 header-extra 排在同一行时只剩 129px，实测
+     「应用（3/3 运行中）」被折成两行。这里不用 flex-basis:100%，因为 naive 在
+     `.n-card > .n-card-header .n-card-header__main`（0,3,0）上写了 flex:1 1 0%，
+     运行时注入的样式排在我们的 <link> 之后，同特异度它会赢（实测标题被压成 0 宽、
+     一字一行）。换成 column + align-items:stretch 绕开这场竞争，选择器多带一层 .n-card
+     抬到 0,3,0 才压得住 naive 给 header 设的 align-items:center。
+     :not(:has(.n-card-header__close)) 把带关闭按钮的对话框卡头排除在外——那里
+     关闭按钮应该留在标题右侧，不该掉到下一行。 */
+  .n-card > .n-card-header:not(:has(.n-card-header__close)) {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .n-card > .n-card-header .n-card-header__extra { justify-content: flex-end; }
+}
+
 /* ---------- 表格高度机制的断点修正 ---------- */
 /* .cp-scroll 的内边距与 PageHeader 的换行行为都随断点变化，这里跟着调，
    页面侧只需要再补自己的 --chrome-extra（工具条/卡片内边距），不用再算 100vh。 */

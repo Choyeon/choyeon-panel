@@ -68,7 +68,7 @@ const dbCols: any[] = [
     render: (r: any) => h('span', { class: 'vchip' }, `${r.conns} conn`),
   },
   {
-    title: '操作', key: 'ops', width: 70, align: 'center',
+    title: '操作', key: 'ops', width: 70, align: 'center', fixed: 'right' as const,
     render: (r: any) =>
       h(NPopconfirm, { onPositiveClick: () => manage('dropDb', r.name) }, {
         trigger: () => h(NButton, { text: true, size: 'small', type: 'error', class: 'cp-op', title: `删除数据库 ${r.name}` }, { default: () => '删除' }),
@@ -88,7 +88,7 @@ const roleCols: any[] = [
   { title: '登录', key: 'login', width: 88, render: (r: any) => h('span', { class: 'st ' + (r.login ? 'ok' : 'idle') }, [h('span', { class: 'dot ' + (r.login ? 'ok' : 'idle') }), r.login ? '可登录' : '仅组']) },
   { title: 'Superuser', key: 'super', width: 92, render: (r: any) => (r.super ? h(NTag, { size: 'tiny', bordered: false, type: 'warning' }, () => 'SUPER') : h('span', { class: 'cell-sub' }, '—')) },
   {
-    title: '操作', key: 'ops', width: 110, align: 'center',
+    title: '操作', key: 'ops', width: 110, align: 'center', fixed: 'right' as const,
     render: (r: any) =>
       h('div', { class: 'cp-ops' }, [
         h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => openPwd(r.name) }, () => '改密'),

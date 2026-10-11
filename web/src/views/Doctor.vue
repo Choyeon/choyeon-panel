@@ -96,7 +96,7 @@ const columns: any[] = [
     render: (r: Item) => h(CpStatusTag, { status: TAG[r.status], text: TYPE[r.status].label }),
   },
   {
-    title: '操作', key: 'act', width: 160,
+    title: '操作', key: 'act', width: 160, fixed: 'right' as const,
     render: (r: Item) => {
       if (r.status === 'pass' || (!r.fixable && !r.fix)) return h(NText, { depth: 3 }, () => '—');
       const children: any[] = [];

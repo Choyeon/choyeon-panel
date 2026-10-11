@@ -159,7 +159,7 @@ const columns: any[] = [
         : h('span', { class: 'cell-sub' }, '—'),
   },
   {
-    title: '操作', key: 'ops', width: 230, align: 'center',
+    title: '操作', key: 'ops', width: 230, align: 'center', fixed: 'right' as const,
     render: (r: any) =>
       h(CpRowActions, {
         ellipsis: 3,

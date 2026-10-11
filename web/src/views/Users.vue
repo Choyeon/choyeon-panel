@@ -117,7 +117,7 @@ const cols: any[] = [
       ),
   },
   {
-    title: '操作', key: 'ops', width: 190, align: 'center',
+    title: '操作', key: 'ops', width: 190, align: 'center', fixed: 'right' as const,
     // 1Panel 的操作列是纯文字按钮 + 5px gap，不带图标；图标版留给工具栏。
     render: (u: any) =>
       h('div', { class: 'cp-ops' }, [

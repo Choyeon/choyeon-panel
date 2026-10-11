@@ -206,6 +206,7 @@ const siteColumns: any[] = [
     key: 'ops',
     width: 170,
     align: 'center',
+    fixed: 'right' as const,
     render: (r: any) => {
       const href = siteHref(r.domain);
       const txt = { text: true, size: 'small', class: 'cp-op' } as const;
@@ -287,6 +288,7 @@ const certColumns: any[] = [
     key: 'ops',
     width: 90,
     align: 'center',
+    fixed: 'right' as const,
     render: (c: any) =>
       isAdmin.value
         ? h(NPopconfirm, { onPositiveClick: () => renew(c) }, {

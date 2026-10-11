@@ -230,7 +230,7 @@ const columns: any[] = [
           : h(CpStatusTag, { status: 'stopped', text: '已停止' }),
   },
   {
-    title: '操作', key: 'ops', width: 209, align: 'center',
+    title: '操作', key: 'ops', width: 209, align: 'center', fixed: 'right' as const,
     render: (r: any) => h(CpRowActions, { buttons: rowActions(r), ellipsis: 2 }),
   },
 ];

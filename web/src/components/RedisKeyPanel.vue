@@ -63,7 +63,7 @@ const memberData = computed<any[]>(() => {
 });
 
 const memberCols = computed<any[]>(() => {
-  const ops = (render: (r: any) => any) => ({ title: '操作', key: 'ops', width: 116, className: 'row-ops', render });
+  const ops = (render: (r: any) => any) => ({ title: '操作', key: 'ops', width: 116, className: 'row-ops', render, fixed: 'right' as const });
   const cols: any[] = [];
   if (type.value === 'hash') {
     cols.push({ title: 'field', key: 'field', width: 140, ellipsis: { tooltip: true }, render: (r: any) => hText(r.field) });

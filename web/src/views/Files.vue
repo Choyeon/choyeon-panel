@@ -299,7 +299,7 @@ const columns: any[] = [
   { title: '大小', key: 'size', width: 90, render: (e: any) => h('span', { class: 'mono-dim' }, fmtSize(e.size, e.isDir)) },
   { title: '修改时间 (UTC)', key: 'mtime', width: 170, render: (e: any) => h('span', { class: 'mono-dim' }, fmtDateTime(e.mtime)) },
   {
-    title: '操作', key: 'ops', width: 220, align: 'center',
+    title: '操作', key: 'ops', width: 220, align: 'center', fixed: 'right' as const,
     // 下载必须是 <a>（走浏览器下载管理器）、解压/删除要 Popconfirm，所以套不上
     // CpRowActions 组件，但 .cp-ops + text/small 就是它那一套版式。
     render: (e: any) => {

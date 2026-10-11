@@ -288,8 +288,9 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 
 
 - 设计令牌（`web/src/style.css`）+ `dark / light / auto` 三态主题，`auto` 跟随系统且实时响应系统切换
 - 首屏外链脚本（`web/public/theme-boot.js`）先落地主题与 `theme-color`，避免暗/亮切换时首帧闪白
-- 响应式：桌面侧栏（可折叠）< 900px 自动切抽屉导航，表格开启横向滚动
-- 无障碍：语义表单 + `label`/`aria-label`、`role="log"` 日志区、`:focus-visible` 焦点环、44px 触控目标、支持键盘触发的行操作
+- 响应式：桌面侧栏（可折叠）< 900px 自动切抽屉导航；宽表在容器内横向滚动，「操作」列吸附在右侧，不用先滚到底再回头找按钮
+- 触屏：`≤900px` 档按钮、输入框、选择器、页签、分页、勾选框补到 44px 高，纯图标按钮同时补宽；开关与清除按钮只外扩命中区，视觉尺寸不变（桌面档保留 26-28px 的行内密度）
+- 无障碍：语义表单 + `label`/`aria-label`、`role="log"` 日志区、`:focus-visible` 焦点环、支持键盘触发的行操作
 - `prefers-reduced-motion` 下动画自动关闭
 - ECharts 按需引入 + `ResizeObserver` 自适应；构建按变更频率分包（vue/naive/echarts/xterm）
 

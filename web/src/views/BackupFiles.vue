@@ -299,7 +299,7 @@ const columns: any[] = [
           : h(CpStatusTag, { status: 'inactive', text: '仅可下载' }),
   },
   {
-    title: '操作', key: 'ops', minWidth: 150, align: 'center',
+    title: '操作', key: 'ops', width: 150, align: 'center', fixed: 'right' as const,
     render: (f: any) =>
       h(CpRowActions, {
         buttons: [
