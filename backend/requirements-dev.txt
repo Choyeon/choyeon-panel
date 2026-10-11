@@ -8,6 +8,6 @@
 #   RuntimeError（"requires the httpx2 package"），只有本地 venv 恰好带着
 #   旧 httpx 时才退化成 deprecation warning。所以本地绿 ≠ CI 绿，
 #   CI 必须显式安装本文件（见 .github/workflows/ci.yml 的「安装依赖」步骤）。
-httpx2>=2.0
+httpx2>=2.13.1
 # 与 CI 同一套静态检查（.github/workflows/ci.yml 单独装 latest，这里保证服务器 venv 也有）
 ruff>=0.17
