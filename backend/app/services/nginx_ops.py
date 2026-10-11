@@ -8,6 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from .. import config
+from ..log import warn
 from ..util import is_domain, is_email, run
 
 CONF_DIR = config.NGINX_CONF_DIRS[0]
@@ -57,16 +58,97 @@ def _write_conf(path: str, content: str) -> None:
             os.unlink(tmp)
 
 
-def _has_cert(domain: str) -> bool:
-    return os.path.exists(f"{TLS_DIR}/{domain}/fullchain.pem")
+# `http2 on;` 是 1.25.1 才有的写法，而旧写法 `listen 443 ssl http2;` 在新版上只是
+# 一句 deprecation warn（本机 nginx 1.26.3 实测：`nginx -t` 仍然通过）。反过来把
+# 新写法发给旧版（Ubuntu 22.04 的 1.18、Debian 12 的 1.22）就是
+# `[emerg] unknown directive "http2"`，nginx -t 直接不过，面板在任何一台旧版机器上
+# 都套不上 HTTPS 域名。所以按实测版本选写法，版本拿不到时用旧写法（覆盖面最广）。
+_HTTP2_NEW_SYNTAX = (1, 25, 1)
+_ver_cache: tuple | None = None
 
 
-def render_vhost(spec: dict) -> str:
+async def nginx_version() -> tuple | None:
+    """`nginx -v` 的 (major, minor, patch)；拿不到返回 None，且失败不进缓存。"""
+    global _ver_cache
+    if _ver_cache is not None:
+        return _ver_cache
+    r = await run("nginx", ["-v"])
+    m = re.search(r"nginx/(\d+)\.(\d+)\.(\d+)", r["out"] or "")
+    if m:
+        _ver_cache = tuple(int(x) for x in m.groups())
+    return _ver_cache
+
+
+async def http2_uses_new_syntax() -> bool:
+    ver = await nginx_version()
+    return ver is not None and ver >= _HTTP2_NEW_SYNTAX
+
+
+# 一张多 SAN 证书只躺在**第一个域名**的 lineage 目录里（certbot 的常规产物，
+# 例如 example.com + www.example.com 共用 live/example.com/）。旧判定是
+# `_has_cert(domain)`：只看 live/<domain>/ 存不存在，第二个 SAN 就被判成"没有证书"，
+# 于是面板给一个本来能走 HTTPS 的域名写出明文 vhost，还把 certbot 已经配好的
+# HTTPS 覆盖掉。这里按证书内容建 domain -> lineage 的索引。
+_CERT_TTL = 60.0
+_cert_cache: tuple[float, dict] | None = None
+_cert_lock = threading.Lock()
+
+
+def invalidate_cert_cache() -> None:
+    global _cert_cache
+    with _cert_lock:
+        _cert_cache = None
+
+
+async def cert_index() -> dict:
+    """domain -> /etc/letsencrypt/live 下的 lineage 目录名。"""
+    global _cert_cache
+    now = time.time()
+    with _cert_lock:
+        if _cert_cache and now - _cert_cache[0] < _CERT_TTL:
+            return _cert_cache[1]
+    from . import cert_ops  # 延迟导入：cert_ops 会回头用 nginx_ops 的常量
+
+    try:
+        names = sorted(p.name for p in Path(TLS_DIR).iterdir() if (p / "fullchain.pem").is_file())
+    except OSError:
+        names = []
+    idx: dict[str, str] = {}
+    for name in names:
+        meta = await cert_ops._openssl_x509(f"{TLS_DIR}/{name}/fullchain.pem")
+        domains = meta.get("domains") or []
+        if not domains:
+            # SAN 读不出来（老 openssl、自签只写 CN）时按目录名兜底：
+            # 把一个其实有证书的域名判成"没证书"会让 vhost 降级成明文，比误判成有证书严重。
+            domains = [name]
+        for d in domains:
+            idx.setdefault(d, name)
+    with _cert_lock:
+        _cert_cache = (now, idx)
+    return idx
+
+
+async def cert_lineage(domain: str) -> str | None:
+    """覆盖这个域名的证书在 live 下的目录名；没有则 None。"""
+    idx = await cert_index()
+    if domain in idx:
+        return idx[domain]
+    # 索引里没有但目录在：手工放的证书（目录名即域名）。保持旧行为，别把已配好的
+    # HTTPS 判成没证书。
+    return domain if os.path.isdir(f"{TLS_DIR}/{domain}") else None
+
+
+def render_vhost(spec: dict, *, ssl_lineage: str | None = None, http2_new: bool = False) -> str:
+    """渲染一个 vhost。
+
+    `ssl_lineage` / `http2_new` 都要由调用方**实测**后传进来（见 apply_vhost）：
+    在这里默认"没证书"或"新版写法"都会让面板在旧机器/多 SAN 域名上写出 nginx 认不下的配置。
+    """
     domain = spec["domain"]
     if not is_domain(domain):
         raise RuntimeError(f"invalid domain: {domain}")
     port = spec["port"]
-    ssl = _has_cert(domain)
+    ssl = bool(ssl_lineage)
     proxy_headers = (
         f"        proxy_pass http://127.0.0.1:{port};\n"
         "        proxy_http_version 1.1;\n"
@@ -82,8 +164,8 @@ def render_vhost(spec: dict) -> str:
             "\n        proxy_set_header Connection \"upgrade\";"
         )
     ssl_lines = (
-        f"    ssl_certificate {TLS_DIR}/{domain}/fullchain.pem;\n"
-        f"    ssl_certificate_key {TLS_DIR}/{domain}/privkey.pem;\n"
+        f"    ssl_certificate {TLS_DIR}/{ssl_lineage}/fullchain.pem;\n"
+        f"    ssl_certificate_key {TLS_DIR}/{ssl_lineage}/privkey.pem;\n"
         "    include /etc/letsencrypt/options-ssl-nginx.conf;\n"
         "    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;\n"
     ) if ssl else ""
@@ -96,13 +178,21 @@ def render_vhost(spec: dict) -> str:
         "        add_header Referrer-Policy strict-origin-when-cross-origin always;\n"
         + ("        add_header Strict-Transport-Security \"max-age=31536000\" always;\n" if ssl else "")
     )
+    # http2 只在 443 上开：`http2 on;` 写在明文 server 里 nginx -t 也放行（本机 1.26.3 实测），
+    # 但那等于对 :80 打开 h2c 前置知识连接；而它落到 1.25.1 之前更是
+    # `[emerg] unknown directive "http2"`，直接让整份配置校验不过。
+    if ssl:
+        listen_v4 = "listen 443 ssl http2;" if not http2_new else "listen 443 ssl;"
+        listen_v6 = "listen [::]:443 ssl http2;" if not http2_new else "listen [::]:443 ssl;"
+        h2 = "    http2 on;\n" if http2_new else ""
+    else:
+        listen_v4, listen_v6, h2 = "listen 80;", "listen [::]:80;", ""
     return (
         f"# managed by choyeon-panel ({spec['name']}) — do not edit by hand\n"
         f"{redirect}server {{\n"
-        f"    listen {'443 ssl' if ssl else '80'};\n"
-        f"    listen {'[::]:443 ssl' if ssl else '[::]:80'};\n"
-        f"    http2 on;\n"
-        f"{ssl_lines}    server_name {domain};\n"
+        f"    {listen_v4}\n"
+        f"    {listen_v6}\n"
+        f"{h2}{ssl_lines}    server_name {domain};\n"
         "    client_max_body_size 100m;\n"
         "\n"
         "    location / {\n"
@@ -122,8 +212,11 @@ def vhost_path(name: str) -> str:
 # （nginx -t 会给一句 conflicting server name 警告，然后照样通过）。
 # 所以"这个域名有没有被别处定义"只能按**实际加载**的文件集合判断：
 # 拿 sites-available 里那些没启用的文件算会误报，拿内存里的旧配置算又会漏报。
-# nginx -T 实测 42ms，缓存 15 秒并写完即失效；拿不到时返回 None，让调用方
-# 如实说"无法确认"，而不是把"查不了"当成"没冲突"照常写入。
+# nginx -T 实测 42ms，缓存 15 秒并写完即失效。
+# 拿不到集合时返回 None，domain_owner 也就无法判断（返回值同样是 None）。
+# **这是"查不了"不是"没冲突"**：面板照常写入（一次 nginx -t 不过的可解释故障，
+# 比因为读不到 -T 就拒绝所有域名操作更容易恢复），所以必须 warn 一条到面板日志，
+# 让"两份配置互相遮蔽"这种全站性后果有迹可查，而不是静默假定安全。
 _LOADED_TTL = 15.0
 _loaded_cache: tuple[float, set | None] | None = None
 _loaded_lock = threading.Lock()
@@ -149,7 +242,11 @@ async def loaded_conf_paths() -> set | None:
 
 
 async def domain_owner(domain: str, target: str) -> str | None:
-    """返回真正加载了该 domain、又不是本次要写的那个文件的配置路径。"""
+    """返回真正加载了该 domain、又不是本次要写的那个文件的配置路径。
+
+    None 有两义：nginx -T 读不到，或确实没有别处定义。调用方用
+    `loaded_conf_paths() is None` 区分并记日志，见上面那段说明。
+    """
     loaded = await loaded_conf_paths()
     if loaded is None:
         return None
@@ -174,10 +271,14 @@ class DomainOwnedElsewhere(RuntimeError):
 
 async def apply_vhost(spec: dict):
     domain = spec["domain"]
-    content = render_vhost(spec)
     Path(CONF_DIR).mkdir(parents=True, exist_ok=True)
     path = vhost_path(spec["name"])
     async with _nginx_section():
+        # 证书与 nginx 版本都在锁内读：锁外读到的可能是几秒钟之前的状态
+        # （并发的续期刚写好证书，或上一次 -T 结果还在 15 秒缓存里）。
+        lineage = await cert_lineage(domain)
+        http2_new = await http2_uses_new_syntax()
+        content = render_vhost(spec, ssl_lineage=lineage, http2_new=http2_new)
         owner = await domain_owner(domain, path)
         if owner:
             raise DomainOwnedElsewhere(
@@ -186,6 +287,8 @@ async def apply_vhost(spec: dict):
                 f"强行套用会让 {Path(owner).name} 里的手工配置静默失效。"
                 f"要让面板托管这个域名，请删除那份文件，或把它改名为 {Path(path).name} 放到 {CONF_DIR}。"
             )
+        if await loaded_conf_paths() is None:
+            warn(f"nginx -T 不可读，本次域名套用（{domain}）未能确认该域名是否已被别处定义")
         old = Path(path).read_text(errors="replace") if os.path.exists(path) else None
         _write_conf(path, content)
         check = await run("nginx", ["-t"])
@@ -194,7 +297,18 @@ async def apply_vhost(spec: dict):
             if old is not None:
                 _write_conf(path, old)
             else:
-                os.unlink(path)
+                try:
+                    os.unlink(path)
+                except OSError as e:
+                    # 删不掉就是最坏的一种：坏配置留在 conf.d/ 里，之后每一次 nginx -t
+                    # 都连带失败，面板上其它域名的套用与续期会全部不可用。
+                    # 吞掉异常再报"已回滚"等于指着一颗地雷说地面是平的。
+                    raise RuntimeError(
+                        f"nginx -t 校验失败，且刚写入的 {path} 删除失败（{type(e).__name__}）："
+                        "这份坏配置留在目录里会让后续所有 nginx 操作一起失败，"
+                        "请手工删除该文件后重新校验。\n"
+                        f"原始错误：{check['out']}"
+                    ) from e
             raise RuntimeError(f"nginx config test failed, rolled back: {check['out']}")
         reload = await run("systemctl", ["reload", "nginx"])
         if reload["code"] != 0:
@@ -246,9 +360,16 @@ async def issue_cert(domain: str, email: str | None = None) -> str:
     args = ["--nginx", "-d", domain, "--non-interactive", "--redirect", "--agree-tos", "--no-eff-email"]
     extra = ["-m", email] if email else ["--register-unsafely-without-email"]
     args = args[:4] + extra + args[4:]
-    r = await run("certbot", args, timeout=300)
-    if r["code"] != 0:
-        raise RuntimeError(f"certbot failed: {r['out']}")
+    # --nginx 会自己改写 /etc/nginx 下的配置（server_name、跳转、有时整份 vhost），
+    # 而⑤H 建立的规矩是「nginx 配置的写 → nginx -t → reload」整体串行：
+    # certbot 绕开这把锁跑，面板这边就可能在校验时读到它刚写到一半的文件，
+    # 把别人的改动当成坏配置回滚掉。所以申请证书也要占住同一个临界区。
+    async with _nginx_section():
+        r = await run("certbot", args, timeout=300)
+        if r["code"] != 0:
+            raise RuntimeError(f"certbot failed: {r['out']}")
+        invalidate_cert_cache()
+        invalidate_domain_cache()
     return r["out"]
 
 
@@ -265,7 +386,12 @@ async def renew_certs() -> dict:
         return {c["name"]: c.get("expiry") for c in (await cert_ops.list_certs())["certs"]}
 
     before = await _expiries()
-    r = await run("certbot", ["renew", "--non-interactive"], timeout=600)
+    # 同 issue_cert：certbot renew 会改写 nginx 配置并（若配了 deploy-hook）重载服务，
+    # 必须占住 ⑤H 那把「nginx 写入临界区」的锁，否则面板这边正写一半的 vhost
+    # 会被它当成待校验配置一起读进去。续期本身要几分钟，同期排队的是低频接口，代价可接受。
+    async with _nginx_section():
+        r = await run("certbot", ["renew", "--non-interactive"], timeout=600)
+        invalidate_cert_cache()
     if r["code"] != 0:
         # util.run 把 stderr 并进了 stdout，返回只有 {code, out}：这里再取 r["err"]
         # 就等于"报错正好发生在 out 为空的时候"必然 KeyError，把一条本该是 400 的
@@ -275,7 +401,9 @@ async def renew_certs() -> dict:
     renewed = sorted(n for n, e in after.items() if e and before.get(n) and e != before.get(n))
     reloaded = False
     if renewed:
-        reloaded = (await run("systemctl", ["reload", "nginx"]))["code"] == 0
+        async with _nginx_section():
+            reloaded = (await run("systemctl", ["reload", "nginx"]))["code"] == 0
+        invalidate_domain_cache()
     return {
         "log": r["out"],
         "renewed": renewed,
@@ -505,8 +633,15 @@ async def save_app_config(path: str, content: str) -> dict:
             if old is not None:
                 _write_conf(real, old)
             else:
-                with suppress(OSError):
+                try:
                     os.unlink(real)
+                except OSError as e:
+                    # 消息里那句「已回滚」此时是假的：坏配置留在了目录里。
+                    raise RuntimeError(
+                        f"nginx -t 校验失败，且新建的 {real} 删除失败（{type(e).__name__}）："
+                        "这份坏配置留在目录里会让之后每次 nginx -t / reload 一起失败，"
+                        "请手工删除该文件。\n原始错误：\n" + (check["out"] or "")
+                    ) from e
             raise RuntimeError(f"nginx -t 校验失败，已回滚：\n{check['out']}")
         reload = await run("systemctl", ["reload", "nginx"])
         if reload["code"] != 0:

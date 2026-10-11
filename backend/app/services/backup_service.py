@@ -500,6 +500,42 @@ async def _sh_script(script: str, timeout: int = 1800) -> dict:
     return await run("/bin/bash", ["-o", "pipefail", "-c", script], timeout=timeout)
 
 
+# pg_restore -l 的条目行形如 `3420; 0 18851 TABLE DATA public t postgres`。
+# 对象名本身可能是两个词（TABLE DATA / MATERIALIZED VIEW / FOREIGN KEY …），
+# 所以不去切第 4 个字段，直接按行首前缀数：数错一项就等于把"归档里没数据"
+# 说成"有数据"，而那正是本次要拦的事。
+_PG_TOC_ENTRY = re.compile(r"^\d+; \d+ \d+ \S", re.M)
+_PG_TOC_DATA = re.compile(r"^\d+; \d+ \d+ TABLE DATA ", re.M)
+
+
+async def _pg_preflight(src_file: str) -> tuple[int, int, str | None]:
+    """在动目标库之前把产物读一遍，返回 (对象条目数, TABLE DATA 条目数, 错误说明)。
+
+    旧流程是"先 dump 留档 → drop/create → gzip -dc | pg_restore"，坏产物要在这之后
+    才被发现：此刻库已经被 drop 了，只能靠留档重建（留档自己也可能失败，那时库就是空壳）。
+    而 `pg_restore -l` 只读头部就能判掉三类坏产物（实测退出码均为 1）：
+    截断的 gzip（`could not read from input file: end of file`）、空 gz
+    （`input file is too short`）、以及被当归档上传的纯文本 dump
+    （`input file appears to be a text format dump`）。
+
+    退出码只取 pg_restore 那一侧：`-l` 拿到目录就收工，不再把 stdin 读完，gzip 于是
+    被 SIGPIPE 打死。本机（PG 17.11）对一份合法备份实测 `left=141 right=0`，而
+    `_sh_script` 开着 pipefail —— 按整条管道的退出码判，**每一份正常备份都会被当成坏产物
+    拒掉**，恢复功能当场全废。gzip 那侧真坏（截断/CRC 不符）时 pg_restore 自己必然报错，
+    所以只看它是安全的：同一写法下三类坏产物仍全部退出码 1（线上实测）。
+
+    还有一层要说清：`-l` 证明的是"归档目录读得出来"，不是"数据一个字节不缺"
+    （把 -Fc 截到 60% 再重新 gzip，`-l` 照样回 0）。所以覆盖前留档和 restore 阶段的
+    --exit-on-error 一个都不能省。
+    """
+    script = f"gzip -dc {sh_escape(src_file)} | pg_restore -l; exit ${{PIPESTATUS[1]}}"
+    r = await _sh_script(script, timeout=120)
+    if r["code"] != 0:
+        return 0, 0, ((r["out"] or "").strip()[-300:] or f"exit {r['code']}")
+    out = r["out"] or ""
+    return len(_PG_TOC_ENTRY.findall(out)), len(_PG_TOC_DATA.findall(out)), None
+
+
 def _gunzip_to(src_file: str, dest: str) -> None:
     with gzip.open(src_file, "rb") as g, open(dest, "wb") as f:
         shutil.copyfileobj(g, f, 1024 * 1024)
@@ -513,6 +549,36 @@ def _quick_check(path: str) -> str:
     con = sqlite3.connect(path)
     try:
         return con.execute("PRAGMA quick_check").fetchone()[0]
+    finally:
+        con.close()
+
+
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _sqlite_stats(path: str) -> tuple[bool, int | None]:
+    """(是不是真正的 SQLite 文件, 用户表数)；表数拿不到时为 None。
+
+    单看 `PRAGMA quick_check` 挡不住空产物：**0 字节的文件在 SQLite 眼里就是一个合法的
+    空库**，quick_check 直接回 ok（线上实测），于是恢复会拿一个空文件把有数据的库换掉，
+    还报「数据已写回」。所以覆盖之前必须自己认头部。
+    用只读 URI 打开：以读写方式打开一个空文件，SQLite 会当场把它初始化成空库，
+    "检查"这一步本身就改了产物。
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(16) != _SQLITE_MAGIC:
+                return False, None
+        con = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)
+    except (OSError, sqlite3.Error):
+        return False, None
+    try:
+        n = con.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchone()[0]
+        return True, int(n)
+    except sqlite3.Error:
+        return True, None
     finally:
         con.close()
 
@@ -548,8 +614,8 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
 
     # 留档写在备份目录里、用 bk<id>-<时间戳>-<库名>-pre-restore 命名：备份文件页只列这个
     # 目录，界面又写着"可退回本次自动留存的 pre-restore 快照"——快照落在应用目录里
-    # 就等于用户看不见它，恢复失败后既找不到也点不动。名字排在最新一位，
-    # prune 按名字排序删最旧的，它要等真实备份轮替过 keep 名额才会被清掉。
+    # 就等于用户看不见它，恢复失败后既找不到也点不动。名字带完整时间戳，落在 prune
+    # 认得的形状里（按写入顺序排在末尾），要等真实备份轮替过 keep 名额才会被清掉。
     # 必须走 _free_path 而不是直接拼名：从留档回滚时两次的时间戳可能落在同一秒，
     # 而留档名与源文件名同形——把留档写在源文件上等于先把它覆盖成当前内容，
     # 于是"退回上一版"变成原地不动，且唯一的回滚数据就此消失。
@@ -585,6 +651,28 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
     if ok != "ok":
         os.unlink(tmp)
         raise RuntimeError(f"快照完整性检查未通过（{ok}），已放弃恢复")
+    valid, tables_in_snap = await run_in_threadpool(_sqlite_stats, tmp)
+    if not valid:
+        # 体积要在删除之前取：先 unlink 再 getsize 会让这句说明变成 FileNotFoundError，
+        # 用户看到的不是"产物不合法、目标库未动"，而是一条看不懂的 OS 错误。
+        size = os.path.getsize(tmp)
+        os.unlink(tmp)
+        raise RuntimeError(
+            f"快照不是合法的 SQLite 数据库（文件为空或头部不符，{size} 字节），"
+            "已放弃恢复，目标库未被改动"
+        )
+    _, tables_now = await run_in_threadpool(_sqlite_stats, dst)
+    shown_snap = "?" if tables_in_snap is None else str(tables_in_snap)
+    shown_now = "?" if tables_now is None else str(tables_now)
+    if tables_in_snap == 0 and tables_now:
+        # 空快照换掉有数据的库，quick_check 一样回 ok（它只保证结构自洽，不保证有内容），
+        # 这一步不拦——用户可能确实要退回一个空库；但必须让界面知道本次恢复的结果是"空"。
+        log.append(
+            f"!! 快照里 0 张表，而当前库有 {tables_now} 张：本次恢复会把库清空，"
+            f"如需退回请恢复 {os.path.basename(pre)}"
+        )
+    else:
+        log.append(f"==> 产物预检通过：快照 {shown_snap} 张表 / 当前库 {shown_now} 张")
 
     stopped = False
     try:
@@ -666,6 +754,14 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
     tf = await run_in_threadpool(tarfile.open, src_file, "r:gz")
     try:
         members = await run_in_threadpool(_tar_checked, tf)
+        if not members:
+            # 面板自己产的归档至少含 `.` 这一条（tar -C <app> -cf - .），一个条目都没有
+            # 就说明这份不是完整备份。应用目录恢复**没有**整份快照可退（见 BackupFiles.vue
+            # 的说明），所以在停服务之前必须硬挡下来，而不是解出 0 个文件后报成功。
+            raise RuntimeError(
+                f"归档里没有任何条目（{os.path.getsize(src_file)} 字节），未停止服务、未改动目录；"
+                "这份产物不是完整备份，请改用更早的一份"
+            )
         stopped = False
         restored = False
         try:
@@ -675,7 +771,10 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
                 log.append(f"==> 已停止 {unit}")
             else:
                 log.append(f"==> {unit} 未在运行，跳过停止")
-            await run_in_threadpool(tf.extractall, dest, members)
+            # filter="tar" 是把当前行为钉住，不是放行风险：不安全条目（绝对路径、..、
+            # 链接型）已由 _tar_checked 逐条拒掉，这里要的正是"按归档里的属主/权限原样落盘"。
+            # 不写出来的话 Python 3.14 会默认改用 data filter，恢复出来的文件属主当场变掉。
+            await run_in_threadpool(tf.extractall, dest, members, filter="tar")
             restored = True
             log.append(f"==> 已解包 {len(members)} 个条目到 {dest}")
         finally:
@@ -719,6 +818,14 @@ async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
     if not is_ident(db):
         raise RuntimeError("库名不合法")
     ts = backup_runner.stamp()
+    # 预检放在最前面，连留档都还没写：坏产物此刻不该碰任何东西。
+    toc_objs, data_objs, toc_err = await _pg_preflight(src_file)
+    if toc_err:
+        raise RuntimeError(
+            f"备份产物 {os.path.basename(src_file)} 读不出归档目录，未做任何改动：{toc_err}\n"
+            "（.dump.gz 必须是 pg_dump -Fc 再 gzip 的产物；纯文本 dump 请用 psql 手工恢复）"
+        )
+    log.append(f"==> 产物预检通过：归档含 {toc_objs} 个对象（其中 TABLE DATA {data_objs} 项）")
     # 文件名保持 bk<id>-<时间戳>-pre-restore.dump.gz：这份留档要能被 prune 认出来
     # （它占 keep 名额、按写入顺序排在末尾，之后随轮替一起淘汰）；写成
     # bk<id>-pre-restore-... 不在 prune 的时间戳形状里，等于每次恢复都留下一个永不轮替的
@@ -782,6 +889,13 @@ async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
             f"--clean --if-exists：{r['out'][-300:]} / {rb['out'][-300:]}"
         )
     log.append(f"==> 库 {db} 已从 {os.path.basename(src_file)} 恢复（属主 {owner}）")
+    if data_objs == 0:
+        # 空库的 -Fc 产物灌进刚建好的空库，pg_restore 的退出码是 0（线上实测），
+        # 单看退出码就等于把"库被清空了"报成"恢复完成"。
+        log.append(
+            f"!! 归档里没有任何表数据（TABLE DATA 0 项），库 {db} 现在是无数据状态；"
+            f"如需退回本次覆盖前的内容，请恢复 {os.path.basename(pre)}"
+        )
 
 
 async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict:

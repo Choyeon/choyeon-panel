@@ -460,10 +460,16 @@ class TestPgRestorePhases(unittest.TestCase):
         self.bk = {"id": 9, "target": "appdb", "kind": "pg"}
 
     def _run(self, codes, bk=None, src=None):
-        """codes 按调用顺序给退出码：1 留档 dump、2 换空库、3 灌数据、4 回退。"""
+        """codes 按调用顺序给退出码：1 留档 dump、2 换空库、3 灌数据、4 回退。
+
+        ⑤Q 在最前面加了一次 `pg_restore -l` 只读预检：它不碰库，也不属于本类要断的
+        四个阶段，所以由替身直接答"产物可读、含 1 项 TABLE DATA"，不计入 scripts。
+        """
         scripts = []
 
         async def fake_script(script, timeout=1800):
+            if "pg_restore -l" in script:
+                return {"code": 0, "out": "3420; 0 18851 TABLE DATA public t appowner\n"}
             scripts.append(script)
             i = len(scripts) - 1
             return {"code": codes[i] if i < len(codes) else 0, "out": f"step{i + 1} output"}

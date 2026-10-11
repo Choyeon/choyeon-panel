@@ -1036,7 +1036,8 @@ class TestRollback(unittest.IsolatedAsyncioTestCase):
 class TestVhostRender(unittest.TestCase):
     def test_security_headers_without_ssl(self):
         out = nginx_ops.render_vhost({"name": "demo", "domain": "demo.example.com", "port": 3000})
-        self.assertIn("http2 on;", out)
+        self.assertNotIn("http2", out, "明文 :80 上开 http2 等于开 h2c，旧版 nginx 还会当成未知指令")
+        self.assertIn("listen 80;", out)
         self.assertIn("X-Content-Type-Options nosniff", out)
         self.assertIn("Referrer-Policy", out)
         self.assertNotIn("Strict-Transport-Security", out, "无证书时不应发送 HSTS")

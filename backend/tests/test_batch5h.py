@@ -61,6 +61,17 @@ class _ConfDir(unittest.TestCase):
         # "nginx 加载了哪些文件"会被下一个用例当成事实。
         nginx_ops._loaded_cache = None
         self.addCleanup(setattr, nginx_ops, "_loaded_cache", None)
+        # 证书索引与 nginx 版本缓存同理；另外把 TLS_DIR 指向空目录，
+        # 否则 apply_vhost 会真的去读 /etc/letsencrypt/live 并为每张在线证书起一个 openssl。
+        self.tls = tempfile.mkdtemp(prefix="cp_5h_tls_")
+        self.addCleanup(shutil.rmtree, self.tls, True)
+        p2 = mock.patch.object(nginx_ops, "TLS_DIR", self.tls)
+        p2.start()
+        self.addCleanup(p2.stop)
+        nginx_ops._cert_cache = None
+        nginx_ops._ver_cache = None
+        self.addCleanup(setattr, nginx_ops, "_cert_cache", None)
+        self.addCleanup(setattr, nginx_ops, "_ver_cache", None)
 
 
 async def _ok(**_kw):
