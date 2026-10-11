@@ -616,6 +616,11 @@ async def delete_app(app_id: int, purge: bool):
     dbm.execute("DELETE FROM apps WHERE id=?", (app_id,))
     # 部署记录只属于这个应用，删掉应用后没有任何入口能读到它们（含完整日志文本）。
     dbm.execute("DELETE FROM deployments WHERE app_id=?", (app_id,))
+    # 告警标记的键名里带应用名，不跟着删就挂在一个不存在的对象上，
+    # 而且同名新建的应用会直接继承（见 alerts_service.forget_app）。
+    from . import alerts_service
+
+    alerts_service.forget_app(app["name"])
     if purge:
         _purge_app_dir(app["path"])
 

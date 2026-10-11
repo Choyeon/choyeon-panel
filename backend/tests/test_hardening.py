@@ -699,13 +699,25 @@ class TestDeletedUserNameReuse(unittest.TestCase):
             security.verify_token(old_token)
 
     def test_epoch_row_survives_a_settings_sweep(self):
-        """守卫「别把 token_epoch:* 当孤儿配置清掉」这条不变量：
-        产品代码里没有任何删 settings 的路径，将来若有人加，这条要红。"""
-        joined = "\n".join(p.read_text(encoding="utf-8") for p in (config.BASE / "backend" / "app").rglob("*.py"))
-        self.assertNotIn(
-            "DELETE FROM settings",
-            joined,
-            "app/ 里出现了删除 settings 的语句：token_epoch:<user> 被清掉会让同名重建复活旧 token",
+        """守卫「别把 token_epoch:* 当孤儿配置清掉」这条不变量。
+
+        ⑤L 起产品确实需要一个删 settings 的入口：删应用要清掉它按名字编的探活标记
+        （`sent:probe-<名>` 之类），否则同名新建的应用直接继承旧状态。所以原来那条
+        "app/ 里不许出现 DELETE FROM settings"的一刀切 grep 站不住了——它只会逼人
+        绕过守卫函数自己写 SQL。换成两条更窄也更真的检查：
+        1) 删 settings 只允许发生在 database.py 的 delete_setting 里（它硬挡墓碑键）；
+        2) 行为见 test_batch5l.py::TestDeleteSettingGuard：删墓碑必须抛错且行还在。
+        """
+        app_dir = config.BASE / "backend" / "app"
+        offenders = [
+            str(p.relative_to(app_dir))
+            for p in app_dir.rglob("*.py")
+            if "DELETE FROM settings" in p.read_text(encoding="utf-8") and p.name != "database.py"
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "删除 settings 必须走 dbm.delete_setting：绕过它就可能顺手删掉 token_epoch:<user> 墓碑",
         )
 
 

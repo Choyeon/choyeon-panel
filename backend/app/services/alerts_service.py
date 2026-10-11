@@ -434,6 +434,33 @@ async def _probe_target(port: int) -> tuple[bool, int | None, str]:
     return True, None, "响应首行不是 HTTP 状态行"
 
 
+def probe_marker_keys(name: str) -> tuple[str, ...]:
+    """一个应用的存活探测在 settings 里占用的全部键。
+
+    四处键名都只由**应用名**决定（`run_probes` 用 `probe-<名>` 做 sent 的 key、
+    用 `probe:<名>` 做 code；`_app_expectation` 读 `probe_expect:<名>`），
+    名字还要跟着 `run_probes` 截断到 48 字符——不截断的话长名字应用的这两个键
+    算出来就不是同一份，清理会漏掉正要清的那个。
+    """
+    n = str(name or "")[:48]
+    return (f"probe_expect:{n}", f"sent:probe-{n}", f"streak:probe:{n}", f"notified:probe:{n}")
+
+
+def forget_app(name: str) -> None:
+    """应用被删掉时，把它按名字编的告警标记一并清掉。
+
+    不清的两个后果（⑤L 实测）：
+    - 幽灵行：`probe_expect:<名>` 残留在 Settings→探活覆写 的列表里，指向一个不存在的应用；
+    - 同名继承：重建同名应用直接拿到旧的 `sent:`（当天已发过 → 第一次无响应静默）、
+      旧的 `streak:`（去抖轮数从中间开始）与 `notified:`（永远不会有人消费它）。
+
+    告警历史（alerts_log 的 `probe:<名>` 行）**不**跟着删：历史是另一条线，
+    由 `_checker_loop` 按 `alert_keep_days`/`alert_keep_rows` 统一裁剪（约定 4、6）。
+    """
+    for key in probe_marker_keys(name):
+        dbm.delete_setting(key)
+
+
 async def run_probes() -> list[dict]:
     """对所有配了端口的应用做存活探测，结果走同一套 alerts_log 去重路径。
 

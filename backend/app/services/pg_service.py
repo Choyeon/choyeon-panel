@@ -4,6 +4,7 @@ import os
 import re
 import time
 
+from .. import aio_db
 from .. import database as dbm
 from ..util import kill_group, run
 from . import redis_client
@@ -164,11 +165,25 @@ async def create_db(name: str, owner: str | None = None):
     await psql(f"CREATE DATABASE {_q(name)}" + (f" OWNER {_q(owner)}" if owner else "") + ";")
 
 
+async def _ensure_no_app_owns(name: str) -> None:
+    """应用详情里关联过这个库的应用还在时，不许从数据库页把它删掉。
+
+    `apps.db_names` 是面板内唯一的"哪个应用用哪个库"记录（AppDetail 的关联库多选框
+    写的就是它）。删掉库之后应用记录仍指向一个不存在的库：应用连不上数据库，
+    而面板里没有任何地方说明是谁在什么时候删的——当场拒绝，比留一查不出原因的故障好。
+    """
+    rows = await aio_db.query("SELECT name, db_names FROM apps WHERE db_names LIKE ?", (f"%{name}%",))
+    owners = [r["name"] for r in rows if name in [p for p in str(r["db_names"] or "").split(",") if p]]
+    if owners:
+        raise RuntimeError(f"{'、'.join(owners)} 仍在关联数据库 {name}，请先在这些应用里取消关联")
+
+
 async def drop_db(name: str):
     if not is_ident(name):
         raise RuntimeError("数据库名不合法")
     if name in ("postgres", "template0"):
         raise RuntimeError("禁止删除该库")
+    await _ensure_no_app_owns(name)
     await psql(f"DROP DATABASE {_q(name)};")
 
 

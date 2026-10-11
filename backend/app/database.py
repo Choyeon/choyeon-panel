@@ -204,6 +204,29 @@ def set_setting(key: str, value) -> None:
         _auth_cache.pop(key, None)
 
 
+# 删不得的键：token_epoch[:<用户>] 是 token 吊销墓碑，删掉它同名重建的用户会让上一个
+# 人的旧 token 原地复活（见 tests/test_hardening.py::TestDeletedUserNameReuse）；
+# jwt_secret 是签名密钥，删了全员掉线。
+_UNDELETABLE_KEYS = ("jwt_secret", "token_epoch")
+
+
+def delete_setting(key: str) -> None:
+    """删除一个 settings 键；清理按名字编码的残留标记只能走这里。
+
+    为什么要包一层而不是让调用方自己写 SQL：对象删掉之后，它按**名字**编的标记键
+    （`sent:probe-<名>` / `streak:probe:<名>` / `notified:probe:<名>` / `probe_expect:<名>`）
+    就挂在再也没有人消费的地方，而同名新建的对象会直接继承旧状态——实测删掉应用后重建
+    同名应用，`sent:` 仍是今天，于是新应用当天第一次无响应一条通知都发不出去。该清。
+    但同一句"扫 settings 清孤儿键"顺手把 `token_epoch:<用户>` 也清掉就是权限复活事故，
+    所以墓碑在这个函数里硬挡，而不是靠写代码的人记住。
+    """
+    k = str(key or "")
+    if k in _UNDELETABLE_KEYS or k.startswith("token_epoch:"):
+        raise ValueError(f"禁止删除该 settings 键：{k}")
+    # 不需要失效 _auth_cache：进缓存的只有 _AUTH_KEYS 与 token_epoch:*，而这两类都在上面被拒了。
+    execute("DELETE FROM settings WHERE key=?", (k,))
+
+
 # 认证路径（每个 /api 请求都要验 token）读的这几个 key 走进程内缓存。
 # 以前每请求两次带全局锁的 SELECT，仪表盘 3 秒轮询把它放大成常驻开销。
 # 缓存必须带 TTL，不能只靠 set_setting 精确失效：`choyeonctl user reset/delete`
