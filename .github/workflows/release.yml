@@ -51,7 +51,7 @@ jobs:
           ( cd "$OUT" && sha256sum choyeon-panel-*.tar.gz ) > SHA256SUMS.txt
           mv "$OUT"/choyeon-panel-*.tar.gz .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: |
