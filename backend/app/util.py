@@ -21,12 +21,19 @@ PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{2,200}$")
 CRED_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/@:\s]*)(:[^@/\s]*)?@")
 # 键值形态的口令：`password=…`（psql/libpq 的失败正文、mysqldump 命令行）、
 # `NEXTAUTH_SECRET=…`（部署日志里回显的 env）、`token: …`（应用自己打的日志）。
-# 键名允许带前缀（DB_PASSWORD、csrf_token），但必须整词结尾，`secretary=…` 这类普通词不算。
+# 键名允许带前缀（DB_PASSWORD、csrf_token），也允许带后缀（AWS_SECRET_ID、
+# AWS_ACCESS_KEY_ID、SESSION_TOKEN_VALUE）——真实 SDK 的变量名几乎都不是单个词，
+# 只认"整词结尾"会把最常见的一批凭据放过去。后缀必须以下划线/连字符/点起头，
+# 所以 `secretary=…` 这类普通词仍然不算凭据键名（⑤J 的误伤反例）。
 # 分隔符原样保留，只把值换成 ***。
 # 不收 `pwd`：本机实测 sudo 每条会话日志都是 `PWD=/cwd ; USER=…`，把整词的 pwd 当键名
 # 会把运维要看的当前目录遮成 ***（真实误伤，⑤J 线上探针在 80 行真日志里抓到），
 # 而以 `pwd=` 传口令的工具在这里没有对照样本——宁可少遮一个少见形态，不弄脏每一条审计。
-CRED_KV_RE = re.compile(r"(?i)\b([\w.-]*(?:password|passwd|secret|token|api[_-]?key))\b(\s*[=:]\s*)(\S+)")
+CRED_KV_RE = re.compile(
+    r"(?i)\b([\w.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)"
+    r"(?:[._-][A-Za-z0-9]+)*)"
+    r"(\s*[=:]\s*)(\S+)"
+)
 # JWT 形态的口令只能按形态认：`Authorization: Bearer eyJhbGci…` 里没有任何键名。
 # 长度下限 12 是把 "bearer 12345" 这类正常文本放过去。
 CRED_BEARER_RE = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._~+/=-]{12,})")

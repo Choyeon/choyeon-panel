@@ -18,8 +18,9 @@
 # 1) 部署（root，全新机器约 3-8 分钟，前端构建较慢，超时给到 15 分钟）
 choyeonctl deploy --port 3210 --json
 
-# 2) 创建管理员（口令自己生成，不要使用示例口令）
-choyeonctl user create admin --password "<随机 20 位口令>" --json
+# 2) 创建管理员（口令自己生成，不要使用示例口令；用 stdin 传，不要写进命令行）
+PW="$(openssl rand -base64 24 | tr -d '/+=' | head -c 20)"
+printf '%s' "$PW" | choyeonctl user create admin --password-stdin --json
 
 # 3) 验收：两项都必须为 true
 choyeonctl status --json      # healthy == true
@@ -72,12 +73,16 @@ choyeonctl deploy --port 3210 --json
 
 ```bash
 PW="$(openssl rand -base64 24 | tr -d '/+=' | head -c 20)"
-choyeonctl user create admin --password "$PW" --json
+printf '%s' "$PW" | choyeonctl user create admin --password-stdin --json
 echo "$PW"   # 记录到交付信息里，不要写进仓库
 ```
 
 验收：返回 `{"ok": true, "username": "admin", "role": "admin"}`。
 口令规则：≥ 8 位；用户名规则 `^[A-Za-z0-9_-]{3,32}$`。
+
+口令**必须**走 `--password-stdin`：`--password` 的写法会把它留在 argv 里，同机任何用户
+`ps -ef` 都能看到、`/proc/<pid>/cmdline` 世界可读、root 的 `~/.bash_history` 再存一条，
+而面板这台机器上还跑着别的业务应用。`--password` 只保留给手工排障。
 
 ### 步骤 3：自检
 
@@ -125,7 +130,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `upgrade` | `--no-pull` | 拉代码→备份→重建→重启，健康检查失败自动回滚；`--no-pull` 只重建并重新渲染 unit |
 | `status` | — | 版本/监听/服务/健康/自检汇总 |
 | `doctor` | — | 只读安全与健康自检（当前 12 项，以 JSON 的 `items` 为准），每项带修复命令 |
-| `user list\|create\|reset\|delete` | `<name> --password --role --yes` | 改密会吊销该用户旧 token；`delete` 必须加 `--yes` |
+| `user list\|create\|reset\|revoke\|delete` | `<name> --password --password-stdin --role --yes` | 账号管理；create/reset 用 `--password-stdin` 传口令。改密与 `revoke` 都会吊销旧 token：`revoke <name>` 只踢这个账号，`revoke all` 踢全部（`delete` 必须加 `--yes`） |
 | `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --type --repo --branch --path --port --domain --start-cmd --install-cmd --lines` | 应用全生命周期；`create` 需 `--template` 或 `--start-cmd` 之一 |
 | `backup run\|list` | — | 面板数据备份（SQLite 在线备份 API） |
 | `start\|stop\|restart` | — | systemd 服务控制 |
@@ -184,7 +189,7 @@ choyeonctl status --json
 | `deploy` 报 unhealthy 但服务确实在跑 | 看返回 JSON 的 `url` / `prefix`，`ss -ltnp \| grep <端口>` | CLI 探测的端口/数据目录来自 `.env`，与 unit 不一致时先 `choyeonctl upgrade --no-pull` 把两边对齐再判失败 |
 | `Address already in use` | `ss -ltnp \| grep :3210` | `kill <pid>` 或换 `--port` |
 | 页面 404 | `ls web/dist/index.html` | 前端未构建：`cd web && npm run build` |
-| `user create` 报「已存在」 | `choyeonctl user list` | 改走 `user reset <name> --password` |
+| `user create` 报「已存在」 | `choyeonctl user list` | 改走 `printf '%s' "$PW" \| choyeonctl user reset <name> --password-stdin` |
 | nginx 项 fail | `nginx -t` | 修正配置后再 `systemctl reload nginx`；不要 restart（会断 WebSocket） |
 | `choyeonctl: command not found` | `ls -l /usr/local/bin/choyeonctl` | 补软链接：`ln -sf <仓库目录>/bin/choyeonctl /usr/local/bin/choyeonctl`（只有 install.sh 会建这个链接） |
 | 服务反复重启 | `systemctl status choyeon-panel` | 触发了 `StartLimitBurst=5`：先修根因，再 `systemctl reset-failed choyeon-panel` |
@@ -198,6 +203,8 @@ choyeonctl status --json
 
 1. **禁止**把面板端口直接暴露公网——只监听 `127.0.0.1`，对外必须走 nginx + TLS。
 2. **禁止**把口令、token、`.env` 内容写进仓库、日志或交付消息（口令只在终端生成并使用）。
+   同样**禁止**把口令放在 `--password` 参数里传给 CLI——它会留在 `ps`、`/proc/<pid>/cmdline` 和 shell 历史里；
+   一律用 `--password-stdin` 从标准输入传。
 3. **禁止**跳过 `doctor` 就宣布部署成功。
 4. **禁止**用 `rm -rf` 清理 `data/`、`/root/backups/panel`；需要空间先跑 `choyeonctl backup run` 再清理旧备份。
 5. **禁止**手工编辑 `/etc/systemd/system/choyeon-panel.service`——它是 `render_unit` 从 `deploy/choyeon-panel.service` + `.env` 渲染出来的，下次升级会被覆盖。改配置请编辑 `<安装目录>/.env`，再执行 `choyeonctl upgrade --no-pull`（等价于 `bash scripts/update.sh --no-pull`）重新渲染。

@@ -152,7 +152,14 @@ async def login(req: Request):
     # 长到离谱的口令连 scrypt 都不进：那是对方挑着打的 CPU 放大，
     # 而 LOGIN_PW_MAX_LEN 比任何真实口令都宽，正常账号不会被挡在外面。
     plausible = bool(password) and len(password) <= security.LOGIN_PW_MAX_LEN
-    ok = bool(user) and plausible and await security.check_pass_async(password, user["pass_hash"])
+    if user and plausible:
+        ok = await security.check_pass_async(password, user["pass_hash"])
+    else:
+        ok = False
+        if plausible:
+            # 用户名不存在也要烧掉同样的一次 scrypt：短路的话"未知用户 ~1ms /
+            # 已知用户 ~50ms"就是公开账号名单，而 401 文案一致并救不了这点。
+            await security.burn_kdf_async(password)
     # 这几条审计一律走 aio_db：dbm.audit 是拿全局 RLock 的 INSERT + commit。
     # 打在事件循环上时，撞库流量的每一条都要循环停一停，撞上 WAL checkpoint 就是
     # 整站冻住（仪表盘轮询、SSE 日志、WS 终端一起卡）；登录路由是唯一免认证入口，
@@ -171,6 +178,21 @@ async def login(req: Request):
     return _user_token(user["username"], role, user.get("nickname", ""), user.get("avatar", ""))
 
 
+@app.post("/api/auth/logout")
+async def logout(req: Request):
+    """退出登录：吊销**这个账号**当前签发的全部 token。
+
+    token 是无状态 JWT，服务端没有会话表可以只作废"手里这一枚"，所以诚实的做法是把
+    这个账号的所有设备一起登出（bump 该用户的 epoch），并在返回里把这个事实说清楚 ——
+    旧版前端只清 localStorage，用户以为退出了，那枚票在 TTL 内（最长 72h）还能拿来
+    调 /api/terminal 拿 root shell。
+    """
+    sub = req.state.cp_sub
+    security.bump_user_epoch(sub)
+    await aio_db.audit(sub, "logout", "该账号全部会话已吊销")
+    return {"ok": True, "scope": "all_devices"}
+
+
 async def _json_body(req: Request) -> dict:
     try:
         body = await req.json()
@@ -185,9 +207,15 @@ def client_ip(req: Request) -> str:
     反向代理场景必须解析 XFF，否则所有登录请求都记在 127.0.0.1 这一个桶里。
     但**最左**值是客户端自带的、可任意伪造（`X-Forwarded-For: 1.2.3.4` 每次换一个，
     限速就形同虚设）。nginx 的 `$proxy_add_x_forwarded_for` 会把真实对端追加到**最右**，
-    所以只信最右一段；同时优先用本面板 nginx 模板里显式设置、客户端无法覆盖的 X-Real-IP。
+    所以只信最右一段；X-Real-IP 是本面板 nginx 模板里 `$remote_addr` 显式设的，
+    客户端覆盖不了。
+
+    前提是**这个头真是代理给的**：只听 127.0.0.1 不等于安全，本机任何进程都能绕过
+    nginx 直连端口并随手编一个 X-Real-IP，于是每个伪造请求一个新桶、root 面板口令爆破
+    零限速。所以先核对 TCP 对端在 CP_TRUSTED_PROXIES 里，不在就退回真实对端地址。
     """
-    if config.TRUST_PROXY:
+    peer = req.client.host if req.client else ""
+    if config.TRUST_PROXY and peer in config.TRUSTED_PROXIES:
         real = req.headers.get("x-real-ip")
         if real and (ip := real.strip()):
             return ip
@@ -196,7 +224,7 @@ def client_ip(req: Request) -> str:
             for chunk in reversed(fwd.split(",")):
                 if (ip := chunk.strip()):
                     return ip
-    return req.client.host if req.client else "?"
+    return peer or "?"
 
 
 # ---------- self-service password (authenticated) ----------

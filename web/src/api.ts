@@ -136,6 +136,8 @@ export const api = {
   setup: (username: string, password: string) => req('/auth/setup', { body: { username, password } }),
   login: (username: string, password: string) => req('/auth/login', { body: { username, password } }),
   changePassword: (oldp: string, newp: string) => req('/auth/password', { body: { old: oldp, new: newp } }),
+  // 真登出：让服务端吊销这个账号的 token，而不是只把本地副本删掉
+  logout: () => req('/auth/logout', { method: 'POST', body: {} }),
   updateProfile: (nickname: string, avatar: string) => req('/auth/profile', { body: { nickname, avatar } }),
   // 头像上传走原始字节（后端不引 python-multipart），Content-Type 必须覆盖默认的 JSON
   uploadAvatar: (blob: Blob) =>

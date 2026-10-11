@@ -347,7 +347,9 @@ class TestViewerSelfService(unittest.TestCase):
     def test_prefix_list_is_exactly_self_service(self):
         self.assertEqual(
             set(deps.SELF_SERVICE_PREFIXES),
-            {"/api/auth/password", "/api/auth/profile", "/api/auth/avatar"},
+            # /auth/logout 是⑤R 加的：它只抬调用者自己的 epoch，动不了别人的会话，
+            # 所以和改密/资料一样属于"只读账号也能改自己"的形态。
+            {"/api/auth/password", "/api/auth/profile", "/api/auth/avatar", "/api/auth/logout"},
         )
 
 

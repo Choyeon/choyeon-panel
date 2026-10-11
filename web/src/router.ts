@@ -64,7 +64,9 @@ export const router = createRouter({
 // 少了这一条，只读账号会停在一片"加载失败"的空表格上。
 // logs（面板日志）走 /api/system/services/{unit}/logs：journalctl 是全机内容，
 // 同样按 admin 收口，所以这一页对只读账号也不该留。
-export const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/users', '/audit', '/cron', '/logsearch', '/logs'];
+// db（数据浏览）能翻出任意 PG 表的任意行、任意 Redis 键值——会话 token 就存在里面，
+// 后端整块路由已挂 require_admin，少了这一条，只读账号会停在一个请求全 403 的空页面上。
+export const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/users', '/audit', '/cron', '/logsearch', '/logs', '/db'];
 
 router.beforeEach((to) => {
   if (to.path !== '/login' && !getToken()) return '/login';

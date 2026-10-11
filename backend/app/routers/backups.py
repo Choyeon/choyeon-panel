@@ -19,15 +19,24 @@ async def _body(req: Request) -> dict:
 
 
 @router.get("/api/backups")
-async def backups_list():
+async def backups_list(req: Request):
     # 列表要 stat 每个产物文件，同步磁盘 I/O 放线程里做
-    return await run_in_threadpool(backup_service.list_backups)
+    rows = await run_in_threadpool(backup_service.list_backups)
+    if req.state.cp_role != "admin":
+        # dir 是 /root/backups/panel：只读账号要能看"有没有备份、多大、什么时候"，
+        # 不需要知道备份落在哪台机器的哪个目录下。
+        for r in rows:
+            r.pop("dir", None)
+    return rows
 
 
 @router.get("/api/backups/files")
-async def backups_files():
+async def backups_files(req: Request):
     """全部备份产物平铺（备份文件管理页）。放在 /{bid} 之前，避免被当成 id。"""
-    return await run_in_threadpool(backup_service.list_files)
+    res = await run_in_threadpool(backup_service.list_files)
+    if req.state.cp_role != "admin":
+        res.pop("dir", None)
+    return res
 
 
 @router.post("/api/backups/{bid}/restore")

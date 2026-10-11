@@ -140,8 +140,11 @@ async def users_update(uid: str, req: Request):
     # role 与 password 都只存在于已签发的 token 里（中间件读的是 token 的 role，
     # 不是库里的），改完必须吊销旧 token，否则把 admin 降成 viewer 后
     # 对方手上的旧 token 在 TTL 内（最长 72h）依旧是 admin——连写操作都拦不住（实测）。
-    # 改密本来就要吊销；这里合并成「任何一次实际变更都吊销」。
-    security.bump_user_epoch(u["username"])
+    # 昵称与头像不在 token 里（票面只有 sub/role/ver），跟着一起吊销就是误伤：
+    # 管理员只想改个显示名，对方下一个请求即 401、网页终端被 4401 关掉，
+    # 而审计里只留下一条看不出原因的 user:update。
+    if new_role is not None or new_hash is not None:
+        security.bump_user_epoch(u["username"])
     await aio_db.audit(req.state.cp_sub, "user:update", u["username"])
     return {"ok": True}
 

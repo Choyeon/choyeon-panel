@@ -130,7 +130,11 @@ async def _sse_journal(unit: str, lines: int):
                 continue
             if not raw:
                 break
-            yield f"data: {json.dumps(raw.decode(errors='replace').rstrip(chr(10)))}\n\n"
+            # 整机 journal 里漂着的东西不受我们控制：业务应用把口令写进启动命令、
+            # 框架把连接串打 INFO 日志都会顺着这条流出去。日志检索（本文件下面一节）
+            # 早就统一过 redact_creds，SSE 是唯一漏网的一条流，这里补上同一个口径。
+            line = redact_creds(raw.decode(errors="replace").rstrip(chr(10)))
+            yield f"data: {json.dumps(line)}\n\n"
     finally:
         # 客户端断开时进程可能已退出，kill 报 ProcessLookupError 属正常
         with suppress(ProcessLookupError):
@@ -158,7 +162,12 @@ async def service_logs(unit: str, request: Request):
 
 
 @router.get("/api/firewall")
-async def firewall():
+async def firewall(req: Request):
+    # 规则表等于一张"这台机器开了哪些端口、从哪些地址段能连"的地图，
+    # 只读账号不需要它（设置页的防火墙区块本来就只对 admin 显示），
+    # 而拿到它的人可以是任何一个用 viewer 账号登录成功的人。
+    if r := need_admin(req):
+        return r
     has = await run("which", ["ufw"])
     if has["code"] != 0:
         return {"tool": "none", "active": False, "output": "未安装 ufw"}

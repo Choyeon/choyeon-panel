@@ -1,14 +1,18 @@
 import re
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from .. import aio_db
+from ..deps import require_admin
 from ..services import pg_service
 from ..errors import err_json
 from ..util import redact_creds
 
-router = APIRouter()
+# 整块 admin only：这一组接口能读出任意 PG 表的任意行、任意 Redis 键值（会话 token、
+# 缓存里的凭据都在里面）。viewer 的"只读"不该包含这些，而逐条加检查已经证明会漏——
+# 之前 7 个 GET 一条都没写。挂在 router 上，新增端点默认继承门禁。
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 # SQL 里的口令是「裸字面量」，redact_creds 那套 key=value 规则抓不到：

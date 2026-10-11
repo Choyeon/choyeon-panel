@@ -99,6 +99,13 @@ def _paths(key: str, default: str) -> list[str]:
 HOST = os.environ.get("CP_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PORT = _int("CP_PORT", 3210, 1, 65535)
 TRUST_PROXY = _bool("CP_TRUST_PROXY")
+# 只有 TCP 对端确实在这份名单里，才认它转来的 X-Real-IP / X-Forwarded-For。
+# 面板只听 127.0.0.1，而本机任何进程（被攻破的业务应用、SSRF）都能绕过 nginx 直连端口，
+# 随手换一个 X-Real-IP：不核对对端就采信的话，登录限速就变成"每个伪造 IP 一个空桶"。
+# 反代装在别的机器上时，把那台机器的地址加进来。
+TRUSTED_PROXIES = [
+    ip.strip() for ip in os.environ.get("CP_TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if ip.strip()
+]
 LOG = _bool("CP_LOG")
 
 # ---------- 路径 ----------
@@ -149,6 +156,7 @@ def as_dict() -> dict:
         "host": HOST,
         "port": PORT,
         "trustProxy": TRUST_PROXY,
+        "trustedProxies": TRUSTED_PROXIES,
         "log": LOG,
         "dataDir": DATA_DIR,
         "appRoot": APP_ROOT,

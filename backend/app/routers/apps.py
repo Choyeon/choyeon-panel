@@ -23,13 +23,27 @@ async def _body(req: Request) -> dict:
     return b if isinstance(b, dict) else {}
 
 
+def _hide_from_viewer(r: dict) -> dict:
+    """只读账号看到的应用行/详情：路径与命令里的凭据一律剥掉。
+
+    沿用 env 与 repo_url 已经定下的口径（字段保留、内容置空或打码），前端表单不用改
+    就能渲染。多剥这两类是因为它们和 repo_url 一样会带密钥：`PGPASSWORD=… node x.js`
+    这种内联写法在启动/安装命令里非常常见；path 则是 /root 下的绝对路径，
+    对一个只读账号没有任何用处，只是给攻击者画了一张目录地图。
+    """
+    r["repo_url"] = redact_creds(r.get("repo_url"))
+    for k in ("start_cmd", "install_cmd"):
+        r[k] = redact_creds(r.get(k))
+    r["path"] = None
+    return r
+
+
 @router.get("/api/apps")
 async def apps_list(req: Request):
     rows = await apps_service.list_apps()
     if req.state.cp_role != "admin":
-        # 仓库地址可能写成 https://user:token@host/x.git，token 不能随列表接口给只读账号
         for r in rows:
-            r["repo_url"] = redact_creds(r.get("repo_url"))
+            _hide_from_viewer(r)
     return rows
 
 
@@ -67,7 +81,7 @@ async def app_get(app_id: int, req: Request):
     # 保留键名并给空数组，viewer 的前端表单仍能正常解析。
     if req.state.cp_role != "admin":
         out["env"] = "[]"
-        out["repo_url"] = redact_creds(out.get("repo_url"))
+        _hide_from_viewer(out)
     return out
 
 

@@ -46,6 +46,25 @@ async def check_pass_async(password: str, stored: str) -> bool:
         return await asyncio.to_thread(check_pass, password, stored)
 
 
+def burn_kdf(password: str) -> None:
+    """按同一套 scrypt 参数空烧一次，结果丢掉。
+
+    账号不存在时如果直接短路返回，未知用户名 ~1ms、已存在用户名 ~50ms，
+    配上"用户名或密码错误"这条一模一样的提示也白搭——响应时间本身就把账号名单念出来了
+    （面板的口令规则是 `^[A-Za-z0-9_-]{3,32}$`，可枚举）。空烧一次让两条分支耗时一致。
+    """
+    try:
+        data = password.encode() or b"-"
+    except UnicodeEncodeError:
+        data = b"-"
+    hashlib.scrypt(data, salt=b"choyeon-panel-burn", n=2**14, r=8, p=1, dklen=64, maxmem=32 * 1024 * 1024)
+
+
+async def burn_kdf_async(password: str) -> None:
+    async with _scrypt_sem():
+        await asyncio.to_thread(burn_kdf, password)
+
+
 # 口令长度的上下限。四条设置路径（setup / 建号 / 管理员改密 / 自助改密）必须用同一把尺子，
 # 否则一处放行、另一处拒绝，用户按提示改完还是 400。
 PW_MIN_LEN = 8
@@ -94,11 +113,29 @@ def check_pass(password: str, stored: str) -> bool:
         return False
 
 
+def _epoch_head(v: str) -> int:
+    """epoch 的 time_ns 前缀；十六进制跨位长时字典序会骗人（"fff" < "1000" 才是对的）。"""
+    try:
+        return int(str(v).split(".")[0], 16)
+    except ValueError:
+        return -1
+
+
 def _user_epoch(username: str) -> str:
-    """每用户密钥版本号：改密 / 删号后自增，只让该用户已签发的 token 失效。"""
+    """当前生效的 token 版本号：全局值与该用户墓碑里较新的那个。
+
+    旧写法是 `token_epoch:<user> or <全局>`，于是第一个被 bump 过的用户会**永久**把全局值
+    挡在门外：等管理员按下"踢下所有人"，改过密的人（恰恰是最可能持有长期 token 的那批）
+    手里的旧票照样能用。两边都是单调的 time_ns，取较大者就对了：全局 bump 之后全员旧票
+    一起失效，之后单个用户 bump 仍然只影响他自己。
+    """
     from . import database as dbm
 
-    return dbm.get_setting(f"token_epoch:{username}") or _global_epoch()
+    user_v = dbm.get_setting(f"token_epoch:{username}")
+    global_v = _global_epoch()
+    if user_v and _epoch_head(user_v) > _epoch_head(global_v):
+        return user_v
+    return global_v
 
 
 def session_epoch(username: str) -> str:

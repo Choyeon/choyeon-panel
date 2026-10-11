@@ -278,6 +278,9 @@ class TestConfigParsers(unittest.TestCase):
             "version", "host", "port", "trustProxy", "log", "dataDir", "appRoot",
             "backupDir", "fileRoots", "unitDir", "python", "webDist", "webBuilt",
             "tokenTtlHours", "maxUploadBytes", "maxBodyBytes", "terminalMaxSessions",
+            # ⑤R：可信任反代列表。它是"哪些源 IP 的 X-Forwarded-For 可以采信"的开关，
+            # 不是密钥；doctor/设置页要展示它才知道限速现在认不认头。
+            "trustedProxies",
         }
         self.assertEqual(set(config.as_dict()) - allowed, set(), "as_dict 出现了未登记的配置项")
         self.assertTrue(config.VERSION, "版本号不应为空")
@@ -341,7 +344,10 @@ class TestTokenRevocation(unittest.TestCase):
         dbm.execute(
             "INSERT INTO settings(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (f"token_epoch:{self.user}", "9999999999"),
+            # 必须用产品自己的生成器：epoch 比较走的是 time_ns 前缀的**数值**大小，
+            # 手写的 "9999999999" 字典序比真实 epoch 大、数值却小得多，
+            # 那样这条用例会在吊销逻辑正确的前提下失败（⑤R 改成数值比较后实测如此）。
+            (f"token_epoch:{self.user}", dbm.new_epoch()),
         )
         with mock.patch.object(dbm, "_AUTH_TTL", 0.0):
             with self.assertRaises(jwt.InvalidTokenError, msg="缓存条目过期后必须读到跨进程写入的新 epoch"):

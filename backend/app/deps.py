@@ -8,6 +8,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from . import config, security
+from .errors import Forbidden
 from .log import log
 
 # 免认证端点：health（存活）与 ready（就绪）必须放通，否则反代/容器探针拿不到真实状态。
@@ -23,10 +24,12 @@ PUBLIC_PREFIXES = (
 )
 MUTATIONS = {"POST", "PATCH", "PUT", "DELETE"}
 
-# 只读账号唯一能写的东西是"自己的账号"：改密、改资料、换头像。
+# 只读账号唯一能写的东西是"自己的账号"：改密、改资料、换头像、登出。
 # 头像必须和 profile 同批放行——上传入口就在资料弹窗里，漏掉它的话 viewer
 # 点"上传头像"得到的是「只读账号不能执行写操作」，而同一个弹窗里改昵称是好的。
-SELF_SERVICE_PREFIXES = ("/api/auth/password", "/api/auth/profile", "/api/auth/avatar")
+# logout 也在里面：漏掉它的话 viewer 点"退出登录"收到 403，前端却照样把本地会话清了，
+# 用户以为退出成功，那枚 token 在 TTL 内仍然可用。
+SELF_SERVICE_PREFIXES = ("/api/auth/password", "/api/auth/profile", "/api/auth/avatar", "/api/auth/logout")
 
 # 面板自身托管静态资源，全部同源加载；禁用 object/frame 嵌入与外域脚本
 CSP = (
@@ -198,12 +201,23 @@ def need_admin(req: Request) -> JSONResponse | None:
     """中间件只挡得住写操作，读接口得自己表态。
 
     viewer 账号的"只读"含义是"看不到不该看的"，不是"能读所有 GET"：
-    文件接口能读任意 .env、备份接口能下载含口令的 dump，
-    所以这类端点必须显式要求 admin，而不是靠 HTTP 方法猜。
+    文件接口能读任意 .env、备份接口能下载含口令的 dump、数据浏览接口能翻任意表行与
+    Redis 键值，所以这类端点必须显式要求 admin，而不是靠 HTTP 方法猜。
     """
     if req.state.cp_role != "admin":
         return JSONResponse(status_code=403, content={"error": "需要管理员权限"})
     return None
+
+
+def require_admin(req: Request) -> None:
+    """need_admin 的依赖版，整块路由都是 admin only 时挂在 APIRouter(dependencies=...) 上。
+
+    逐条写 `if r := need_admin(req)` 的结局是多一个端点就少一个检查：数据浏览那一整块
+    7 个读接口就是这么一个都没写。挂在 router 上之后新增端点默认继承这道门禁，
+    忘记开口的方向是"拒"，不是"放"。
+    """
+    if req.state.cp_role != "admin":
+        raise Forbidden("需要管理员权限")
 
 
 def _extract_token(headers: Headers, query: QueryParams, allow_query: bool) -> str:

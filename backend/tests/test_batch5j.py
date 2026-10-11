@@ -150,6 +150,23 @@ class TestCredentialRedaction(unittest.TestCase):
             self.assertNotIn("aaaabbbbcccc", out)
             self.assertIn("***", out)
 
+    def test_multi_segment_key_is_masked(self):
+        """⑤R：真实 SDK 的键名几乎都不是单个词。
+
+        旧规则要求关键字整词结尾，`AWS_SECRET_ID=`、`AWS_ACCESS_KEY_ID=` 就这样带着
+        明文出去了——而这类值正好写在应用的 start_cmd / .panel.env 里，对只读账号也开放。
+        """
+        for s, secret in (
+            ("AWS_SECRET_ID=wjj thing", "wjj"),
+            ("export AWS_SECRET_ACCESS_KEY=AKIAiosfj1030fj", "AKIAiosfj1030fj"),
+            ("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+            ("SESSION_TOKEN_VALUE: ghp_abc123DEF", "ghp_abc123DEF"),
+            ("PRIVATE_KEY=/root/.ssh/id_ed25519", "id_ed25519"),
+        ):
+            out = redact_creds(s)
+            self.assertNotIn(secret, out, s)
+            self.assertIn("***", out, s)
+
     def test_bearer_token_is_masked(self):
         out = redact_creds("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc")
         self.assertIn("Bearer ***", out)
@@ -168,6 +185,10 @@ class TestCredentialRedaction(unittest.TestCase):
             # 把整词 pwd 当口令键名会把运维要看的cwd 遮成 ***，所以这一形态明确不遮。
             "    root : PWD=/root/www/choyeon-panel/backend ; USER=postgres ; COMMAND=/usr/bin/psql",
             "cd $PWD && npm run build",
+            # 后缀形态放宽之后仍然不能误伤：这些含关键字的普通词后面接的是字母，不是分隔符。
+            "tokenizer_model=gpt2 max_tokens=8",
+            "keyfile=/etc/nginx/keys/dhparam.pem",
+            "npm run build --password-stdin",
             "",
             None,
         ):

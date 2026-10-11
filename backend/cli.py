@@ -307,6 +307,31 @@ async def cmd_doctor(_a: argparse.Namespace) -> dict:
     return res
 
 
+def _warn(msg: str):
+    """告警走 stderr，--json 时 stdout 仍然是纯 JSON。"""
+    print(f"[warn] {msg}", file=sys.stderr)
+
+
+def _password_arg(a: argparse.Namespace) -> str | None:
+    """口令优先走 stdin。
+
+    `--password <pw>` 会留在 argv 里：同机任何用户 `ps -ef` 就能看到，Linux 下
+    /proc/<pid>/cmdline 世界可读，root 的 ~/.bash_history 还会原样存一条。面板这台机器上
+    跑着别人的业务应用，它们也有读 /proc 的权限，所以管理员口令对它们可见。
+    脚本里改用 `--password-stdin`（`printf '%s' "$PW" | choyeonctl user create x --password-stdin`）。
+    """
+    if getattr(a, "password_stdin", False):
+        if a.password:
+            Out.error("--password 与 --password-stdin 不能同时使用", EXIT_USAGE)
+        pw = sys.stdin.readline().rstrip("\r\n")
+        if not pw:
+            Out.error("--password-stdin 未从标准输入读到口令", EXIT_USAGE)
+        return pw
+    if a.password:
+        _warn("--password 走命令行会被 ps 与 shell 历史看到，自动化请改用 --password-stdin")
+    return a.password
+
+
 async def cmd_user(a: argparse.Namespace) -> dict:
     if a.user_cmd == "list":
         rows = dbm.query("SELECT id,username,role,created_at FROM users ORDER BY id")
@@ -314,38 +339,63 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         return {"users": rows}
 
     if a.user_cmd == "create":
-        if not a.name or not a.password:
-            Out.error("create 需要 <name> 与 --password", EXIT_USAGE)
-        pw_err = security.password_error(a.password)
-        if pw_err:
-            Out.error(pw_err, EXIT_USAGE)
+        if not a.name:
+            Out.error("create 需要 <name> 与 --password（或 --password-stdin）", EXIT_USAGE)
         if not security.USERNAME_RE.match(str(a.name)):
             Out.error("用户名只能包含字母、数字、下划线与连字符（3-32 位）", EXIT_USAGE)
+        pw = _password_arg(a)
+        if not pw:
+            Out.error("create 需要 --password（或 --password-stdin）", EXIT_USAGE)
+        pw_err = security.password_error(pw)
+        if pw_err:
+            Out.error(pw_err, EXIT_USAGE)
         role = a.role  # argparse 已用 choices 限定 admin/viewer
         if dbm.query_one("SELECT id FROM users WHERE username=?", (a.name,)):
             Out.error(f"用户 {a.name} 已存在", EXIT_FAIL)
         dbm.execute(
             "INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)",
-            (a.name, security.hash_pass(a.password), role),
+            (a.name, security.hash_pass(pw), role),
         )
         dbm.audit(a.name, "cli:user:create", role)
         Out.result({"ok": True, "username": a.name, "role": role}, f"已创建 {a.name}（{role}）")
         return {"ok": True, "username": a.name, "role": role}
 
     if a.user_cmd == "reset":
-        if not a.name or not a.password:
-            Out.error("reset 需要 <name> 与 --password", EXIT_USAGE)
+        if not a.name:
+            Out.error("reset 需要 <name> 与 --password（或 --password-stdin）", EXIT_USAGE)
         u = dbm.query_one("SELECT * FROM users WHERE username=?", (a.name,))
         if not u:
             Out.error(f"用户 {a.name} 不存在", EXIT_FAIL)
-        pw_err = security.password_error(a.password)
+        pw = _password_arg(a)
+        if not pw:
+            Out.error("reset 需要 --password（或 --password-stdin）", EXIT_USAGE)
+        pw_err = security.password_error(pw)
         if pw_err:
             Out.error(pw_err, EXIT_USAGE)
-        dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (security.hash_pass(a.password), a.name))
+        dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (security.hash_pass(pw), a.name))
         # 改密后吊销该用户所有已签发 token，避免旧凭证继续可用
         security.bump_user_epoch(a.name)
         dbm.audit(a.name, "cli:user:reset")
         Out.result({"ok": True, "username": a.name, "revokedTokens": True}, f"已重置 {a.name} 密码并吊销旧 token")
+        return {"ok": True, "username": a.name}
+
+    if a.user_cmd == "revoke":
+        # 应急吊销：怀疑口令泄露 / 有人被踢出后还想立刻断掉所有已登录会话时用的。
+        # 不改动口令，只做「把 epoch 抬上去」，于是所有旧 token 当场失效。
+        # 给一个名字只吊销该账号；给 all 连全局 epoch 一起抬，覆盖所有用户，
+        # 包括之后才被 bump 过的单账号（全局值取的是当下时间，见 security._user_epoch）。
+        if not a.name:
+            Out.error("revoke 需要 <name> 或 all", EXIT_USAGE)
+        if a.name == "all":
+            dbm.bump_token_epoch()
+            dbm.audit("cli", "cli:user:revoke", "all")
+            Out.result({"ok": True, "scope": "all"}, "已吊销全部用户的会话")
+            return {"ok": True, "scope": "all"}
+        if not dbm.query_one("SELECT id FROM users WHERE username=?", (a.name,)):
+            Out.error(f"用户 {a.name} 不存在", EXIT_FAIL)
+        security.bump_user_epoch(a.name)
+        dbm.audit(a.name, "cli:user:revoke")
+        Out.result({"ok": True, "username": a.name}, f"已吊销 {a.name} 的全部会话")
         return {"ok": True, "username": a.name}
 
     if a.user_cmd == "delete":
@@ -365,7 +415,7 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         # 删掉最后一个管理员后，面板回到「未创建管理员」状态——此时任何能访问到面板的人
         # 都可以先一步把管理员注册走。只说"已删除"没人会意识到这一点。
         left = dbm.query_one("SELECT COUNT(*) c FROM users WHERE role='admin'")["c"]
-        note = "" if left else "；本机已无管理员，请立即 choyeonctl user create <name> --password <pw> --role admin"
+        note = "" if left else "；本机已无管理员，请立即 printf '%s' \"$PW\" | choyeonctl user create <name> --password-stdin --role admin"
         Out.result({"ok": True, "username": a.name, "adminLeft": left}, f"已删除 {a.name}{note}")
         return {"ok": True, "adminLeft": left}
 
@@ -561,7 +611,7 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
         "conventions": {
             "json": "所有命令支持全局 --json，输出结构化结果",
             "exitCodes": {"0": "成功", "1": "执行失败", "2": "用法错误", "3": "前置条件不满足"},
-            "nonInteractive": "口令等敏感值通过参数传入；破坏性操作需显式 --yes",
+            "nonInteractive": "口令通过 --password-stdin 从标准输入传入（argv 形式仅限手工排障，会留在 ps 与 shell 历史里）；破坏性操作需显式 --yes",
         },
         "commands": [
             {"name": "deploy", "args": ["--prefix", "--port", "--branch", "--skip-nginx", "--no-deps"],
@@ -573,8 +623,11 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
              "desc": "升级到最新代码，失败自动回滚；--no-pull 只重建并重启（改配置后重新渲染 unit）"},
             {"name": "status", "args": [], "desc": "版本/监听/服务/健康/自检汇总"},
             {"name": "doctor", "args": [], "desc": "安全与健康自检，含每项修复建议"},
-            {"name": "user list|create|reset|delete", "args": ["<name>", "--password", "--role", "--yes"],
-             "desc": "账号管理（改密会吊销旧 token）"},
+            {"name": "user list|create|reset|revoke|delete",
+             "args": ["<name>", "--password", "--password-stdin", "--role", "--yes"],
+             "desc": "账号管理（改密会吊销旧 token；revoke 只吊销会话不改口令）",
+             "notes": ["create/reset 优先 --password-stdin：argv 里的口令同机用户 ps 可见",
+                       "revoke <name> 只踢这个账号；revoke all 抬全局版本号，全员旧票一起失效"]},
             {"name": "app templates|list|create|deploy|rollback|logs",
              "args": ["--id", "--name", "--template", "--type", "--repo", "--branch", "--path",
                       "--port", "--domain", "--start-cmd", "--install-cmd", "--lines"],
@@ -587,7 +640,7 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
         ],
         "deployRecipe": [
             "choyeonctl deploy --port 3210",
-            "choyeonctl user create admin --password <随机口令>",
+            "printf '%s' \"<随机口令>\" | choyeonctl user create admin --password-stdin",
             "choyeonctl doctor",
             "choyeonctl status --json",
         ],
@@ -624,9 +677,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="安全与健康自检", parents=[common]).set_defaults(fn=cmd_doctor)
 
     u = sub.add_parser("user", help="账号管理", parents=[common])
-    u.add_argument("user_cmd", choices=["list", "create", "reset", "delete"])
-    u.add_argument("name", nargs="?")
-    u.add_argument("--password")
+    u.add_argument("user_cmd", choices=["list", "create", "reset", "revoke", "delete"])
+    u.add_argument("name", nargs="?", help="revoke 传 all 表示吊销全部用户")
+    u.add_argument("--password", help="口令走 argv，同机用户可见；脚本请改用 --password-stdin")
+    u.add_argument("--password-stdin", action="store_true", help="从标准输入读取一行口令")
     u.add_argument("--role", choices=["admin", "viewer"], default="admin")
     u.add_argument("--yes", action="store_true")
     u.set_defaults(fn=cmd_user)

@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from .. import config
 from .. import aio_db
 from .. import database as dbm
+from ..log import warn
 from ..services import cert_ops, systemd_ops
 from ..templates import list_templates
 from ..util import disk_usage_pct, run
@@ -37,7 +38,11 @@ async def ready():
         row = dbm.query_one("SELECT COUNT(*) c FROM users")
         checks["database"] = "ok" if row is not None else "fail"
     except Exception as e:  # noqa: BLE001 探针本身不能抛异常，交给上层统一降级
-        checks["database"] = f"fail: {e}"
+        # /api/ready 在免登录名单里（deps 的公开前缀）。SQLite 的 OSError 带数据文件绝对路径，
+        # PG 的连接失败原文带 host/port 甚至 `password authentication failed for user "x"`，
+        # 原样回显等于让任何能连上端口的人读出基础设施细节。细节进日志，对外只有 fail。
+        warn("[ready]", "database", type(e).__name__, str(e)[:500])
+        checks["database"] = "fail"
 
     ok = all(v == "ok" for v in checks.values())
     return JSONResponse(status_code=200 if ok else 503, content={"ready": ok, "checks": checks})

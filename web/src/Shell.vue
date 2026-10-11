@@ -152,7 +152,14 @@ watch(
   { immediate: true },
 );
 
-function doLogout() {
+async function doLogout() {
+  // 先让服务端吊销 token，再清本地。只清本地的话，那枚签名票据在 TTL（默认 12 小时）内
+  // 依然是有效的面板凭证：从开发工具里复制走、共用电脑没退干净，都是这么留下的。
+  try {
+    await api.logout();
+  } catch {
+    // 吊销失败不能把人锁在面板里——没有"退出不了"的退出按钮，照样清本地。
+  }
   clearSession();
   router.replace('/login');
 }
@@ -456,7 +463,7 @@ function toggleTheme(ev: MouseEvent) {
       preset="dialog"
       type="warning"
       title="退出登录"
-      content="退出后需要重新输入账号密码才能进入面板。"
+      content="退出会注销该账号的全部登录（包括其他浏览器与设备上的），之后需要重新输入账号密码才能进入面板。"
       positive-text="退出"
       negative-text="取消"
       :positive-button-props="{ type: 'warning' }"

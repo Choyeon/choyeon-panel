@@ -83,7 +83,9 @@ async function grab(fn: () => Promise<any>, set: (v: any) => void) {
 }
 async function load() {
   if (isAdmin.value) await grab(() => api.alertSettings(), (v) => (alerts.value = normalizeAlerts(v)));
-  await grab(() => api.firewall(), (v) => (fw.value = v));
+  // 防火墙规则表（开了哪些端口、来源地址）按 admin 收口，与后端 /api/firewall 同一口径；
+  // 少了这个判断，只读账号一进设置页就吃到一条 403 报错。
+  if (isAdmin.value) await grab(() => api.firewall(), (v) => (fw.value = v));
 }
 async function renew() {
   renewing.value = true;
@@ -304,7 +306,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       </section>
 
       <div v-if="isAdmin" class="cp-divider"></div>
-      <section>
+      <section v-if="isAdmin">
         <div class="sec-head">
           <h2 class="sec-title">防火墙</h2>
           <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? (fw.active ? 'ufw 已启用' : 'ufw 未启用') : '检测中…' }}</span>
