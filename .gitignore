@@ -7,3 +7,9 @@ __pycache__/
 *.pyc
 .DS_Store
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+coverage/
+*.local

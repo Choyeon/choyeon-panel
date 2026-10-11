@@ -1,0 +1,53 @@
+name: 部署求助
+description: 装不上、起不来、doctor 有 fail —— 先来这里，多数问题手册里已有定式
+title: "[help] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先查 [RUNBOOK.md](RUNBOOK.md) 与 [AGENTS.md 第 6 节「失败处置」](https://github.com/Choyeon/choyeon-panel/blob/main/AGENTS.md)——按症状查表，比描述问题更快。
+        如果表里没有，请带上下面三段输出，它们基本能定位一切。
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: 你想做什么
+      description: 目标 + 卡在哪一步（哪条命令、哪个页面、什么现象）
+      placeholder: 在 Rocky 9 上执行 bash scripts/install.sh，健康检查阶段超时。
+    validations:
+      required: true
+
+  - type: textarea
+    id: outputs
+    attributes:
+      label: 关键输出
+      description: "先删除域名、公网 IP、口令、token 等敏感值"
+      render: shell
+      placeholder: |
+        cat /etc/os-release
+        choyeonctl doctor --json        # 未装成 CLI 时用: ./bin/choyeonctl doctor --json
+        journalctl -u choyeon-panel -n 50 --no-pager
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 卡住的阶段
+      options:
+        - 装系统依赖
+        - 建 venv / 装 Python 包
+        - 前端构建（npm）
+        - systemd unit / 服务启动
+        - 健康检查未通过
+        - nginx 反代或证书
+        - 已经跑起来，但某个功能不对
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 你已经试过什么
+      description: 避免重复建议；改过哪些 `.env` 键也写在这里（不要贴内容）

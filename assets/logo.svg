@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="choyeon-panel logo">
+  <defs>
+    <linearGradient id="cp-logo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#005eeb"/>
+      <stop offset="1" stop-color="#4c8ef1"/>
+    </linearGradient>
+    <linearGradient id="cp-sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".20"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#cp-logo)"/>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#cp-sheen)"/>
+
+  <!-- 面板窗口 -->
+  <rect x="25" y="31" width="78" height="66" rx="10" fill="#08224f" fill-opacity=".42"/>
+  <path d="M25 41a10 10 0 0 1 10-10h58a10 10 0 0 1 10 10v4H25z" fill="#ffffff" fill-opacity=".22"/>
+  <circle cx="35" cy="38" r="2.4" fill="#fff" fill-opacity=".9"/>
+  <circle cx="43" cy="38" r="2.4" fill="#fff" fill-opacity=".55"/>
+  <circle cx="51" cy="38" r="2.4" fill="#fff" fill-opacity=".35"/>
+
+  <!-- 侧栏分组 -->
+  <rect x="25" y="45" width="19" height="52" rx="0" fill="#ffffff" fill-opacity=".10"/>
+  <rect x="30" y="52" width="9" height="3.4" rx="1.7" fill="#fff" fill-opacity=".8"/>
+  <rect x="30" y="60" width="9" height="3.4" rx="1.7" fill="#fff" fill-opacity=".4"/>
+  <rect x="30" y="68" width="9" height="3.4" rx="1.7" fill="#fff" fill-opacity=".4"/>
+  <rect x="30" y="76" width="9" height="3.4" rx="1.7" fill="#fff" fill-opacity=".28"/>
+
+  <!-- 实时曲线 -->
+  <polyline points="50,82 58,70 66,75 74,61 82,67 94,53" fill="none" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" opacity=".95"/>
+  <circle cx="94" cy="53" r="3.4" fill="#8fd460"/>
+  <!-- 指标条 -->
+  <rect x="50" y="88" width="30" height="3.4" rx="1.7" fill="#fff" fill-opacity=".45"/>
+  <rect x="50" y="90" width="18" height="3.4" rx="1.7" fill="#fff" fill-opacity=".75"/>
+  <rect x="84" y="88" width="10" height="5.6" rx="2.4" fill="#6fdba4" fill-opacity=".85"/>
+</svg>

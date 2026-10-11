@@ -1,0 +1,65 @@
+# 贡献指南
+
+先说结论：**能跑通 `make lint && make test`、CI 全绿、且改动在真实面板里验证过**，这个 PR 就基本可以合并了。下面解释每一步为什么这么要求。
+
+## 环境准备
+
+```bash
+# 后端（需要 Python 3.11+）
+cd backend && python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+
+# 前端（需要 Node 20+）
+cd ../web && npm ci
+```
+
+`requirements-dev.txt` 与生产依赖**刻意分开**：`scripts/common.sh` 的 `venv_create()` 只装 `requirements.txt`，测试包进生产环境会被 doctor 与备份一起带上机器。测试跑起来还硬依赖 `httpx2`（starlette 的 `TestClient`），漏装会在干净环境里直接 `RuntimeError`——本地 venv 常因为带着旧 httpx 而退化成一堆 warning，于是"本地绿 CI 红"。
+
+常用命令：
+
+```bash
+make help          # 查看全部目标
+make backend-dev   # 后端 http://127.0.0.1:3210
+make web-dev       # 前端 :5173，/api 代理到 3210
+make test          # 后端 unittest
+make lint          # ruff + mypy + vue-tsc
+make fmt           # ruff 格式化
+make release-dry   # 本地模拟发布打包（不推送）
+```
+
+Windows 也能开发：systemd / journalctl / nginx 这类 Linux 专属能力会降级为提示，API、页面与测试均可运行。
+
+## 跑测试要注意的三件事
+
+1. **测试自己决定数据目录。** 每个测试模块必须在 `from app import …` **之前**设置 `CP_DATA_DIR` / `CP_FILE_ROOTS` 默认值——配置在 import 时就读取了。CI 用 `unittest discover`（没有 conftest），先被 import 的模块说了算，漏写就会污染真实目录。
+2. **不要带 `CP_DATA_DIR` 环境变量跑测试**，尤其是生产机上；那会让测试写进真实数据目录。
+3. **探测解释器的测试要遮位。** CI 的 3.11 job 的 `PATH` 里一定有 `python3.11`，测试若关心版本路由就必须把 3.13/3.12/3.11 全部用不合格替身遮住，否则测的是宿主机而不是脚本。
+
+## 代码约定
+
+- 后端：类型注解完整，`mypy` 非阻断但新增错误请修；`ruff` 阻断（含 import 排序 `I001`）。
+- 所有对外 exec 走**参数数组 + 白名单正则**，不拼接 shell 字符串；子进程统一 `start_new_session`，超时 `killpg`。
+- 文件路径操作必须过 `safe_path` 一类的 realpath 守卫，限制在 `CP_FILE_ROOTS` 内。
+- CLI 的每个命令都要支持 `--json`，退出码只用 `0/1/2/3` 四态；改了参数就同步更新 `choyeonctl schema` 与 [AGENTS.md](AGENTS.md) 的命令表。
+- 前端：`<script setup>` + TypeScript；样式与主题值走 `web/src/style.css` 的设计令牌，不要在组件里硬编码颜色；文案用中文，图标用 naive-ui / 内置 SVG，不用 emoji。
+
+## 提 PR 的流程
+
+1. 从 `main` 切分支，命名随意，但一个 PR 只做一件事。
+2. 本地 `make lint && make test`，前端改动再跑 `cd web && npm run build`。
+3. **UI 改动要在跑起来的面板里验证**——构建通过不等于界面修好了。截图或简述操作路径放在 PR 描述里。
+4. 提交信息用中文，一句话说清"改了什么/为什么"，动词开头（`修复 …` / `新增 …` / `重构 …`）。一个提交对应一个可独立回滚的变更。
+5. 打开 PR，CI 必须全绿（后端 3.11/3.12、前端构建、shellcheck、systemd unit 校验）。
+6. 若改动了行为、配置项或命令契约，同步更新 `README.md`、`AGENTS.md`/`RUNBOOK.md` 与 `CHANGELOG.md`。
+
+合并策略由维护者决定，_contributor 不要在本地 rebase 已推送的提交，也不要 `--amend`。_
+
+## 发布
+
+版本号同时存在于 `backend/app/config.py` 的 `VERSION` 与 `web/package.json`，发版时两处一起改。流程：提交 → 打 `vX.Y.Z` tag → 推 tag → `.github/workflows/release.yml` 自动打包并建 Release（产物：源码包、前端 dist 包、`SHA256SUMS.txt`）。本地可用 `make release-dry` 先看产物对不对。
+
+## 行为与沟通
+
+- 项目讨论、Issue、提交信息默认中文；代码标识符用英文。
+- 安全漏洞请按 [SECURITY.md](SECURITY.md) 私密上报，不要开公开 Issue。
+- 维护者评审最看重两点：**是否真的在线上验证过**，以及**是否把线上事实（服务是否活着、备份是否落地）如实写进结论**。不能检查的项就标成 warn 并说明原因，不要伪造通过。

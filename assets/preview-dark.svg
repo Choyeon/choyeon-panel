@@ -1,0 +1,250 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-label="choyeon-panel 概览页界面示意">
+  <defs>
+    <linearGradient id="pd-brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#005eeb"/>
+      <stop offset="1" stop-color="#4c8ef1"/>
+    </linearGradient>
+    <linearGradient id="pd-area" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d8eff" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#3d8eff" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="pd-area2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9b7bff" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#9b7bff" stop-opacity="0.02"/>
+    </linearGradient>
+    <clipPath id="pd-screen"><rect x="0" y="0" width="1200" height="720" rx="18"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#pd-screen)">
+    <!-- page -->
+    <rect width="1200" height="720" fill="#2e313d"/>
+
+    <!-- ================= sidebar ================= -->
+    <rect x="0" y="0" width="228" height="720" fill="#262833"/>
+    <line x1="228" y1="0" x2="228" y2="720" stroke="#434552" stroke-width="1"/>
+
+    <!-- brand row -->
+    <rect x="20" y="22" width="34" height="34" rx="9" fill="url(#pd-brand)"/>
+    <rect x="27" y="29" width="20" height="15" rx="3" fill="#ffffff" fill-opacity="0.92"/>
+    <rect x="27" y="32.5" width="6" height="12" fill="#4c8ef1"/>
+    <text x="64" y="45" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#e3e6f3">choyeon-panel</text>
+
+    <!-- group: 监控 -->
+    <text x="20" y="92" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11" letter-spacing="1.2" fill="#9597a4">监控</text>
+
+    <!-- active item: 概览 -->
+    <rect x="8" y="102" width="212" height="38" rx="10" fill="#3d8eff" fill-opacity="0.14"/>
+    <rect x="8" y="112" width="3" height="18" rx="1.5" fill="#3d8eff"/>
+    <rect x="24" y="115" width="7" height="7" rx="1.5" fill="#3d8eff"/>
+    <rect x="34" y="115" width="7" height="7" rx="1.5" fill="#3d8eff" fill-opacity="0.6"/>
+    <rect x="24" y="125" width="7" height="7" rx="1.5" fill="#3d8eff" fill-opacity="0.6"/>
+    <rect x="34" y="125" width="7" height="7" rx="1.5" fill="#3d8eff"/>
+    <text x="52" y="126" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="600" fill="#e3e6f3">概览</text>
+
+    <g font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" fill="#adb0bc">
+      <rect x="24" y="153" width="16" height="12" rx="2" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <text x="52" y="164">应用</text>
+      <rect x="24" y="191" width="16" height="16" rx="3" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <text x="52" y="202">服务</text>
+      <ellipse cx="32" cy="232" rx="8" ry="4" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <path d="M24 232v8c0 2.2 3.6 4 8 4s8-1.8 8-4v-8" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <text x="52" y="240">数据库</text>
+      <rect x="24" y="265" width="16" height="14" rx="2" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <path d="M24 269h16" stroke="#9597a4" stroke-width="1.4"/>
+      <text x="52" y="278">备份</text>
+    </g>
+
+    <text x="20" y="322" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11" letter-spacing="1.2" fill="#9597a4">运维</text>
+    <g font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" fill="#adb0bc">
+      <rect x="24" y="337" width="16" height="14" rx="2" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <path d="M29 337v14M34 337v14" stroke="#9597a4" stroke-width="1.1"/>
+      <text x="52" y="348">文件</text>
+      <rect x="23" y="371" width="18" height="15" rx="3" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <path d="M27 376l4 3-4 3" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <text x="52" y="384">终端</text>
+      <circle cx="32" cy="412" r="6" fill="none" stroke="#9597a4" stroke-width="1.4"/>
+      <path d="M32 403v-3M32 424v-3M23 412h-3M44 412h-3" stroke="#9597a4" stroke-width="1.4"/>
+      <text x="52" y="417">设置</text>
+    </g>
+
+    <!-- doctor badge in sidebar footer -->
+    <rect x="8" y="648" width="212" height="52" rx="12" fill="#242633" stroke="#434552"/>
+    <circle cx="30" cy="674" r="9" fill="#6fdba4" fill-opacity="0.16"/>
+    <path d="M26 674l3 3 6-6" fill="none" stroke="#6fdba4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="48" y="670" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#e3e6f3">自检 12 项全通过</text>
+    <text x="48" y="687" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11" fill="#9597a4">fail 0 · warn 0</text>
+
+    <!-- ================= header ================= -->
+    <rect x="228" y="0" width="972" height="64" fill="#262833"/>
+    <line x1="228" y1="64" x2="1200" y2="64" stroke="#434552"/>
+    <text x="256" y="39" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="19" font-weight="600" fill="#e3e6f3">概览</text>
+    <text x="324" y="39" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12" fill="#9597a4">/ 服务器运行状态</text>
+
+    <text x="828" y="39" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12" fill="#adb0bc"> uptime 128d </text>
+    <circle cx="920" cy="35" r="4" fill="#8fd460"/>
+    <text x="930" y="39" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12" fill="#adb0bc">在线</text>
+    <!-- theme + user -->
+    <rect x="986" y="20" width="108" height="26" rx="13" fill="#242633" stroke="#434552"/>
+    <text x="1002" y="37" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12" fill="#c0c2cf">深色 / 浅色</text>
+    <circle cx="1130" cy="33" r="15" fill="url(#pd-brand)"/>
+    <text x="1130" y="38" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#ffffff">A</text>
+
+    <!-- ================= stat cards ================= -->
+    <g>
+      <rect x="256" y="88" width="296" height="120" rx="14" fill="#242633" stroke="#434552"/>
+      <text x="276" y="116" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="13" fill="#9597a4">CPU</text>
+      <text x="276" y="152" font-family="'JetBrains Mono',Menlo,Consolas,monospace" font-size="30" font-weight="600" fill="#e3e6f3">23.5%</text>
+      <text x="276" y="176" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11" fill="#9597a4">8 核 · load 0.61</text>
+      <g transform="translate(476,110)">
+        <circle cx="34" cy="34" r="26" fill="none" stroke="#434552" stroke-width="7"/>
+        <circle cx="34" cy="34" r="26" fill="none" stroke="#3d8eff" stroke-width="7" stroke-linecap="round"
+                stroke-dasharray="38.3 125.0" transform="rotate(-90 34 34)"/>
+        <text x="34" y="39" text-anchor="middle" font-family="'JetBrains Mono',Menlo,monospace" font-size="13" fill="#c0c2cf">24</text>
+      </g>
+      <rect x="276" y="188" width="256" height="4" rx="2" fill="#434552"/>
+      <rect x="276" y="188" width="60" height="4" rx="2" fill="#3d8eff"/>
+    </g>
+
+    <g>
+      <rect x="572" y="88" width="296" height="120" rx="14" fill="#242633" stroke="#434552"/>
+      <text x="592" y="116" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="13" fill="#9597a4">内存</text>
+      <text x="592" y="152" font-family="'JetBrains Mono',Menlo,Consolas,monospace" font-size="30" font-weight="600" fill="#e3e6f3">3.1 GB</text>
+      <text x="592" y="176" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11" fill="#9597a4">共 16 GB · swap 已用 0.2 GB</text>
+      <g transform="translate(792,110)">
+        <circle cx="34" cy="34" r="26" fill="none" stroke="#434552" stroke-width="7"/>
+        <circle cx="34" cy="34" r="26" fill="none" stroke="#9b7bff" stroke-width="7" stroke-linecap="round"
+                stroke-dasharray="31.7 131.7" transform="rotate(-90 34 34)"/>
+        <text x="34" y="39" text-anchor="middle" font-family="'JetBrains Mono',Menlo,monospace" font-size="13" fill="#c0c2cf">19</text>
+      </g>
+      <rect x="592" y="188" width="256" height="4" rx="2" fill="#434552"/>
+      <rect x="592" y="188" width="50" height="4" rx="2" fill="#9b7bff"/>
+    </g>
+
+    <g>
+      <rect x="888" y="88" width="296" height="120" rx="14" fill="#242633" stroke="#434552"/>
+      <text x="908" y="116" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="13" fill="#9597a4">磁盘 /</text>
+      <text x="908" y="152" font-family="'JetBrains Mono',Menlo,Consolas,monospace" font-size="30" font-weight="600" fill="#e3e6f3">68%</text>
+      <text x="908" y="176" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11" fill="#9597a4">已用 122 GB / 180 GB</text>
+      <g transform="translate(1108,110)">
+        <circle cx="34" cy="34" r="26" fill="none" stroke="#434552" stroke-width="7"/>
+        <circle cx="34" cy="34" r="26" fill="none" stroke="#f5c26f" stroke-width="7" stroke-linecap="round"
+                stroke-dasharray="110.8 52.5" transform="rotate(-90 34 34)"/>
+        <text x="34" y="39" text-anchor="middle" font-family="'JetBrains Mono',Menlo,monospace" font-size="13" fill="#c0c2cf">68</text>
+      </g>
+      <rect x="908" y="188" width="256" height="4" rx="2" fill="#434552"/>
+      <rect x="908" y="188" width="174" height="4" rx="2" fill="#f5c26f"/>
+    </g>
+
+    <!-- ================= trend chart ================= -->
+    <rect x="256" y="228" width="612" height="270" rx="14" fill="#242633" stroke="#434552"/>
+    <text x="278" y="258" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#e3e6f3">资源趋势</text>
+    <text x="278" y="277" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11" fill="#9597a4">近 24 小时 · 每 30 秒采样</text>
+    <g font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12">
+      <circle cx="640" cy="254" r="4" fill="#3d8eff"/>
+      <text x="650" y="258" fill="#adb0bc">CPU</text>
+      <circle cx="706" cy="254" r="4" fill="#9b7bff"/>
+      <text x="716" y="258" fill="#adb0bc">内存</text>
+      <circle cx="778" cy="254" r="4" fill="#8fd460"/>
+      <text x="788" y="258" fill="#adb0bc">网络</text>
+    </g>
+
+    <!-- grid -->
+    <g stroke="#434552" stroke-width="1" stroke-dasharray="3 5">
+      <line x1="278" y1="330" x2="846" y2="330"/>
+      <line x1="278" y1="386" x2="846" y2="386"/>
+      <line x1="278" y1="442" x2="846" y2="442"/>
+    </g>
+    <line x1="278" y1="490" x2="846" y2="490" stroke="#5b5e6a"/>
+    <g font-family="'JetBrains Mono',Menlo,monospace" font-size="10" fill="#9597a4">
+      <text x="278" y="508">00:00</text>
+      <text x="420" y="508">06:00</text>
+      <text x="562" y="508">12:00</text>
+      <text x="704" y="508">18:00</text>
+      <text x="820" y="508">now</text>
+    </g>
+
+    <!-- area + lines -->
+    <path d="M278 452 L320 440 L362 462 L404 428 L446 436 L488 408 L530 424 L572 396 L614 414 L656 382 L698 402 L740 372 L782 392 L846 366 L846 490 L278 490 Z"
+          fill="url(#pd-area)"/>
+    <path d="M278 452 L320 440 L362 462 L404 428 L446 436 L488 408 L530 424 L572 396 L614 414 L656 382 L698 402 L740 372 L782 392 L846 366"
+          fill="none" stroke="#3d8eff" stroke-width="2.6" stroke-linejoin="round"/>
+    <path d="M278 470 L320 466 L362 472 L404 462 L446 468 L488 456 L530 464 L572 452 L614 460 L656 446 L698 454 L740 440 L782 450 L846 436 L846 490 L278 490 Z"
+          fill="url(#pd-area2)"/>
+    <path d="M278 470 L320 466 L362 472 L404 462 L446 468 L488 456 L530 464 L572 452 L614 460 L656 446 L698 454 L740 440 L782 450 L846 436"
+          fill="none" stroke="#9b7bff" stroke-width="2.4" stroke-linejoin="round"/>
+    <path d="M278 482 L330 476 L382 484 L434 472 L486 480 L538 468 L590 478 L642 464 L694 474 L746 460 L798 470 L846 458"
+          fill="none" stroke="#8fd460" stroke-width="2" stroke-dasharray="6 5" opacity="0.85"/>
+    <circle cx="846" cy="366" r="4.5" fill="#3d8eff" stroke="#242633" stroke-width="2"/>
+
+    <!-- ================= network / process card ================= -->
+    <rect x="888" y="228" width="296" height="270" rx="14" fill="#242633" stroke="#434552"/>
+    <text x="910" y="258" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#e3e6f3">系统信息</text>
+    <g font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12">
+      <g fill="#9597a4">
+        <text x="910" y="290">发行版</text>
+        <text x="910" y="318">内核</text>
+        <text x="910" y="346">面板版本</text>
+        <text x="910" y="374">监听</text>
+        <text x="910" y="402">systemd</text>
+        <text x="910" y="430">备份</text>
+      </g>
+      <g fill="#c0c2cf" text-anchor="end" font-family="'JetBrains Mono',Menlo,monospace">
+        <text x="1160" y="290">Ubuntu 24.04</text>
+        <text x="1160" y="318">6.8.0-45</text>
+        <text x="1160" y="346">v1.1.8</text>
+        <text x="1160" y="374">127.0.0.1:3210</text>
+        <text x="1160" y="402">256 units</text>
+        <text x="1160" y="430">今日 03:10</text>
+      </g>
+    </g>
+    <line x1="910" y1="448" x2="1162" y2="448" stroke="#434552"/>
+    <rect x="910" y="460" width="252" height="24" rx="7" fill="#6fdba4" fill-opacity="0.12"/>
+    <text x="1036" y="476" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12" fill="#6fdba4">TLS 反代已启用 · 端口未暴露公网</text>
+
+    <!-- ================= app table ================= -->
+    <rect x="256" y="518" width="928" height="180" rx="14" fill="#242633" stroke="#434552"/>
+    <text x="278" y="548" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#e3e6f3">应用</text>
+    <text x="340" y="548" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11" fill="#9597a4">4 个 · 3 运行中</text>
+    <rect x="1044" y="528" width="120" height="30" rx="9" fill="url(#pd-brand)"/>
+    <text x="1104" y="547" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#ffffff">部署新应用</text>
+
+    <g font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12" fill="#9597a4">
+      <text x="278" y="580">名称</text>
+      <text x="500" y="580">类型</text>
+      <text x="620" y="580">端口</text>
+      <text x="740" y="580">状态</text>
+      <text x="900" y="580">操作</text>
+    </g>
+    <line x1="278" y1="590" x2="1162" y2="590" stroke="#434552"/>
+
+    <g font-family="'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="13">
+      <g>
+        <text x="278" y="616" fill="#e3e6f3">my-api</text>
+        <text x="500" y="616" fill="#adb0bc">python-fastapi</text>
+        <text x="620" y="616" fill="#adb0bc" font-family="'JetBrains Mono',Menlo,monospace">8000</text>
+        <circle cx="746" cy="612" r="4" fill="#8fd460"/>
+        <text x="758" y="616" fill="#c0c2cf">运行中</text>
+        <text x="900" y="616" fill="#3d8eff">日志 · 重启 · 回滚 · 停止</text>
+      </g>
+      <g opacity="0.92">
+        <text x="278" y="646" fill="#e3e6f3">site-web</text>
+        <text x="500" y="646" fill="#adb0bc">node-next</text>
+        <text x="620" y="646" fill="#adb0bc" font-family="'JetBrains Mono',Menlo,monospace">3000</text>
+        <circle cx="746" cy="642" r="4" fill="#8fd460"/>
+        <text x="758" y="646" fill="#c0c2cf">运行中</text>
+        <text x="900" y="646" fill="#3d8eff">日志 · 重启 · 回滚 · 停止</text>
+      </g>
+      <g opacity="0.88">
+        <text x="278" y="676" fill="#e3e6f3">docs-static</text>
+        <text x="500" y="676" fill="#adb0bc">static-site</text>
+        <text x="620" y="676" fill="#adb0bc" font-family="'JetBrains Mono',Menlo,monospace">—</text>
+        <circle cx="746" cy="672" r="4" fill="#9597a4"/>
+        <text x="758" y="676" fill="#c0c2cf">已停止</text>
+        <text x="900" y="676" fill="#3d8eff">日志 · 启动 · 删除</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- frame -->
+  <rect x="0.5" y="0.5" width="1199" height="719" rx="18" fill="none" stroke="#434552"/>
+</svg>

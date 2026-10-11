@@ -1,0 +1,108 @@
+name: 缺陷报告
+description: 报告一个可复现的问题
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。这个项目跑在真实机器上，所以**环境信息比描述更重要**——请尽量填满下面几项，尤其是三段命令的输出。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 期望行为 vs 实际行为，以及出现问题的页面/命令
+      placeholder: |
+        在「应用」页点“回滚”后，期望回到上一个成功部署，实际跳到了最新版本。
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 从干净状态开始的编号步骤；能给出最小复现最好
+      placeholder: |
+        1. 部署应用 A 两次
+        2. 在应用详情页点“回滚”
+        3. 看到 …
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断输出
+      description: 请粘贴这三条命令的 JSON 输出（**先删除域名、公网 IP、口令、token 等敏感值**）
+      render: shell
+      placeholder: |
+        choyeonctl status --json
+        choyeonctl doctor --json
+        journalctl -u choyeon-panel -n 50 --no-pager
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os-family
+    attributes:
+      label: 发行版系
+      options:
+        - Debian / Ubuntu / Mint / Kali
+        - RHEL / Rocky / AlmaLinux / Fedora / Amazon Linux
+        - Arch / Manjaro / EndeavourOS / CachyOS
+        - openSUSE Leap / Tumbleweed
+        - Alpine
+        - 其它
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: 发行版版本
+      description: "cat /etc/os-release 输出的 PRETTY_NAME"
+      placeholder: Ubuntu 24.04.1 LTS
+    validations:
+      required: true
+
+  - type: input
+    id: panel-version
+    attributes:
+      label: 面板版本
+      description: "choyeonctl status --json 输出里的 version"
+      placeholder: "1.1.8"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python 版本
+      description: 面板 venv 使用的解释器
+      placeholder: "3.11.9"
+
+  - type: dropdown
+    id: access-path
+    attributes:
+      label: 访问方式
+      description: 面板的暴露路径直接影响判定（默认只应监听 127.0.0.1）
+      options:
+        - 仅本机 127.0.0.1
+        - nginx 反向代理 + TLS
+        - 直接暴露公网端口（不安全配置）
+        - 只用 CLI，未开网页
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 已升级到最新版仍能复现
+          required: true
+        - label: 上述诊断输出中不含口令、token、私钥或 `.env` 内容
+          required: true
+        - label: 这不是安全漏洞（漏洞请按 SECURITY.md 私密上报，不要开公开 Issue）
+          required: true

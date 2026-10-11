@@ -67,14 +67,29 @@ jobs:
             SHA256SUMS.txt
           generate_release_notes: true
           body: |
-            ## 安装 / 升级
+            ## 安装
 
             ```bash
-            # 全新安装
-            bash scripts/install.sh
-
-            # 已安装实例升级（会自动备份并在健康检查失败时回滚）
-            /root/choyeon-panel/scripts/update.sh
+            git clone --branch <本 tag> https://github.com/Choyeon/choyeon-panel.git
+            cd choyeon-panel && sudo bash scripts/install.sh      # 就地部署到该目录
             ```
 
-            校验：`sha256sum -c SHA256SUMS.txt`
+            不想用 git 时，下载源码包 `choyeon-panel-<版本>.tar.gz`，解压后进入目录执行同一条命令。
+
+            ## 已安装实例升级
+
+            ```bash
+            sudo choyeonctl upgrade          # 拉代码 → 备份 → 构建 → 重启，健康检查失败自动回滚
+            sudo choyeonctl status --json    # healthy 必须为 true
+            sudo choyeonctl doctor --json    # counts.fail 必须为 0
+            ```
+
+            只改了 `.env` 配置时用 `choyeonctl upgrade --no-pull` 重新渲染 systemd unit。
+
+            ## 产物
+
+            - `choyeon-panel-<版本>.tar.gz` —— 源码包（不含 `.git`、`node_modules`、`.venv`、`data`、`web/dist`）
+            - `choyeon-panel-web-<版本>.tar.gz` —— 前端构建产物，解压为 `web/dist` 后可直接由后端托管
+            - `SHA256SUMS.txt` —— 校验：`sha256sum -c SHA256SUMS.txt`
+
+            变更明细见 [CHANGELOG.md](https://github.com/Choyeon/choyeon-panel/blob/main/CHANGELOG.md)；部署与排障规则见 [AGENTS.md](https://github.com/Choyeon/choyeon-panel/blob/main/AGENTS.md) / [RUNBOOK.md](https://github.com/Choyeon/choyeon-panel/blob/main/RUNBOOK.md)。

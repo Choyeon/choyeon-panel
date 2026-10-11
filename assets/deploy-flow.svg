@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="236" viewBox="0 0 1200 236" role="img" aria-label="一键部署与自动回滚流程">
+  <defs>
+    <linearGradient id="df-1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#005eeb"/><stop offset="1" stop-color="#4c8ef1"/>
+    </linearGradient>
+    <marker id="df-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5b5e6a"/>
+    </marker>
+    <style>
+      .n { font-family:Inter,'PingFang SC','Microsoft YaHei',system-ui,sans-serif; fill:#e3e6f3; font-size:16px; font-weight:600; }
+      .d { font-family:Inter,'PingFang SC','Microsoft YaHei',system-ui,sans-serif; fill:#9597a4; font-size:12.5px; }
+      .c { font-family:ui-monospace,Consolas,monospace; fill:#7faef5; font-size:12px; }
+    </style>
+  </defs>
+  <rect width="1200" height="236" fill="#1b1e27"/>
+
+  <g transform="translate(24,44)">
+    <rect width="176" height="112" rx="12" fill="#242633" stroke="#434552"/>
+    <circle cx="26" cy="30" r="12" fill="url(#df-1)"/>
+    <text x="26" y="35" text-anchor="middle" class="n" fill="#fff" font-size="14">1</text>
+    <text x="48" y="35" class="n">发行版识别</text>
+    <text x="18" y="62" class="d">apt / dnf / pacman</text>
+    <text x="18" y="80" class="d">zypper / apk</text>
+    <text x="18" y="100" class="c">detect_os</text>
+  </g>
+  <g transform="translate(222,44)">
+    <rect width="176" height="112" rx="12" fill="#242633" stroke="#434552"/>
+    <circle cx="26" cy="30" r="12" fill="url(#df-1)"/>
+    <text x="26" y="35" text-anchor="middle" class="n" fill="#fff" font-size="14">2</text>
+    <text x="48" y="35" class="n">依赖自动装</text>
+    <text x="18" y="62" class="d">Python 3.11+ · Node 22</text>
+    <text x="18" y="80" class="d">nginx · git · sqlite</text>
+    <text x="18" y="100" class="c">ensure_python/node</text>
+  </g>
+  <g transform="translate(420,44)">
+    <rect width="176" height="112" rx="12" fill="#242633" stroke="#434552"/>
+    <circle cx="26" cy="30" r="12" fill="url(#df-1)"/>
+    <text x="26" y="35" text-anchor="middle" class="n" fill="#fff" font-size="14">3</text>
+    <text x="48" y="35" class="n">构建</text>
+    <text x="18" y="62" class="d">venv + uv/pip 依赖</text>
+    <text x="18" y="80" class="d">vite 分包 + 预压缩 gz</text>
+    <text x="18" y="100" class="c">npm run build</text>
+  </g>
+  <g transform="translate(618,44)">
+    <rect width="176" height="112" rx="12" fill="#242633" stroke="#434552"/>
+    <circle cx="26" cy="30" r="12" fill="url(#df-1)"/>
+    <text x="26" y="35" text-anchor="middle" class="n" fill="#fff" font-size="14">4</text>
+    <text x="48" y="35" class="n">systemd 接管</text>
+    <text x="18" y="62" class="d">unit 由 .env 渲染</text>
+    <text x="18" y="80" class="d">Restart + StartLimit</text>
+    <text x="18" y="100" class="c">enable --now</text>
+  </g>
+  <g transform="translate(816,44)">
+    <rect width="176" height="112" rx="12" fill="#242633" stroke="#434552"/>
+    <circle cx="26" cy="30" r="12" fill="url(#df-1)"/>
+    <text x="26" y="35" text-anchor="middle" class="n" fill="#fff" font-size="14">5</text>
+    <text x="48" y="35" class="n">健康检查</text>
+    <text x="18" y="62" class="d">/api/ready 就绪探针</text>
+    <text x="18" y="80" class="d">失败自动回滚上一版本</text>
+    <text x="18" y="100" class="c">healthcheck.sh</text>
+  </g>
+  <g transform="translate(1014,44)">
+    <rect width="162" height="112" rx="12" fill="#242633" stroke="#6fdba4" stroke-opacity=".55"/>
+    <circle cx="26" cy="30" r="12" fill="#6fdba4" fill-opacity=".22"/>
+    <text x="26" y="35" text-anchor="middle" class="n" fill="#6fdba4" font-size="14">✓</text>
+    <text x="48" y="35" class="n">上线</text>
+    <text x="18" y="62" class="d">127.0.0.1:3210</text>
+    <text x="18" y="80" class="d">可选 nginx + certbot</text>
+    <text x="18" y="100" class="c">choyeonctl doctor</text>
+  </g>
+
+  <g stroke="#5b5e6a" stroke-width="1.6" fill="none" marker-end="url(#df-ar)">
+    <path d="M200 100 H222"/>
+    <path d="M398 100 H420"/>
+    <path d="M596 100 H618"/>
+    <path d="M794 100 H816"/>
+    <path d="M992 100 H1014"/>
+  </g>
+  <path d="M904 156 C 904 196 780 200 706 200 L 706 200" stroke="#f58a92" stroke-opacity=".7" stroke-width="1.6" fill="none" stroke-dasharray="5 4" marker-end="url(#df-ar)"/>
+  <text x="618" y="216" class="d" fill="#f58a92">健康检查不通过 → git reset 回上一个 commit 并重建</text>
+  <text x="24" y="200" class="c">bash scripts/install.sh   或   choyeonctl deploy --json   # 全新机器 3–8 分钟</text>
+</svg>

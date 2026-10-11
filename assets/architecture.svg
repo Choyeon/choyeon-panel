@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" role="img" aria-label="choyeon-panel 架构图">
+  <defs>
+    <linearGradient id="ar-core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#005eeb" stop-opacity=".20"/>
+      <stop offset="1" stop-color="#4c8ef1" stop-opacity=".06"/>
+    </linearGradient>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5b5e6a"/>
+    </marker>
+    <style>
+      .box { fill:#242633; stroke:#434552; rx:12; }
+      .t   { font-family:Inter,'PingFang SC','Microsoft YaHei',system-ui,sans-serif; fill:#e3e6f3; font-size:17px; font-weight:600; }
+      .s   { font-family:Inter,'PingFang SC','Microsoft YaHei',system-ui,sans-serif; fill:#9597a4; font-size:13px; }
+      .m   { font-family:ui-monospace,Consolas,monospace; fill:#7faef5; font-size:13px; }
+      .ln  { stroke:#5b5e6a; stroke-width:1.6; fill:none; marker-end:url(#ar); }
+      .grp { font-family:Inter,'PingFang SC',system-ui,sans-serif; fill:#adb0bc; font-size:14px; font-weight:600; letter-spacing:2px; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="660" fill="#1b1e27"/>
+
+  <!-- 客户端 -->
+  <text x="40" y="46" class="grp">入口</text>
+  <rect x="40" y="60" width="250" height="86" rx="12" fill="#242633" stroke="#434552"/>
+  <text x="60" y="92" class="t">浏览器 · Vue 3 SPA</text>
+  <text x="60" y="114" class="s">Naive UI + ECharts + xterm.js</text>
+  <text x="60" y="132" class="m">dark / light / auto 三态主题</text>
+
+  <rect x="40" y="164" width="250" height="86" rx="12" fill="#242633" stroke="#434552"/>
+  <text x="60" y="196" class="t">choyeonctl CLI</text>
+  <text x="60" y="218" class="s">deploy / app / backup / doctor</text>
+  <text x="60" y="236" class="m">全命令 --json · 固定退出码</text>
+
+  <rect x="40" y="288" width="250" height="72" rx="12" fill="#242633" stroke="#434552"/>
+  <text x="60" y="318" class="t">nginx 反代（可选）</text>
+  <text x="60" y="340" class="s">TLS 终结 · 面板只监听 127.0.0.1</text>
+
+  <!-- 核心 -->
+  <text x="380" y="46" class="grp">面板核心 · FastAPI + Uvicorn</text>
+  <rect x="380" y="60" width="440" height="420" rx="16" fill="url(#ar-core)" stroke="#434552"/>
+
+  <rect x="404" y="84" width="392" height="66" rx="10" fill="#242633" stroke="#434552"/>
+  <text x="422" y="110" class="t">中间件</text>
+  <text x="422" y="132" class="s">JWT 认证 · viewer 只读门禁 · 安全响应头 · 请求体上限</text>
+
+  <rect x="404" y="164" width="392" height="88" rx="10" fill="#242633" stroke="#434552"/>
+  <text x="422" y="190" class="t">routers</text>
+  <text x="422" y="212" class="s">apps · system · files · dbops · meta · extras · sites</text>
+  <text x="422" y="234" class="m">REST /api/* · SSE 日志 · WebSocket 终端</text>
+
+  <rect x="404" y="266" width="392" height="88" rx="10" fill="#242633" stroke="#434552"/>
+  <text x="422" y="292" class="t">services</text>
+  <text x="422" y="314" class="s">systemd_ops · nginx_ops · cert_ops · pg/redis · alerts</text>
+  <text x="422" y="336" class="m">子进程固定 argv + 进程组超时清理</text>
+
+  <rect x="404" y="368" width="392" height="88" rx="10" fill="#242633" stroke="#434552"/>
+  <text x="422" y="394" class="t">存储与指标</text>
+  <text x="422" y="416" class="s">SQLite（WAL + busy_timeout）· 审计/部署日志自动裁剪</text>
+  <text x="422" y="438" class="m">psutil 进程内采集，无 fork</text>
+
+  <!-- 被管资源 -->
+  <text x="900" y="46" class="grp">被管理的宿主机资源</text>
+  <g>
+    <rect x="900" y="60" width="260" height="58" rx="10" fill="#242633" stroke="#434552"/>
+    <text x="918" y="84" class="t">systemd 单元</text>
+    <text x="918" y="104" class="s">应用服务 · timer · journalctl</text>
+
+    <rect x="900" y="128" width="260" height="58" rx="10" fill="#242633" stroke="#434552"/>
+    <text x="918" y="152" class="t">nginx + certbot</text>
+    <text x="918" y="172" class="s">vhost 生成 · -t 失败即回滚</text>
+
+    <rect x="900" y="196" width="260" height="58" rx="10" fill="#242633" stroke="#434552"/>
+    <text x="918" y="220" class="t">PostgreSQL / Redis</text>
+    <text x="918" y="240" class="s">库角色 · SQL 控制台 · 键浏览</text>
+
+    <rect x="900" y="264" width="260" height="58" rx="10" fill="#242633" stroke="#434552"/>
+    <text x="918" y="288" class="t">文件白名单根</text>
+    <text x="918" y="308" class="s">realpath 约束 · 拒绝穿越与符号链接</text>
+
+    <rect x="900" y="332" width="260" height="58" rx="10" fill="#242633" stroke="#434552"/>
+    <text x="918" y="356" class="t">备份产物</text>
+    <text x="918" y="376" class="s">pg_dump · tar · SQLite 在线备份</text>
+
+    <rect x="900" y="400" width="260" height="58" rx="10" fill="#242633" stroke="#434552"/>
+    <text x="918" y="424" class="t">告警出口</text>
+    <text x="918" y="444" class="s">Telegram / Webhook · 入库可追溯</text>
+  </g>
+
+  <!-- 连线 -->
+  <path class="ln" d="M290 103 H 380"/>
+  <path class="ln" d="M290 207 C 340 207 340 150 380 150"/>
+  <path class="ln" d="M165 288 V 250"/>
+  <path class="ln" d="M820 110 H 900"/>
+  <path class="ln" d="M820 210 H 900"/>
+  <path class="ln" d="M820 300 H 900"/>
+  <path class="ln" d="M820 350 H 900"/>
+  <path class="ln" d="M820 420 H 900"/>
+
+  <!-- 底部：自动化 -->
+  <text x="40" y="440" class="grp">自动化与运维契约</text>
+  <rect x="40" y="456" width="440" height="118" rx="12" fill="#242633" stroke="#434552"/>
+  <text x="60" y="486" class="t">scripts/ + deploy/</text>
+  <text x="60" y="508" class="s">install / update / backup / healthcheck / uninstall</text>
+  <text x="60" y="528" class="s">systemd unit 由 .env 渲染，升级失败自动 git 回滚</text>
+  <text x="60" y="552" class="m">bash scripts/install.sh   # 自动装依赖，5 个发行版系</text>
+
+  <rect x="500" y="456" width="320" height="118" rx="12" fill="#242633" stroke="#434552"/>
+  <text x="520" y="486" class="t">CI / Release</text>
+  <text x="520" y="508" class="s">Python 3.11 / 3.12 · ruff · shellcheck</text>
+  <text x="520" y="528" class="s">vue-tsc 类型检查 + vite 构建</text>
+  <text x="520" y="552" class="m">tag v* → 打包发布产物 + SHA256</text>
+
+  <rect x="840" y="456" width="320" height="118" rx="12" fill="#242633" stroke="#434552"/>
+  <text x="860" y="486" class="t">doctor 安全自检</text>
+  <text x="860" y="508" class="s">12 项只读检查，每项附修复命令</text>
+  <text x="860" y="528" class="s">监听地址 / 权限 / 证书 / 定时器对账</text>
+  <text x="860" y="552" class="m">choyeonctl doctor --json</text>
+</svg>

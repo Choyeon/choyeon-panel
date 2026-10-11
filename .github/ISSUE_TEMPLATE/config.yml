@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞上报
+    url: https://github.com/Choyeon/choyeon-panel/security/advisories/new
+    about: 认证绕过、路径穿越、命令注入、令牌吊销失效等请走私密通道，不要开公开 Issue。
+  - name: 部署与排障手册
+    url: https://github.com/Choyeon/choyeon-panel/blob/main/RUNBOOK.md
+    about: 装不上、起不来、页面 404、数据库锁、nginx 项 fail —— 先查这张表，多数问题已有定式。
+  - name: AI 智能体 / 自动化部署规则
+    url: https://github.com/Choyeon/choyeon-panel/blob/main/AGENTS.md
+    about: 确定性步骤、--json 字段契约、退出码含义与硬性禁止事项。
+  - name: 贡献指南
+    url: https://github.com/Choyeon/choyeon-panel/blob/main/CONTRIBUTING.md
+    about: 环境准备、测试与 CI 门槛、提交与 PR 约定。

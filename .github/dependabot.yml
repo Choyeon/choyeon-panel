@@ -1,0 +1,51 @@
+version: 2
+updates:
+  # CI/发布流水线的动作版本（这几个仓库最容易悄悄过期）
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: Asia/Shanghai
+    labels: [ci, dependencies]
+    commit-message:
+      prefix: "chore(actions)"
+    open-pull-requests-limit: 5
+
+  # 前端运行时与构建依赖
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: Asia/Shanghai
+    labels: [frontend, dependencies]
+    commit-message:
+      prefix: "chore(web)"
+    ignore:
+      # Naive UI 的大版本常带组件 API 变更，留给手工升级评估
+      - dependency-name: naive-ui
+        update-types: [version-update:semver-major]
+    open-pull-requests-limit: 5
+
+  # 后端运行时依赖：requirements.txt 与 pyproject.toml 必须同步
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: Asia/Shanghai
+    labels: [backend, dependencies]
+    commit-message:
+      prefix: "chore(backend)"
+    groups:
+      fastapi-stack:
+        patterns:
+          - fastapi
+          - uvicorn
+          - starlette
+          - python-multipart
+    open-pull-requests-limit: 5
