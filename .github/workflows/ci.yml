@@ -68,8 +68,21 @@ jobs:
         if: failure()
         run: |
           LOG="${{ runner.temp }}/ut.log"
-          grep -E "^(FAIL|ERROR): " "$LOG" | head -30 | sed "s/^/::error :/"
-          grep -E "^[A-Za-z_.]+(Error|Exception): " "$LOG" | head -30 | sed "s/^/::error :/"
+          if [ ! -s "$LOG" ]; then
+            echo "::error :ut.log missing or empty"
+            CP_DATA_DIR="${{ runner.temp }}/cp-data" python -m unittest discover -s tests > /tmp/re.log 2>&1 || true
+            LOG=/tmp/re.log
+          fi
+          echo "::error :log-lines=$(wc -l < "$LOG")"
+          grep -E "^(FAIL|ERROR): " "$LOG" | head -8 | sed "s/^/::error :/" || true
+          rm -f /tmp/chunk_*
+          tail -80 "$LOG" | split -l 20 - /tmp/chunk_
+          i=0
+          for f in /tmp/chunk_*; do
+            i=$((i+1)); [ $i -gt 9 ] && break
+            echo "::error :$(tr '\n' '|' < "$f" | head -c 3500)"
+          done
+          rm -f /tmp/chunk_*
 
       - name: CLI 冒烟（choyeonctl）
         env:
