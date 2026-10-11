@@ -11,6 +11,7 @@
 
 import argparse
 import asyncio
+import io
 import os
 import re
 import shutil
@@ -317,6 +318,47 @@ class TestCliContract(unittest.TestCase):
                             f"cmd_upgrade 没有调用 update.sh：{calls}")
             self.assertEqual("--no-pull" in calls[0], want,
                              f"upgrade {flag or '(无参数)'} 透传结果不符：{calls[0]}")
+
+
+class TestCliUserCreate(unittest.TestCase):
+    """choyeonctl user create 的落库与留痕——AGENTS.md 让智能体照抄这条命令建管理员。
+
+    审计是面板唯一的追责线索：只写一句"已建号"而看不出建的是什么角色，
+    "谁在这台机器上加了一个 admin"就没法回答。用户名那条链上还有个锚定的坑：
+    末尾多一个换行的名字能过旧的正则，却过不了 token 主体的精确比对；这里连拒绝一起验。
+    """
+
+    NAME = f"utcli{os.getpid() % 100000}"
+
+    def setUp(self):
+        import cli
+        from app import database as dbm
+        self.cli, self.dbm = cli, dbm
+        self.addCleanup(self.dbm.execute, "DELETE FROM users WHERE username=?", (self.NAME,))
+        self.addCleanup(self.dbm.execute, "DELETE FROM audit WHERE username=?", (self.NAME,))
+
+    def _create(self, name: str, role: str = "admin"):
+        args = self.cli.build_parser().parse_args(
+            ["user", "create", name, "--password-stdin", "--role", role]
+        )
+        with mock.patch.object(self.cli.sys, "stdin", io.StringIO("Password123\n")), \
+             mock.patch.object(self.cli.Out, "json_mode", True):
+            return asyncio.run(self.cli.cmd_user(args))
+
+    def test_create_records_role_in_audit(self):
+        self.assertTrue(self._create(self.NAME)["ok"])
+        self.assertEqual(self.dbm.query_one("SELECT role FROM users WHERE username=?", (self.NAME,))["role"], "admin")
+        row = self.dbm.query_one(
+            "SELECT detail FROM audit WHERE username=? ORDER BY id DESC LIMIT 1", (self.NAME,)
+        )
+        self.assertIn("admin", str(row["detail"]), "审计要看得出建的是什么角色，光一条建号记录不够")
+
+    def test_trailing_newline_name_is_rejected(self):
+        """末尾多一个换行的名字既不该建得出来，也不该在审计里和真账号长得一样。"""
+        bad = f"{self.NAME}\n"
+        with self.assertRaises(SystemExit):
+            self._create(bad)
+        self.assertIsNone(self.dbm.query_one("SELECT 1 FROM users WHERE username=?", (bad,)))
 
 
 if __name__ == "__main__":

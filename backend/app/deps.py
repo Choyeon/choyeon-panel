@@ -35,8 +35,8 @@ SELF_SERVICE_PREFIXES = ("/api/auth/password", "/api/auth/profile", "/api/auth/a
 # 面板自身托管静态资源，全部同源加载；禁用 object/frame 嵌入与外域脚本
 CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "  # vue SFC 内联样式脚本 + echarts 运行时
-    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "  # 首屏主题脚本在 public/theme-boot.js，不再需要 'unsafe-inline'
+    "style-src 'self' 'unsafe-inline'; "  # naive-ui 运行时注入 <style> 与内联 style 属性
     "img-src 'self' data: blob:; "
     "connect-src 'self' ws: wss:; "
     "font-src 'self' data:; "
@@ -301,6 +301,9 @@ class AuthMiddleware:
                 role = decoded.get("role") or "admin"
                 scope["state"]["cp_sub"] = decoded.get("sub")
                 scope["state"]["cp_role"] = role
+                # 长连接（网页终端）握手后要自己判"这枚票是否已经过期"：HTTP 侧每次请求
+                # 都重新 verify_token，而 WS 只在握手时验一次，之后只剩 60 秒的角色复验。
+                scope["state"]["cp_exp"] = decoded.get("exp")
             except Exception:  # noqa: BLE001
                 role = None
                 # 过期会话在 WS 上要如实说"登录已过期"：旧写法让握手继续、由终端路由

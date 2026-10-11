@@ -9,11 +9,11 @@ import struct
 import subprocess
 import termios
 import threading
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .. import aio_db, config, security
-from .. import database as dbm
 from ..log import warn
 
 router = APIRouter()
@@ -26,23 +26,26 @@ _OVERFLOW_NOTE = "\r\n\x1b[31m[面板] 输出积压超过上限，已断开该�
 # 直到浏览器标签关掉——这是面板里唯一一条权限已收回但会话还继续可用的通道。
 _RECHECK_SEC = 60
 
+# 一条半死的连接（标签被浏览器挂起、中间设备把会话断了但 TCP 没断）会一直占着
+# 一个 pty 和 TERMINAL_MAX_SESSIONS 的名额，直到面板重启。前端每 25 秒发一帧 ping
+# （Terminal.vue 的 pingTimer），所以真实标签永远不会空闲到这里；到点回收的只会是
+# 那种自己不说话、也听不见关掉的连接。
+_IDLE_SEC = 180
+
 
 def _identity(user: str) -> tuple[str, str]:
-    """身份快照 =（库里的角色，token 版本号）。同步 sqlite，调用方放线程里跑。
-
-    账号不存在按 LookupError 抛：调用方把"查不到人"和"变了"同样当成失效。
-    """
-    row = dbm.query_one("SELECT role FROM users WHERE username=?", (user,))
-    if not row:
-        raise LookupError(f"用户 {user} 不存在")
-    return str(row["role"] or "admin"), security.session_epoch(user)
+    """身份快照（库里的角色 + token 版本号），见 security.session_identity。"""
+    return security.session_identity(user)
 
 
-async def _revalidate(ws: WebSocket, user: str, identity: tuple[str, str]) -> None:
+async def _revalidate(ws: WebSocket, user: str, identity: tuple[str, str], exp: float) -> None:
     while True:
         await asyncio.sleep(_RECHECK_SEC)
         try:
-            stale = await asyncio.to_thread(_identity, user) != identity
+            # 到期判定也必须有人做：HTTP 侧每个请求都重新 verify_token，jwt 库自己会拒
+            # 过期票；WS 只在握手时验一次，之后若只看 epoch，一条 root shell 就能在
+            # token 过期后继续活着（TOKEN_TTL_HOURS 配到 72 就是三天）。
+            stale = time.time() >= exp or await asyncio.to_thread(_identity, user) != identity
         except Exception:  # noqa: BLE001
             stale = True
         if not stale:
@@ -161,7 +164,7 @@ async def terminal(ws: WebSocket):
         # 连 pty 都没建，写一条 close 会在审计里凭空多出一次"关闭"。
         opened = True
         await aio_db.audit(user, "terminal:open")
-        guard = asyncio.create_task(_revalidate(ws, user, identity))
+        guard = asyncio.create_task(_revalidate(ws, user, identity, float(state.get("cp_exp") or 0)))
 
         loop = asyncio.get_running_loop()
         master, slave = pty.openpty()
@@ -226,12 +229,27 @@ async def terminal(ws: WebSocket):
         pump = asyncio.create_task(pump_out())
         while not pump.done():
             try:
-                raw = await ws.receive_text()
+                raw = await asyncio.wait_for(ws.receive_text(), _IDLE_SEC)
             except WebSocketDisconnect:
+                break
+            except TimeoutError:
+                # 到点没收到任何帧（连 ping 都没有）：这条连接已经没人看了。
+                # 收尾必须自己发 close：uvicorn 会在 handler 返回后补，但客户端只看到
+                # 连接凭空断掉，拿不到"为什么断"，而 pty 额度要等循环退出才归还。
+                with contextlib.suppress(Exception):
+                    await aio_db.audit(user, "terminal:idle_timeout")
+                with contextlib.suppress(Exception):
+                    await ws.send_json({"d": "out", "data": "\r\n[长时间无输入，终端会话已结束，请刷新页面重连]\r\n"})
+                    await ws.close()
                 break
             try:
                 msg = json.loads(raw)
             except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                # "JSON 合法但不是对象"（1、"x"、[]）在旧写法里会走到 msg.get：
+                # int/str/list 没有 .get，AttributeError 直接把会话和 pty 一起打死，
+                # 而且这是任何已登录 admin 一条消息就能做到的事。
                 continue
             kind = msg.get("d")
             if kind == "input":

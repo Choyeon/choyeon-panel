@@ -136,11 +136,12 @@ async def setup(req: Request):
     if security.rate_limited(ip):
         return JSONResponse(status_code=429, content={"error": "尝试过多，请稍后再试"})
     body = await _json_body(req)
-    existing = dbm.query_one("SELECT COUNT(*) c FROM users WHERE role='admin'")
+    # 判据是"表里一个账号都没有"，与 /api/auth/status 的 needsSetup 同一个口径：
+    # 原来按 admin 计数，管理员被 CLI 删光而机器上还留着 viewer 时，setup 会对公网
+    # 重新开放——谁先 POST 谁就是 root，不需要猜任何东西。那种残局请用 CLI 建号。
+    existing = dbm.query_one("SELECT COUNT(*) c FROM users")
     if existing and existing["c"] > 0:
-        # 只数 admin：机器上只剩 viewer 时（删过管理员），按 COUNT(*) 判定会永远 403，
-        # 于是既进不去后台也建不出管理员，只能登服务器用 CLI 救。
-        return JSONResponse(status_code=403, content={"error": "管理员已存在"})
+        return JSONResponse(status_code=403, content={"error": "初始化已完成，请用 choyeonctl user create 建号"})
     # str() 兜的是 JSON 里 {"username": 123} 这种合法但离谱的输入：不转的话
     # 123.strip() 直接 AttributeError，一个未登录请求换来 500 和一条脏审计。
     username = str(body.get("username") or "").strip()
@@ -150,10 +151,13 @@ async def setup(req: Request):
     pw_err = security.password_error(password)
     if pw_err:
         return JSONResponse(status_code=400, content={"error": pw_err})
-    dbm.execute(
-        "INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)",
-        (username, await security.hash_pass_async(password), "admin"),
-    )
+    # 撞名走 400 而不是 500：CLI 在另一个进程里同时建号时 INSERT 会抛 IntegrityError，
+    # 未登录请求换来一坨进 journal 的栈。
+    status = dbm.create_first_admin(username, await security.hash_pass_async(password))
+    if status == "not-empty":
+        return JSONResponse(status_code=403, content={"error": "初始化已完成，请用 choyeonctl user create 建号"})
+    if status == "name-taken":
+        return JSONResponse(status_code=400, content={"error": "该用户名已被占用"})
     await aio_db.audit(username, "setup", "创建管理员")
     security.clear_attempts(ip)
     return _user_token(username, "admin")
@@ -166,6 +170,11 @@ async def login(req: Request):
         return JSONResponse(status_code=429, content={"error": "尝试过多，请稍后再试"})
     body = await _json_body(req)
     username = str(body.get("username") or "").strip()
+    akey = security.account_key(username)
+    # 按账号这道检查放在 scrypt 之前：它拦的就是"同一个名字被反复试"，
+    # 放在哈希之后等于让每次拦截都照样烧掉 16MB 内存和几十毫秒 CPU。
+    if security.account_locked(akey):
+        return JSONResponse(status_code=429, content={"error": "该账号尝试过多，请稍后再试"})
     user = dbm.query_one("SELECT * FROM users WHERE username=?", (username,))
     password = str(body.get("password") or "")
     # scrypt(n=2^14) 单次约 16MB/几十毫秒：直接在 async 里跑会冻住整个事件循环，
@@ -186,6 +195,10 @@ async def login(req: Request):
     # 整站冻住（仪表盘轮询、SSE 日志、WS 终端一起卡）；登录路由是唯一免认证入口，
     # 也就是唯一能被无限放大的那条。
     if not ok:
+        # 只给真实存在的账号记账号桶：不存在的名字没什么可爆破，记了等于让
+        # 陌生人随意撑大 _attempts 的键空间（清理每 600 秒才跑一次）。
+        if user:
+            security.note_failure(akey)
         await aio_db.audit(username or "?", "login_failed", ip)
         return JSONResponse(status_code=401, content={"error": "用户名或密码错误"})
     role = user["role"] or "admin"
@@ -199,6 +212,7 @@ async def login(req: Request):
         )
     await aio_db.audit(user["username"], "login")
     security.clear_attempts(ip)
+    security.clear_attempts(akey)
     return _user_token(user["username"], role, user.get("nickname", ""), user.get("avatar", ""))
 
 

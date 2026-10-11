@@ -83,14 +83,16 @@ async def _check_listen() -> dict:
 
 async def _check_admin() -> dict:
     # 判据是「有没有 admin」而不是「有没有用户」：只剩 viewer 的机器（删过管理员）
-    # 用 COUNT(*) 会显示 pass、setup 接口又回 403「管理员已存在」，谁也进不去。
+    # 按 COUNT(*) 会显示 pass，而那种人其实已经进不去后台了。
+    # 修复命令一律走 --password-stdin：--password 会把口令留在 ps、/proc/<pid>/cmdline
+    # 和 shell 历史里，同机任何用户都读得到（AGENTS.md §7 同一条）。
     total = dbm.query_one("SELECT COUNT(*) c FROM users")["c"]
     admins = dbm.query_one("SELECT COUNT(*) c FROM users WHERE role='admin'")["c"]
     if admins == 0:
         return {
             "status": "fail",
             "detail": f"没有管理员账号（共 {total} 个账号）" if total else "未创建管理员，任何人都能抢注",
-            "fix": "choyeonctl user create <name> --password <pw> --role admin",
+            "fix": "printf '%s' \"$PW\" | choyeonctl user create <name> --password-stdin --role admin",
         }
     return {"status": "pass", "detail": f"{admins} 个管理员 / 共 {total} 个账号", "fix": ""}
 
@@ -189,14 +191,32 @@ async def _check_frontend() -> dict:
 
 
 async def _check_permissions() -> dict:
-    env_file = Path(config.ENV_FILE)
-    if env_file.exists() and (env_file.stat().st_mode & 0o077):
-        return {
-            "status": "warn",
-            "detail": f"{env_file} 权限过宽，密钥可能被同机其他用户读取",
-            "fix": f"chmod 0600 {env_file}",
-        }
-    return {"status": "pass", "detail": ".env 权限正常（或不存在）", "fix": ""}
+    """密钥与数据库的落地权限，一项看三个对象。
+
+    panel.db 里是 users.pass_hash 和 settings.jwt_secret，签名密钥一旦外泄就等于任何人都
+    能签一枚 admin token，而 admin 有 root 终端；`.env` 里是同一批配置明文。这三样按默认
+    umask 落地是 0755/0644，同机随便一个业务账户都能整份读走。
+    """
+    targets = (
+        (Path(config.ENV_FILE), "0600"),
+        (Path(config.DATA_DIR), "0700"),
+        (Path(config.DATA_DIR) / "panel.db", "0600"),
+    )
+    bad = []
+    for p, want in targets:
+        try:
+            mode = p.stat().st_mode & 0o777
+        except OSError:
+            continue  # 不存在的不判（开发机上根本没有 .env）
+        if mode & 0o077:
+            bad.append((p, mode, want))
+    if not bad:
+        return {"status": "pass", "detail": ".env 与数据目录权限正常", "fix": ""}
+    return {
+        "status": "warn",
+        "detail": "；".join(f"{p} 是 {oct(m)}，同机其他用户可读" for p, m, _ in bad),
+        "fix": " && ".join(f"chmod {w} {p}" for p, _, w in bad),
+    }
 
 
 async def _check_cli() -> dict:

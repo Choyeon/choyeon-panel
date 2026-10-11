@@ -39,15 +39,20 @@ CRED_KV_RE = re.compile(
 CRED_BEARER_RE = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._~+/=-]{12,})")
 
 
-def is_name(s): return bool(NAME_RE.match(s or ""))
-def is_domain(s): return bool(DOMAIN_RE.match(s or ""))
-def is_unit(s): return bool(UNIT_RE.match(s or ""))
+# 一律用 fullmatch 而不是 match：这些正则都写成 `^…$`，而 Python 的 `$` 允许结尾**多一个
+# 换行**，所以 "example.com\n"、"mydb\n" 都能过 match。字符集里没有空格/分号/引号，
+# 换行也只能落在最后，进 nginx 与 argv 不会改写命令词法——但它会让库名、server_name
+# 与文件名的精确比较全部失配（`domain in idx`、find_app_configs 的域名集合），
+# 造出一个"看起来不存在却又占着端口"的对象。fullmatch 要求吃掉整个字符串，堵住这一条。
+def is_name(s): return bool(NAME_RE.fullmatch(s or ""))
+def is_domain(s): return bool(DOMAIN_RE.fullmatch(s or ""))
+def is_unit(s): return bool(UNIT_RE.fullmatch(s or ""))
 def is_port(p): return isinstance(p, int) and 1024 <= p <= 65535
-def is_branch(s): return bool(BRANCH_RE.match(s or ""))
-def is_ident(s): return bool(IDENT_RE.match(s or ""))
-def is_path(s): return bool(PATH_RE.match(s or ""))
-def is_git_url(s): return bool(s) and (bool(GIT_URL_RE.match(s)) or s.startswith("/"))
-def is_email(s): return bool(EMAIL_RE.match((s or "").strip()))
+def is_branch(s): return bool(BRANCH_RE.fullmatch(s or ""))
+def is_ident(s): return bool(IDENT_RE.fullmatch(s or ""))
+def is_path(s): return bool(PATH_RE.fullmatch(s or ""))
+def is_git_url(s): return bool(s) and (bool(GIT_URL_RE.fullmatch(s)) or s.startswith("/"))
+def is_email(s): return bool(EMAIL_RE.fullmatch((s or "").strip()))
 
 
 def sub_port(text, old, new):

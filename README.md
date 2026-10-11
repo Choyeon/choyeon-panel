@@ -25,9 +25,8 @@
   <img src="https://img.shields.io/badge/OS-Ubuntu%20%C2%B7%20Debian%20%C2%B7%20Rocky%20%C2%B7%20Arch%20%C2%B7%20Alpine-5b5e6a?cacheSeconds=3600" alt="支持的发行版" />
 </p>
 
-> **原生 Linux 服务器管理面板 —— 一台机器一个入口，不依赖 Docker。**
-> 一行脚本装完：应用部署与回滚、systemd 服务、nginx 站点、SSL 证书、PostgreSQL/Redis、备份、文件管理、Web 终端、12 项安全自检。
-> Native Linux server admin panel: apps, systemd, nginx, SSL, databases, backups and a 12-point security doctor — **no Docker required**.
+> **原生 Linux 服务器管理面板：跑在宿主机上，不依赖 Docker。**
+> 装完自带 `choyeonctl`：应用部署与回滚、systemd 服务、nginx 站点、SSL 证书、PostgreSQL/Redis、备份、文件管理、Web 终端、12 项安全自检。
 
 <p align="center">
   <img src="./assets/preview-dark.svg" alt="choyeon-panel 概览页（暗色主题）" width="100%" />
@@ -45,11 +44,11 @@
 | 被管应用 | 宿主机 systemd unit，进程可见可 `journalctl` | 容器编排层，日志与端口多一跳 |
 | 内存常驻 | 单 Uvicorn 进程（psutil 进程内采集，无 fork） | 面板 + docker daemon + compose 容器 |
 | 安装 | `bash scripts/install.sh` 一行，自动装依赖 | 先装 Docker，再装面板 |
-| 升级 | 备份 → 构建 → 健康检查 → **失败自动 git 回滚** | 拉镜像，失败需手工排障 |
+| 升级 | 备份 → 构建 → 健康检查 → 失败自动 git 回滚 | 拉镜像，失败需手工排障 |
 | 数据落点 | 一个 SQLite 文件 + `.env`，可直接备份/迁移 | 分散在卷与容器内 |
 | 面向自动化 | 全命令 `--json` + 固定退出码 + [AGENTS.md](AGENTS.md) | 多为网页优先 |
 
-适合：个人服务器 / 小团队 VPS / 独立开发者把一个或多个站点跑在裸机上，想有个能审计、能回滚、能被脚本驱动的入口。
+适合把一到几个站点跑在裸机上、又希望每次改动都能回滚、能追责的人：个人 VPS、小团队共用机器、独立开发者的交付机。
 
 ---
 
@@ -69,14 +68,14 @@
 
 其它发行版：脚本不会中断，但会跳过依赖安装并提示自行确认 `git / nginx / sqlite3`。
 
-### 60 秒部署
+### 一键部署
 
 ```bash
 git clone https://github.com/Choyeon/choyeon-panel.git
 cd choyeon-panel && sudo bash scripts/install.sh
 ```
 
-脚本依次完成：装系统依赖 → 建 venv → 构建前端 → 渲染 systemd unit → 启动并健康检查 → （可选）配置 nginx 反代与 certbot。
+脚本依次完成：装系统依赖 → 建 venv → 构建前端 → 渲染 systemd unit → 启动并健康检查 → （可选）配置 nginx 反代与 certbot。全新机器 3–8 分钟，大头在装依赖和前端构建；`choyeonctl deploy` 是非交互版本（不会问 nginx 反代），超时预算给到 15 分钟。
 
 ```bash
 # 创建管理员（口令走 stdin，不要写在命令行参数里）
@@ -127,37 +126,33 @@ choyeonctl upgrade --no-pull  # 只改了配置时：跳过拉代码，仅重建
   <img src="./assets/architecture.svg" alt="choyeon-panel 架构：入口层（浏览器 SPA / choyeonctl / nginx 反代）→ 面板核心（认证中间件、routers、services、SQLite 与指标库）→ 被管资源（systemd、nginx+certbot、PostgreSQL/Redis、文件白名单、备份与告警）" width="100%" />
 </p>
 
-三个设计决定塑造了整个结构：
-
-1. **一个进程，两类入口。** 后端是单个 FastAPI/Uvicorn 进程，同时托管 SPA 静态产物与 `/api`；`choyeonctl` 复用同一套 service 层，所以网页能做的事终端也能做，不存在"只有 UI 里有"的能力。
-2. **面板不代理，面板直管。** systemd、nginx、certbot、pg_dump 都在这台机器上被直接调用：exec 一律走参数数组 + 正则白名单，子进程统一 `start_new_session` 并在超时时 `killpg`。没有容器中间层，日志和进程状态就是机器本身的状态。
-3. **状态只有一份，且可备份。** 面板自身数据是一个 WAL 模式的 SQLite 文件 + `.env`，全部在 `CP_DATA_DIR` 下；备份用 SQLite 在线备份 API，不用 `cp`。指标历史进同一个库，`doctor` 就查这些事实是否自相一致。
+1. **一个进程，两类入口。** 后端是单个 FastAPI/Uvicorn 进程，同时托管 SPA 静态产物与 `/api`；`choyeonctl` 复用同一套 service 层，所以 CLI 覆盖的是网页端的同一批操作，不存在"只有 UI 里有"的能力。
+2. **直接调用宿主机命令。** systemd、nginx、certbot、pg_dump 都在这台机器上被执行：exec 一律走参数数组 + 名称/域名/unit 正则白名单，子进程统一 `start_new_session` 并在超时时 `killpg`。
+3. **状态只有一个 SQLite 文件。** 面板自身数据是 WAL 模式的 `panel.db` + `.env`，都在 `CP_DATA_DIR` 下；备份走 SQLite 在线备份 API，不用 `cp`。指标历史进同一个库，`doctor` 查的就是这些事实是否自相一致。
 
 ## 功能
 
 | 模块 | 能力 |
 | --- | --- |
-| 应用管理 | Git 拉取 → 安装依赖 → systemd 托管部署 Node/Python 应用；环境变量、自定义启动命令、unit 模板、**一键回滚到上一次成功部署** |
+| 应用管理 | Git 拉取 → 安装依赖 → systemd 托管部署 Node/Python 应用；环境变量、自定义启动命令、unit 模板，可回滚到上一次成功部署 |
 | 一键模板 | 建应用时选预设（`node-service` / `node-next` / `python-fastapi` / `static-site`），自动填运行时、安装与启动命令、端口 |
-| **安全自检** | 网页「安全自检」页与 `choyeonctl doctor`：监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI、**证书续期是否真有人托管**、**定时器单元与任务记录对账**共 12 项只读检查，每项给可复制的修复命令 |
-| Nginx 集成 | 按域名/端口生成反代配置，开关 WebSocket 升级、请求体大小、重定向；`nginx -t` 校验后热加载，**校验失败自动回滚原文件** |
-| SSL | certbot 签发/续期，到期天数告警；证书清单与「最早到期 N 天」在总览可见 |
-| 系统监控 | psutil 进程内采集（无 fork）：CPU/内存/网速实时曲线 + **1h/6h/24h/7d 历史曲线**（磁盘、负载、磁盘 IO）、Top 进程；systemd 服务启停；journalctl 实时日志（SSE）与关键词检索 |
-| 数据库 | PostgreSQL 库/角色管理 + SQL 控制台 + **表/行数据浏览（可编辑）**；Redis 键浏览器（string/hash/list/set/zset，含 TTL 与内存），读路径走进程内 RESP 客户端，不 fork redis-cli |
-| 备份 | pg_dump / 目录打包 / SQLite 在线备份，daily/weekly 调度由 **systemd timer** 托管（列表直接显示下次触发时间），支持在线恢复、上传与下载备份文件 |
-| 网站与证书 | 域名 × 应用 × 端口的反代总览（HTTPS/跳转/WebSocket 开关与配置文件名），证书清单含剩余天数与最早到期提醒，一键套用/移除 vhost、手动续期 |
+| 安全自检 | 网页「安全自检」页与 `choyeonctl doctor`：监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI、证书续期是否真有人托管、定时器单元与任务记录对账，共 12 项只读检查，每项给可复制的修复命令 |
+| 网站与证书 | 按域名/端口生成反代配置，开关 WebSocket 升级、请求体大小、重定向；`nginx -t` 校验后热加载，校验失败自动回滚原文件。certbot 签发/续期，域名 × 应用 × 端口的 vhost 总览能一键套用/移除与手动续期，并列出剩余天数与最早到期提醒 |
+| 系统监控 | psutil 进程内采集（无 fork）：CPU/内存/网速实时曲线，1h/6h/24h/7d 历史曲线（磁盘、负载、磁盘 IO）、Top 进程；systemd 服务启停；journalctl 实时日志（SSE）与关键词检索 |
+| 数据库 | PostgreSQL 库/角色管理 + SQL 控制台 + 表/行数据浏览（可编辑）；Redis 键浏览器（string/hash/list/set/zset，含 TTL 与内存），读路径走进程内 RESP 客户端，不 fork redis-cli |
+| 备份 | pg_dump / 目录打包 / SQLite 在线备份，daily/weekly 调度由 systemd timer 托管（列表直接显示下次触发时间），支持在线恢复、上传与下载备份文件 |
 | 日志中心 | 系统日志按 unit/时间/级别/正则关键词检索（journalctl 固定 argv），应用与面板日志尾读，命中高亮 |
-| 文件管理 | 白名单根目录内浏览/编辑/**多文件上传**/下载/打包下载/解压/重命名/删除，带体积上限；上传按字节落盘，解压拒绝越界路径与符号链接 |
-| Web 终端 | pty + xterm.js，仅管理员，带并发会话上限 |
+| 文件管理 | 白名单根目录内浏览/编辑/多文件上传/下载/打包下载/解压/重命名/删除，带体积上限；上传按字节落盘，解压拒绝越界路径与符号链接 |
+| Web 终端 | pty + xterm.js，仅管理员，带并发会话上限与空闲回收 |
 | 用户与审计 | admin/viewer 两级（viewer 只读），全量操作审计日志（自动裁剪与脱敏） |
-| 告警 | 磁盘水位、SSL 到期、服务掉线、CPU/内存/负载阈值、**应用 HTTP 探活** → Telegram / Webhook；告警入库可追溯、可确认 |
+| 告警 | 磁盘水位、SSL 到期、服务掉线、CPU/内存/负载阈值、应用 HTTP 探活 → Telegram / Webhook；告警入库可追溯、可确认 |
 | 定时任务 | cron 表达式在面板里登记（渲染成 systemd timer），命令走固定 argv 白名单，可立即执行并留下末段日志 |
 
 ---
 
 ## 命令行
 
-装完后 `choyeonctl` 会软链到 `/usr/local/bin`，网页端能做的事在终端同样能做——所有命令都支持 `--json`，退出码固定 `0 成功 / 1 失败 / 2 用法错误 / 3 前置条件不满足`，适合写进运维脚本或交给 AI 智能体执行。
+装完后 `choyeonctl` 会软链到 `/usr/local/bin`。所有命令都支持 `--json`，退出码固定 `0 成功 / 1 失败 / 2 用法错误 / 3 前置条件不满足`，适合写进运维脚本；`choyeonctl schema --json` 是参数契约的权威来源。
 
 ```bash
 choyeonctl deploy --port 3210 --json                 # 与 scripts/install.sh 等价的一键部署
@@ -223,6 +218,7 @@ LICENSE                MIT
 | --- | --- | --- |
 | `CP_HOST` / `CP_PORT` | `127.0.0.1` / `3210` | 监听地址；反代场景保持回环 |
 | `CP_TRUST_PROXY` | 关 | 置于反代后设 `1`，登录限速按真实 IP 计数 |
+| `CP_TRUSTED_PROXIES` | `127.0.0.1,::1` | 允许采信 `X-Real-IP` / `X-Forwarded-For` 的反代地址；不在表里就只看 TCP 对端 |
 | `CP_HSTS` | 关 | 面板直连 HTTPS 时才开；走 nginx 时由 nginx 统一发送 |
 | `CP_DATA_DIR` | 仓库根 `data/` | SQLite 与密钥目录，**唯一必须备份** |
 | `CP_FILE_ROOTS` | `/root/www,/etc/nginx,/root/backups/panel` | 文件管理根目录白名单（绝对路径） |
@@ -265,21 +261,24 @@ cd web && npm run build                             # vue-tsc 类型检查 + vit
 bash scripts/healthcheck.sh                         # 线上健康检查
 ```
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `run_tests.py` 输出 **Ran 1045 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖与 `assets/banner.svg` 版式由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑四个 job：Python 3.11/3.12 双版本后端测试（非 root runner，含 CLI 与启动冒烟）、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `run_tests.py` 输出 **Ran 1080 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖与 `assets/banner.svg` 版式由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
 
 ---
 
 ## 安全设计
 
-- 口令 scrypt(N=16384, 64B) + 随机盐；JWT 密钥首启随机生成并存于 `CP_DATA_DIR`
-- **令牌吊销**：改密/删号后按用户自增 epoch，旧 token 立即失效（改密接口会同步返回新 token，不打断当前会话）
-- 登录限速（每 IP 每分钟 N 次，可调）+ 失败审计；viewer 角色全局禁写
-- 统一安全响应头：`Content-Security-Policy`、`X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`、`Permissions-Policy`、COOP/CORP、`X-Request-Id`；可选 HSTS
+- 口令 scrypt(N=16384, 64B) + 随机盐；JWT 密钥首启随机生成并存于 `CP_DATA_DIR`，数据目录 0700、`panel.db` 与 `.env` 0600
+- **令牌吊销**：改密/删号/降权会 bump 按用户的 epoch，旧 token 立即失效（改密接口同步返回新 token，不打断当前会话）
+- **长连接复验**：网页终端（WebSocket）与日志流（SSE）每 60 秒重新对一次身份与到期时间，被降权或票过期时当场收尾；终端另有 180 秒空闲回收与并发会话上限
+- 登录限速双桶：每 IP 每分钟 N 次 + 每个账号每分钟 N 次（代理池轮换 IP 时后一道才管用），失败与吊销都进审计
+- viewer 角色全局禁写：写接口在中间件按角色拒绝，只读账号能看不能改
+- 统一安全响应头：`Content-Security-Policy`（`script-src 'self'`，入口 HTML 无内联脚本）、`X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`、`Permissions-Policy`、COOP/CORP、`X-Request-Id`；可选 HSTS
+- 请求体上限：非上传接口统一 413，上传按 `CP_MAX_UPLOAD_MB` 收口；`X-Real-IP`/`XFF` 只在 TCP 对端属于 `CP_TRUSTED_PROXIES` 时才采信
 - 所有 exec 走参数数组 + 名称/域名/unit 正则白名单；仅受控场景使用 shell 转义
 - 子进程统一 `start_new_session` 并在超时时 `killpg`，避免残留进程组与僵尸进程
-- 文件管理 realpath 约束在白名单内，拒绝穿越、跨目录移动与超限读写
+- 文件管理 realpath 约束在白名单内，拒绝穿越、跨目录移动与超限读写；原子写不跟随符号链接，解包拒绝越界路径并清掉归档里的 setuid/setgid 位
 - nginx 配置变更前保存原文件，`nginx -t` 失败即回滚
-- 默认只监听 `127.0.0.1`；`.env` 权限 0600；审计日志写库前脱敏
+- 默认只监听 `127.0.0.1`；审计、错误日志与恢复日志出面板前统一 `redact_creds` 脱敏
 
 发现漏洞请走 [SECURITY.md](SECURITY.md) 里的私密渠道上报，不要开公开 Issue。
 
@@ -288,10 +287,10 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 
 ## UI/UX
 
 - 设计令牌（`web/src/style.css`）+ `dark / light / auto` 三态主题，`auto` 跟随系统且实时响应系统切换
-- 首屏内联脚本预置主题，杜绝暗色模式下的白屏闪烁
+- 首屏外链脚本（`web/public/theme-boot.js`）先落地主题与 `theme-color`，避免暗/亮切换时首帧闪白
 - 响应式：桌面侧栏（可折叠）< 900px 自动切抽屉导航，表格开启横向滚动
 - 无障碍：语义表单 + `label`/`aria-label`、`role="log"` 日志区、`:focus-visible` 焦点环、44px 触控目标、支持键盘触发的行操作
-- 尊重 `prefers-reduced-motion`，动画自动降级
+- `prefers-reduced-motion` 下动画自动关闭
 - ECharts 按需引入 + `ResizeObserver` 自适应；构建按变更频率分包（vue/naive/echarts/xterm）
 
 <p align="center">
@@ -310,7 +309,7 @@ choyeonctl backup list
 包含 `panel.db`（用 SQLite 在线 backup API 安全拷贝，非直接 `cp`）与 `.env`，默认保留最近 14 份（`CP_KEEP_BACKUPS`）。定时备份由 systemd timer 托管，也可登记为 cron：
 
 ```cron
-0 4 * * * /root/choyeon-panel/scripts/backup.sh >> /var/log/choyeon-backup.log 2>&1
+0 4 * * * <安装目录>/scripts/backup.sh >> /var/log/choyeon-backup.log 2>&1
 ```
 
 恢复：停服务 → 解压覆盖 `panel.db` → 起服务 → `scripts/healthcheck.sh`（详细步骤见 RUNBOOK 第 4 节）。
@@ -320,13 +319,13 @@ choyeonctl backup list
 ## FAQ
 
 **Q：为什么不打包成 Docker 镜像？**
-面板的职责是管理这台机器上的 systemd、nginx、certbot 与文件。放进容器就要额外打通 docker socket、特权挂载与 host 网络，权限面反而更大，日志和多一跳网络让排障更慢。本项目的设计前提就是**不用 Docker**。
+面板的职责是管理这台机器上的 systemd、nginx、certbot 与文件。放进容器就要额外打通 docker socket、特权挂载与 host 网络，权限面反而更大，日志还多一跳，排障更慢。
 
 **Q：需要独立数据库吗？**
 不需要。面板自身状态存在一个 SQLite 文件（WAL 模式），迁移或备份只需带走 `CP_DATA_DIR`。PostgreSQL/Redis 是"被管理对象"，你有才需要。
 
 **Q：会占用多少资源？**
-一个 Uvicorn 进程。指标采集走 psutil 进程内读取，不 fork 子进程；历史曲线在同一个 SQLite 里。实测常驻内存约 100–200 MB。
+一个 Uvicorn 进程。指标采集走 psutil 进程内读取，不 fork 子进程；历史曲线写在同一个 SQLite 里。这台交付机上 systemd 记的 `MemoryCurrent` 约 50 MB（被管应用自身的内存不计入）。
 
 **Q：能同时管几台机器？**
 一台实例管一台机器。多台就每台装一份，用同一个 Git 仓库和各自的 `.env`；面板本身不提供跨机聚合。
@@ -335,29 +334,18 @@ choyeonctl backup list
 只读。所有写接口在中间件层按角色拒绝，且操作留痕在审计日志里。
 
 **Q：升级失败怎么办？**
-`choyeonctl upgrade` 在健康检查不通过时自动 `git reset` 回上一个 commit 并重启，不需要手工回滚。
+`choyeonctl upgrade` 在健康检查不通过时自动 `git reset` 回上一个 commit 并重启。注意回滚只覆盖代码，不恢复数据库——数据要回来得走备份文件（上节）。
 
 ---
 
 ## 参与贡献
 
-改动请先读 [CONTRIBUTING.md](CONTRIBUTING.md)：环境准备、`make lint / make test` 门槛、CI 必须全绿、commit 与 PR 约定。也欢迎直接提 [Issue](https://github.com/Choyeon/choyeon-panel/issues)。
+改动请先读 [CONTRIBUTING.md](CONTRIBUTING.md)：环境准备、`make lint / make test` 门槛、CI 必须全绿、commit 与 PR 约定。
 
-维护者偏好：**先在真实环境验证再交付**——构建通过不等于功能修好了，UI 改动需要在运行的面板里点过一遍。
+维护者偏好：先在真实环境验证再交付——构建通过不等于功能修好了，UI 改动要在跑起来的面板里点过一遍。
 
-## 贡献者 & 支持
-
-觉得有用的话，点个 **Star** 是最大的支持 —— 它让这个项目被下一个找不到合适面板的人看见。
-
-<p align="center">
-  <a href="https://github.com/Choyeon/choyeon-panel/stargazers"><img src="https://img.shields.io/github/stars/Choyeon/choyeon-panel?style=social&cacheSeconds=3600" alt="GitHub stars" /></a>
-  <a href="https://github.com/Choyeon/choyeon-panel/network/members"><img src="https://img.shields.io/github/forks/Choyeon/choyeon-panel?style=social&cacheSeconds=3600" alt="GitHub forks" /></a>
-</p>
+项目在别人机器上的样子我们看不到，所以最缺的信息是：你的发行版、被管应用的类型、以及哪一步和文档写的不一样。这些直接开 [Issue](https://github.com/Choyeon/choyeon-panel/issues/new/choose)。
 
 ## License
 
-<p align="center">
-  <img src="./assets/logo.svg" alt="choyeon-panel 标志" width="56" height="56" />
-</p>
-
-<p align="center"><a href="./LICENSE">MIT License</a> · © Choyeon · <a href="https://github.com/Choyeon/choyeon-panel/issues/new/choose">提 Issue</a> · <a href="https://github.com/Choyeon/choyeon-panel/compare">提 PR</a></p>
+[MIT](./LICENSE) · © Choyeon · [提 Issue](https://github.com/Choyeon/choyeon-panel/issues/new/choose) · [提 PR](https://github.com/Choyeon/choyeon-panel/compare)

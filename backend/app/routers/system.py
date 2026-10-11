@@ -9,13 +9,16 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from .. import aio_db, config
+from .. import aio_db, config, security
 from ..deps import need_admin
 from ..errors import err_json
 from ..services import system_metrics, systemd_ops
 from ..util import is_unit, parse_lines, redact_creds, run
 
 router = APIRouter()
+
+# 长连接（日志 SSE）的身份复验间隔，与网页终端 terminal._RECHECK_SEC 同一套理由。
+_RECHECK_SEC = 60
 
 
 @router.get("/api/system/info")
@@ -111,12 +114,21 @@ async def service_action(unit: str, req: Request):
         return err_json(e, 500, log_tag="service:action")
 
 
-async def _sse_journal(unit: str, lines: int):
+async def _sse_journal(unit: str, lines: int, user: str = "", exp: float = 0.0):
+    """journalctl -f 的 SSE 流。
+
+    `user`/`exp` 是握手时那枚 token 的主体与到期时间：长连接只在 GET 那一刻验过一次身份，
+    之后改密/降权/删号/票过期都不会惊动这条流，而它推的是**全机** journal。所以按
+    _RECHECK_SEC 复验一次，对不上就收尾。留空表示"不复核"，只给单测用——两个路由
+    都必须把 request.state 里的值传进来。
+    """
     proc = await asyncio.create_subprocess_exec(
         "journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "short-iso", "-f",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
+    base = await asyncio.to_thread(security.session_identity, user) if user else None
+    until = time.monotonic() + _RECHECK_SEC
     try:
         stdout = proc.stdout
         if stdout is None:  # stdout 未接管时直接结束，避免 AttributeError 打断 SSE 流
@@ -129,6 +141,20 @@ async def _sse_journal(unit: str, lines: int):
                 continue
             if not raw:
                 break
+            if base is not None and time.monotonic() >= until:
+                until = time.monotonic() + _RECHECK_SEC
+                if time.time() >= exp:
+                    stale = True
+                else:
+                    try:
+                        stale = await asyncio.to_thread(security.session_identity, user) != base
+                    except Exception:  # noqa: BLE001
+                        stale = True
+                if stale:
+                    with suppress(Exception):
+                        await aio_db.audit(user, "sse:revoked")
+                    yield f"data: {json.dumps('登录状态已变更，日志流已停止。请重新连接。')}\n\n"
+                    return
             # 整机 journal 里漂着的东西不受我们控制：业务应用把口令写进启动命令、
             # 框架把连接串打 INFO 日志都会顺着这条流出去。日志检索（本文件下面一节）
             # 早就统一过 redact_creds，SSE 是唯一漏网的一条流，这里补上同一个口径。
@@ -140,9 +166,9 @@ async def _sse_journal(unit: str, lines: int):
             proc.kill()
 
 
-def log_stream_response(unit: str, lines: int) -> StreamingResponse:
+def log_stream_response(unit: str, lines: int, user: str, exp: float) -> StreamingResponse:
     return StreamingResponse(
-        _sse_journal(unit, min(lines, 2000)),
+        _sse_journal(unit, min(lines, 2000), user, exp),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
@@ -157,7 +183,7 @@ async def service_logs(unit: str, request: Request):
     if not is_unit(unit):
         return JSONResponse(status_code=400, content={"error": "unit 名不合法"})
     lines = parse_lines(request.query_params.get("lines"))
-    return log_stream_response(unit, lines)
+    return log_stream_response(unit, lines, request.state.cp_sub, float(request.state.cp_exp or 0))
 
 
 @router.get("/api/firewall")

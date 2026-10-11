@@ -74,7 +74,11 @@ def public_message(exc: BaseException, *, fallback: str = "操作失败，请查
 def err_json(exc: BaseException, status: int | None = None, *, log_tag: str | None = None) -> JSONResponse:
     """旧式 `return JSONResponse(400, {"error": str(e)})` 的替代：状态码不变，内容已脱敏。"""
     if not isinstance(exc, PanelError):
-        warn(f"[{log_tag or 'api'}]", type(exc).__name__, str(exc)[:500])
+        # 响应体走 public_message，落 journald 的这份过去是原文：同机任意用户可读
+        # journal（本仓库对 sudo 日志的威胁模型就是这条），而异常尾巴里常带
+        # `PGPASSWORD=…`、连接串这类子进程回显。这里只遮凭据、保留绝对路径——
+        # 路径是排障要看的，遮成 <路径> 等于把日志废掉一半。
+        warn(f"[{log_tag or 'api'}]", type(exc).__name__, redact_creds(str(exc))[:500])
     return JSONResponse(
         status_code=status or getattr(exc, "status", 400),
         content={"error": public_message(exc), "code": getattr(exc, "code", "bad_input")},

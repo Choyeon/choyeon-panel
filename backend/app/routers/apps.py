@@ -213,7 +213,9 @@ async def app_ssl(app_id: int, req: Request):
     try:
         out = await apps_service.attach_ssl(app_id, (await _body(req)).get("email"))
         await aio_db.audit(req.state.cp_sub, "app:ssl", str(app_id))
-        return {"ok": True, "log": out}
+        # certbot 的原文里会出现 ACME 账户与账号邮箱等信息，另外两个 certbot 出口
+        # （sites.py、extras.py 的续期）都已经遮过，这里补齐同一口径。
+        return {"ok": True, "log": redact_creds(out)}
     except Exception as e:  # noqa: BLE001
         # 与其它 app 路由一致返回 400：certbot 未安装、端口未填、nginx -t 不过
         # 都是用户可修正的配置问题，返 500 时前端只能显示"服务器内部错误"。
@@ -238,7 +240,9 @@ async def app_nginx(app_id: int, req: Request):
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
     port, domain = await _nginx_scope(a)
-    configs = nginx_ops.find_app_configs(port, domain)
+    # 面板自己的反代不进这个列表（与 assert_app_conf 同一口径），否则一个误填成
+    # 面板端口的应用会在编辑器和"删除 vhost"里把面板的入口当成自己的文件。
+    configs = [c for c in nginx_ops.find_app_configs(port, domain) if not nginx_ops.is_panel_proxy(c)]
     if req.state.cp_role != "admin":
         # vhost 原文里有内部端口、证书路径和本机目录结构，与 /api/sites/{domain}/config
         # 同一口径：只读账号看分析结论（域名、HTTPS、WebSocket、body 限制），
@@ -326,4 +330,6 @@ async def app_logs(app_id: int, request: Request):
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
     lines = parse_lines(request.query_params.get("lines"))
-    return log_stream_response(apps_service.unit_name(a), lines)
+    return log_stream_response(
+        apps_service.unit_name(a), lines, request.state.cp_sub, float(request.state.cp_exp or 0)
+    )

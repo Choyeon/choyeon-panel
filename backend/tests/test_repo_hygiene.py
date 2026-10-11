@@ -319,17 +319,24 @@ class TestRepoHygiene(unittest.TestCase):
                                 f"{href} 在 index.html 里声明，但 web/public 下没有这个文件")
 
     def test_theme_color_与背景token一致(self):
-        """<meta name=theme-color> 的初值要跟 style.css 的 --cp-bg 同值。
+        """首屏那一帧的 theme-color 取值要跟 style.css 的 --cp-bg 同值。
 
         对不上时浏览器工具栏/手机状态栏会先闪一个别的颜色，再在 JS 落地后跳回页面底色。
+        CSP 收紧到 script-src 'self' 之后，切主题那段从 index.html 的内联脚本挪进了
+        web/public/theme-boot.js，所以"首屏那一帧"= 入口 HTML 的初值 + 那份外链脚本，
+        只查 index.html 会把亮色值判成丢失。
         """
         css = (REPO / "web/src/style.css").read_text(encoding="utf-8")
         html = (REPO / "web/index.html").read_text(encoding="utf-8")
+        boot = (REPO / "web/public/theme-boot.js").read_text(encoding="utf-8")
         bgs = re.findall(r"--cp-bg:\s*(#[0-9a-fA-F]{6})", css)
         self.assertEqual(len(bgs), 2, f"--cp-bg 应当暗/亮各一处，实际 {bgs}")
         for value in bgs:
             with self.subTest(color=value):
-                self.assertIn(value, html, f"{value} 未出现在入口 HTML 的 theme-color 里")
+                self.assertIn(value, html + boot, f"{value} 未出现在入口 HTML 的 theme-color 初值或首屏主题脚本里")
+        initial = re.search(r'<meta name="theme-color" content="(#[0-9a-fA-F]{6})"', html)
+        self.assertIsNotNone(initial, "入口 HTML 必须带 theme-color 初值，JS 落地前那一帧靠它")
+        self.assertIn(initial.group(1), bgs, f"theme-color 初值 {initial.group(1)} 不等于任何一档 --cp-bg")
 
 
     def test_social_版式不重叠不溢出(self):

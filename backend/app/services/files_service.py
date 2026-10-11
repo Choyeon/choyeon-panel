@@ -132,7 +132,9 @@ def _keep_owner(tmp: str, target: str) -> None:
             os.chmod(tmp, 0o644)  # 新文件：给一个应用进程通常能读的权限
         return
     with contextlib.suppress(OSError):
-        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        # S_IMODE 含 setuid/setgid/sticky 高位，原样搬过去等于让"编辑一个文本文件"
+        # 把高危位重新落一遍（面板以 root 写）。保留 0777 以内的属主权限就够了。
+        os.chmod(tmp, stat.S_IMODE(st.st_mode) & 0o0777)
     with contextlib.suppress(OSError):
         os.chown(tmp, st.st_uid, st.st_gid)
 
@@ -317,8 +319,19 @@ def make_archive(paths: list[str], out_name: str = "archive.tar.gz") -> dict:
     # 带线程号：打包跑在线程池里，两个并发请求选中同一个目录时只用 pid 会撞在
     # 同一个临时文件上，tar 互相截断，两边都"成功"，产物却都是坏的。
     tmp = os.path.join(common, f".{safe_name(out_name)}.{os.getpid()}.{threading.get_ident()}.tmp")
+    # O_EXCL + O_NOFOLLOW：这个临时文件落在**应用目录**里（应用用户可写），而打包由
+    # root 进程执行。tarfile.open 默认跟随已存在的符号链接，有人提前在同一路径放一个
+    # 指向 /etc/ 的链接，root 就会替他把一份 gzip 写到他选的位置——文件名还是他给的。
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     try:
-        with tarfile.open(tmp, "w:gz") as tf:
+        try:
+            fd = os.open(tmp, flags, 0o600)
+        except FileExistsError:
+            # 上一次进程被强杀留下的半截临时文件。unlink 只作用于这个路径本身，
+            # 就算它此刻已被换成链接，删掉的也是链接而不是链接的目标。
+            os.unlink(tmp)
+            fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "wb") as fobj, tarfile.open(fileobj=fobj, mode="w:gz") as tf:
             for x in picked:
                 tf.add(x, arcname=os.path.basename(x), recursive=True)
     except OSError as e:

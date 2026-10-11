@@ -143,7 +143,15 @@ async def users_update(uid: str, req: Request):
     # 而审计里只留下一条看不出原因的 user:update。
     if new_role is not None or new_hash is not None:
         security.bump_user_epoch(u["username"])
-    await aio_db.audit(req.state.cp_sub, "user:update", u["username"])
+    # 审计里写清改了哪几项：一条光写人名的 user:update，事后既看不出管理员
+    # 有没有把某个人升成 admin，也看不出是谁把谁的口令重置了。
+    # 只记字段名——口令、头像路径这些值本身不进审计表。
+    changed = ",".join(
+        name for name, val in (
+            ("role", new_role), ("password", new_hash), ("nickname", new_nickname), ("avatar", new_avatar),
+        ) if val is not None
+    )
+    await aio_db.audit(req.state.cp_sub, "user:update", f"{u['username']}({changed})" if changed else u["username"])
     return {"ok": True}
 
 

@@ -16,7 +16,9 @@ ALGO = "HS256"
 
 # 用户名的唯一权威写法：注册、建号（main.py / cli.py）与 token 主体校验（verify_token）
 # 必须用同一个表达式，否则会出现"能建号但签发的 token 自己验不过"这种死锁。
-USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+# `\Z` 而不是 `$`：`$` 允许结尾多一个换行，"admin\n" 会以 match 通过。名字是 token 的
+# sub、也是审计与目录名的原料，带一个看不见却能分开两个同名账号的换行进来最难查。
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}\Z")
 ROLES = ("admin", "viewer")
 
 # scrypt 的参数是 32MB 临时内存/次。放到线程池后并行度不再受事件循环限制，
@@ -147,6 +149,21 @@ def session_epoch(username: str) -> str:
     return _user_epoch(username)
 
 
+def session_identity(username: str) -> tuple[str, str]:
+    """长连接复验用的身份快照 =（库里的角色，token 版本号）。同步 sqlite，调用方放线程里跑。
+
+    只看 epoch 不够：管理员把某人降为只读时改的是 users.role，不 bump epoch，那台已经
+    握手的 root shell/日志流就感觉不到。账号不存在按 LookupError 抛：调用方把"查不到人"
+    和"变了"同样当成失效。
+    """
+    from . import database as dbm
+
+    row = dbm.query_one("SELECT role FROM users WHERE username=?", (username,))
+    if not row:
+        raise LookupError(f"用户 {username} 不存在")
+    return str(row["role"] or "admin"), _user_epoch(username)
+
+
 def bump_user_epoch(username: str) -> str:
     from . import database as dbm
 
@@ -200,6 +217,42 @@ def rate_limited(ip: str) -> bool:
 
 def clear_attempts(ip: str) -> None:
     _attempts.pop(ip, None)
+
+
+# ---------- 按账号的失败计数 ----------
+# IP 桶挡不住分布式慢爆：对方有几百个 IP（代理池、肉鸡），每个 IP 每分钟 9 次，
+# 打在同一个 admin 账号上的命中率就是 9×N。爆破了 admin 口令就等于拿到
+# /api/terminal 的 root shell，这一层必须按账号也收一道。
+# 与 IP 桶的区别：这里只在**失败**时计数（成功登录不消耗名额，也不该把
+# 多台设备正常使用的账号算成攻击），且窗口起点固定——不随每次失败顺延，
+# 否则"每 50 秒失败一次"的慢 drip 会让桶永不过期，把锁变成永久封禁。
+# 代价是任何人都能用错误的口令把某个已知账号锁最多一分钟；这是可用性换
+# 爆破成本，和已有的 IP 桶是同一套取舍（LOGIN_LIMIT / LOGIN_WINDOW_SEC）。
+
+ACCOUNT_PREFIX = "acct:"
+
+
+def account_key(username: str) -> str:
+    return ACCOUNT_PREFIX + str(username or "").strip().lower()[:64]
+
+
+def account_locked(key: str) -> bool:
+    rec = _attempts.get(key)
+    if not rec:
+        return False
+    if time.time() - rec[1] > config.LOGIN_WINDOW_SEC:
+        _attempts.pop(key, None)
+        return False
+    return rec[0] > config.LOGIN_LIMIT
+
+
+def note_failure(key: str) -> None:
+    now = time.time()
+    rec = _attempts.get(key)
+    if not rec or now - rec[1] > config.LOGIN_WINDOW_SEC:
+        _attempts[key] = [1, now]
+    else:
+        rec[0] += 1
 
 
 def cleanup_attempts() -> None:

@@ -3,14 +3,26 @@ import secrets
 import sqlite3
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 
 from . import config
+from .util import redact_creds
 
 os.makedirs(config.DATA_DIR, exist_ok=True)
+# 数据目录里放着 panel.db（users.pass_hash、settings.jwt_secret）和头像。默认权限是
+# 0755：同机任何一个普通用户都能把库整个读走——离线爆破 scrypt 哈希是一回事，
+# 直接拿 jwt_secret 签一枚 admin token 是另一回事，后者等于这台风控面板替攻击者
+# 把 root 终端递过去。目录收到 0700，db 文件收到 0600（WAL/SHM 靠目录权限一起挡住）。
+# chmod 失败不拦启动：开发机上 DATA_DIR 可能是别人建的目录，此时照常服务，
+# 由 doctor 的权限项如实报出来，而不是让面板起不来。
+with suppress(OSError):
+    os.chmod(config.DATA_DIR, 0o700)
 
 _lock = threading.RLock()
 conn = sqlite3.connect(f"{config.DATA_DIR}/panel.db", check_same_thread=False, timeout=15)
+with suppress(OSError):
+    os.chmod(f"{config.DATA_DIR}/panel.db", 0o600)
 conn.row_factory = sqlite3.Row
 # WAL + busy_timeout：面板进程与 backup_runner（独立进程）可安全并发读写
 conn.execute("PRAGMA journal_mode = WAL")
@@ -190,6 +202,32 @@ def execute(sql: str, params=()):
         return cur.lastrowid
 
 
+def create_first_admin(username: str, pw_hash: str) -> str:
+    """setup 唯一的写库入口：在同一把锁里确认「users 表为空」并落库。
+
+    返回 ok / not-empty / name-taken。拆成"路由先查、查完再插"时，两个未登录的并发
+    请求会同时通过检查，于是两个人都拿到 200 和两枚 admin token——第一个装完机的
+    管理员永远不知道自己不是唯一的管理员。setup 是全仓唯一免认证的写入口，
+    这个窗口不需要抢，脚本化地重试几十次就能命中。
+
+    判据是"整张表为空"而不是"没有 admin"：管理员被 CLI 删光而机器上还留着 viewer 时，
+    按 admin 计数等于把"第一个点到 /api/auth/setup 的人成为 root"重新对公网打开——
+    那不需要猜任何东西，限速也拦不住。这种残局的正解是登服务器用
+    `choyeonctl user create`（doctor 的 fix 早就这么写），不是让公网先抢到算谁的。
+    """
+    with _lock:
+        n = query_one("SELECT COUNT(*) c FROM users")
+        if n and n["c"] > 0:
+            return "not-empty"
+        try:
+            conn.execute("INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)", (username, pw_hash, "admin"))
+        except sqlite3.IntegrityError:
+            # 表是空的却撞了 UNIQUE：只可能是 CLI 在另一个进程里同时建号（WAL 共享同一份库）。
+            return "name-taken"
+        conn.commit()
+        return "ok"
+
+
 def _read_setting(key: str) -> str | None:
     row = query_one("SELECT value FROM settings WHERE key=?", (key,))
     return row["value"] if row and row["value"] is not None else None
@@ -303,11 +341,16 @@ def audit(username, action: str, detail=None) -> None:
     # 三个字段都要截断：action/detail 有一部分调用方直接把请求体拼进去
     # （如 f"file:{body['action']}"），一条 1MB 的输入就能把审计表撑大、
     # 并把 /api/audit 页面变成自伤式 DoS。username 同理来自 token 声明。
-    if detail is not None and len(str(detail)) > 500:
-        detail = str(detail)[:500]
+    #
+    # 同时在这一处统一脱敏：detail 里相当多的写法是 f"...(失败: {e})"，而异常原文
+    # 常带子进程回显的 `PGPASSWORD=…`、certbot 输出、连接串。审计表虽然只有 admin
+    # 能读，但它是**长期留存**，且整份进备份与导出；指望每个调用点都记得遮，
+    # ⑤C/⑤O 已经实测漏掉三个出口，收在唯一写入口才是收口。
+    if detail is not None:
+        detail = redact_creds(str(detail))[:500]
     execute(
         "INSERT INTO audit(username,action,detail) VALUES(?,?,?)",
-        (str(username or "")[:64], str(action or "")[:64], detail),
+        (str(username or "")[:64], redact_creds(str(action or ""))[:64], detail),
     )
 
 

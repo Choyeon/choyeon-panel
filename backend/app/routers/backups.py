@@ -6,6 +6,7 @@ from .. import aio_db
 from ..deps import need_admin
 from ..errors import err_json
 from ..services import backup_service
+from ..util import redact_creds
 
 router = APIRouter()
 
@@ -137,7 +138,9 @@ async def backups_run(bid: str, req: Request):
         # 带 req：既是为了记"谁手动跑了备份"，也是因为不写审计的写接口
         # 在审计页面上等于没发生过。失败也记一条并带上退出码。
         await aio_db.audit(req.state.cp_sub, "backup:run", f"{bid}(code={r['code']})")
-        return {"code": r["code"], "log": r["out"]}
+        # runner 的 stdout 是 pg_dump/tar 的原文，失败行里可能带出连接串里的口令；
+        # 定时任务侧（cron_service）早已统一遮过，这个手动入口是同一个口径。
+        return {"code": r["code"], "log": redact_creds(r["out"])}
     except Exception as e:  # noqa: BLE001
         await aio_db.audit(req.state.cp_sub, "backup:run", f"{bid}(失败: {e})")
         return err_json(e, 500)

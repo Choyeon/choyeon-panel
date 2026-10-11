@@ -42,7 +42,9 @@ def _req(body=None, role="admin", sub="tester", query=None):
         return body
 
     return SimpleNamespace(
-        state=SimpleNamespace(cp_role=role, cp_sub=sub),
+        # cp_exp 是批次⑥C 新加的 state：日志 SSE 现在要拿它判票有没有过期。
+        # 测试里给正无穷，表达的正是"这是一张没过期的好票"。
+        state=SimpleNamespace(cp_role=role, cp_sub=sub, cp_exp=float("inf")),
         json=_json,
         query_params=query or {},
     )

@@ -587,10 +587,23 @@ def _safe_conf_path(p: str) -> str:
     return real
 
 
+def is_panel_proxy(c: dict) -> bool:
+    """这份配置反代的是面板自己的端口，那它就是面板的对外入口，不是任何应用的 vhost。
+
+    应用的 port 只受 `is_port`（1024-65535）约束，填成面板端口照样存得进去，而归属判定
+    是按"反代端口"匹配的：于是一个 port=3210 的应用会把 choyeon-panel.conf 认成
+    "我的配置"，保存 + reload 一次就把面板的 HTTPS 入口换成指向那个应用的反代，
+    而 remove_vhost 只认 panel-*.conf，救不回来。
+    """
+    return config.PORT in (c.get("analysis", {}).get("proxyPorts") or [])
+
+
 def app_conf_paths(port, domain) -> set:
     """该应用自己的 nginx 配置文件集合（realpath，便于与 _safe_conf_path 的结果比对）。"""
     out = set()
     for c in find_app_configs(port, domain):
+        if is_panel_proxy(c):
+            continue
         with suppress(OSError):
             out.add(os.path.realpath(c["file"]))
     return out

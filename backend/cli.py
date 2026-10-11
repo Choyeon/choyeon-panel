@@ -231,7 +231,9 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
         "prefix": str(prefix),
         "dataDir": str(data_dir),
         "adminCreated": bool(admins),
-        "next": "无管理员时打开 URL 注册，或 choyeonctl user create <name> --password <pw>",
+        # 不再写"打开 URL 注册"：setup 只在 users 表为空时放行，而这里刚建号就可能已有
+        # viewer；也不再示范 `--password <pw>`——那会把口令留在 argv、/proc 和 shell 历史里。
+        "next": '创建管理员：printf \'%s\' "$PW" | choyeonctl user create admin --password-stdin',
     }
     if str(prefix.resolve()) != str(ROOT):
         data["cliHint"] = (

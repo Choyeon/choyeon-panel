@@ -358,25 +358,44 @@ class TestTerminalIdentity(unittest.TestCase):
 
 
 class TestTerminalRevalidate(unittest.IsolatedAsyncioTestCase):
+    # 这些用例只验 epoch/角色这一路，把到期时间设成"永远不会到"，
+    # 免得 exp 的判定把三条断言全变成同一种关闭。
+    _FUTURE = float("inf")
+
     async def test_stale_identity_closes_session(self):
         ws = _Ws()
         with mock.patch.object(terminal, "_identity", lambda _u: ("viewer", "e2")), \
              mock.patch.object(terminal, "_RECHECK_SEC", 0.01):
-            await asyncio.wait_for(terminal._revalidate(ws, "someone", ("admin", "e1")), 2)
+            await asyncio.wait_for(
+                terminal._revalidate(ws, "someone", ("admin", "e1"), self._FUTURE), 2
+            )
         self.assertEqual(ws.closed, 4401)
 
     async def test_revoked_epoch_closes_session(self):
         ws = _Ws()
         with mock.patch.object(terminal, "_identity", side_effect=LookupError("删号了")), \
              mock.patch.object(terminal, "_RECHECK_SEC", 0.01):
-            await asyncio.wait_for(terminal._revalidate(ws, "someone", ("admin", "e1")), 2)
+            await asyncio.wait_for(
+                terminal._revalidate(ws, "someone", ("admin", "e1"), self._FUTURE), 2
+            )
+        self.assertEqual(ws.closed, 4401)
+
+    async def test_expired_token_closes_session(self):
+        """token 过期后长连接必须自己收：HTTP 侧每个请求都重新 verify_token，
+        只有 WS 是握手时验一次就再不回头——不查 exp 的话一条 72 小时的票能一直开着 root shell。"""
+        ws = _Ws()
+        with mock.patch.object(terminal, "_identity", lambda _u: ("admin", "e1")), \
+             mock.patch.object(terminal, "_RECHECK_SEC", 0.01):
+            await asyncio.wait_for(terminal._revalidate(ws, "someone", ("admin", "e1"), 0), 2)
         self.assertEqual(ws.closed, 4401)
 
     async def test_unchanged_identity_keeps_session(self):
         ws = _Ws()
         with mock.patch.object(terminal, "_identity", lambda _u: ("admin", "e1")), \
              mock.patch.object(terminal, "_RECHECK_SEC", 0.01):
-            task = asyncio.create_task(terminal._revalidate(ws, "someone", ("admin", "e1")))
+            task = asyncio.create_task(
+                terminal._revalidate(ws, "someone", ("admin", "e1"), self._FUTURE)
+            )
             await asyncio.sleep(0.12)
             self.assertFalse(task.done(), "身份没变就该继续看着")
             self.assertIsNone(ws.closed)

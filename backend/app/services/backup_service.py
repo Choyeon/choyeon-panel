@@ -16,7 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from .. import backup_runner, config
 from .. import database as dbm
 from ..log import warn
-from ..util import is_name, run, sh_escape, unit_env_value, unit_pct_escape
+from ..util import is_name, redact_creds, run, sh_escape, unit_env_value, unit_pct_escape
 from .files_service import iso_ms
 from .pg_service import is_ident, psql
 
@@ -725,6 +725,34 @@ def _tar_checked(tf: tarfile.TarFile) -> list:
     return members
 
 
+def _strip_setuid(dest: str, members: list) -> int:
+    """解包后收平 setuid/setgid/sticky，返回被收平的条目数。
+
+    恢复刻意用 filter="tar"（要按归档里的属主与权限原样落盘），于是归档里的 4755
+    也照原样落盘：面板以 root 解包，解出来的 setuid-root 二进制躺在应用目录里，
+    同机任何一个被攻破的应用进程就白拿一个提权落点。面板自己产的归档不会有这些位
+    （tar 的 mode 来自磁盘真实文件，应用目录里本就不该有 setuid 程序），
+    所以这一步只可能动到手工上传的第三方归档——那正是该挡的对象。
+    """
+    n = 0
+    for m in members:
+        if not m.isfile() or not (m.mode & 0o7000):
+            continue
+        p = os.path.join(dest, m.name)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        # 复核 lstat：链接型条目已被 _tar_checked 拒掉，这里再确认落点仍是普通文件，
+        # 免得有人在解包与收权限之间塞一个链接进来。
+        if not stat.S_ISREG(st.st_mode) or not (st.st_mode & 0o7000):
+            continue
+        with suppress(OSError):
+            os.chmod(p, stat.S_IMODE(st.st_mode) & ~0o7000)
+            n += 1
+    return n
+
+
 async def _restore_app(bk: dict, src_file: str, log: list) -> None:
     from . import apps_service, systemd_ops
 
@@ -775,7 +803,10 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
             # 不写出来的话 Python 3.14 会默认改用 data filter，恢复出来的文件属主当场变掉。
             await run_in_threadpool(tf.extractall, dest, members, filter="tar")
             restored = True
+            suid = await run_in_threadpool(_strip_setuid, dest, members)
             log.append(f"==> 已解包 {len(members)} 个条目到 {dest}")
+            if suid:
+                log.append(f"!! {suid} 个条目带 setuid/setgid/sticky 位，已收平为普通权限")
         finally:
             if env_keep:
                 # 不管解包成没成，环境变量都得回到现值：半程失败时归档里那份
@@ -923,7 +954,9 @@ async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict
     # 数据确实装上了，但日志里有 `!!` 行 = 有一件事要人接手（服务没起来、按最大库定位、
     # 归档环境变量生效）。这些行过去只藏在 log 里，而界面收到 ok:true 就一律报
     # 「恢复完成」——绿色成功提示正好把要处理的那行盖住。单独带出来给前端定调性。
-    return {"ok": True, "warn": [line for line in log if line.startswith("!!")], "log": "\n".join(log)}
+    # 整段遮一次凭据：pg_restore/tar 的原文里带过连接串，而这段文字要进浏览器。
+    masked = redact_creds("\n".join(log))
+    return {"ok": True, "warn": [line for line in masked.splitlines() if line.startswith("!!")], "log": masked}
 
 
 async def run_backup_now(bid: int) -> dict:

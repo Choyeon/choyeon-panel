@@ -43,6 +43,56 @@
   `test_repo_hygiene` 新增双向对账，config 与样例不会再各说各话
 - Release 正文改为就地部署口径（`choyeonctl upgrade` / `--no-pull`），并列出 tarball 产物与 SHA256
 
+### 安全
+
+- `/api/auth/setup` 收口：判据从「有没有 admin」改成「整张表为空」，插入放进 `create_first_admin`
+  的单锁临界区。此前管理员被 CLI 删光而机器上还留着 viewer 时，setup 会对公网重新开放，谁先
+  POST 谁就是 root；两个并发未登录请求也能同时通过检查、各拿一枚 admin token。撞名改回 400，
+  不再把 `IntegrityError` 的栈抛进 journal。
+- 登录限速加第二道按账号的桶（`acct:<name>`）：IP 桶挡不住代理池慢爆——几百个 IP 各打 9 次/分钟，
+  落在同一个 admin 账号上就是 9×N。账号检查放在 scrypt 之前（拦截不再顺手烧 16MB 哈希），
+  窗口起点固定不随失败顺延（慢 drip 不会把锁变成永久封禁），只给真实存在的账号记账。
+- CSP 的 `script-src` 收紧为 `'self'`：首屏防闪主题脚本从 `web/index.html` 的内联块挪到
+  `web/public/theme-boot.js`。`style-src` 仍留 `'unsafe-inline'`，naive-ui 运行时注入样式必需它。
+- 长连接不再只在握手时验一次身份：网页终端与日志 SSE 每 60 秒复验（库里的角色 + token epoch +
+  到期时间），改密、降权、删号、票过期都会立刻停流并留一条审计；终端另加 180 秒空闲回收，
+  半死连接不会再把 `TERMINAL_MAX_SESSIONS` 的名额占满到重启。
+- 终端帧守卫：JSON 合法但不是对象的一帧（`1`、`"x"`、`[]`）原先会走到 `.get` 抛
+  `AttributeError`，把会话和 pty 一起打死，而任何已登录 admin 发一条消息就够了。
+- 校验函数统一 `fullmatch`：正则写成 `^…$` 配 `match` 时 `"example.com\n"` 也算合法，结尾那个
+  换行会造出「看起来不存在、却又占着端口」的域名/库名/文件名；管理员用户名同理改用 `\Z`。
+- 落盘权限：`CP_DATA_DIR` 收到 0700、`panel.db` 收到 0600（里面有 `pass_hash` 与 `jwt_secret`，
+  签名密钥外泄等于任何人都能签一枚 admin token）；打包临时文件改 `O_CREAT|O_EXCL|O_NOFOLLOW`
+  + 0600，`_keep_owner` 复制权限位时不再把 setuid/setgid 一起抄过去。
+- 恢复应用归档后收平 setuid/setgid/sticky 位：`filter="tar"` 按归档里的 mode 原样落盘，
+  root 解包一个手工上传的 4755 二进制就是给同机任何被攻破的应用留一个提权落点；收平了几个条目
+  会以 `!!` 行如实报出来，不静默改人家的文件。
+- 面板自己的 nginx 入口不再混进应用配置列表：应用的 port 允许 1024-65535，填成面板端口时
+  归属判定会把 `choyeon-panel.conf` 认成「我的配置」，保存并 reload 一次就把面板的 HTTPS 入口
+  换成指向那个应用，而 `remove_vhost` 只认 `panel-*.conf`，救不回来。
+- 出口脱敏：审计的 detail 与 action、错误日志、`app:ssl` 回执、备份执行日志、恢复结果统一过
+  `redact_creds`（子进程回显里的 `PGPASSWORD=`、Bearer 串、连接串）；`user:update` 审计写明改了
+  角色/口令/昵称/头像中的哪几项，不再只留一个光秃秃的用户名。
+- doctor 的权限项从只看 `.env` 扩到 `.env` + 数据目录 + `panel.db`，并把 `user create` 的修复
+  命令与 CLI `deploy` 的下一步提示改成 `--password-stdin` 写法（口令不再进 argv、`ps` 与 shell 历史）。
+
+### 测试
+
+- `backend/tests/test_batch6a.py`：覆盖上面这批改动（首管理员建号临界区与整表还原、账号桶的
+  锁定/清零、`--password-stdin` 的 CLI 解析、SSE 与终端的复验停流与空闲回收）。
+- `test_batch5g`、`test_batch5k`、`test_deploy_contract`、`test_repo_hygiene` 跟随新
+  `request.state.cp_exp` 与首屏主题脚本的新落点；`theme-color` 一致性断言改看 index.html +
+  `theme-boot.js` 拼出的首屏那一帧，并要求初值等于某一档 `--cp-bg`。
+- `backend/tests/test_repo_hygiene.py` 的 README 口径断言同步：CI 实为 4 个 job、
+  `Ran 1080 tests … OK`、引用文件与 `.env.example` 覆盖继续由 CI 把守。
+
+### 文档
+
+- README 去掉宣传腔与重复句：删掉英文回声段、Star 煽情段和社交徽章；「60 秒部署」改成按实测
+  的 3-8 分钟口径；常驻内存改成带测量口径的 ≈50 MB（`MemoryCurrent`）而非区间猜测；架构三小标题
+  从对仗句式改回直陈；SSL 行并入「网站与证书」；安全设计补上本轮加固，命令行段指向
+  `choyeonctl schema --json` 作为契约权威。
+
 ## [1.1.8] - 2026-10-11
 
 本轮的主线是**让面板说的和机器上发生的一致**，以及把部署做成任意发行版都能一行跑通。
