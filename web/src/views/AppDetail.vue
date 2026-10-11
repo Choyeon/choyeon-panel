@@ -455,14 +455,14 @@ watch(
         <NForm label-placement="left" label-width="100" style="max-width: 660px">
           <NSpace vertical :size="12">
             <!-- 只读账号：字段保留可读（read-only 不减对比度），写入口不放进来 -->
-            <NFormItem label="名称"><NInput v-model:value="edit.name" :read-only="!isAdmin" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
-            <NFormItem label="安装目录"><NInput v-model:value="edit.path" :read-only="!isAdmin" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
-            <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" :read-only="!isAdmin" :input-props="{ 'aria-label': 'Git 仓库地址' }" /></NFormItem>
-            <NFormItem label="分支"><NInput v-model:value="edit.branch" :read-only="!isAdmin" :input-props="{ 'aria-label': '分支' }" /></NFormItem>
-            <NFormItem label="安装命令"><NInput v-model:value="edit.install_cmd" :read-only="!isAdmin" :input-props="{ 'aria-label': '安装命令' }" /></NFormItem>
-            <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" :read-only="!isAdmin" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" /></NFormItem>
-            <NFormItem label="端口"><NInput v-model:value="edit.port" :read-only="!isAdmin" placeholder="留空表示无端口" :input-props="{ 'aria-label': '监听端口' }" /></NFormItem>
-            <NFormItem label="域名"><NInput v-model:value="edit.domain" :read-only="!isAdmin" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
+            <NFormItem label="名称"><NInput v-model:value="edit.name" :readonly="!isAdmin" :input-props="{ 'aria-label': '应用名称' }" /></NFormItem>
+            <NFormItem label="安装目录"><NInput v-model:value="edit.path" :readonly="!isAdmin" placeholder="/root/www/<名称>" :input-props="{ 'aria-label': '安装目录' }" /></NFormItem>
+            <NFormItem label="Git 仓库"><NInput v-model:value="edit.repo_url" :readonly="!isAdmin" :input-props="{ 'aria-label': 'Git 仓库地址' }" /></NFormItem>
+            <NFormItem label="分支"><NInput v-model:value="edit.branch" :readonly="!isAdmin" :input-props="{ 'aria-label': '分支' }" /></NFormItem>
+            <NFormItem label="安装命令"><NInput v-model:value="edit.install_cmd" :readonly="!isAdmin" :input-props="{ 'aria-label': '安装命令' }" /></NFormItem>
+            <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" :readonly="!isAdmin" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" /></NFormItem>
+            <NFormItem label="端口"><NInput v-model:value="edit.port" :readonly="!isAdmin" placeholder="留空表示无端口" :input-props="{ 'aria-label': '监听端口' }" /></NFormItem>
+            <NFormItem label="域名"><NInput v-model:value="edit.domain" :readonly="!isAdmin" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
             <NFormItem label="关联数据库">
               <NSelect v-model:value="dbSel" :disabled="!isAdmin" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" aria-label="关联数据库" style="width: 100%" />
             </NFormItem>
@@ -549,7 +549,7 @@ watch(
               <NButton size="small" tertiary round :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect || ngxSaving" :loading="ngxSaving" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
             </NSpace>
             <EmptyBox v-if="!ngxFile.content" text="完整配置文本仅管理员可见：这里保留域名、HTTPS、WebSocket 与上传限制的分析结论" />
-            <NInput v-else v-model:value="ngxContent" type="textarea" :read-only="!isAdmin || ngxSaving" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
+            <NInput v-else v-model:value="ngxContent" type="textarea" :readonly="!isAdmin || ngxSaving" :autosize="{ minRows: 14, maxRows: 26 }" :input-props="{ class: 'mono', 'aria-label': 'nginx 配置内容', style: 'font-size: var(--fs-xs)' }" />
             <NSpace justify="space-between" align="center" style="margin-top: var(--space-3)">
               <div class="cp-help">{{ isAdmin ? '保存将执行 nginx -t 校验，失败自动回滚并 reload 生效' : '只读账号可查看分析结论，配置全文、保存与快捷项由管理员操作' }}</div>
               <NButton v-if="isAdmin" type="primary" size="small" round class="cp-press" :loading="ngxSaving" :disabled="ngxSaving" :icon="ico('SaveOutline')" @click="saveNginx">保存配置</NButton>
@@ -574,7 +574,7 @@ watch(
               v-model:value="unitContent"
               type="textarea"
               :autosize="{ minRows: 14, maxRows: 26 }"
-              :read-only="!!unitInfo && !unitInfo.managed"
+              :readonly="!!unitInfo && !unitInfo.managed"
               :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: var(--fs-xs)' }"
             />
             <NSpace justify="space-between" align="center">
