@@ -14,12 +14,45 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .. import config
 from .. import aio_db
+from .. import database as dbm
+from .. import security
 from ..log import warn
 
 router = APIRouter()
 
 _SESSIONS = 0  # 当前终端会话数，避免并发 pty 拖垮机器
 _OVERFLOW_NOTE = "\r\n\x1b[31m[面板] 输出积压超过上限，已断开该终端会话。\x1b[0m\r\n".encode()
+
+# 长连接只在握手那一刻校验过角色，之后 JWT 里的 role 声明是快照、不再回头看库。
+# 于是"把这个人降为只读 / 删号 / 改密吊销旧 token"之后，那台 root shell 照样活着，
+# 直到浏览器标签关掉——这是面板里唯一一条权限已收回但会话还继续可用的通道。
+_RECHECK_SEC = 60
+
+
+def _identity(user: str) -> tuple[str, str]:
+    """身份快照 =（库里的角色，token 版本号）。同步 sqlite，调用方放线程里跑。
+
+    账号不存在按 LookupError 抛：调用方把"查不到人"和"变了"同样当成失效。
+    """
+    row = dbm.query_one("SELECT role FROM users WHERE username=?", (user,))
+    if not row:
+        raise LookupError(f"用户 {user} 不存在")
+    return str(row["role"] or "admin"), security.session_epoch(user)
+
+
+async def _revalidate(ws: WebSocket, user: str, identity: tuple[str, str]) -> None:
+    while True:
+        await asyncio.sleep(_RECHECK_SEC)
+        try:
+            stale = await asyncio.to_thread(_identity, user) != identity
+        except Exception:  # noqa: BLE001
+            stale = True
+        if not stale:
+            continue
+        with contextlib.suppress(Exception):
+            await aio_db.audit(user, "terminal:revoked")
+            await ws.close(code=4401)
+        return
 
 
 def _dim(raw: object, fallback: int, cap: int) -> int:
@@ -110,13 +143,27 @@ async def terminal(ws: WebSocket):
     loop = None
     reader_added = False
     pump = None
+    guard = None
     try:
         # accept/审计必须在 try 内：客户端在握手中途断开时 accept() 会抛异常，
         # 旧写法此时已经占了一个额度却永远不会释放（finally 还没进入），
         # 反复几次后 TERMINAL_MAX_SESSIONS 被占满，终端整个功能永久不可用直到重启。
         await ws.accept()
+        # 以库为准再认一次身份（中间件的 role 来自 token 声明，是签发时的快照），
+        # 并把这一份作为后续复验的基线。查不到人就失败关闭：这是 root shell。
+        try:
+            identity = await asyncio.to_thread(_identity, user)
+        except Exception:  # noqa: BLE001
+            await ws.close(code=4401)
+            return
+        if identity[0] != "admin":
+            await ws.close(code=4403)
+            return
+        # opened 只管"要不要补一条 terminal:close 审计"：被上面两条拒绝的握手
+        # 连 pty 都没建，写一条 close 会在审计里凭空多出一次"关闭"。
         opened = True
         await aio_db.audit(user, "terminal:open")
+        guard = asyncio.create_task(_revalidate(ws, user, identity))
 
         loop = asyncio.get_running_loop()
         master, slave = pty.openpty()
@@ -205,6 +252,8 @@ async def terminal(ws: WebSocket):
         _SESSIONS -= 1
         if pump is not None:
             pump.cancel()
+        if guard is not None:
+            guard.cancel()
         if reader_added and master is not None:
             with contextlib.suppress(Exception):
                 loop.remove_reader(master)

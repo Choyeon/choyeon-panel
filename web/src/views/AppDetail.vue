@@ -221,7 +221,9 @@ async function load() {
   }
   loadNginx();
   loadPg();
-  loadUnit();
+  // unit 全文里有 Environment= 凭据与本机路径，后端只认管理员；只读账号不发这个请求，
+  // 否则每次进详情页都弹一条 403 红条。
+  if (isAdmin.value) loadUnit();
   loadProc();
   // 带着 running 记录进入/刷新页面时接续轮询，否则部署记录停在打开那一刻
   if (deps.value.some((d: any) => d.status === 'running')) later(pollDeps, 3000);
@@ -558,28 +560,32 @@ watch(
 
       <div v-else-if="tab === 'unit'">
         <NSpace vertical :size="12" style="width: 100%">
-          <NAlert v-if="unitInfo && !unitInfo.managed" type="warning" :bordered="false" size="small">
-            该应用为纳管模式（unit {{ app.unit }} 由外部管理），面板只读展示，不会写入该文件。
+          <NAlert v-if="!isAdmin" type="info" :bordered="false" size="small">
+            unit 文件里带着 Environment= 环境变量与本机路径，全文仅管理员可查看。只读账号仍可在「基本配置」看运行状态、在「运行日志」看服务输出。
           </NAlert>
-          <div class="cp-help">
-            文件：<span class="mono-dim">{{ unitInfo?.path }}</span>。保存流程：写入 → systemd-analyze verify 校验 → daemon-reload，任一步失败自动回滚。修改后需重启服务才生效；面板生成模式下保存会同步更新部署模板，后续部署按此模板渲染。占位符 <code v-pre>{{name}} {{path}} {{start_cmd}} {{port}}</code> 可在模板中使用。
-          </div>
-          <NInput
-            v-model:value="unitContent"
-            type="textarea"
-            :autosize="{ minRows: 14, maxRows: 26 }"
-            :read-only="!!unitInfo && !unitInfo.managed"
-            :disabled="!isAdmin"
-            :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: var(--fs-xs)' }"
-          />
-          <NSpace justify="space-between" align="center">
-            <NSpace size="small">
-              <NButton size="small" tertiary round :icon="ico('RefreshOutline')" @click="loadUnit">重新读取</NButton>
-              <NButton v-if="isAdmin && unitInfo?.managed" size="small" tertiary round @click="restoreDefaultTpl">恢复面板默认模板</NButton>
-              <NButton v-if="isAdmin && unitInfo?.managed" size="small" tertiary round type="warning" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
+          <template v-else>
+            <NAlert v-if="unitInfo && !unitInfo.managed" type="warning" :bordered="false" size="small">
+              该应用为纳管模式（unit {{ app.unit }} 由外部管理），面板只读展示，不会写入该文件。
+            </NAlert>
+            <div class="cp-help">
+              文件：<span class="mono-dim">{{ unitInfo?.path }}</span>。保存流程：写入 → systemd-analyze verify 校验 → daemon-reload，任一步失败自动回滚。修改后需重启服务才生效；面板生成模式下保存会同步更新部署模板，后续部署按此模板渲染。占位符 <code v-pre>{{name}} {{path}} {{start_cmd}} {{port}}</code> 可在模板中使用。
+            </div>
+            <NInput
+              v-model:value="unitContent"
+              type="textarea"
+              :autosize="{ minRows: 14, maxRows: 26 }"
+              :read-only="!!unitInfo && !unitInfo.managed"
+              :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: var(--fs-xs)' }"
+            />
+            <NSpace justify="space-between" align="center">
+              <NSpace size="small">
+                <NButton size="small" tertiary round :icon="ico('RefreshOutline')" @click="loadUnit">重新读取</NButton>
+                <NButton v-if="unitInfo?.managed" size="small" tertiary round @click="restoreDefaultTpl">恢复面板默认模板</NButton>
+                <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
+              </NSpace>
+              <NButton type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed || unitSaving" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
             </NSpace>
-            <NButton v-if="isAdmin" type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed || unitSaving" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
-          </NSpace>
+          </template>
         </NSpace>
       </div>
 

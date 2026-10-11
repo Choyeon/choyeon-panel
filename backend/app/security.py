@@ -101,6 +101,15 @@ def _user_epoch(username: str) -> str:
     return dbm.get_setting(f"token_epoch:{username}") or _global_epoch()
 
 
+def session_epoch(username: str) -> str:
+    """当前 token 版本号，给长连接（网页终端）复核身份用。
+
+    握手时抓一份，之后定时再读一次比对：改密、CLI 重置/删号、管理员降权都会 bump
+    这个版本号，对不上就说明签发那一刻的授权已经收回了。
+    """
+    return _user_epoch(username)
+
+
 def bump_user_epoch(username: str) -> str:
     from . import database as dbm
 

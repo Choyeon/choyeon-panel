@@ -1,11 +1,24 @@
+import re
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .. import aio_db
 from ..services import pg_service
 from ..errors import err_json
+from ..util import redact_creds
 
 router = APIRouter()
+
+
+# SQL 里的口令是「裸字面量」，redact_creds 那套 key=value 规则抓不到：
+#   ALTER ROLE app PASSWORD 'hunter2';   CREATE USER u IDENTIFIED BY 'hunter2';
+# 控制台的语句会整条进审计表（管理员都能翻），抹不平就等于把凭据抄成第二份明文副本。
+_SQL_PW_RE = re.compile(r"(?i)\b(password|identified\s+by)\s+(?:'[^']*'|\"[^\"]*\"|[^\s,;)]+)")
+
+
+def _sql_for_audit(sql: str) -> str:
+    return redact_creds(_SQL_PW_RE.sub(lambda m: f"{m.group(1)} ***", str(sql or "")))[:70]
 
 
 async def _body(req: Request) -> dict:
@@ -73,7 +86,7 @@ async def pg_query(req: Request):
         return JSONResponse(status_code=400, content={"error": "库名不合法"})
     try:
         out = await pg_service.query_sql(sql, db)
-        await aio_db.audit(req.state.cp_sub, "db:sql", f"{db}: {sql[:70]}")
+        await aio_db.audit(req.state.cp_sub, "db:sql", f"{db}: {_sql_for_audit(sql)}")
         return {"result": out, "db": db}
     except Exception as e:  # noqa: BLE001
         return err_json(e)

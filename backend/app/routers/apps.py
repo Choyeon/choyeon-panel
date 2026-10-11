@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from .. import aio_db
 from .. import database as dbm
+from ..deps import need_admin
 from ..services import apps_service, nginx_ops, systemd_ops
 from ..templates import apply_template
 from ..util import parse_lines, redact_creds
@@ -270,7 +271,12 @@ async def app_nginx_quick(app_id: int, req: Request):
 
 
 @router.get("/api/apps/{app_id}/unit")
-async def app_unit_read(app_id: int):
+async def app_unit_read(app_id: int, req: Request):
+    # unit 全文归管理员：面板生成的 unit 里就写着 Environment= / EnvironmentFile=，
+    # 与同文件的 env（详情接口给 viewer 空数组）、nginx 全文（只给分析结论）同一口径。
+    # 只读账号该看的是服务状态与日志，不是应用密钥落在哪个文件第几行。
+    if r := need_admin(req):
+        return r
     try:
         return apps_service.read_unit(app_id)
     except Exception as e:  # noqa: BLE001

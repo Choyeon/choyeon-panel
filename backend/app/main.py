@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import avatars, config, errors, security
+from . import aio_db, avatars, config, errors, security
 from . import database as dbm
 from .deps import AuthMiddleware, BodyCapMiddleware
 from .log import warn
@@ -133,7 +133,7 @@ async def setup(req: Request):
         "INSERT INTO users(username,pass_hash,role) VALUES(?,?,?)",
         (username, await security.hash_pass_async(password), "admin"),
     )
-    dbm.audit(username, "setup", "创建管理员")
+    await aio_db.audit(username, "setup", "创建管理员")
     security.clear_attempts(ip)
     return _user_token(username, "admin")
 
@@ -153,16 +153,20 @@ async def login(req: Request):
     # 而 LOGIN_PW_MAX_LEN 比任何真实口令都宽，正常账号不会被挡在外面。
     plausible = bool(password) and len(password) <= security.LOGIN_PW_MAX_LEN
     ok = bool(user) and plausible and await security.check_pass_async(password, user["pass_hash"])
+    # 这几条审计一律走 aio_db：dbm.audit 是拿全局 RLock 的 INSERT + commit。
+    # 打在事件循环上时，撞库流量的每一条都要循环停一停，撞上 WAL checkpoint 就是
+    # 整站冻住（仪表盘轮询、SSE 日志、WS 终端一起卡）；登录路由是唯一免认证入口，
+    # 也就是唯一能被无限放大的那条。
     if not ok:
-        dbm.audit(username or "?", "login_failed", ip)
+        await aio_db.audit(username or "?", "login_failed", ip)
         return JSONResponse(status_code=401, content={"error": "用户名或密码错误"})
     role = user["role"] or "admin"
     if not security.USERNAME_RE.match(user["username"]):
         # 老版本放行过的用户名可能不符合当前规则，而 verify_token 会拒绝这种主体。
         # 照签的话用户看到的是"登录成功，然后每个请求 401"，无从下手；在这里说清楚。
-        dbm.audit(user["username"], "login_rejected", ip)
+        await aio_db.audit(user["username"], "login_rejected", ip)
         return JSONResponse(status_code=403, content={"error": "该账号的用户名不符合当前规则，请由管理员用 choyeonctl user create 重建账号"})
-    dbm.audit(user["username"], "login")
+    await aio_db.audit(user["username"], "login")
     security.clear_attempts(ip)
     return _user_token(user["username"], role, user.get("nickname", ""), user.get("avatar", ""))
 
@@ -214,7 +218,7 @@ async def change_password(req: Request):
     dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (new_hash, me["username"]))
     # 仅让当前用户的旧 token 失效，并立即签发新 token，避免用户被踢下线
     security.bump_user_epoch(me["username"])
-    dbm.audit(me["username"], "password_change")
+    await aio_db.audit(me["username"], "password_change")
     return _user_token(me["username"], role, me.get("nickname", ""), me.get("avatar", ""))
 
 
@@ -232,7 +236,7 @@ async def update_profile(req: Request):
     if avatar is not None:
         avatar = str(avatar).strip()[:256]
         dbm.execute("UPDATE users SET avatar=? WHERE id=?", (avatar, me["id"]))
-    dbm.audit(req.state.cp_sub, "profile:update")
+    await aio_db.audit(req.state.cp_sub, "profile:update")
     updated = dbm.query_one("SELECT nickname,avatar FROM users WHERE id=?", (me["id"],))
     return {"ok": True, "nickname": updated["nickname"], "avatar": updated["avatar"]}
 
@@ -290,7 +294,7 @@ async def upload_avatar(req: Request):
     os.chmod(path, 0o644)
     url = f"/api/avatars/{me['id']}.{ext}?v={int(time.time())}"
     dbm.execute("UPDATE users SET avatar=? WHERE id=?", (url, me["id"]))
-    dbm.audit(req.state.cp_sub, "avatar:upload", f"{len(data)}B")
+    await aio_db.audit(req.state.cp_sub, "avatar:upload", f"{len(data)}B")
     return {"avatar": url}
 
 
@@ -325,11 +329,14 @@ app.include_router(metrics.router)
 
 # ---------- background housekeeping ----------
 def _prune_all() -> None:
-    # 四个 prune 都是带子查询的 DELETE，走 database.py 那把全局 RLock 的同步 sqlite。
+    # 三个 prune 都是带子查询的 DELETE，走 database.py 那把全局 RLock 的同步 sqlite。
     dbm.prune_audit()
     dbm.prune_deployments()
-    dbm.prune_alerts()
     dbm.prune_metrics()
+    # 告警历史不在这里裁：alerts_service._checker_loop 每轮按用户设置的
+    # alert_keep_days / alert_keep_rows 裁一次。以前这儿跟着 prune_alerts() 用默认值
+    # （30 天 / 2000 条）每 10 分钟再裁一遍，把设置顶成死配置——管理员调到 365 天，
+    # 三十天前的记录照样当天就被删掉，而且没有任何地方说它被谁删的。
 
 
 async def _housekeeping():

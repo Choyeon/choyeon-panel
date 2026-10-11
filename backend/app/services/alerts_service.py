@@ -12,8 +12,14 @@
 4. 历史与通知是两条独立的线：历史每轮去重后落库（含恢复的 ok 行），通知按
    `sent:<key>` 做当日去重，资源阈值还要连续两轮超标才发。
    任何"为了少发通知而少记历史"的改动都会让网页端的告警列表失明。
+   历史的去重对象是**该 code 最近一行**（不限 level）：crit → ok → 同一条 crit
+   必须重新落一行，否则"好了又坏"在列表里长得和"还在正常"一模一样。
 5. 发过告警的对象必须发一条「已恢复」（`notified:<code>` 标记）：只有告警没有
    下文的通道，会逼着人反复登录面板确认，很快就被当成噪音忽略。
+   阈值巡检和存活探测共用 `_recover()`，两条路径不能各写一份恢复逻辑。
+6. 告警历史的裁剪只有 `_checker_loop` 一处：它按用户设置的 `alert_keep_days` /
+   `alert_keep_rows` 裁。housekeeping 里再裁一次用的是函数默认值，
+   设置就会变成死配置（⑤K 实测：keep 改成 365 天，30 天前的记录照样每 10 分钟被删）。
 """
 
 import asyncio
@@ -125,20 +131,24 @@ async def notify(text: str) -> bool:
 
 
 async def record(level: str, code: str, message: str, meta: str = "") -> int | None:
-    """写一条告警历史；与同 code+level 的最近一行 message 相同则跳过。
+    """写一条告警历史；与**该 code 最近一行**同级同文才跳过（比较不限 level）。
 
-    去重键取 code+level 而不是 code：crit → ok（恢复）与 crit → crit（依旧告警）
-    必须能区分开，恢复要留下一行。返回新行 id，跳过或写库失败返回 None。
+    去重键取 code 的最近一行而不是 code+level，是因为故障会好了又坏：
+    09:00 磁盘超标（crit 行）→ 09:30 清理（ok 行）→ 15:00 备份又把盘写满，
+    按 code+level 比的是"上一条 crit"，那条文字没变，于是这一轮**一行历史都不落**，
+    告警列表最新一行停在「磁盘使用率正常」而盘正在满——网页端就此失明（约定 4）。
+    反过来 crit → crit（依旧告警）仍然会被跳过：最近一行就是同级同文。
+    恢复要留下一行 ok，这一条靠 level 不同来保证。
     """
     code = str(code or "")[:64]
     if level not in LEVELS or not code:
         return None
     try:
         last = await aio_db.query_one(
-            "SELECT message FROM alerts_log WHERE code=? AND level=? ORDER BY id DESC LIMIT 1",
-            (code, level),
+            "SELECT level, message FROM alerts_log WHERE code=? ORDER BY id DESC LIMIT 1",
+            (code,),
         )
-        if last is not None and last["message"] == message:
+        if last is not None and last["level"] == level and last["message"] == message:
             return None
         return await aio_db.execute(
             "INSERT INTO alerts_log(ts,level,code,message,meta) VALUES(datetime('now'),?,?,?,?)",
@@ -165,6 +175,23 @@ def _streak(code: str, trigger: bool) -> int:
     return n
 
 
+async def _recover(code: str, ok_message: str, meta: str = "") -> None:
+    """恢复的一侧：落一行 ok 历史，并对"发过告警"的对象补一条「已恢复」。
+
+    `record` 返回 None 表示与最近一行完全相同（已经恢复过），不再重复发。
+    `notified:<code>` 记的是"这个对象发过告警通知"，据此决定要不要发恢复并清掉标记：
+    只有告警没有下文的通道，会逼着人反复登录面板确认，很快就被当成噪音忽略（约定 5）。
+    巡检与存活探测都必须走这里——探测的正常分支过去直接 `record("ok", …)`，
+    于是 `notified:probe:<应用>` 永远留着、恢复通知永远不发，同一个标记还会
+    在 settings 里越积越多（没有清理入口）。
+    """
+    if await record("ok", code, ok_message, meta) is None:
+        return
+    if dbm.get_setting("notified:" + code):
+        dbm.set_setting("notified:" + code, "")
+        await notify(f"已恢复：{ok_message}")
+
+
 async def _check(key: str, trigger: bool, message: str, *, code: str | None = None,
                  level: str = "warn", ok_message: str | None = None, meta: str = "",
                  log_message: str | None = None, debounce: int = 1) -> None:
@@ -175,23 +202,13 @@ async def _check(key: str, trigger: bool, message: str, *, code: str | None = No
     数值同时进 meta，展开最新一条就能看到。
 
     `debounce` > 1 时，前若干轮只落历史不推送，避免瞬时尖峰变成通知噪音。
-
-    恢复也要推送：`notified:<code>` 记的是"这个对象发过告警通知"，恢复时据此
-    发一条「已恢复」并清掉标记。没有这条的话，用户收到"磁盘 91%"之后永远等不到
-    下文，只能自己登录面板确认——而收到告警的人恰恰是不会天天开面板的人。
     """
     log_code = code or key
     if not trigger:
         if debounce > 1:
             _streak(log_code, False)
-        if ok_message is None:
-            return
-        # record 返回 None = 与上一条 ok 完全相同（已恢复过），不重复发恢复通知
-        if await record("ok", log_code, ok_message, meta) is None:
-            return
-        if dbm.get_setting("notified:" + log_code):
-            dbm.set_setting("notified:" + log_code, "")
-            await notify(f"已恢复：{ok_message}")
+        if ok_message is not None:
+            await _recover(log_code, ok_message, meta)
         return
     await record(level, log_code, message if log_message is None else log_message, meta)
     if debounce > 1 and _streak(log_code, True) < debounce:
@@ -449,8 +466,10 @@ async def run_probes() -> list[dict]:
                          meta=_meta(app=a["id"], port=port, detail=detail[:120]))
             results.append({"name": name, "port": port, "alive": True, "status": None, "level": "warn"})
         elif status in expect:
-            await record("ok", code, f"应用 {name} 存活（端口 {port}）",
-                         meta=_meta(app=a["id"], port=port, status=status, expect=expect_text))
+            # 恢复走 _recover 而不是裸 record：上一轮"无响应"发过通知就得补一条「已恢复」，
+            # 并清掉 notified:probe:<应用>，否则这条标记再也没有人消费。
+            await _recover(code, f"应用 {name} 存活（端口 {port}）",
+                           meta=_meta(app=a["id"], port=port, status=status, expect=expect_text))
             results.append({"name": name, "port": port, "alive": True, "status": status, "level": "ok"})
         else:
             await record("warn", code,

@@ -658,7 +658,10 @@ class TestRunChecksHistory(_HistoryCase):
         self._round(cpu=5.0, sent=sent)
         self._round(cpu=97.0, sent=sent)
         self.assertEqual(len(sent), 1, "恢复后计数要清零，不能下一轮立刻又发一条")
-        self.assertEqual([r["level"] for r in _metric_rows() if r["code"] == "cpu"], ["warn", "ok"])
+        # 历史里要重新出现一行 warn：去重是跟「该 code 最近一行」比，不是「最近一行 warn」。
+        # 否则一次「超标 → 恢复 → 又超标」在网页端只看得到前两次，第三次烧 CPU 无人知晓。
+        self.assertEqual([r["level"] for r in _metric_rows() if r["code"] == "cpu"],
+                         ["warn", "ok", "warn"])
 
     def test_clear_faults_are_not_debounced(self):
         """连不上/单元 failed 这类明确故障必须当轮就推，不等第二轮。"""
