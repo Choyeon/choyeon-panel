@@ -397,9 +397,10 @@ esac
 exit 1''')
 
     def _shadow_newer_pythons(self):
-        """测试机自带的 python3.13/3.12 会抢先通过探测，必须用不达标替身遮住，
-        否则测的是服务器而不是脚本的路由。"""
-        for name in ("python3.13", "python3.12"):
+        """测试机/CI 自带的 python3.13/3.12/3.11 都会抢先通过探测（CI 的 3.11 job
+        PATH 里必有 setup-python 装的真 python3.11），必须用不达标替身遮住，
+        否则测的是宿主机而不是脚本的路由。"""
+        for name in ("python3.13", "python3.12", "python3.11"):
             self._shim(name, "exit 1")
 
     def _node_shim(self, version):
