@@ -258,12 +258,12 @@ cd backend
                                                     # uv 建的 venv 没有 .venv/bin/pip：uv pip install --python .venv/bin/python -r requirements-dev.txt
 .venv/bin/python -m unittest discover -s tests      # 校验器、unit 渲染与转义、nginx 解析、
                                                     # 路径守卫、令牌吊销、限速、日志裁剪、超时清理
-                                                    # 部署模板、就绪探针
+                                                    # 部署模板、就绪探针、仓库门面一致性（README 引用/版本号/资产）
 cd web && npm run build                             # vue-tsc 类型检查 + vite 构建
 bash scripts/healthcheck.sh                         # 线上健康检查
 ```
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 **1030 个断言 / 245 个子测试**。
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `unittest discover` 输出 **Ran 1037 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
 
 ---
 
@@ -354,4 +354,8 @@ choyeonctl backup list
 
 ## License
 
-[MIT](./LICENSE) © Choyeon
+<p align="center">
+  <img src="./assets/logo.svg" alt="choyeon-panel 标志" width="56" height="56" />
+</p>
+
+<p align="center"><a href="./LICENSE">MIT License</a> · © Choyeon · <a href="https://github.com/Choyeon/choyeon-panel/issues/new/choose">提 Issue</a> · <a href="https://github.com/Choyeon/choyeon-panel/compare">提 PR</a></p>
