@@ -269,6 +269,23 @@ class TestRepoHygiene(unittest.TestCase):
                 self.assertFalse([e for e in root.iter() if _tag(e) == "text"],
                                  f"{path} 用 <text> 画字形，缺字体的渲染器会画空")
 
+    def test_界面品牌位一律走_LogoMark(self):
+        """web/src 里不许再出现手写的 `.logo-mark` / `.brand-mark` 字母标记。
+
+        品牌标记收进 components/LogoMark.vue 后，样式也只在组件里定义。漏一处（侧栏改了、
+        抽屉没改）不会让构建变红，只会在线上渲染成一个没样式的裸字母。
+        """
+        offenders = []
+        for src in (REPO / "web/src").rglob("*"):
+            if not src.is_file() or src.suffix not in {".vue", ".ts", ".css"}:
+                continue
+            if src.name == "LogoMark.vue":
+                continue
+            for line_no, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+                if re.search(r'class="(logo|brand)-mark"', line):
+                    offenders.append(f"{src.relative_to(REPO)}:{line_no}: {line.strip()}")
+        self.assertFalse(offenders, "品牌位应改用 <LogoMark />：\n" + "\n".join(offenders))
+
     def test_入口引用的图标资源存在(self):
         """index.html 里每个 <link> 指向的本地图标都必须真在 web/public 下。
 

@@ -265,7 +265,7 @@ cd web && npm run build                             # vue-tsc 类型检查 + vit
 bash scripts/healthcheck.sh                         # 线上健康检查
 ```
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `run_tests.py` 输出 **Ran 1043 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖与 `assets/banner.svg` 版式由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `run_tests.py` 输出 **Ran 1044 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖与 `assets/banner.svg` 版式由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
 
 ---
 

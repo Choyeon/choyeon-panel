@@ -330,7 +330,7 @@ function toggleTheme(ev: MouseEvent) {
       <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0 var(--space-3)">
         <template #header>
           <div class="logo">
-            <div class="logo-mark" aria-hidden="true">C</div>
+            <LogoMark />
             <span class="logo-text">choyeon <b>panel</b></span>
           </div>
         </template>

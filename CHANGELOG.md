@@ -13,7 +13,7 @@
 - `backend/tests/test_repo_hygiene.py`：门面一致性回归测试（社区文件齐全、README 引用的本地文件存在、
   版本号三处一致、`assets/` 无孤儿且为合法 SVG、doctor 项数与文档口径一致、Issue 模板字段完整、
   `.env.example` 与 `config.py` 双向对账、banner 与 social 卡版式几何契约、
-  品牌标记四处同源且图标不使用 `<text>`、入口图标链接与 `theme-color` 对账）
+  品牌标记四处同源且图标不使用 `<text>`、界面品牌位只走 `LogoMark`、入口图标链接与 `theme-color` 对账）
 - `backend/run_tests.py`：unittest 入口，把 `conftest.py` 只为 pytest 提供的两道保护补齐——
   强制忽略外部 `CP_DATA_DIR`（带着它跑 discover 会让各模块的 `setdefault` 失效、用例直接读写线上库），
   并把本轮临时目录收进会话根目录、退出时整块删除；`make test` 与 CI 的单元测试步骤改用它
