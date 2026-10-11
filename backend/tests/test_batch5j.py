@@ -6,7 +6,8 @@
    NVMe 整盘（nvme0n1）自己也滤掉，在那类机器上恒为 0。
 2. 凭据打码只认 `https://user:pass@host` 一种形态：pg 失败正文里的 `password=…`、
    部署日志回显的 `NEXTAUTH_SECRET=…`、应用日志里的 `Bearer eyJ…` 都原样落库、
-   原样出接口，而日志检索接口对只读账号开放。
+   原样出接口，而日志检索接口对只读账号开放。反向的误伤同样实测过：sudo 的会话日志
+   每一条都带 `PWD=当前目录`，所以整词 pwd 明确**不**当口令键名。
 3. PG 标识符只认小写，于是 Prisma/TypeORM 那种 "UserProfile" 驼峰表在表列表里
    列得出来、点不开（永远一句"表名不合法"）；建库时不带引号又会被 Postgres 折叠成
    小写，用户按自己输入的驼峰名再去查就变成"库不存在"。
@@ -163,6 +164,10 @@ class TestCredentialRedaction(unittest.TestCase):
             "GET /api/db/redis/key?k=token_list&page=2",
             "nginx reload ok, worker_processes auto",
             'psql -c "SELECT 1" -d rosetta',
+            # ⑤J 线上探针在 80 行真日志里抓到的误伤：sudo 每条会话日志都带 PWD=当前目录，
+            # 把整词 pwd 当口令键名会把运维要看的cwd 遮成 ***，所以这一形态明确不遮。
+            "    root : PWD=/root/www/choyeon-panel/backend ; USER=postgres ; COMMAND=/usr/bin/psql",
+            "cd $PWD && npm run build",
             "",
             None,
         ):
