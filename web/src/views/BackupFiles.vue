@@ -141,8 +141,7 @@ function confirmDelOne(f: any) {
   });
 }
 
-// 批量删除走串行：一次请求打满磁盘目录反而看不清是哪一步失败，
-// 而且 prune 本身也是按名字顺序删的。
+// 批量删除走串行：一次请求打满磁盘目录反而看不清是哪一步失败。
 function confirmDelChecked() {
   const targets = files.value.filter((f) => checked.value.includes(f.name));
   if (!targets.length) return;
@@ -343,7 +342,7 @@ onMounted(() => {
       <NAlert v-if="totals.count" type="info" :bordered="false" size="small" style="margin-bottom: var(--space-3)">
         共 {{ totals.count }} 个 · 合计 {{ fmtBytes(totals.size) }}；当前筛选 {{ shown.length }} 个 · {{ fmtBytes(totals.shownSize) }}。产物目录 {{ dir || '未设置' }}。
         <template v-if="isAdmin">
-          保留份数由任务的 keep 自动裁剪（按文件名排序删最旧的）；这里手动删除是腾空间的补充手段，删掉的文件不会由 timer 重建。
+          保留份数由任务的 keep 按写入顺序自动裁剪最旧的产物；这里手动删除是腾空间的补充手段，删掉的文件不会由 timer 重建。
         </template>
       </NAlert>
 
@@ -374,7 +373,9 @@ onMounted(() => {
           <NFormItem label="生成时间 (UTC)"><NText style="font-size: var(--fs-sm)">{{ fmtDateTime(restoreTarget?.mtime) }} · {{ fmtBytes(restoreTarget?.size || 0) }}</NText></NFormItem>
         </NForm>
         <NAlert v-if="restoreErr" type="error" :bordered="false" size="small" role="alert">{{ restoreErr }}</NAlert>
-        <NAlert v-if="restoreLog" :type="restoreWarn ? 'warning' : 'success'" :bordered="false" size="small" role="status">
+        <!-- 结果色由 restoreWarn 决定；NAlert 自己会把 role 钉成 alert（$attrs 被 mergeProps
+             覆盖），所以这里不再写 role，避免"以为自己是柔和提示"。 -->
+        <NAlert v-if="restoreLog" :type="restoreWarn ? 'warning' : 'success'" :bordered="false" size="small">
           <pre class="mono-pre">{{ restoreLog }}</pre>
         </NAlert>
         <NSpace justify="end" :size="8">

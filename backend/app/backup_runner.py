@@ -128,8 +128,8 @@ def sqlite_snapshot(src: str, dest: str) -> None:
                 except OSError:
                     pass
         raise
-    # 成功也要删掉中间库：它是未压缩的整库副本，留在备份目录里既白占空间，
-    # 又会按文件名排序挤占 keep 名额，把真正可用的一份备份裁掉。
+    # 成功也要删掉中间库：它是未压缩的整库副本，留在备份目录里白占一倍空间，
+    # 而且在备份文件页只会显示成一个"仅可下载"的读不了的文件。
     try:
         os.unlink(tmp)
     except OSError:
@@ -220,6 +220,34 @@ def _cleanup(path: str):
             pass
 
 
+def _prune_order(bid: int) -> list:
+    """本任务自动生成的产物，按"写入顺序从旧到新"排好的文件名列表。
+
+    排序键是 (时间戳, 同秒序号, mtime, 名字)，不能直接按名字排：同一秒内跑两次备份时
+    `_free_path` 给第二份补 `-2`，而 `…-03-41-00-2-app.sqlite.gz` 的字典序**在**
+    `…-03-41-00-app.sqlite.gz` 之前（`2` < `a`）——按名字排会把刚写完的那一份当"最旧"
+    删掉，目录里留下的反而是更早的一份，界面却报"备份完成"。线上探针实测到的正是这一支。
+    无序号一定是先写的那一份（`_free_path` 只在基础名已存在时才补号），所以缺省记 0。
+    末尾必须落在 `.gz`/`.tgz` 上：`sqlite_snapshot` 的中间库叫 `….sqlite.gz.tmp`，崩在半路
+    时它会留在目录里，不认扩展名就等于让一个读不了的半成品占掉一个保留名额。
+    """
+    auto = re.compile(
+        rf"^bk{bid}-(\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}})(?:-(\d+))?.*(?:\.gz|\.tgz)$"
+    )
+    held = []
+    for name in os.listdir(BACKUP_DIR):
+        m = auto.match(name)
+        if not m:
+            continue
+        try:
+            mtime = os.stat(f"{BACKUP_DIR}/{name}").st_mtime
+        except OSError:
+            mtime = 0.0
+        held.append(((m.group(1), int(m.group(2) or 0), mtime, name), name))
+    held.sort()
+    return [name for _, name in held]
+
+
 def prune(bk: dict):
     """按 keep 名额删这个任务**自动生成**的最旧备份。
 
@@ -231,8 +259,7 @@ def prune(bk: dict):
     上传的产物由用户在备份文件页自己删。
     """
     bid = int(bk["id"])
-    auto = re.compile(rf"^bk{bid}-\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}")
-    files = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith(f"bk{bid}-") and auto.match(f))
+    files = _prune_order(bid)
     while len(files) > int(bk["keep"]):
         f = files.pop(0)
         try:

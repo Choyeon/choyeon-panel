@@ -197,6 +197,49 @@ class TestPruneQuota(_Tmp):
         R.prune({"id": "7", "keep": 1})
         self.assertEqual(self._left(), ["bk7-2026-01-02-03-00-00.dump.gz"])
 
+    def test_same_second_sequence_is_the_newer_backup(self):
+        """同一秒跑两次备份时 `-2` 那份是**后**写的，不能被当成最旧的剪掉。
+
+        线上探针实测：连点两次"立即备份"落在同一秒，第二条产物是
+        `bk<id>-<同一秒>-2-app.sqlite.gz`，而按文件名字典序 `-2` 排在基础名之前
+        （`2` < `a`），旧排序把刚写完的这份删掉、留下更早的那一份，界面却报备份完成。
+        """
+        self._touch(
+            "bk7-2026-01-02-03-00-00.dump.gz",
+            "bk7-2026-01-02-03-00-00-2.dump.gz",
+        )
+        R.prune({"id": 7, "keep": 1})
+        self.assertEqual(self._left(), ["bk7-2026-01-02-03-00-00-2.dump.gz"])
+
+    def test_same_second_rotates_in_write_order(self):
+        self._touch(
+            "bk7-2026-01-02-03-00-00.dump.gz",
+            "bk7-2026-01-02-03-00-00-2.dump.gz",
+            "bk7-2026-01-02-03-00-00-3.dump.gz",
+        )
+        R.prune({"id": 7, "keep": 2})
+        self.assertEqual(
+            self._left(),
+            ["bk7-2026-01-02-03-00-00-2.dump.gz", "bk7-2026-01-02-03-00-00-3.dump.gz"],
+        )
+
+    def test_crash_leftover_tmp_is_not_a_quota_holder(self):
+        """`sqlite_snapshot` 的中间库叫 `….sqlite.gz.tmp`：恢复逻辑读不了它，不配占名额。
+
+        它带完整的时间戳前缀，只认前缀的筛选会把它算进 keep 名额，于是崩过一次之后
+        每一份真备份都会被这个半成品"挤"掉一轮。
+        """
+        self._touch(
+            "bk7-2026-01-01-03-00-00-app.sqlite.gz.tmp",
+            "bk7-2026-01-02-03-00-00-app.sqlite.gz",
+            "bk7-2026-01-03-03-00-00-app.sqlite.gz",
+        )
+        R.prune({"id": 7, "keep": 1})
+        self.assertEqual(
+            self._left(),
+            ["bk7-2026-01-01-03-00-00-app.sqlite.gz.tmp", "bk7-2026-01-03-03-00-00-app.sqlite.gz"],
+        )
+
 
 class TestAppRestoreEnvHonesty(_Tmp):
     def setUp(self):

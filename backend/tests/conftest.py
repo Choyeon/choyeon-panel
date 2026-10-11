@@ -9,6 +9,13 @@
 `tempfile.tempdir` 必须一起改：它一旦被任何先于 conftest 运行的代码解析过就会被缓存，
 那时只设 TMPDIR 是无效的。外部已经指定 TMPDIR 时不去动它（可能是 CI 的共享目录），
 改为只删本轮新出现的那些 `cp_*` 条目，避免把别人的临时文件一起带走。
+
+另外无条件改写 `CP_DATA_DIR`：`app.config` 的默认值就是 `<安装目录>/data`，而各测试模块
+用的是 `os.environ.setdefault(...)`——只要调用 pytest 时环境里带着 CP_DATA_DIR（哪怕是
+`cd backend && CP_DATA_DIR=… .venv/bin/python -m pytest` 这种为线上探针写下的习惯用法），
+setdefault 就全部失效，整轮用例会直接读写生产库。2026-10-11 就这么把线上 panel.db 写坏了
+一次（audit 795→11、settings 丢键、token_epoch 被抬高把真人会话吊销），靠
+`/root/backups/panel/manual/panel-pre-update-*.tar.gz` 才恢复。这里不接受任何外部值。
 """
 
 import os
@@ -25,6 +32,15 @@ else:
     _WATCHED = _SESSION_ROOT
     os.environ["TMPDIR"] = _SESSION_ROOT
     tempfile.tempdir = _SESSION_ROOT
+
+_external_data_dir = os.environ.pop("CP_DATA_DIR", "")
+os.environ["CP_DATA_DIR"] = tempfile.mkdtemp(prefix="cp_data_guard_")
+if _external_data_dir:
+    # print 而不是 raise：静默改写更危险，运行的人必须看得见"我传的路径被忽略了"。
+    print(
+        "[conftest] 忽略外部 CP_DATA_DIR=%r，已改用会话临时目录；"
+        "要跑线上探针请用 .venv/bin/python <script>，不要 -m pytest。" % (_external_data_dir,)
+    )
 
 
 def pytest_sessionfinish(session, exitstatus):

@@ -366,7 +366,7 @@ async function submit() {
             <NFormItem label="保留份数">
               <NSpace vertical :size="2">
                 <NInputNumber v-model:value="form.keep" :min="1" :max="365" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px" />
-                <span class="cp-help">超出份数后由任务自动裁剪最旧的产物（按文件名排序删最旧的）。</span>
+                <span class="cp-help">超出份数后由任务自动裁剪最旧的产物（按写入顺序删，同一秒生成的多份按序号排；不是按文件名的字母序）。</span>
               </NSpace>
             </NFormItem>
           </NSpace>

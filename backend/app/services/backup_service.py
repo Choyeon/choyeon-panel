@@ -435,7 +435,8 @@ def save_upload(bid: int, filename: str, data: bytes, overwrite: bool = False) -
 async def delete_file(bid: int, filename: str) -> dict:
     """只删一个备份产物，不动任务、不动 timer。
 
-    prune 是按文件名排序删最旧的，手动删掉旧的一份等于给下一轮腾出名额；
+    prune 只数自动生成的产物（按写入顺序删最旧的），手动删掉一份自动备份等于给下一轮
+    腾出名额，而删掉上传的产物只是腾磁盘、不影响名额；
     备份目录不在 data/ 下，也没有别的接口能删它，所以这里必须自己把名字记进审计，
     事后才查得到是谁在什么时候清了哪一份。
     """
@@ -718,9 +719,10 @@ async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
     if not is_ident(db):
         raise RuntimeError("库名不合法")
     ts = backup_runner.stamp()
-    # 文件名保持 bk<id>-<时间戳>-pre-restore.dump.gz：prune 是按名字排序删最旧的，
-    # 这里用当前时间戳正好排在末尾；写成 bk<id>-pre-restore-... 会排到所有真实备份之后，
-    # 等于每次恢复都留下一个永不轮替的文件把 keep 名额吃掉。
+    # 文件名保持 bk<id>-<时间戳>-pre-restore.dump.gz：这份留档要能被 prune 认出来
+    # （它占 keep 名额、按写入顺序排在末尾，之后随轮替一起淘汰）；写成
+    # bk<id>-pre-restore-... 不在 prune 的时间戳形状里，等于每次恢复都留下一个永不轮替的
+    # 文件把名额吃掉。
     pre = backup_runner._free_path(bk["id"], ts, "-pre-restore.dump.gz", BACKUP_DIR)
     # 恢复会 drop 目标库，先给当前内容做一份同目录的 dump 作为退路
     code = (await _sh_script(backup_runner.dump_cmd(f"su -s /bin/sh postgres -c 'pg_dump -Fc {db}'", pre)))["code"]
