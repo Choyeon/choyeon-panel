@@ -85,6 +85,25 @@ class TestRepoHygiene(unittest.TestCase):
             checked += 1
         self.assertGreaterEqual(checked, 10, "README 本地引用过少，正则可能已失配")
 
+    def test_readme_徽章链接形态(self):
+        """README 的 shields.io 徽章必须带 cacheSeconds，且查询串只能用 `?` 起头。
+
+        两个缺陷都在 GitHub 页面上才看得见：不带 `cacheSeconds` 时 camo 冷缓存会 504，
+        徽章整块裂图；把 `&cacheSeconds=…` 直接拼到 `/badge/label-message-color` 后面
+        （没有 `?`）时 shields 仍然回 200，但 `&…` 被当成颜色值的一部分解析失败，
+        徽章退化成默认灰——自定义色和缓存时长一起丢掉。
+        """
+        text = (REPO / "README.md").read_text(encoding="utf-8")
+        urls = re.findall(r"https://img\.shields\.io/[^\s\")]+", text)
+        self.assertGreaterEqual(len(urls), 7, f"README 徽章少于 7 个（读到 {len(urls)} 个），疑似徽章行被删")
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertIn("cacheSeconds=", url, "徽章没设 cacheSeconds，camo 冷缓存会 504 破图")
+                self.assertLessEqual(url.count("?"), 1, f"查询串里出现多个 `?`：{url}")
+                if "&" in url:
+                    self.assertIn("?", url, f"`&` 之前没有 `?`，{url} 的参数全部不会被解析")
+                    self.assertLess(url.index("?"), url.index("&"), "`&` 出现在第一个 `?` 之前，参数不会被解析")
+
     def test_版本号三处一致(self):
         sys.path.insert(0, str(REPO / "backend"))
         try:

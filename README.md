@@ -20,9 +20,9 @@
   <a href="https://github.com/Choyeon/choyeon-panel/releases"><img src="https://img.shields.io/github/v/release/Choyeon/choyeon-panel?label=release&logo=github&color=3d8eff&cacheSeconds=3600" alt="最新版本" /></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white&cacheSeconds=3600" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/Vue%203-TypeScript-42b883?logo=vuedotjs&logoColor=white&cacheSeconds=3600" alt="Vue 3 + TypeScript" />
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-9b7bff&cacheSeconds=3600" alt="MIT License" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-9b7bff?cacheSeconds=3600" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/Docker-not%20required-8fd460?logo=docker&logoColor=white&cacheSeconds=3600" alt="无需 Docker" />
-  <img src="https://img.shields.io/badge/OS-Ubuntu%20%C2%B7%20Debian%20%C2%B7%20Rocky%20%C2%B7%20Arch%20%C2%B7%20Alpine-5b5e6a&cacheSeconds=3600" alt="支持的发行版" />
+  <img src="https://img.shields.io/badge/OS-Ubuntu%20%C2%B7%20Debian%20%C2%B7%20Rocky%20%C2%B7%20Arch%20%C2%B7%20Alpine-5b5e6a?cacheSeconds=3600" alt="支持的发行版" />
 </p>
 
 > **原生 Linux 服务器管理面板 —— 一台机器一个入口，不依赖 Docker。**
@@ -265,7 +265,7 @@ cd web && npm run build                             # vue-tsc 类型检查 + vit
 bash scripts/healthcheck.sh                         # 线上健康检查
 ```
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `run_tests.py` 输出 **Ran 1044 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖与 `assets/banner.svg` 版式由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 上跑 5 个 job：Python 3.11/3.12 双版本后端测试（非 root runner）+ CLI 与启动冒烟、前端类型检查与构建、shellcheck、systemd unit 校验。当前 `run_tests.py` 输出 **Ran 1045 tests … OK**（增删测试后请同步这个数字），README 的引用/文件/版本号/`.env.example` 覆盖与 `assets/banner.svg` 版式由 `backend/tests/test_repo_hygiene.py` 在 CI 里持续把守。
 
 ---
 

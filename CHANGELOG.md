@@ -13,7 +13,8 @@
 - `backend/tests/test_repo_hygiene.py`：门面一致性回归测试（社区文件齐全、README 引用的本地文件存在、
   版本号三处一致、`assets/` 无孤儿且为合法 SVG、doctor 项数与文档口径一致、Issue 模板字段完整、
   `.env.example` 与 `config.py` 双向对账、banner 与 social 卡版式几何契约、
-  品牌标记四处同源且图标不使用 `<text>`、界面品牌位只走 `LogoMark`、入口图标链接与 `theme-color` 对账）
+  品牌标记四处同源且图标不使用 `<text>`、界面品牌位只走 `LogoMark`、徽章查询串形态与缓存时长、
+  入口图标链接与 `theme-color` 对账）
 - `backend/run_tests.py`：unittest 入口，把 `conftest.py` 只为 pytest 提供的两道保护补齐——
   强制忽略外部 `CP_DATA_DIR`（带着它跑 discover 会让各模块的 `setdefault` 失效、用例直接读写线上库），
   并把本轮临时目录收进会话根目录、退出时整块删除；`make test` 与 CI 的单元测试步骤改用它
@@ -31,7 +32,8 @@
 - `<meta name="theme-color">` 与真实底色对齐：`#101014`/`#f5f6fa` → `--cp-bg` 的
   `#2e313d`/`#f4f4f4`，运行时改为直接读取该 token，不再在 JS 里抄一份色值
 - README 的 9 枚 shields.io 徽章统一加 `cacheSeconds=3600`：GitHub 的图片代理冷缓存超时会把徽章
-  渲染成空白，缓存后重复加载不再破图
+  渲染成空白，缓存后重复加载不再破图；其中 `license` 与 `OS` 两枚原先被拼成 `…-颜色&cacheSeconds=…`
+  （没有 `?`），shields 仍回 200 但把 `&…` 当作颜色解析失败，自定义色和缓存时长一起丢失
 - 后端为 `.webmanifest` 注册 `application/manifest+json`：部分发行版的 MIME 表里没有这个扩展名，
   回落到 `application/octet-stream` 会让浏览器忽略清单
 - 文档与代码一致性核对：`choyeonctl doctor` 项数、CLI 参数表与 `choyeonctl schema --json` 对齐

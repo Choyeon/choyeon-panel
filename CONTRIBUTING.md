@@ -70,6 +70,7 @@ Windows 也能开发：systemd / journalctl / nginx 这类 Linux 专属能力会
 - 改完标记要按 16/32px 复核：浏览器里把 SVG 序列化成 `data:` URL 交给 `<img>`，画进 canvas 后按最近邻放大，肉眼确认曲线没有糊成噪点（16px 下描边宽度换算不足 1.5px 就会断）。
 - `web/public/` 下的 PNG/ICO 兜底图标由上述 canvas 路径导出（16/32/48、`apple-touch-icon` 180 直角满幅、PWA 192/512），`favicon.ico` 是 16+32+48 三张 PNG 拼的容器格式；不要手工维护，改 SVG 后重新导出。
 - `assets/social.svg` 是 GitHub「Settings → Social preview」的图源，导出 1200×600 PNG 上传；GitHub 会缩到 640×320 显示，正文最小字号不要低于 22。
+- README 的徽章走 GitHub 图片代理 `camo.githubusercontent.com`：**代理失败在 GitHub 页面表现为破图，直接 curl `img.shields.io` 却是 200**，所以要用浏览器打开仓库首页、数 `naturalWidth === 0` 的 `<img>` 才算验证。徽章 URL 的自定义参数一律从 `?` 起（`/badge/label-message-color?cacheSeconds=3600`）；`/badge/…-颜色&cacheSeconds=…` 这种写法 shields 仍回 200，但 `&…` 被并进颜色段解析失败，自定义色和缓存时长会一起丢掉——`test_readme_徽章链接形态` 拦的就是这个。
 
 ## 行为与沟通
 
