@@ -22,6 +22,33 @@ def _md_files():
     return [p for p in REPO.glob("*.md")]
 
 
+def _tag(el):
+    return el.tag.rsplit("}", 1)[-1]
+
+
+def _translate(el):
+    m = re.search(r"translate\(([^)]*)\)", el.get("transform") or "")
+    if not m:
+        return 0.0, 0.0
+    nums = [float(v) for v in re.split(r"[,\s]+", m.group(1).strip()) if v]
+    return nums[0], (nums[1] if len(nums) > 1 else 0.0)
+
+
+def _text_advance(text, size):
+    """无字体环境下的保守估算：CJK 按 1em，数字/大写 0.62em，其余拉丁 0.55em，再留 10% 渲染器余量。"""
+    units = 0.0
+    for ch in text:
+        if ord(ch) >= 0x2E80:
+            units += 1.0
+        elif ch == " ":
+            units += 0.28
+        elif ch.isupper() or ch.isdigit():
+            units += 0.62
+        else:
+            units += 0.55
+    return units * size * 1.1
+
+
 class TestRepoHygiene(unittest.TestCase):
     maxDiff = None
 
@@ -81,6 +108,86 @@ class TestRepoHygiene(unittest.TestCase):
                 self.assertTrue(root.tag.endswith("svg"), "根元素不是 <svg>")
                 self.assertIn("viewBox", root.attrib, "SVG 缺少 viewBox，GitHub 上会按原始尺寸裁切")
                 self.assertIn(f"assets/{svg.name}", corpus, f"{svg.name} 未被任何 markdown 文档引用（孤儿资产）")
+
+    def test_banner_版式不重叠不溢出(self):
+        """banner.svg 的三条几何契约：chips 行不压右侧卡片、标签不顶破胶囊、网格不贴画布边缘。
+
+        对应 GitHub 首页真实出现过的"排版错乱"。这里只做坐标断言（不依赖字体光栅化），
+        像素级复验配方见 CONTRIBUTING.md 的门面资产一节。
+        """
+        root = ET.fromstring((REPO / "assets/banner.svg").read_text(encoding="utf-8"))
+        vb = [float(v) for v in root.get("viewBox").split()]
+
+        chips = []
+        for band in root:
+            # chips 由一个不带 transform、统一设 font-size 的父组管理；带 transform 的是插图区块。
+            if _tag(band) != "g" or band.get("transform") or not band.get("font-size"):
+                continue
+            size = float(band.get("font-size"))
+            for chip in band:
+                if _tag(chip) != "g":
+                    continue
+                rect = next((c for c in chip if _tag(c) == "rect"), None)
+                text = next((c for c in chip if _tag(c) == "text"), None)
+                if rect is None or text is None or not (text.text or "").strip():
+                    continue
+                cx, cy = _translate(chip)
+                chips.append(
+                    {
+                        "label": text.text.strip(),
+                        "x": cx,
+                        "y": cy,
+                        "w": float(rect.get("width")),
+                        "h": float(rect.get("height")),
+                        "text_x": cx + float(text.get("x") or 0),
+                        "size": size,
+                    }
+                )
+        self.assertGreaterEqual(len(chips), 4, f"没抓到 banner 的 chips 行：{chips}")
+
+        cards = []
+        for group in root:
+            if _tag(group) != "g":
+                continue
+            gx, gy = _translate(group)
+            for rect in (c for c in group if _tag(c) == "rect"):
+                if float(rect.get("width") or 0) >= 300 and float(rect.get("height") or 0) >= 150:
+                    cards.append({"x": gx, "y": gy, "w": float(rect.get("width")), "h": float(rect.get("height"))})
+        self.assertTrue(cards, "banner 右侧卡片消失，版式已重构，请同步本测试")
+
+        for card in cards:
+            for ch in chips:
+                vertical = ch["y"] < card["y"] + card["h"] and card["y"] < ch["y"] + ch["h"]
+                if not vertical:
+                    continue
+                gap = card["x"] - (ch["x"] + ch["w"])
+                self.assertGreater(
+                    gap, 40, f"chip「{ch['label']}」右端距卡片左缘仅 {gap:.0f}px，GitHub 缩放后会被卡片压住"
+                )
+
+        for ch in chips:
+            self.assertGreaterEqual(ch["text_x"] - ch["x"], 8, f"chip「{ch['label']}」文字贴住胶囊左缘")
+            need = _text_advance(ch["label"], ch["size"])
+            slack = ch["x"] + ch["w"] - (ch["text_x"] + need)
+            self.assertGreaterEqual(slack, 8, f"chip「{ch['label']}」估算字宽 {need:.0f} 溢出胶囊（余量 {slack:.0f}）")
+
+        full_canvas = {
+            (r.get("fill") or "")[5:-1]
+            for r in root.iter()
+            if _tag(r) == "rect"
+            and (r.get("fill") or "").startswith("url(#")
+            and float(r.get("x") or 0) == 0.0
+            and float(r.get("y") or 0) == 0.0
+            and float(r.get("width") or 0) >= vb[2]
+            and float(r.get("height") or 0) >= vb[3]
+        }
+        for pat in (p for p in root.iter() if _tag(p) == "pattern"):
+            stroked_tile = any(_tag(c) == "path" and c.get("stroke") for c in pat)
+            if stroked_tile and not pat.get("patternTransform") and pat.get("id") in full_canvas:
+                self.fail(
+                    f"网格 pattern #{pat.get('id')} 从 (0,0) 平铺满画布且无 patternTransform，"
+                    "会在 banner 顶边/左边留下一条贴边亮线；请给平铺加半格偏移"
+                )
 
     def test_doctor_项数与文档口径一致(self):
         corpus = "\n".join(p.read_text(encoding="utf-8") for p in _md_files())

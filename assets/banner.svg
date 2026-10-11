@@ -16,7 +16,7 @@
       <stop offset="0" stop-color="#3d8eff"/>
       <stop offset="1" stop-color="#9b7bff"/>
     </linearGradient>
-    <pattern id="bn-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <pattern id="bn-grid" width="40" height="40" patternUnits="userSpaceOnUse" patternTransform="translate(20,20)">
       <path d="M40 0H0v40" fill="none" stroke="#ffffff" stroke-opacity=".035"/>
     </pattern>
   </defs>
@@ -52,24 +52,24 @@
   <!-- 特性 chips -->
   <g font-family="Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" font-size="19" fill="#c0c2cf">
     <g transform="translate(238,228)">
-      <rect width="188" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
-      <text x="20" y="26">应用一键部署</text>
+      <rect width="156" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
+      <text x="18" y="26">应用一键部署</text>
     </g>
-    <g transform="translate(440,228)">
-      <rect width="200" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
-      <text x="20" y="26">systemd 直管</text>
+    <g transform="translate(408,228)">
+      <rect width="158" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
+      <text x="18" y="26">systemd 直管</text>
     </g>
-    <g transform="translate(654,228)">
-      <rect width="176" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
-      <text x="20" y="26">nginx + SSL</text>
+    <g transform="translate(580,228)">
+      <rect width="150" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
+      <text x="18" y="26">nginx + SSL</text>
     </g>
-    <g transform="translate(844,228)">
-      <rect width="188" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
-      <text x="20" y="26">备份自动回滚</text>
+    <g transform="translate(744,228)">
+      <rect width="156" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
+      <text x="18" y="26">备份自动回滚</text>
     </g>
-    <g transform="translate(1046,228)">
-      <rect width="222" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
-      <text x="20" y="26">12 项安全自检</text>
+    <g transform="translate(914,228)">
+      <rect width="166" height="40" rx="20" fill="#fff" fill-opacity=".06" stroke="#5b5e6a"/>
+      <text x="18" y="26">12 项安全自检</text>
     </g>
   </g>
 

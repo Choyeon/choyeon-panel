@@ -58,6 +58,15 @@ Windows 也能开发：systemd / journalctl / nginx 这类 Linux 专属能力会
 
 版本号同时存在于 `backend/app/config.py` 的 `VERSION` 与 `web/package.json`，发版时两处一起改。流程：提交 → 打 `vX.Y.Z` tag → 推 tag → `.github/workflows/release.yml` 自动打包并建 Release（产物：源码包、前端 dist 包、`SHA256SUMS.txt`）。本地可用 `make release-dry` 先看产物对不对。
 
+## 门面资产（README 里的 SVG）
+
+`assets/*.svg` 是项目在 GitHub 上的第一屏，改动后请用真实渲染验证，不要只看 XML 语法：
+
+- `backend/tests/test_repo_hygiene.py` 已经把守三件事：资产合法且被文档引用、chips 行不压到右侧卡片、标签字宽不溢出胶囊（CJK 按 1em 的保守估算 + 10% 渲染器余量），以及平铺网格必须带 `patternTransform` 偏移——从 `(0,0)` 铺满画布的描边网格会在 banner 顶边留下一条贴边亮线。
+- 像素级复验：用浏览器直接打开 `.svg` 文件（1:1 渲染，不套 markdown 容器），把 `getBoundingClientRect()` 按 `viewBox.width / svgRect.width` 换算回画布坐标再判重叠；朴素 `getBBox()` 会忽略祖先 `transform`，量出来是假重叠。
+- CI 与多数开发机没有中文字体和 rsvg/inkscape，**不要**指望服务端把 SVG 转 PNG。
+- `preview-light.svg` 由 `preview-dark.svg` 按设计令牌替换生成（`sed` 逐色映射，保留 `id="pd-*"` 不动），改深色版必须同步生成浅色版。
+
 ## 行为与沟通
 
 - 项目讨论、Issue、提交信息默认中文；代码标识符用英文。
