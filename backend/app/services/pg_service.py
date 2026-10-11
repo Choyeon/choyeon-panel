@@ -8,7 +8,14 @@ from .. import database as dbm
 from ..util import kill_group, run
 from . import redis_client
 
-IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+# 标识符白名单。放开大小写是必须的：Prisma/TypeORM/Jira 这类应用建的就是
+# "UserProfile" 这种带引号的驼峰表，而 list_tables 会把它们列出来——只认小写的校验
+# 让浏览器里"看得见、点不开"，用户每次都在同一句"表名不合法"上撞墙。
+# 仍然收紧在 [A-Za-z0-9_]：库里没有空白、没有引号、没有 `:`/`/`（那会让 -d 的参数
+# 变成 libpq 连接串），也不会以下划线/数字开头以外的形态出现，落到 shell 字符串与
+# SQL 字面量里都无需再转义。超集（带空格或引号的表名）继续被拒，但那是少数派，
+# 报错文案会说明怎么办。
+IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 
 
 def is_ident(s: str) -> bool:
@@ -148,10 +155,13 @@ async def list_roles() -> list:
 
 async def create_db(name: str, owner: str | None = None):
     if not is_ident(name):
-        raise RuntimeError("数据库名只允许小写字母/数字/下划线")
+        raise RuntimeError("数据库名只允许字母/数字/下划线，且不能以数字开头")
     if owner and not is_ident(owner):
         raise RuntimeError("owner 名不合法")
-    await psql(f"CREATE DATABASE {name}" + (f" OWNER {owner}" if owner else "") + ";")
+    # 建库语句一律带引号：不带引号时 Postgres 会把标识符折叠成小写，
+    # 于是"建一个 Rosetta 库"实际建出 rosetta，而浏览器按用户输入的驼峰名去查，
+    # 永远报"库不存在"。引号里的名字与 pg_database 里存的、以及 -d 传的都是同一份。
+    await psql(f"CREATE DATABASE {_q(name)}" + (f" OWNER {_q(owner)}" if owner else "") + ";")
 
 
 async def drop_db(name: str):
@@ -159,19 +169,19 @@ async def drop_db(name: str):
         raise RuntimeError("数据库名不合法")
     if name in ("postgres", "template0"):
         raise RuntimeError("禁止删除该库")
-    await psql(f"DROP DATABASE {name};")
+    await psql(f"DROP DATABASE {_q(name)};")
 
 
 async def create_role(name: str, password: str):
     if not is_ident(name):
         raise RuntimeError("用户名不合法")
-    await psql(f"CREATE ROLE {name} LOGIN PASSWORD {_quote_pass(password)};")
+    await psql(f"CREATE ROLE {_q(name)} LOGIN PASSWORD {_quote_pass(password)};")
 
 
 async def set_role_password(name: str, password: str):
     if not is_ident(name):
         raise RuntimeError("用户名不合法")
-    await psql(f"ALTER ROLE {name} LOGIN PASSWORD {_quote_pass(password)};")
+    await psql(f"ALTER ROLE {_q(name)} LOGIN PASSWORD {_quote_pass(password)};")
 
 
 async def drop_role(name: str):
@@ -179,13 +189,13 @@ async def drop_role(name: str):
         raise RuntimeError("用户名不合法")
     if name == "postgres":
         raise RuntimeError("禁止删除 postgres")
-    await psql(f"DROP OWNED BY {name}; DROP ROLE {name};")
+    await psql(f"DROP OWNED BY {_q(name)}; DROP ROLE {_q(name)};")
 
 
 async def grant(name: str, db: str):
     if not is_ident(name) or not is_ident(db):
         raise RuntimeError("参数不合法")
-    await psql(f"GRANT ALL PRIVILEGES ON DATABASE {db} TO {name};")
+    await psql(f"GRANT ALL PRIVILEGES ON DATABASE {_q(db)} TO {_q(name)};")
 
 
 async def query_sql(sql: str, db: str | None = None) -> str:
@@ -398,7 +408,8 @@ async def table_meta(db: str, schema: str, table: str) -> dict:
     """列元数据 + 主键。既给前端渲染只读详情/编辑表单，也是写入时的列白名单。"""
     for v, what in ((db, "数据库"), (schema, "schema"), (table, "表")):
         if not is_ident(v):
-            raise RuntimeError(f"{what}名不合法（仅支持小写字母/数字/下划线）")
+            raise RuntimeError(f"{what}名不合法（仅支持字母、数字与下划线，且不能以数字开头；"
+                               "含空格或引号的表名请改用 SQL 控制台）")
     cols = await psql_json(_json_agg(
         "SELECT ordinal_position::int AS pos, column_name::text AS name,\n"
         "        data_type::text AS type, udt_name::text AS udt,\n"
@@ -407,7 +418,7 @@ async def table_meta(db: str, schema: str, table: str) -> dict:
         "          OR coalesce(is_identity,'NO')='YES'\n"
         "          OR coalesce(identity_generation,'')<>'') AS auto\n"
         f"   FROM information_schema.columns\n"
-        f"  WHERE table_schema='{schema}' AND table_name='{table}'",
+        f"  WHERE table_schema={_sql_lit(schema)} AND table_name={_sql_lit(table)}",
         "t.pos",
     ), db=db)
     pk = await psql_json(_json_agg(
@@ -415,7 +426,7 @@ async def table_meta(db: str, schema: str, table: str) -> dict:
         "   FROM pg_index i,\n"
         "        unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord),\n"
         "        pg_attribute a\n"
-        f"  WHERE i.indrelid = '{_q(schema)}.{_q(table)}'::regclass AND i.indisprimary\n"
+        f"  WHERE i.indrelid = {_sql_lit(_q(schema) + '.' + _q(table))}::regclass AND i.indisprimary\n"
         "    AND a.attrelid = i.indrelid AND a.attnum = k.attnum",
         "t.ord",
     ), db=db)
@@ -492,7 +503,7 @@ async def table_data(db: str, schema: str, table: str, page: int, size: int) -> 
         raise RuntimeError("读不到这张表的列信息")
     size = max(1, min(size, 200))
     page = max(1, page)
-    quoted = f'"{schema}"."{table}"'
+    quoted = f"{_q(schema)}.{_q(table)}"
     total = await _table_count(db, schema, table, quoted)
     # _ctid 随行返回：无主键的表靠它定位要改哪一行，前端只把它当标识、不渲染成列。
     # 有主键时显式 ORDER BY：不带排序的 LIMIT/OFFSET 翻页可能重复或漏行。
@@ -814,7 +825,16 @@ async def redis_key(k: str) -> dict:
 
 
 async def redis_del(keys: list) -> dict:
-    ks = [k for k in (str(x) for x in keys[:200] if x) if len(k) <= 512]
+    """按 key 名删除（UNLINK，不阻塞 Redis）。
+
+    每个 key 都过 `_check_key`，和详情/列表用同一份上限。旧写法在这里另写一个
+    `len(k) <= 512` 的过滤器，把 513~2048 的 key **静默丢掉**：用户在界面上一口气选 3 个
+    删，面板回 `deleted: 1` 却没有任何提示，那个长 key 其实压根没被送去执行——
+    而 SCAN 能把这种 key 列出来、详情接口也允许查看（上限 2048），等于"看得见、删不掉"。
+    """
+    if len(keys) > 200:
+        raise RuntimeError("一次最多删除 200 个 key")
+    ks = [_check_key(k) for k in keys]
     reps = await _rp([["UNLINK", k] for k in ks], ["int"] * len(ks))
     return {"deleted": sum(1 for r in reps if isinstance(r, int) and r > 0)}
 

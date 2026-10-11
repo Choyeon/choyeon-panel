@@ -359,8 +359,12 @@ class TestPgParsing(unittest.TestCase):
                         "必须独立进程组，超时时才能连 psql 子进程一起回收")
 
     def test_managed_statements_use_validated_names_only(self):
-        """标识符白名单不能被 JSON 改动带偏：非法名必须在拼 SQL 前拒绝。"""
-        for bad in ("a;DROP ROLE postgres", "B", 'q"uote', "a|b"):
+        """标识符白名单不能被 JSON 改动带偏：非法名必须在拼 SQL 前拒绝。
+
+        ⑤J 起大小写不再是拒绝理由（"UserProfile" 这种驼峰表必须能点开），所以这里只列
+        真正危险的形态：分隔符、空白、libpq 连接串形态（`-d` 会把它们当连接参数解析）。
+        """
+        for bad in ("a;DROP ROLE postgres", 'q"uote', "a|b", "b c", "1abc", "postgresql://evil/db"):
             with self.assertRaises(RuntimeError):
                 self._run(pg_service.drop_role(bad))
             with self.assertRaises(RuntimeError):

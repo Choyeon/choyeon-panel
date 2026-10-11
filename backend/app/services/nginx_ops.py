@@ -321,14 +321,56 @@ def analyze_config(content: str) -> dict:
     }
 
 
+def _enabled_targets(available_dir: str):
+    """sites-available 里**已启用**的文件 realpath 集合；判不出来时返回 None（=不过滤）。
+
+    没有 sites-enabled 目录说明本机不是 Debian 那套双目录布局，此时没有可靠判据，
+    把"查不了"当成"没生效"会让真正在服务的站点从列表里消失——那比多列一个文件严重得多。
+    """
+    enabled = os.path.join(os.path.dirname(available_dir.rstrip("/")), "sites-enabled")
+    if not os.path.isdir(enabled):
+        return None
+    try:
+        names = os.listdir(enabled)
+    except OSError:
+        return None
+    out = set()
+    for n in names:
+        with suppress(OSError):
+            out.add(os.path.realpath(f"{enabled}/{n}"))
+    return out
+
+
 def _iter_conf_files():
+    """列出 nginx 实际会加载的配置文件（不是"这些目录里躺着的所有文件"）。
+
+    Debian 的 nginx.conf 只 include `conf.d/*.conf` 与 `sites-enabled/*`，所以：
+    - conf.d 里不以 .conf 结尾的文件（手工备份、README）不在那个 glob 里；
+    - sites-available 只是存放处，一份配置只有被 sites-enabled 的符号链接指到才生效
+      （链接名可以跟文件名不同，所以比 realpath）。
+
+    之前按目录全量扫，把没启用的草稿也算成一个站点。本模块对这件事早有结论——
+    "拿 sites-available 里那些没启用的文件算会误报"（见 loaded_conf_paths 上方注释），
+    只是当时只把结论用在了写入路径上，读的一侧还是旧的。后果不只是列表多一行：
+    find_app_configs 会把"这个域名的配置"解析到那份不生效的文件上，用户在应用详情里
+    改它、nginx -t 通过、reload 成功，线上却一个字都没变，而 assert_app_conf 又按同一份
+    匹配结果放行——编辑就此指到幽灵文件上。
+    """
     for d in config.NGINX_CONF_DIRS:
+        base = os.path.basename(d.rstrip("/"))
+        enabled = _enabled_targets(d) if base == "sites-available" else None
         try:
             for f in os.listdir(d):
                 # 原子写留下的 `.面板.conf.<pid>.tmp` 正常不存在（写完就 rename），
                 # 只有进程被杀在中间才会残留；它不是 nginx 会 include 的文件，
                 # 也不该出现在站点列表里。
                 if f.endswith(".tmp"):
+                    continue
+                if base == "conf.d" and not f.endswith(".conf"):
+                    continue
+                if (enabled is not None
+                        and base == "sites-available"
+                        and os.path.realpath(f"{d}/{f}") not in enabled):
                     continue
                 yield f"{d}/{f}", f
         except OSError:
@@ -440,8 +482,9 @@ def assert_app_conf(path: str, port, domain) -> None:
     allowed = app_conf_paths(port, domain)
     if real not in allowed:
         raise RuntimeError(
-            "只能编辑该应用自己的 nginx 配置（按域名/反代端口匹配到的文件）。"
-            "若刚改过域名或端口，请回到本页重新加载配置列表后再编辑。"
+            "只能编辑该应用自己的 nginx 配置（按域名/反代端口匹配到的、且 nginx 实际加载的文件）。"
+            "若刚改过域名或端口，请回到本页重新加载配置列表后再编辑；"
+            "sites-available 里没有对应 sites-enabled 链接的文件不生效，也不会出现在可编辑列表里。"
         )
 
 

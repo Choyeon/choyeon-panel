@@ -56,6 +56,8 @@ def _scan_nginx_sites() -> list[dict]:
 
     复用 nginx_ops 的目录列举与 analyze_config：域名/端口/SSL/WebSocket/跳转的判定
     只应该有一份实现，否则面板两处对同一个文件的理解会分叉。
+    列举那一份现在只给 nginx **实际加载**的文件（见 _iter_conf_files），所以
+    sites-available 里未启用的草稿不会再被列成一个在线站点。
     """
     out = []
     for path, fname in nginx_ops._iter_conf_files():

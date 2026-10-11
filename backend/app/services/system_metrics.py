@@ -7,6 +7,7 @@
 import asyncio
 import os
 import platform
+import re
 import shutil
 import socket
 import time
@@ -52,6 +53,20 @@ def _read(path: str) -> str:
         return f.read()
 
 
+def _is_whole_disk(name: str) -> bool:
+    """这块是不是整盘（而不是分区）。整盘才代表设备真实吞吐，分区加起来会重复计数。
+
+    命名规则各不相同，光看"末尾是不是数字"会把 NVMe/EMMC 的整盘自己滤掉：
+    - sda / vda / xvda 是整盘，sda1 / xvda1 是分区；
+    - nvme0n1 是整盘（末尾就是数字！），nvme0n1p1 才是分区；
+    - mmcblk0 是整盘，mmcblk0p1 才是分区。
+    """
+    if name.startswith(("nvme", "mmcblk")):
+        # 前缀之后的部分形如 `0n1` / `0`；出现 `p<数字>` 尾巴就是分区
+        return not re.search(r"p\d+$", name)
+    return not name[-1].isdigit()
+
+
 def _proc_raw() -> dict:
     """无 psutil 时的 /proc 兜底（仍在线程里跑，不碰事件循环）。"""
     stat_lines = [ln for ln in _read("/proc/stat").split("\n") if ln]
@@ -90,10 +105,16 @@ def _proc_raw() -> dict:
         p = line.split()
         if len(p) < 10 or not p[2].startswith(("sd", "nvme", "vd", "xvd", "mmcblk")):
             continue
-        if "." in p[2] or p[2][-1].isdigit():  # 只要整盘，不要分区
+        if not _is_whole_disk(p[2]):
             continue
-        io_r += int(p[6]) * 512
-        io_w += int(p[10]) * 512
+        # 字段序号是 kernel 的 Documentation/admin-guide/iostats.rst：
+        # 4=读次数 5=读扇区 6=读耗时ms 7=写次数 8=写合并 9=写扇区 10=写耗时ms。
+        # 这里要的是**扇区**（×512 才是字节），拿 6/10 就把毫秒当成了数据量。本机实测：
+        # sda 的 p[9]*512 = 42775365120，与 psutil.disk_io_counters().write_bytes 逐位相同，
+        # 而 p[6]*512 只有 1.5 亿；读侧同理（psutil 的 read_bytes 多出的 748 扇区是光驱 sr0，
+        # 面板按 sd/nvme/vd/xvd/mmcblk 计，本来就不把光驱算进磁盘吞吐）。
+        io_r += int(p[5]) * 512
+        io_w += int(p[9]) * 512
     try:
         load = [round(x, 2) for x in os.getloadavg()]
     except OSError:

@@ -19,6 +19,14 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}@[A-Za-z0-9-]{1,63
 IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{2,200}$")
 CRED_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/@:\s]*)(:[^@/\s]*)?@")
+# 键值形态的口令：`password=…`（psql/libpq 的失败正文、mysqldump 命令行）、
+# `NEXTAUTH_SECRET=…`（部署日志里回显的 env）、`token: …`（应用自己打的日志）。
+# 键名允许带前缀（DB_PASSWORD、csrf_token），但必须整词结尾，`secretary=…` 这类普通词不算。
+# 分隔符原样保留，只把值换成 ***。
+CRED_KV_RE = re.compile(r"(?i)\b([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key))\b(\s*[=:]\s*)(\S+)")
+# JWT 形态的口令只能按形态认：`Authorization: Bearer eyJhbGci…` 里没有任何键名。
+# 长度下限 12 是把 "bearer 12345" 这类正常文本放过去。
+CRED_BEARER_RE = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._~+/=-]{12,})")
 
 
 def is_name(s): return bool(NAME_RE.match(s or ""))
@@ -45,15 +53,21 @@ def sub_port(text, old, new):
 
 
 def redact_creds(s):
-    """打码 URL 里的 `user:password@` 凭据段，只保留用户名。
+    """打码文本里能看到的凭据：URL 的 `user:password@`、`password=…` 这类键值、`Bearer …`。
 
     仓库地址允许写成 `https://user:token@host/x.git`（GIT_URL_RE 放行），
     部署日志会把整条 `git clone` 命令原文落库，而日志与列表接口对只读账号开放，
     所以凭据既不能落库、也不能出接口。仅用户名（无 `:`）不算密钥，原样保留。
+
+    键值与 Bearer 两支是给**所有**日志出口用的（journal 检索能把整机日志读出来，
+    定时任务与部署日志原样回显），所以放在这一处而不是各接口自己想起来才遮：
+    `pg_dump` 失败正文里的 `password=…`、应用 env 回显里的 `*_SECRET=…` 以前是原样出接口的。
     """
     if not s:
         return s
-    return CRED_URL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}:***@" if m.group(3) else m.group(0), s)
+    s = CRED_URL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}:***@" if m.group(3) else m.group(0), s)
+    s = CRED_KV_RE.sub(lambda m: m.group(1) + m.group(2) + "***", s)
+    return CRED_BEARER_RE.sub(lambda m: m.group(1) + "***", s)
 
 
 def clean_abs_path(p, what="路径"):

@@ -17,8 +17,7 @@ from .util import redact_creds
 
 # /root/a/b、/etc/nginx/conf.d/x.conf 这类绝对路径（至少两段，避免把 "/ " 误伤）
 _ABS_PATH = re.compile(r"(?<![\w.])/(?:[A-Za-z0-9_.+:@-]+/)+[A-Za-z0-9_.+:@-]*")
-# psycopg/redis 失败信息里的 user=... password=...
-_KV_SECRET = re.compile(r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key)\b\s*=\s*\S+")
+# 键值形态的口令（password=… / Bearer …）由 util.redact_creds 统一负责，这里不再各写一份
 _MAX = 300
 
 
@@ -67,7 +66,7 @@ def public_message(exc: BaseException, *, fallback: str = "操作失败，请查
         return fallback
     else:
         text = str(exc) or fallback
-    text = _KV_SECRET.sub(r"\1=***", redact_creds(text))
+    text = redact_creds(text)
     text = _ABS_PATH.sub("<路径>", text).strip()
     return text[:_MAX] or fallback
 
