@@ -1074,7 +1074,7 @@ class TestScryptOffLoop(unittest.IsolatedAsyncioTestCase):
         def slow_hash(pw):
             inflight.append(1)
             peak.append(len(inflight))
-            time.sleep(0.02)
+            time.sleep(0.15)
             inflight.pop()
             return f"fake:{pw}"
 
@@ -1096,8 +1096,10 @@ class TestScryptOffLoop(unittest.IsolatedAsyncioTestCase):
         await tick_task
 
         self.assertLessEqual(max(peak), sec._SCRYPT_CONCURRENCY, "scrypt 并发没压住，内存会被顶飞")
-        # 事件循环最大间隔不该被 8 次哈希拉长（阈值远大于 5ms 调度抖动，小于一次哈希）
-        self.assertLess(max(ticks), 0.02, "哈希仍在事件循环上跑")
+        # 阈值要同时满足两件事：明显小于一次哈希（跑在循环上时间隔就是 150ms 量级），
+        # 又明显大于调度抖动。旧写法用 20ms 假哈希 + 20ms 阈值，两者相等，全量跑起来
+        # 被同机负载偶发顶到 20ms 以上就红一条（2026-10-11 实测到一次），单独跑又总是绿。
+        self.assertLess(max(ticks), 0.06, "哈希仍在事件循环上跑")
 
     def test_sync_helpers_still_available(self):
         # CLI（choyeonctl user create）是同步进程，走的是 hash_pass/check_pass
