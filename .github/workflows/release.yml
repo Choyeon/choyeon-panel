@@ -37,13 +37,19 @@ jobs:
         run: |
           VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${VERSION#v}"
+          # 产物先写到工作区外：tar 读 "." 时，目录里新增的归档文件会让 tar
+          # 判定 "." 已变化而以退出码 1 失败（归档内容本身没问题但步骤挂掉）
+          OUT="${{ runner.temp }}/rel-assets"
+          mkdir -p "$OUT"
           tar --exclude='.git' --exclude='node_modules' --exclude='.venv' \
               --exclude='data' --exclude='web/dist' \
-              -czf "choyeon-panel-${VERSION}.tar.gz" \
+              -czf "$OUT/choyeon-panel-${VERSION}.tar.gz" \
               --transform "s#^#choyeon-panel/#" .
           # 前端构建产物单独打包，供只需替换静态资源的场景使用
-          tar -czf "choyeon-panel-web-${VERSION}.tar.gz" -C web dist
-          sha256sum choyeon-panel-*.tar.gz > SHA256SUMS.txt
+          tar -czf "$OUT/choyeon-panel-web-${VERSION}.tar.gz" -C web dist
+          # 校验和用文件基名，用户在工作区里 sha256sum -c 才能对上
+          ( cd "$OUT" && sha256sum choyeon-panel-*.tar.gz ) > SHA256SUMS.txt
+          mv "$OUT"/choyeon-panel-*.tar.gz .
 
       - uses: actions/upload-artifact@v4
         with:
