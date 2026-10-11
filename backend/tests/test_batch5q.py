@@ -35,6 +35,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
+os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_batch5q_data_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch5q_roots_"))
 from app import backup_runner as R
 from app import config
 from app import database as dbm

@@ -18,6 +18,7 @@ import zipfile
 from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_up_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_files_upload_roots_"))
 
 from app import config, errors  # noqa: E402
 from app import database as dbm  # noqa: E402

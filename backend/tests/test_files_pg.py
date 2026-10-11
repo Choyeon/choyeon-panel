@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_files_pg_roots_"))
 
 from app.services import files_service, pg_service  # noqa: E402
 

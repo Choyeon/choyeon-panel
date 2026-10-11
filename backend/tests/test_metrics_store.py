@@ -14,6 +14,7 @@ from unittest import mock
 from urllib.parse import quote
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_metrics_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_metrics_store_roots_"))
 
 from fastapi import FastAPI  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402

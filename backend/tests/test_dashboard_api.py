@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_dash_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_dashboard_api_roots_"))
 
 from fastapi import FastAPI  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402

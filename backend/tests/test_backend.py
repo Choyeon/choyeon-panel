@@ -7,8 +7,9 @@ from pathlib import Path
 import jwt
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_backend_roots_"))
 
-from app import security  # noqa: E402
+from app import config, security  # noqa: E402
 from app.services import apps_service, nginx_ops  # noqa: E402
 from app.services.files_service import safe_path  # noqa: E402
 from app.util import is_domain, is_git_url, is_ident, is_name, is_port, is_unit, sh_escape  # noqa: E402
@@ -136,13 +137,15 @@ server {
 
 class TestSafePath(unittest.TestCase):
     def test_allowed(self):
-        self.assertTrue(safe_path("/root/www/anything").startswith("/root/www/"))
+        root = config.FILE_ROOTS[0].rstrip("/")
+        self.assertTrue(safe_path(root + "/anything").startswith(root + "/"))
 
     def test_escape_denied(self):
+        root = config.FILE_ROOTS[0].rstrip("/")
         with self.assertRaises(RuntimeError):
             safe_path("/etc/passwd")
         with self.assertRaises(RuntimeError):
-            safe_path("/root/www/../../etc/shadow")
+            safe_path(root + "/../../etc/shadow")
 
 
 class TestAuth(unittest.TestCase):

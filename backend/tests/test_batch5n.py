@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_batch5n_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch5n_roots_"))
 
 import unittest  # noqa: E402
 

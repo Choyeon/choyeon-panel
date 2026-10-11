@@ -23,6 +23,7 @@ import tempfile
 import time
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_apps_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_apps_service_roots_"))
 
 import unittest  # noqa: E402
 from pathlib import Path  # noqa: E402

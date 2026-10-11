@@ -6,6 +6,8 @@ ETag 来验证会整份重传）。运行时压缩不能用于 /api 的 text/eve
 只发生在构建期（web/scripts/gzip-assets.mjs），这里只测"读哪份文件"。
 """
 import gzip
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,6 +15,8 @@ from tempfile import TemporaryDirectory
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_static_gzip_data_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_static_gzip_roots_"))
 from app.main import DistFiles
 
 RAW = b"RAW-JAVASCRIPT-" * 400

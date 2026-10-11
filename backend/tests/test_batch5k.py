@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch5k_roots_"))
 
 import unittest
 

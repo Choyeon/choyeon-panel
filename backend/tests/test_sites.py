@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_sites_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_sites_roots_"))
 
 from app import config  # noqa: E402
 from app import database as dbm  # noqa: E402

@@ -11,9 +11,13 @@
 """
 import asyncio
 import json
+import os
+import tempfile
 import unittest
 from unittest import mock
 
+os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_batch5d_data_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch5d_roots_"))
 from app import config, deps, security
 from app.deps import AuthMiddleware, BodyCapMiddleware, cap_for
 

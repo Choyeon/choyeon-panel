@@ -32,6 +32,7 @@ import tempfile
 import time
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_unit_esc_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_unit_escaping_roots_"))
 
 import unittest  # noqa: E402
 from unittest import mock  # noqa: E402

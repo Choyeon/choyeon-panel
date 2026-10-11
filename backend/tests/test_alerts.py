@@ -21,6 +21,7 @@ import sqlite3
 import tempfile
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_alerts_roots_"))
 
 import unittest
 from unittest import mock

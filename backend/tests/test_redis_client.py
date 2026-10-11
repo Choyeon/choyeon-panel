@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_redis_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_redis_client_roots_"))
 
 from app.services import pg_service, redis_client  # noqa: E402
 from app.services.redis_client import MORE, RedisConnectionError, RedisError, RespParser  # noqa: E402

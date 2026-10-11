@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_b5i_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch5i_roots_"))
 
 import unittest
 from unittest import mock

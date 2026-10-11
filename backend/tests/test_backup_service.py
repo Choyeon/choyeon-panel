@@ -23,6 +23,7 @@ import tempfile
 import threading
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_bk_ut_"))
+os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_backup_service_roots_"))
 
 import unittest  # noqa: E402
 from unittest import mock  # noqa: E402
