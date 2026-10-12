@@ -15,7 +15,7 @@ import { useCachedFetch, invalidateCache } from '../composables/useCachedFetch';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
 import { useTableHeight } from '../composables/useTableHeight';
 import { useCopy } from '../composables/useCopy';
-import { fmtDateTime } from '../composables/useFormat';
+import { fmtBytes, fmtDateTime, fmtDuration } from '../composables/useFormat';
 
 const msg = useMessage();
 const isAdmin = getRole() === 'admin';
@@ -375,6 +375,15 @@ const bigFileColumns: any[] = [
     render: (r: any) => h('span', { class: 'mono' }, r.bytes_human),
   },
 ];
+/**
+ * 行数装不满一页就不挂分页条：空表底下孤零零一个「1」既不是分页也不是导航，
+ * 只是噪声（判词表在「没有异常」时也会挂出这个 1）。返回的必须是传进来的
+ * 那个对象本身或 false，不能在模板里现造新对象——那样 naive 每次重渲染都会
+ * 把用户已经翻到的页码重置回第一页。
+ */
+function pager(count: number, cfg: { pageSize: number }) {
+  return count > cfg.pageSize ? cfg : false;
+}
 const storagePaging = { pageSize: 10, showSizePicker: false, showQuickJumper: false };
 
 const hotPct = (v: any) => typeof v === 'number' && v >= 90;
@@ -518,6 +527,337 @@ const keyColumns: any[] = [
   },
 ];
 
+// 内存压力也是只读对账（vmstat 双快照测速率 + PSI + cgroup v2 单元榜 + 按 RSS 的进程榜，服务端 90 秒 TTL）。
+// 概览那张内存图回答的是「此刻占了多少」，这一页回答管理员紧接着要问的三句话：这台机器有没有因为缺内存而变慢
+// （直接回收、换页、PSI 停顿在总量图上完全隐身）、内存被谁拿着（单元榜把进程认领回面板管理的应用）、内核有没有
+// 已经杀过进程（vmstat 的 oom_kill 是自启动以来的一个整数，非 0 才去 kernel 日志点受害者）。
+// 这一页一个修复动作都没有：给某个服务加 MemoryMax、加到多少，是只有管理员知道业务峰值的容量决策，面板替它写进
+// unit 不是自动化，是赌博。处置一律是能复制走的只读命令。
+const forceSample = ref(false);
+const sampling = ref(false);
+const {
+  data: memData, error: memError, loading: memLoading, refreshing: memRefreshing, refresh: refreshMemory,
+} = useCachedFetch<any>({
+  key: () => 'memory',
+  loader: () => api.memory(forceSample.value),
+  maxAge: 60000,
+});
+watch(memError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+async function resample() {
+  forceSample.value = true;
+  sampling.value = true;
+  try {
+    await refreshMemory();
+  } catch {
+    /* 失败已经通过 memError 走上面的 toast */
+  } finally {
+    forceSample.value = false;
+    sampling.value = false;
+  }
+}
+
+const memBusy = computed(() => memLoading.value || memRefreshing.value || sampling.value);
+const memInfo = computed<any>(() => memData.value?.mem ?? {});
+const pressInfo = computed<any>(() => memData.value?.pressure ?? {});
+const rateInfo = computed<any>(() => memData.value?.rates ?? {});
+const tunInfo = computed<any>(() => memData.value?.tunables ?? {});
+const unitBlock = computed<any>(() => memData.value?.units ?? {});
+const procBlock = computed<any>(() => memData.value?.procs ?? {});
+const oomBlock = computed<any>(() => memData.value?.oom ?? {});
+const unitRows = computed<any[]>(() => unitBlock.value.items ?? []);
+const procRows = computed<any[]>(() => procBlock.value.items ?? []);
+const oomRows = computed<any[]>(() => oomBlock.value.events ?? []);
+const swapDevs = computed<any[]>(() => memInfo.value.devices ?? []);
+const memFindings = computed<any[]>(() => memData.value?.findings ?? []);
+const memCounts = computed(() => memData.value?.counts ?? { risk: 0, warn: 0, info: 0, procs: 0, units: 0 });
+const unitKills = computed<Record<string, number>>(() => oomBlock.value.unit_kills ?? {});
+const killTotal = computed(() => Number(oomBlock.value.kernel_total) || 0);
+// OOM 不设阈值：内核计数是一个整数，非 0 就是要紧，没有「杀得还不多」这一档。
+const memKilled = computed(() => killTotal.value > 0 || Object.keys(unitKills.value).length > 0);
+// 「知道就好」那档（顶到上限被拦过、承诺超过启发式上限）默认收着，和存储那页同一条理由：
+// 一进来先看见一堆无关痛痒的行，真正的风险反而被埋在下面。
+const memOnlySerious = ref(true);
+const memShownFindings = computed(() => (memOnlySerious.value
+  ? memFindings.value.filter((f: any) => f.severity !== 'info')
+  : memFindings.value));
+const memInfoFindings = computed(() => memFindings.value.filter((f: any) => f.severity === 'info'));
+
+// chip 与条子的深浅一律跟着后端判词走，前端不再抄一遍 MEM_RISK_PCT/CAP_RISK_PCT：阈值只改在后端时，
+// 颜色不会和判词各说一套。
+const sevOfFinding = (id: string) => {
+  const hit = memFindings.value.find(
+    (f: any) => String(f.id) === id || String(f.id).startsWith(`${id}:`),
+  );
+  return hit ? String(hit.severity) : '';
+};
+const tone = (sev: string) => (sev === 'risk' ? 'err' : sev === 'warn' ? 'warn' : '');
+const usedTone = computed(() => tone(sevOfFinding('mem-used')));
+const swapTone = computed(() => tone(sevOfFinding('swap-full')));
+const psiTone = computed(() => tone(sevOfFinding('psi-active')));
+const rateTone = computed(() => tone(sevOfFinding('direct-reclaim')) || tone(sevOfFinding('swapping'))
+  || tone(sevOfFinding('commit')));
+const unitTone = (unit: string) => sevOfFinding(`cap:${unit}`) || sevOfFinding(`pids:${unit}`);
+
+// 测不到就是「没采到」，不是 0：0 会被读成「没有在换页」，而真实情况是这个窗口没取到数（计数器倒退、
+// 读不到 /proc/vmstat、或者 refresh 之外的路径压根没开窗）。
+const rateNum = (v: unknown, suffix = '') => (typeof v === 'number' ? `${v}${suffix}` : '没采到');
+const rateBytes = (v: unknown) => (typeof v === 'number' ? `${fmtBytes(v)}/秒` : '没采到');
+const avgOf = (k: string) => {
+  const v = (pressInfo.value.some || {})[k];
+  return typeof v === 'number' ? v.toFixed(1) : '—';
+};
+const psiStopped = computed(() => {
+  const t = Number((pressInfo.value.some || {}).total) || 0;
+  return t > 0 ? fmtDuration(t / 1e6) : '';
+});
+const hostTotal = computed(() => Number(memInfo.value.total) || 0);
+const pctOfTotal = (n: unknown) => (typeof n === 'number' && hostTotal.value > 0
+  ? Math.round((n * 100) / hostTotal.value)
+  : null);
+
+const UNIT_KIND: Record<string, string> = {
+  service: '服务单元',
+  scope: '一次性会话（登录会话、手工起的进程都算）',
+  slice: '分组（占用已含组内所有子单元）',
+  other: '认不出后缀',
+  none: '读不到 cgroup',
+  root: '根 cgroup',
+};
+
+const memAlertText = computed(() => {
+  const d = memData.value;
+  if (!d) return '';
+  if (!d.mem?.ok) return `读不到 /proc/meminfo（${d.mem?.reason || '原因未知'}），这一页的数字都不可信。`;
+  const c = d.counts || {};
+  if (c.risk) {
+    const first = (d.findings || []).find((f: any) => f.severity === 'risk');
+    return `${c.risk} 项要紧：${first ? first.title : ''}。面板不会替你 kill 进程，也不会替你改 unit 的上限，`
+      + '下面每条处置都是只读命令，要你自己 SSH 进去执行。';
+  }
+  if (c.warn) return `没有要紧项，另有 ${c.warn} 项值得处理。`;
+  const p = d.pressure || {};
+  const psi = p.ok
+    ? `PSI some 近 10 秒 ${avgOf('avg10')}%`
+    : `压力指数读不到（${p.reason || '原因未知'}）`;
+  const r = d.rates || {};
+  const rate = r.ok
+    ? `${r.secs} 秒窗口里直接回收 ${rateNum(r.direct_reclaim)} 页/秒、换出 ${rateBytes(r.swap_out)}`
+    : '速率窗口没采到，这几项不作数';
+  return `已用 ${d.mem.used_pct}%（还能腾出 ${fmtBytes(d.mem.available)}），${psi}，${rate}；`
+    + '内核没有 OOM 杀过进程，也没有单元被自己的上限杀掉。';
+});
+const memAlert = computed(() => {
+  const d = memData.value;
+  if (!d) return null;
+  const c = memCounts.value;
+  const type = !d.mem?.ok || c.risk ? ('error' as const) : c.warn ? ('warning' as const) : ('success' as const);
+  return { type, text: memAlertText.value };
+});
+
+const memPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: false };
+
+const unitColumns: any[] = [
+  {
+    title: '单元', key: 'unit', minWidth: 250,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('div', { class: 'cell-name mono ls-wrap mm-break' }, [
+        r.unit,
+        r.self ? h('span', { class: 'mm-tag self' }, '面板自己') : null,
+        r.app ? h('span', { class: 'mm-tag app' }, r.app) : null,
+      ]),
+      h('div', { class: 'cell-sub' }, UNIT_KIND[r.kind] || '认不出后缀'),
+    ]),
+  },
+  {
+    title: '此刻占用', key: 'current', width: 150,
+    render: (r: any) => (r.readable
+      ? h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono' }, fmtBytes(r.current)),
+        h('div', { class: 'st-bar' }, [h('i', { style: barStyle(r.pct_of_host) })]),
+        h('div', { class: 'cell-sub' },
+          typeof r.pct_of_host === 'number' ? `整机 ${r.pct_of_host}%` : '整机总量读不到'),
+      ])
+      // 读不到不折成 0：0 会被读成「这个单元没占内存」，而真实情况是它刚退出、或者压根不上报。
+      : h('span', { class: 'cell-sub' }, '读不到 memory.current')),
+  },
+  {
+    title: '自己声明的上限', key: 'cap', width: 170,
+    render: (r: any) => {
+      if (!r.max) {
+        return h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name mono' }, '没设上限'),
+          h('div', { class: 'cell-sub' }, r.high ? `只有软上限 ${fmtBytes(r.high)}` : '顶到整机才处理'),
+        ]);
+      }
+      const hot = unitTone(r.unit) === 'risk';
+      return h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono' }, fmtBytes(r.max)),
+        h('div', { class: 'st-bar' }, [h('i', { class: hot ? 'hot' : '', style: barStyle(r.pct_of_cap) })]),
+        h('div', { class: 'cell-sub' },
+          typeof r.pct_of_cap === 'number' ? `用到 ${r.pct_of_cap}%` : '整机总量读不到，算不出百分比'),
+      ]);
+    },
+  },
+  {
+    title: '峰值', key: 'peak', width: 116,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono' }, r.peak ? fmtBytes(r.peak) : '—'),
+      ...(r.peak ? [h('div', { class: 'cell-sub' }, '自单元启动以来')] : []),
+    ]),
+  },
+  {
+    title: '线程', key: 'pids', width: 124,
+    render: (r: any) => {
+      if (typeof r.pids !== 'number') return h('span', { class: 'cell-sub' }, '—');
+      const hot = sevOfFinding(`pids:${r.unit}`) === 'risk';
+      return h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono' }, `${r.pids} / ${r.pids_max ?? '不限'}`),
+        ...(typeof r.pct_of_pids === 'number'
+          ? [h('div', { class: 'st-bar' }, [h('i', { class: hot ? 'hot' : '', style: barStyle(r.pct_of_pids) })]),
+            h('div', { class: 'cell-sub' }, `TasksMax 用了 ${r.pct_of_pids}%`)]
+          : []),
+      ]);
+    },
+  },
+  {
+    title: '这一行的可信度', key: 'marks', minWidth: 236,
+    render: (r: any) => {
+      const marks: { t: string; bad: boolean }[] = [];
+      if (!r.readable) marks.push({ t: '没有内存统计：刚退出或该单元不上报', bad: true });
+      if (r.kind === 'slice') marks.push({ t: '分组，别把它和自己的子单元再加一次', bad: false });
+      if (r.kind === 'scope') marks.push({ t: '不是面板管的服务，内存是真占了', bad: false });
+      if (r.self) marks.push({ t: '这一行是面板自己：被上限杀掉就是整个面板没了', bad: false });
+      const killed = Number((r.events || {}).oom_kill) || Number(unitKills.value[r.unit]) || 0;
+      if (killed) marks.push({ t: `被自己的上限杀过 ${killed} 次`, bad: true });
+      const throttled = Number((r.events || {}).max) || 0;
+      if (throttled) marks.push({ t: `顶到上限被拦过 ${throttled} 次`, bad: false });
+      if (!marks.length) return h('span', { class: 'cell-sub' }, '常规服务单元');
+      return h('div', { class: 'st-marks' }, marks.map((m) =>
+        h('span', { class: m.bad ? 'st-mark' : 'st-mark mute' }, m.t)));
+    },
+  },
+];
+
+const procColumns: any[] = [
+  {
+    title: '进程', key: 'comm', minWidth: 210,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name ls-wrap' }, r.comm),
+      h('div', { class: 'cell-sub mono' }, `pid ${r.pid}`),
+    ]),
+  },
+  {
+    title: 'RSS', key: 'rss', width: 116,
+    render: (r: any) => h('span', { class: 'mono' }, fmtBytes(r.rss)),
+  },
+  {
+    title: '占整机', key: 'pct', width: 130,
+    render: (r: any) => {
+      const pct = pctOfTotal(r.rss);
+      return h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono' }, typeof pct === 'number' ? `${pct}%` : '—'),
+        ...(typeof pct === 'number'
+          ? [h('div', { class: 'st-bar' }, [h('i', { style: barStyle(pct) })])]
+          : []),
+      ]);
+    },
+  },
+  {
+    // 归不到单元是常态（容器外的守护进程、内核工作队列、非 systemd 拉起来的进程），
+    // 如实写出来比硬凑一个名字有用：这一列的用途是判断「能不能顺着单元找回应用」。
+    title: '归属', key: 'unit', minWidth: 260,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'mono ls-wrap mm-break' }, r.unit || (r.kind === 'root' ? '根 cgroup' : '归不到单元')),
+      ...(r.app
+        ? [h('div', { class: 'cell-sub' }, `面板管理的应用：${r.app}`)]
+        : r.unit
+          ? [h('div', { class: 'cell-sub' }, UNIT_KIND[r.kind] || '认不出后缀')]
+          : [h('div', { class: 'cell-sub' }, '按 cgroup 找不到对应单元')]),
+    ]),
+  },
+];
+
+const oomColumns: any[] = [
+  {
+    title: '时间', key: 'at', width: 150,
+    render: (r: any) => h('span', { class: 'mono ls-wrap' }, r.at || '—'),
+  },
+  {
+    title: '受害者', key: 'who', minWidth: 190,
+    render: (r: any) => (r.comm
+      ? h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name ls-wrap' }, r.comm),
+        h('div', { class: 'cell-sub mono' }, `pid ${r.pid ?? '?'}`),
+      ])
+      : h('span', { class: 'cell-sub' }, '这行认不出进程名，只留原文')),
+  },
+  {
+    title: 'kernel 日志原文', key: 'line', minWidth: 320,
+    render: (r: any) => h('div', { class: 'cell-sub mono ls-wrap mm-break' }, r.line || '—'),
+  },
+];
+
+const swapColumns: any[] = [
+  {
+    title: '设备', key: 'name', minWidth: 220,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono ls-wrap mm-break' }, r.name),
+      h('div', { class: 'cell-sub' }, `${r.type || '?'} · 优先级 ${r.priority ?? '?'}`),
+    ]),
+  },
+  {
+    title: '总量', key: 'total', width: 110,
+    render: (r: any) => h('span', { class: 'mono' }, fmtBytes(r.total)),
+  },
+  {
+    title: '已用', key: 'used', width: 150,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono' }, `${fmtBytes(r.used)}（${r.used_pct ?? 0}%）`),
+      h('div', { class: 'st-bar' }, [h('i', { class: swapTone.value === 'err' ? 'hot' : '', style: barStyle(r.used_pct) })]),
+    ]),
+  },
+];
+
+const memFindingColumns: any[] = [
+  {
+    title: '判词', key: 'title', minWidth: 300,
+    render: (r: any) =>
+      h('div', { class: 'cell-main' }, [
+        h('span', { class: 'cell-ico' }, [
+          h(NIcon, {
+            component: icons[sevOf(r.severity).icon],
+            size: 17,
+            color: r.severity === 'risk' ? 'var(--cp-err)' : r.severity === 'warn' ? 'var(--cp-warn)' : 'var(--cp-text-mute)',
+          }),
+        ]),
+        h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name ls-wrap' }, r.title),
+          h('div', { class: 'cell-sub ls-wrap' }, r.detail),
+        ]),
+      ]),
+  },
+  {
+    title: '档位', key: 'severity', width: 96,
+    render: (r: any) => h(NTag, { size: 'small', type: sevOf(r.severity).type, bordered: false }, () => sevOf(r.severity).text),
+  },
+  {
+    // 和存储那页一样给复制按钮：这里的 fix 全是只读命令（systemctl status、cat memory.events），
+    // 复制走不会出事。面板自己不去执行任何一条——加上限、重启服务都是容量决策，不是维修动作。
+    title: '处置', key: 'fix', minWidth: 300,
+    render: (r: any) => (r.fix
+      ? h('div', { class: 'st-fix' }, [
+        h('code', { class: 'mono st-fix-cmd' }, r.fix),
+        h(NButton, {
+          size: 'tiny',
+          quaternary: true,
+          onClick: () => copy(r.fix, '已复制：面板不会替你执行，请 SSH 进去自己跑'),
+        }, { default: () => '复制', icon: () => h(NIcon, { component: icons.CopyOutline, size: 13 }) }),
+      ])
+      : h('span', { class: 'cell-sub' }, '这一条不用动手')),
+  },
+];
+
 const allPorts = computed<any[]>(() => portData.value?.ports ?? []);
 const portBusy = computed(() => portLoading.value || portRefreshing.value || auditing.value);
 // 默认只列"能被外面碰到"的那几行：几百个仅本机监听的端口（rpc、metrics、数据库）
@@ -629,6 +969,8 @@ const tabs = computed(() => [
   { key: 'login', label: '登录安全', badge: loginCounts.value.risk > 0 },
   // 存储这层的红点只认「要紧」（分区快满），值得处理的占用用页内告警说话：日志偏大、备份偏多天天都有，长期亮着就等于没亮。
   { key: 'storage', label: '存储占用', badge: storageCounts.value.risk > 0 },
+  // 内存这一层的红点只认「要紧」（正在停顿、OOM 杀过人、顶到自己的上限）：天天都有的小波动长期亮着就等于没亮。
+  { key: 'memory', label: '内存压力', badge: memCounts.value.risk > 0 },
   // 单元日志走 /api/system/services/{unit}/logs，服务端要求 admin（journal 是全机内容）。
   // 不给只读账号留这个页签，否则他点进来的是一片 403。
   ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
@@ -880,7 +1222,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       <NDataTable
         ref="tableAnchor"
         :columns="columns" :data="filtered" size="small" :bordered="false" :loading="loading"
-        :scroll-x="810" :max-height="tableH" :pagination="paging" :row-key="(r: any) => r.unit"
+        :scroll-x="810" :max-height="tableH" :pagination="pager(filtered.length, paging)" :row-key="(r: any) => r.unit"
         class="cp-tbl tbl-services"
       >
         <!-- 拉取失败不能显示成「没有匹配的服务」：那是"数据是空的"，而实际是"没拿到数据" -->
@@ -945,7 +1287,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       <NDataTable
         :columns="patchColumns" :data="patches?.packages || []" size="small" :bordered="false"
         :loading="patchBusy && !patches" :scroll-x="620"
-        :max-height="(patches?.packages || []).length ? tableH : undefined" :pagination="patchPaging"
+        :max-height="(patches?.packages || []).length ? tableH : undefined" :pagination="pager((patches?.packages || []).length, patchPaging)"
         :row-key="(r: any) => r.name" class="cp-tbl tbl-patches"
       >
         <template #empty>
@@ -1008,7 +1350,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       <NDataTable
         :columns="portColumns" :data="shownPorts" size="small" :bordered="false"
         :loading="portBusy && !portData" :scroll-x="842"
-        :max-height="shownPorts.length ? tableH : undefined" :pagination="portPaging"
+        :max-height="shownPorts.length ? tableH : undefined" :pagination="pager(shownPorts.length, portPaging)"
         :row-key="(r: any) => r.port" class="cp-tbl tbl-ports"
       >
         <template #empty>
@@ -1063,7 +1405,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 
       <NDataTable
         :columns="findingColumns" :data="loginFindings" size="small" :bordered="false"
-        :loading="loginBusy && !loginData" :scroll-x="760" :pagination="loginPaging"
+        :loading="loginBusy && !loginData" :scroll-x="760" :pagination="pager(loginFindings.length, loginPaging)"
         :row-key="(r: any) => r.id" class="cp-tbl tbl-findings"
       >
         <template #empty>
@@ -1088,7 +1430,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         :columns="settingColumns" :data="shownSettings" size="small" :bordered="false"
-        :loading="loginBusy && !loginData" :scroll-x="780" :pagination="loginPaging"
+        :loading="loginBusy && !loginData" :scroll-x="780" :pagination="pager(shownSettings.length, loginPaging)"
         :row-key="(r: any) => r.key" class="cp-tbl tbl-settings"
       >
         <template #empty>
@@ -1215,7 +1557,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         :columns="storageFindingColumns" :data="shownFindings" size="small" :bordered="false"
-        :loading="storageBusy && !storageData" :scroll-x="696" :pagination="storagePaging"
+        :loading="storageBusy && !storageData" :scroll-x="696" :pagination="pager(shownFindings.length, storagePaging)"
         :row-key="(r: any) => r.id" class="cp-tbl tbl-findings"
       >
         <template #empty>
@@ -1232,7 +1574,158 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="bigFiles.length" :columns="bigFileColumns" :data="bigFiles" size="small" :bordered="false"
-        :scroll-x="450" :pagination="storagePaging" :row-key="(r: any) => r.path" class="cp-tbl tbl-bigfiles"
+        :scroll-x="450" :pagination="pager(bigFiles.length, storagePaging)" :row-key="(r: any) => r.path" class="cp-tbl tbl-bigfiles"
+      />
+    </CpToolbarCard>
+    <CpToolbarCard v-else-if="tab === 'memory'" title="内存压力" style="margin-top: 10px">
+      <template #right>
+        <div class="mm-toolbar">
+          <NText v-if="memData" depth="3" class="mm-time">
+            采样于 {{ fmtDateTime(memData.as_of) }}<template v-if="memData.cached">（缓存）</template>
+          </NText>
+          <NButton size="small" tertiary :loading="memBusy" :icon="icon('RefreshOutline', 14)" @click="refreshMemory">刷新</NButton>
+          <NButton size="small" :loading="sampling" :icon="icon('SyncOutline', 14)" @click="resample">重新采样</NButton>
+        </div>
+      </template>
+
+      <NAlert v-if="!memData && memError" type="error" :bordered="false" style="margin-bottom: var(--space-3)">
+        内存探测失败：{{ (memError as Error).message || '未知错误' }}。点上方「重新采样」重试。
+      </NAlert>
+      <NAlert v-else-if="memAlert" :type="memAlert.type" :bordered="false" style="margin-bottom: var(--space-3)">
+        {{ memAlert.text }}
+      </NAlert>
+
+      <div v-if="memData" class="mm-chips">
+        <span class="mm-chip" :class="usedTone">
+          <i>已用</i>{{ memInfo.ok ? `${memInfo.used_pct}%（剩 ${fmtBytes(memInfo.available)}）` : '读不到' }}
+        </span>
+        <span class="mm-chip"><i>可腾出</i>{{ memInfo.ok ? `${fmtBytes(memInfo.reclaimable)} 页缓存与可回收 slab` : '—' }}</span>
+        <span class="mm-chip" :class="swapTone">
+          <i>swap</i>{{ memInfo.swap_total ? `${memInfo.swap_pct}%（${fmtBytes(memInfo.swap_used)} / ${fmtBytes(memInfo.swap_total)}）` : '这台机器没配 swap' }}
+        </span>
+        <span class="mm-chip" :class="psiTone">
+          <i>PSI some</i>{{ pressInfo.ok ? `近 10 秒 ${avgOf('avg10')}% · 近 5 分钟 ${avgOf('avg300')}%` : '读不到' }}
+        </span>
+        <span v-if="psiStopped" class="mm-chip"><i>累计停顿</i>{{ psiStopped }}</span>
+        <span class="mm-chip" :class="rateTone">
+          <i>直接回收</i>{{ rateInfo.ok ? `${rateNum(rateInfo.direct_reclaim)} 页/秒` : '速率没采到' }}
+        </span>
+        <span class="mm-chip" :class="rateTone"><i>换出</i>{{ rateInfo.ok ? rateBytes(rateInfo.swap_out) : '速率没采到' }}</span>
+        <span class="mm-chip"><i>缺页等待</i>{{ rateInfo.ok ? `${rateNum(rateInfo.majfault, ' 次/秒')}` : '速率没采到' }}</span>
+        <span class="mm-chip" :class="{ err: memKilled }">
+          <i>OOM</i><template v-if="killTotal">内核杀过 {{ killTotal }} 次</template>
+          <template v-else-if="memKilled">{{ Object.keys(unitKills).length }} 个单元被自己的上限杀过</template>
+          <template v-else>没有杀过进程</template>
+        </span>
+        <span class="mm-chip"><i>承诺</i>{{ memInfo.commit_limit ? `${fmtBytes(memInfo.committed)} / ${fmtBytes(memInfo.commit_limit)}` : '读不到' }}</span>
+        <span class="mm-chip" :class="{ err: memCounts.risk > 0 }"><i>要紧</i>{{ memCounts.risk }} 项</span>
+        <span class="mm-chip" :class="{ warn: memCounts.warn > 0 }"><i>值得处理</i>{{ memCounts.warn }} 项</span>
+        <span class="mm-chip"><i>知道就好</i>{{ memCounts.info }} 项</span>
+        <span class="mm-chip"><i>榜上</i>{{ memCounts.units }} 个单元 · 全机 {{ memCounts.procs }} 个进程</span>
+      </div>
+
+      <div v-if="memData && tunInfo.ok" class="mm-tun">
+        <span>swappiness {{ tunInfo.swappiness ?? '读不到' }}</span>
+        <span>overcommit_memory {{ tunInfo.overcommit_memory ?? '读不到' }}</span>
+        <span>min_free_kbytes {{ tunInfo.min_free_kbytes ?? '读不到' }}</span>
+        <span>panic_on_oom {{ tunInfo.panic_on_oom ?? '读不到' }}</span>
+        <span>面板只读这些策略，不改它们</span>
+      </div>
+
+      <div v-if="memData && (memData.notes || []).length" class="mm-notes">
+        <div v-for="(n, i) in memData.notes" :key="i" class="mm-note">{{ n }}</div>
+      </div>
+
+      <div class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-brand-soft)" /> 判词
+        </span>
+        <NText depth="3" class="mm-src">先说结论：有没有正在缺内存、谁最该被看一眼、内核杀没杀过人</NText>
+        <NButton
+          v-if="memInfoFindings.length"
+          size="tiny" :quaternary="memOnlySerious" :type="memOnlySerious ? 'default' : 'primary'"
+          @click="memOnlySerious = !memOnlySerious"
+        >
+          {{ memOnlySerious ? `展开 ${memInfoFindings.length} 条「知道就好」` : '只看在意的' }}
+        </NButton>
+      </div>
+      <NDataTable
+        :columns="memFindingColumns" :data="memShownFindings" size="small" :bordered="false"
+        :loading="memBusy && !memData" :scroll-x="696" :pagination="pager(memShownFindings.length, memPaging)"
+        :row-key="(r: any) => r.id" class="cp-tbl tbl-mem-findings"
+      >
+        <template #empty>
+          <EmptyBox :text="memOnlySerious && memInfoFindings.length ? '要紧的没有，值得处理的也没有' : '没有异常：既没在换页，也没人顶到上限'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="memData" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.CubeOutline" :size="15" color="var(--cp-brand-soft)" /> 谁拿着这些内存
+        </span>
+        <NText depth="3" class="mm-src">
+          <template v-if="unitBlock.ok === false">{{ unitBlock.reason || '读不到 cgroup' }}</template>
+          <template v-else>
+            按各单元当前的 memory.current 排序<template v-if="unitBlock.omitted">，另有 {{ unitBlock.omitted }} 个都不比这些占得多</template><template v-if="unitBlock.managed">；其中 {{ unitBlock.managed }} 个是面板管理的应用</template>。面板自己那一行无条件留在表里。
+          </template>
+        </NText>
+      </div>
+      <NDataTable
+        v-if="memData" :columns="unitColumns" :data="unitRows" size="small" :bordered="false"
+        :loading="memBusy && !memData" :scroll-x="1046" :pagination="false"
+        :max-height="unitRows.length ? tableH : undefined" :row-key="(r: any) => r.unit"
+        class="cp-tbl tbl-mem-units"
+      >
+        <template #empty>
+          <EmptyBox :text="unitBlock.ok === false ? (unitBlock.reason || '读不到 cgroup v2') : 'system.slice 里没有带内存统计的单元'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="memData" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.PulseOutline" :size="15" color="var(--cp-brand-soft)" /> 按 RSS 的前几名进程
+        </span>
+        <NText depth="3" class="mm-src">
+          <template v-if="procBlock.ok === false">{{ procBlock.reason || '读不到 /proc' }}</template>
+          <template v-else>
+            逐行看，不要相加：共享页在每个进程的 RSS 里都算一遍。<template v-if="procBlock.budget_hit">这一轮为了读满 {{ procBlock.count }} 个进程的 statm 而用完预算、只收齐 {{ procBlock.scanned }} 个，榜外可能还有占得更多的。</template>
+          </template>
+        </NText>
+      </div>
+      <NDataTable
+        v-if="memData" :columns="procColumns" :data="procRows" size="small" :bordered="false"
+        :loading="memBusy && !memData" :scroll-x="620" :pagination="false"
+        :max-height="procRows.length ? tableH : undefined" :row-key="(r: any) => r.pid"
+        class="cp-tbl tbl-mem-procs"
+      >
+        <template #empty>
+          <EmptyBox :text="procBlock.ok === false ? (procBlock.reason || '读不到 /proc') : '一个有常驻内存的进程都没读到'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="memKilled" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.WarningOutline" :size="15" color="var(--cp-err)" /> OOM 名单
+        </span>
+        <NText depth="3" class="mm-src">
+          <template v-if="oomBlock.source === 'counter-only'">{{ oomBlock.reason || '只有次数，没有受害者' }}</template>
+          <template v-else>当前 boot 的 kernel 日志里挑出来的这几行；认不出进程名的只留原文</template>
+        </NText>
+      </div>
+      <NDataTable
+        v-if="memKilled && oomRows.length" :columns="oomColumns" :data="oomRows" size="small" :bordered="false"
+        :scroll-x="660" :pagination="false" :row-key="(r: any) => r.line" class="cp-tbl tbl-mem-oom"
+      />
+
+      <div v-if="swapDevs.length" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.LayersOutline" :size="15" color="var(--cp-brand-soft)" /> swap 设备
+        </span>
+        <NText depth="3" class="mm-src">写进去的不会自己回来；这台机器上真能用的换出空间就这几行</NText>
+      </div>
+      <NDataTable
+        v-if="swapDevs.length" :columns="swapColumns" :data="swapDevs" size="small" :bordered="false"
+        :scroll-x="490" :pagination="false" :row-key="(r: any) => r.name" class="cp-tbl tbl-mem-swaps"
       />
     </CpToolbarCard>
     <CpToolbarCard v-else :title="logUnit ? `${logUnit} · journalctl 实时日志` : '单元日志'" style="margin-top: 10px">
@@ -1387,6 +1880,38 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
   .cp-tbl :deep(.st-piece code) { max-width: none; white-space: normal; word-break: break-all; overflow: visible; text-overflow: clip; }
   .cp-tbl :deep(.st-fix) { flex-wrap: wrap; }
   .cp-tbl :deep(.st-fix-cmd) { flex: 1 1 100%; max-width: 100%; white-space: normal; word-break: break-all; }
+}
+
+/* 内存压力：总量与速率的结论用 chip 摆最上面，往下是「谁拿着」（单元榜、进程榜）和已经杀过人的
+   名单。格子里的类走 .cp-tbl :deep，理由和登录安全那页一样——h() 生成的节点拿不到本组件的 data-v。
+   条子、标记、可复制命令直接复用存储那页的 .st-bar / .st-marks / .st-fix，两页对照时形状不会分叉。 */
+.mm-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.mm-time { font-size: var(--fs-xs); }
+.mm-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-3); }
+.mm-chip {
+  display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%; padding: 4px 10px;
+  border-radius: var(--radius-md); background: var(--cp-bg-soft); font-size: var(--fs-sm); color: var(--cp-text);
+}
+.mm-chip i { font-style: normal; font-size: var(--fs-xs); color: var(--cp-text-mute); }
+.mm-chip.warn { color: var(--cp-warn); }
+.mm-chip.err { color: var(--cp-err); }
+/* 内核策略单独一行：判词里说「swappiness=60 时写 swap 是内核的主动选择」，得让人看见那个 60 从哪来。 */
+.mm-tun { display: flex; flex-wrap: wrap; gap: 14px; margin: -6px 0 var(--space-3); font-size: var(--fs-xs); color: var(--cp-text-dim); }
+.mm-notes { margin: -4px 0 var(--space-3); }
+.mm-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
+.mm-block { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: var(--space-3) 0 6px; }
+.mm-src { font-size: var(--fs-xs); }
+.cp-tbl :deep(.mm-tag) {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: var(--radius-sm);
+  font-size: var(--fs-2xs); font-weight: 500; vertical-align: 1px; background: var(--cp-bg-soft); color: var(--cp-text-dim);
+}
+.cp-tbl :deep(.mm-tag.self) { color: var(--cp-brand); }
+.cp-tbl :deep(.mm-tag.app) { color: var(--cp-warn); }
+/* 单元名、设备名、kernel 日志原文都是没有空格的长 token，只放开 white-space 会在定宽列里溢出被裁成
+   半截；overflow-wrap 让它在真要越界时才断行。 */
+.cp-tbl :deep(.mm-break) { overflow-wrap: anywhere; word-break: normal; }
+@media (max-width: 767px) {
+  .mm-toolbar { justify-content: flex-start; }
 }
 
 /* 1Panel 日志盒参数压过 LogStream 的行内高度（组件根上的类，:deep 到 .log-view） */
