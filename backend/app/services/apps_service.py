@@ -149,13 +149,28 @@ def write_env_file(app: dict):
         raise RuntimeError(f"写入 .panel.env 失败：{e}") from e
 
 
-async def ensure_unit(app: dict):
+async def ensure_unit(app: dict, warn=None):
+    """写 unit、daemon-reload，并让它进开机目标。
+
+    enable 这一步以前完全缺位：面板只 start 不 enable，而 systemd 不会自己把新写的 unit
+    纳入开机目标——"这次上线成功"和"机器重启后它还在"是两件事。线上接管 Rosetta 时这个
+    缺口最刺眼：手工写的两个 unit 原本都是 enabled，面板接管后反而会在重启后丢服务，
+    托管比不托管还少一层保障。
+    自定义 unit_template 没写 [Install] 时 enable 会被 systemd 拒绝（rc=1），那种 unit
+    照样能手动启动，所以降级成提醒（warn），不把一次已经上线的部署判成失败。
+    """
     if app.get("unit_override"):
         return
     Path(f"{UNIT_DIR}/{unit_name(app)}").write_text(render_unit(app))
     r = await run("systemctl", ["daemon-reload"])
     if r["code"] != 0:
         raise RuntimeError(r["out"])
+    e = await run("systemctl", ["enable", "--", unit_name(app)], timeout=30)
+    if e["code"] != 0 and warn is not None:
+        warn(
+            f"!!> unit 已写入，但没能设置开机自启：{(e['out'] or '').strip()[:160]}"
+            "（机器重启后这个应用不会自己起来；unit 里要有 [Install] WantedBy= 才能 enable）"
+        )
 
 
 async def remove_unit(app: dict):
@@ -496,6 +511,15 @@ def _check_not_protected(path: str):
             raise RuntimeError(f"安装目录不能位于{label}（{root}）之内或与之相同")
 
 
+def _append_note(out: dict, msg: str) -> None:
+    """把提醒追加进 note，而不是覆盖已有的那条。
+
+    note 原来是"最后一个写它的分支赢"：一次保存里"没设上自启"和"服务没重启成功"可以同时
+    成立，只显示后一条会让人以为自启是好的。
+    """
+    out["note"] = f'{out["note"]}；{msg}' if out.get("note") else msg
+
+
 async def apply_edited(old: dict, new_app: dict) -> dict:
     """PATCH 之后把改动真正落到 systemd / .panel.env / nginx，服务在跑就顺手重启。
 
@@ -535,7 +559,7 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
         return out
     try:
         write_env_file(new_app)
-        await ensure_unit(new_app)
+        await ensure_unit(new_app, warn=lambda t: _append_note(out, t.removeprefix("!!> ")))
         if new_app.get("domain") and new_app.get("port"):
             await nginx_ops.apply_vhost(
                 {"name": new_app["name"], "domain": new_app["domain"], "port": new_app["port"]}
@@ -546,17 +570,17 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
                 except Exception as e:  # noqa: BLE001
                     # 新配置已经在服务了，旧文件删不掉是"多一份残留"，不是"没生效"，
                     # 所以这里只追加说明，不把整次保存判成失败。
-                    out["note"] = f"新的反向代理已生效，但旧配置文件没能删除：{str(e)[:120]}"
+                    _append_note(out, f"新的反向代理已生效，但旧配置文件没能删除：{str(e)[:120]}")
         elif old.get("domain") and not renamed:
             # 域名被清空、或只剩域名没有端口：留着那个 server 块就是一个指向死端口的 502
             await nginx_ops.remove_vhost(new_app["name"])
     except nginx_ops.DomainOwnedElsewhere as e:
         out["applied"] = False
-        out["note"] = f"配置已保存，但该域名的反向代理仍由别处的文件托管，面板没有覆盖：{str(e)[:180]}"
+        _append_note(out, f"配置已保存，但该域名的反向代理仍由别处的文件托管，面板没有覆盖：{str(e)[:180]}")
         return out
     except Exception as e:  # noqa: BLE001
         out["applied"] = False
-        out["note"] = f"配置已保存，但没能同步到 systemd/nginx：{str(e)[:160]}（下次部署会补上）"
+        _append_note(out, f"配置已保存，但没能同步到 systemd/nginx：{str(e)[:160]}（下次部署会补上）")
         return out
     # daemon-reload 只改"下次启动用什么"，跑着的进程还是旧的 ExecStart，
     # 所以在服务本来就在跑的时候必须重启一次，否则这次编辑依旧不生效。
@@ -565,12 +589,12 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
             await restart_and_verify(unit_name(new_app), new_app["port"])
             out["restarted"] = True
         except Exception as e:  # noqa: BLE001
-            out["note"] = f"配置已写入，但服务没能重启成功：{str(e)[:160]}"
+            _append_note(out, f"配置已写入，但服务没能重启成功：{str(e)[:160]}")
     else:
         # 应用本来就没在跑（包括"上一次保存写了坏命令、服务已经崩掉"这种）：
         # 不擅自启动，但必须说清这次改动要等下一次启动或部署才生效，
         # 否则界面只剩一句"已保存"，用户会以为新配置已经在跑了。
-        out["note"] = "配置已写入，但服务当前没有运行，改动在下一次启动或部署时生效"
+        _append_note(out, "配置已写入，但服务当前没有运行，改动在下一次启动或部署时生效")
     return out
 
 
@@ -674,7 +698,10 @@ UNIT_STABLE_SAMPLES = 2
 UNIT_SAMPLE_SEC = 1
 # 刚重启完就查端口必然读到空值：进程已 fork 但还没 bind。给绑定的这几秒留出余量，
 # 否则每次正常部署都配一句"域名反代可能 502"的假警报，真出错时反而没人信。
-PORT_WAIT_TRIES = 5
+# 5 次实测不够：线上 Rosetta 后端是 `uvicorn --workers 2`，重启 5s 后 FastAPI 还在 import
+# （数据库连接池、路由注册都在启动期），部署日志于是固定带一句假警报。窗口按"秒"算，
+# 至少要盖住一个 python 应用的冷启动；端口真的对不上时多等 15s 也只影响这一次部署的尾巴。
+PORT_WAIT_TRIES = 20
 
 
 async def _live_pid(unit: str) -> int:
@@ -731,7 +758,11 @@ async def restart_and_verify(unit: str, port=None, *, warn=None) -> None:
                 return
             await asyncio.sleep(UNIT_SAMPLE_SEC)
         if listening is None:
-            warn(f"!!> {unit} 未检测到监听端口，而面板记录的是 {port}，域名反代可能 502")
+            warn(
+                f"!!> 重启后 {PORT_WAIT_TRIES}s 内没探到 {unit} 监听任何端口"
+                f"（面板记录的是 {port}）：应用还在初始化的话这条提醒会自己消失，"
+                "端口填错则域名反代可能 502"
+            )
         else:
             warn(f"!!> {unit} 监听在 {listening}，与面板记录的 {port} 不一致，域名反代可能 502")
 
@@ -825,6 +856,22 @@ async def cancel_inflight_deployments() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def resolve_repo_dir(path: str) -> str | None:
+    """应用目录所在 Git 工作树的根；目录不在任何仓库里时返回 None。
+
+    monorepo 的组件目录（`<仓库>/frontend`）自己没有 `.git`。凡是按 `app.path` 是否
+    含 `.git` 来判"有没有仓库"的地方都会把这种应用判错，线上后果各不相同：部署会转去
+    `git clone` 到已存在且非空的目录（git 直接拒绝，组件永远无法通过面板部署）、回滚在
+    入口守卫就报"应用目录不是 Git 仓库"、而同步靠另一份内联实现才恰好是对的。
+    """
+    if os.path.isdir(f"{path}/.git"):
+        return path
+    top = await run("git", ["-C", path, "rev-parse", "--show-toplevel"], cwd=None, timeout=30)
+    lines = (top["out"] or "").strip().splitlines()
+    cand = lines[-1] if lines else ""
+    return cand if cand and os.path.isdir(f"{cand}/.git") else None
+
+
 async def _current_sha(path: str) -> str | None:
     r = await run("git", ["rev-parse", "--short", "HEAD"], cwd=path, timeout=30)
     return r["out"] if r["code"] == 0 else None
@@ -873,8 +920,9 @@ async def rollback_app(app_id: int) -> dict:
     if not app:
         raise RuntimeError("应用不存在")
     _ensure_no_deployment(app_id, "回滚")
-    if not os.path.isdir(f"{app['path']}/.git"):
-        raise RuntimeError("应用目录不是 Git 仓库，无法回滚")
+    repo_dir = await resolve_repo_dir(app["path"])
+    if not repo_dir:
+        raise RuntimeError("应用目录不在任何 Git 仓库里，无法回滚")
     rows = dbm.query(
         "SELECT id,commit_sha FROM deployments WHERE app_id=? AND status='success' AND commit_sha IS NOT NULL"
         " ORDER BY id DESC LIMIT 20",
@@ -882,7 +930,7 @@ async def rollback_app(app_id: int) -> dict:
     )
     if not rows:
         raise RuntimeError("没有可回滚的成功部署记录")
-    current = await _current_sha(app["path"])
+    current = await _current_sha(repo_dir)
     target = None
     seen: set[str] = set()
     for row in rows:
@@ -892,9 +940,9 @@ async def rollback_app(app_id: int) -> dict:
         seen.add(sha)
         if sha == current:
             continue
-        if not await _commit_present(app["path"], sha):
+        if not await _commit_present(repo_dir, sha):
             continue
-        if await _is_newer_than(app["path"], current, sha) is True:
+        if await _is_newer_than(repo_dir, current, sha) is True:
             continue
         target = row
         break
@@ -905,7 +953,7 @@ async def rollback_app(app_id: int) -> dict:
             "没有可回滚的版本：部署记录里的 commit 除当前版本外，要么已不在仓库中（浅克隆/历史被改写），"
             "要么比当前更新"
         )
-    r = await run("git", ["reset", "--hard", target["commit_sha"]], cwd=app["path"], timeout=120)
+    r = await run("git", ["reset", "--hard", target["commit_sha"]], cwd=repo_dir, timeout=120)
     if r["code"] != 0:
         raise RuntimeError(f"回滚失败：{r['out']}")
     try:
@@ -936,14 +984,8 @@ async def sync_app(app_id: int) -> dict:
     if not is_branch(branch):
         raise RuntimeError("分支名不合法")
     path = app["path"]
-    # 单体仓库（monorepo）里前后端组件常常各占一个子目录，子目录没有 .git。
-    # 用 rev-parse 找到真正的工作树根，同步才能覆盖"组件目录在同一个仓库内"的场景。
-    repo_dir = path
-    if not os.path.isdir(f"{path}/.git"):
-        top = await run("git", ["-C", path, "rev-parse", "--show-toplevel"], cwd=None, timeout=30)
-        cand = (top["out"] or "").strip().splitlines()[-1] if top["code"] == 0 else ""
-        if cand and os.path.isdir(f"{cand}/.git"):
-            repo_dir = cand
+    # monorepo 的组件目录没有 .git，仓库根才是能 fetch/reset 的地方（见 resolve_repo_dir）。
+    repo_dir = await resolve_repo_dir(path) or path
     if not os.path.isdir(f"{repo_dir}/.git"):
         raise RuntimeError(f"{path} 下没有 Git 仓库，请先执行一次完整部署")
 
@@ -1025,19 +1067,32 @@ async def _run_deployment(app: dict, dep_id: int):
         dbm.execute("UPDATE apps SET updated_at=datetime('now') WHERE id=?", (app["id"],))
 
     # 动工作区之前先记下当前 commit，失败时才能说清"盘上的代码和服务跑的代码是不是两份"
-    before = await _current_sha(app["path"]) if os.path.isdir(f"{app['path']}/.git") else None
+    # monorepo 的组件目录（`<仓库>/frontend`）自己没有 .git：仓库根才是要 fetch/reset 的地方，
+    # 也是唯一取到 commit 的地方（见 resolve_repo_dir）。按 app.path 判仓库会把组件判成
+    # "没有仓库"，线上后果是部署转去 clone 已存在且非空的目录、部署记录永远不写 commit_sha
+    # （回滚因此查不到候选），失败时的 before/after 也全为空——那条"盘上已是新代码、服务还在
+    # 跑旧代码"的提示对组件永远不触发（见 test_batch7a）。
+    # 这两次 git 调用必须在 try 里面：放在 try 之前时，任务在这几步被取消会绕过下面
+    # except CancelledError 的收尾，deployment 行留在 running，直到看门狗回收才解锁
+    # 这个应用的删除/回滚/改配置（批次⑤G 修的就是这个）。
+    repo_dir = None
+    before = None
     try:
+        repo_dir = await resolve_repo_dir(app["path"])
+        before = await _current_sha(repo_dir) if repo_dir else None
         if app["repo_url"]:
-            if os.path.exists(f"{app['path']}/.git"):
+            if repo_dir:
+                if repo_dir != app["path"]:
+                    _append_log(dep_id, f"==> 仓库根 {repo_dir}（应用目录是其子目录，本次会更新整个仓库）")
                 _append_log(dep_id, f"==> git fetch/checkout {app['branch']}")
-                r = await run("git", ["fetch", "origin", app["branch"]], cwd=app["path"], timeout=GIT_FETCH_T)
+                r = await run("git", ["fetch", "origin", app["branch"]], cwd=repo_dir, timeout=GIT_FETCH_T)
                 if r["code"] != 0:
                     raise RuntimeError(r["out"])
-                r = await run("git", ["checkout", app["branch"]], cwd=app["path"], timeout=GIT_CHECKOUT_T)
+                r = await run("git", ["checkout", app["branch"]], cwd=repo_dir, timeout=GIT_CHECKOUT_T)
                 if r["code"] != 0:
                     raise RuntimeError(r["out"])
                 r = await run(
-                    "git", ["reset", "--hard", f"origin/{app['branch']}"], cwd=app["path"], timeout=GIT_RESET_T
+                    "git", ["reset", "--hard", f"origin/{app['branch']}"], cwd=repo_dir, timeout=GIT_RESET_T
                 )
                 if r["code"] != 0:
                     raise RuntimeError(r["out"])
@@ -1071,7 +1126,7 @@ async def _run_deployment(app: dict, dep_id: int):
 
         _append_log(dep_id, "==> 写入环境变量与 systemd unit")
         write_env_file(app)
-        await ensure_unit(app)
+        await ensure_unit(app, warn=lambda t: _append_log(dep_id, t))
 
         if app["domain"]:
             if app["port"]:
@@ -1090,7 +1145,7 @@ async def _run_deployment(app: dict, dep_id: int):
 
         _append_log(dep_id, f"==> 重启并确认服务 {unit_name(app)}")
         await restart_and_verify(unit_name(app), app["port"], warn=lambda t: _append_log(dep_id, t))
-        sha = await _current_sha(app["path"])
+        sha = await _current_sha(repo_dir) if repo_dir else None
         if sha:
             dbm.execute("UPDATE deployments SET commit_sha=? WHERE id=?", (sha, dep_id))
             _append_log(dep_id, f"==> 当前 commit {sha}（可在部署记录中回滚到此版本）")
@@ -1114,7 +1169,7 @@ async def _run_deployment(app: dict, dep_id: int):
         # 面板只写"部署失败"，看现场的人无法判断现在盘上到底是哪一份。
         # 这里不自动 reset 回去——用户可能正要在新代码上排查，静默改工作区更糟；
         # 只把差异写进日志，并指出可用的回滚目标。
-        after = await _current_sha(app["path"]) if os.path.isdir(f"{app['path']}/.git") else None
+        after = await _current_sha(repo_dir) if repo_dir else None
         if before and after and before != after:
             _append_log(
                 dep_id,
