@@ -100,6 +100,14 @@ class ParseMountsTests(unittest.TestCase):
         self.assertNotIn("/run/credentials/systemd-journald.service",
                          {m["path"] for m in ss._parse_mounts(REAL_MOUNTS)})
 
+    def test_snapshot_fstypes_are_flagged(self):
+        # 只读镜像的 ro 是性质不是故障：判词要跳过它，前端也得能不重抄一份 fstype 清单。
+        by = {m["path"]: m for m in ss._parse_mounts(
+            "/dev/loop0 /snap/core/1 squashfs ro 0 0\n"
+            "/dev/sda1 / ext4 rw,errors=remount-ro 0 0\n")}
+        self.assertTrue(by["/snap/core/1"]["snapshot"])
+        self.assertFalse(by["/"]["snapshot"])
+
     def test_true_read_only_survives(self):
         rows = ss._parse_mounts("/dev/sdc1 /mnt/backup ext4 ro,nosuid 0 0\n")
         self.assertEqual(len(rows), 1)
@@ -238,7 +246,8 @@ class MountFindingsTests(unittest.TestCase):
         tight = dict(one_mount("/mnt/spare"), used_pct=93, free="1.0GB", free_human="1.0GB")
         self.assertIn("mount:/mnt/spare", self._ids([tight]))
         self.assertNotIn("mount:/mnt/spare", self._ids([dict(tight, panel=True)]))
-        self.assertNotIn("mount:/mnt/spare", self._ids([dict(tight, fstype="squashfs")]))
+        self.assertNotIn("mount:/mnt/spare",
+                         self._ids([dict(tight, fstype="squashfs", snapshot=True)]))
 
     def test_read_only_reports_dmesg_not_remount(self):
         out = self._f([dict(one_mount(), ro=True)])
@@ -263,6 +272,50 @@ class MountFindingsTests(unittest.TestCase):
     def test_findings_still_callable_without_mounts(self):
         # 老签名调用（⑫B 的用例就这么调）不能被新形参打断。
         self.assertEqual(ss._findings([], {"bytes": None}, {"ok": False}, []), [])
+
+
+class SharedDeviceTests(unittest.TestCase):
+    """同一块盘挂两处只算一处的事，标在行上而不是从表里删掉。
+
+    夹具来自线上：unit 开着 PrivateTmp，面板进程的命名空间里因此多一个 /var/tmp，
+    statvfs 出来的数字和 / 完全相同。
+    """
+
+    class _St:
+        def __init__(self, dev):
+            self.st_dev = dev
+
+    def _run(self, text, devs, table=None):
+        def fake_stat(path):
+            if path not in devs:
+                raise OSError(2, "No such file or directory")
+            return SharedDeviceTests._St(devs[path])
+
+        def fake_vfs(path):
+            return (table or {}).get(path, vfs())
+
+        with mock.patch.object(ss.os, "statvfs", side_effect=fake_vfs), \
+             mock.patch.object(ss.os, "stat", side_effect=fake_stat), \
+             mock.patch.object(ss.config, "DATA_DIR", "/data"):
+            return ss._mounts(text)
+
+    def test_second_mount_of_same_device_is_flagged(self):
+        out = self._run("/dev/sda1 / ext4 rw 0 0\n/dev/sda1 /var/tmp ext4 rw 0 0\n",
+                        {"/": 2049, "/var/tmp": 2049})
+        by = {i["path"]: i for i in out["items"]}
+        self.assertIsNone(by["/"]["same_dev_as"])
+        self.assertEqual(by["/var/tmp"]["same_dev_as"], "/")
+
+    def test_different_devices_are_not_flagged(self):
+        out = self._run("/dev/sda1 / ext4 rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n",
+                        {"/": 2049, "/tmp": 33})
+        by = {i["path"]: i for i in out["items"]}
+        self.assertIsNone(by["/"]["same_dev_as"])
+        self.assertIsNone(by["/tmp"]["same_dev_as"])
+
+    def test_unstatable_path_is_not_flagged(self):
+        out = self._run("/dev/sdb1 /mnt/gone ext4 rw 0 0\n", {})
+        self.assertIsNone(out["items"][0]["same_dev_as"])
 
 
 class AuditWiringTests(unittest.TestCase):

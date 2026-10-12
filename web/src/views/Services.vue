@@ -232,6 +232,13 @@ const allFindings = computed<any[]>(() => storageData.value?.findings ?? []);
 const bigFiles = computed<any[]>(() => storageData.value?.big_files ?? []);
 const diskInfo = computed<any>(() => storageData.value?.disk ?? {});
 const tightDisk = computed(() => Number(diskInfo.value?.used_pct ?? 0) >= 90);
+// 挂载点这一张表回答的是「别的盘呢」：chip 上的分区余量说的是数据目录所在的那块盘，
+// 而写满的可能是一个和数据目录毫无关系的挂载点，或者它的 inode 先耗尽。
+const mountData = computed<any>(() => storageData.value?.mounts ?? {});
+const mountRows = computed<any[]>(() => mountData.value?.items ?? []);
+const tightMounts = computed(() => mountRows.value.filter(
+  (m: any) => Number(m.used_pct ?? 0) >= 90 || Number(m.inode_pct ?? 0) >= 90,
+));
 // 「知道就好」那几档（没扫完、点名几个大文件）默认收着：一进来先看见一堆无关痛痒的行，
 // 真正的风险反而被埋在下面。
 const onlySerious = ref(true);
@@ -369,6 +376,61 @@ const bigFileColumns: any[] = [
   },
 ];
 const storagePaging = { pageSize: 10, showSizePicker: false, showQuickJumper: false };
+
+const hotPct = (v: any) => typeof v === 'number' && v >= 90;
+const barStyle = (v: any) => `width:${Math.min(100, Math.max(0, Number(v) || 0))}%`;
+const mountColumns: any[] = [
+  {
+    title: '挂载点', key: 'path', minWidth: 196,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono ls-wrap' }, r.path),
+      h('div', { class: 'cell-sub mono ls-wrap' }, `${r.fstype} · ${r.device || '?'}`),
+    ]),
+  },
+  {
+    // 百分比与上面「分区已用」那颗 chip 同一个算法（写不进去的都算已用，含 ext4 预留块），
+    // 所以根分区这一行的数字和 chip 上的必须一致；df 的 Use% 会低几个点，别拿来对。
+    title: '容量', key: 'used_pct', width: 150,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono' }, typeof r.used_pct === 'number' ? `已用 ${r.used_pct}%` : '—'),
+      h('div', { class: 'st-bar' }, [h('i', { class: hotPct(r.used_pct) ? 'hot' : '', style: barStyle(r.used_pct) })]),
+      h('div', { class: 'cell-sub' }, r.unknown ? '挂着却读不到' : `剩 ${r.free_human} / 共 ${r.total_human}`),
+    ]),
+  },
+  {
+    // inode 单独一列，因为它是这块面板过去唯一的盲区：容量还剩几十 GB 而 inode 用尽时，
+    // 任何新建文件都报错，只看余量的地方一律说"盘很空"。
+    title: 'inode', key: 'inode_pct', width: 132,
+    render: (r: any) => (typeof r.inode_pct !== 'number'
+      ? h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono' }, '—'),
+        h('div', { class: 'cell-sub ls-wrap' }, r.unknown ? '读不到' : '这类文件系统没有 inode 表'),
+      ])
+      : h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono' }, `${r.inode_pct}%`),
+        h('div', { class: 'st-bar' }, [h('i', { class: hotPct(r.inode_pct) ? 'hot' : '', style: barStyle(r.inode_pct) })]),
+        ...(hotPct(r.inode_pct)
+          ? [h('div', { class: 'cell-sub ls-wrap' }, '容量看着还够，新文件已经建不出来')]
+          : []),
+      ])),
+  },
+  {
+    title: '这块盘', key: 'marks', minWidth: 176,
+    render: (r: any) => {
+      const marks: { t: string; bad: boolean }[] = [];
+      if (r.unknown) marks.push({ t: '挂着却读不到', bad: true });
+      // snapshot 是后端给的：squashfs 这类只读镜像天生带 ro，那是性质不是故障，不能报成红。
+      if (r.ro) marks.push({ t: r.snapshot ? '只读镜像，不是故障' : '只读挂载', bad: !r.snapshot });
+      if (r.fstype === 'tmpfs') marks.push({ t: 'RAM 盘，重启即清', bad: false });
+      // 同一块盘挂两处时的第二行（面板自己的命名空间里就有个 /var/tmp）：不标出来会像两块盘。
+      if (r.same_dev_as) marks.push({ t: `与 ${r.same_dev_as} 是同一块盘`, bad: false });
+      if (r.panel) marks.push({ t: '面板数据在这', bad: false });
+      if (!marks.length) return h('span', { class: 'cell-sub' }, '读写正常');
+      return h('div', { class: 'st-marks' }, marks.map((m) =>
+        h('span', { class: m.bad ? 'st-mark' : 'st-mark mute' }, m.t)));
+    },
+  },
+];
 const findingColumns: any[] = [
   {
     title: '判词', key: 'title', minWidth: 320,
@@ -1093,6 +1155,9 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
           <i>分区已用</i>{{ diskInfo.ok ? `${diskInfo.used_pct}%（剩 ${diskInfo.free_human}）` : '读不到' }}
         </span>
         <span class="st-chip"><i>分区总量</i>{{ diskInfo.total_human || '—' }}</span>
+        <span class="st-chip" :class="{ err: tightMounts.length > 0 }">
+          <i>挂载点</i>{{ mountRows.length }} 个<template v-if="tightMounts.length"> · {{ tightMounts.length }} 处吃紧</template><template v-else-if="mountData.omitted">（另有 {{ mountData.omitted }} 个未列）</template>
+        </span>
         <span class="st-chip"><i>systemd 日志</i>{{ storageData.journal?.bytes_human ?? '读不到' }}</span>
         <span class="st-chip"><i>合计</i>{{ storageCounts.bytes_total_human }} / {{ storageCounts.roots }} 个目录</span>
         <span class="st-chip" :class="{ err: storageCounts.risk > 0 }"><i>要紧</i>{{ storageCounts.risk }} 项</span>
@@ -1113,6 +1178,26 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       >
         <template #empty>
           <EmptyBox :text="storageError && !storageData ? '存储扫描失败，点上方「重新扫描」重试' : '没有可扫描的目录：数据目录与 CP_FILE_ROOTS 都读不到'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="storageData" class="st-block">
+        <span class="section-title">
+          <NIcon :component="icons.LayersOutline" :size="15" color="var(--cp-brand-soft)" /> 挂载点
+        </span>
+        <NText depth="3" class="st-src">
+          <template v-if="mountData.ok === false">{{ mountData.reason || '读不到挂载点表' }}</template>
+          <template v-else-if="mountData.omitted">已列出最吃紧的 {{ mountRows.length }} 个，另有 {{ mountData.omitted }} 个都不比这些紧</template>
+          <template v-else>每一个挂载点一行，同一块盘挂两处会标出来；内核自己挂的那些不列</template>
+        </NText>
+      </div>
+      <NDataTable
+        v-if="storageData" :columns="mountColumns" :data="mountRows" size="small" :bordered="false"
+        :loading="storageBusy && !storageData" :scroll-x="654" :pagination="false"
+        :row-key="(r: any) => r.path" class="cp-tbl tbl-mounts"
+      >
+        <template #empty>
+          <EmptyBox :text="mountData.ok === false ? (mountData.reason || '读不到 /proc/mounts') : '没有列出任何挂载点'" />
         </template>
       </NDataTable>
 
@@ -1264,6 +1349,8 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
   border-radius: 2px; background: var(--cp-bg-soft); overflow: hidden;
 }
 .cp-tbl :deep(.st-bar i) { display: block; height: 100%; border-radius: 2px; background: var(--cp-brand-soft); }
+/* 90% 以上才染红，和后端判词用的是同一条线：条子比判词先红，人就会去查一条其实不要紧的盘。 */
+.cp-tbl :deep(.st-bar i.hot) { background: var(--cp-err); }
 .cp-tbl :deep(.st-pieces) { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
 .cp-tbl :deep(.st-piece) {
   display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%; padding: 2px 7px;
@@ -1274,6 +1361,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 .cp-tbl :deep(.st-piece.rest) { background: transparent; color: var(--cp-text-mute); }
 .cp-tbl :deep(.st-marks) { display: flex; flex-direction: column; gap: 3px; }
 .cp-tbl :deep(.st-mark) { font-size: var(--fs-xs); color: var(--cp-warn); line-height: 1.6; }
+.cp-tbl :deep(.st-mark.mute) { color: var(--cp-text-mute); }
 .cp-tbl :deep(.st-fix) { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cp-tbl :deep(.st-fix-cmd) {
   flex: 0 1 auto; min-width: 0; padding: 3px 7px; border-radius: var(--radius-sm);

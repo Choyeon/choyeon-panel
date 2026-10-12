@@ -922,7 +922,9 @@ def _storage_text(d: dict) -> str:
                     continue
                 marks = []
                 if m.get("ro"):
-                    marks.append("只读")
+                    marks.append("只读镜像" if m.get("snapshot") else "只读")
+                if m.get("same_dev_as"):
+                    marks.append(f"与 {m['same_dev_as']} 是同一块盘")
                 if m.get("panel"):
                     marks.append("面板数据在这")
                 line = (f"  {m['path']:<24} {m.get('fstype', '?'):<8} 已用 {_pct(m.get('used_pct'))}"

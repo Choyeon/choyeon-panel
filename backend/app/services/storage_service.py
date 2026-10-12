@@ -70,7 +70,9 @@ SEV_LABEL = {SEV_RISK: "要紧", SEV_WARN: "值得处理", SEV_INFO: "知道就�
 NOTES = (
     f"每个目录最多扫 {ROOT_BUDGET_SEC:.0f} 秒、{MAX_DEPTH} 层，标了「未扫完」的给出的是下界而不是全量。",
     "不跟随符号链接、不跨文件系统计数；备份产物只统计不删除。",
-    "盘扫的只是登记的目录；挂载点表覆盖本机每一个真实文件系统，容量、inode、是否只读逐块列出来，远端对象存储仍然不在视野内。",
+    "盘扫的只是登记的目录；挂载点表读的是面板进程自己的挂载命名空间（unit 开着 PrivateTmp，"
+      "它的 /tmp 与终端里那个不一定是同一个），列每个挂载点的容量、inode、是否只读，"
+      "同一块盘挂两处会标出来；远端对象存储仍然不在视野内。",
     "登记的根可以互相包含（数据目录就在应用根里面）：逐行各算各的，合计只算最外层那一份。",
 )
 
@@ -319,7 +321,8 @@ def _parse_mounts(text: str) -> list[dict]:
             # 只读的 RAM 盘写不进任何东西，永远不会成为"这块盘满了"。这台机器上
             # /run/credentials/* 就是五个这样的挂载点（systemd 设计如此），列出来只是噪声。
             continue
-        by_mp[mp] = {"path": mp, "device": parts[0], "fstype": fstype, "ro": ro}
+        by_mp[mp] = {"path": mp, "device": parts[0], "fstype": fstype, "ro": ro,
+                    "snapshot": fstype in SNAPSHOT_FSTYPES}
     return list(by_mp.values())
 
 
@@ -333,6 +336,24 @@ def _mount_of(path: str, items: list[dict]) -> str | None:
         if inside and (best is None or len(mp) > len(best)):
             best = mp
     return best
+
+
+def _flag_shared_device(items: list[dict]) -> None:
+    """同一块文件系统挂了不止一处，就在后出现的那一行标出它和谁是同一块盘。
+
+    面板自己就踩在这条上：unit 里开着 PrivateTmp，本进程的挂载命名空间因此多出一个
+    /var/tmp，它就是根分区（这台机器上实测 st_dev 都是 2049）。那一行的容量、inode 和
+    / 一模一样，不标注看上去像"两块盘都用到 21%"，管理员会去找一块并不存在的盘。
+    """
+    anchor: dict[int, str] = {}
+    for it in items:
+        try:
+            dev = os.stat(it["path"]).st_dev
+        except OSError:
+            it["same_dev_as"] = None
+            continue
+        first = anchor.setdefault(dev, it["path"])
+        it["same_dev_as"] = None if first == it["path"] else first
 
 
 def _mounts(raw: str | None = None) -> dict:
@@ -388,6 +409,7 @@ def _mounts(raw: str | None = None) -> dict:
     # 最吃紧的排前面，读不到的和 0% 的沉底：这张表的用途是先看见哪块盘要出事。
     items.sort(key=lambda it: (it["used_pct"] is None, -(it["used_pct"] or 0), it["path"]))
     shown = items[:TOP_MOUNTS]
+    _flag_shared_device(shown)
     return {"ok": True, "items": shown, "total": len(items),
             "omitted": max(len(items) - TOP_MOUNTS, 0), "panel_mount": panel}
 
@@ -459,7 +481,7 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
             })
         pct = m.get("used_pct")
         if (isinstance(pct, int) and pct >= DISK_TIGHT_PCT
-                and not m.get("panel") and ftype not in SNAPSHOT_FSTYPES):
+                and not m.get("panel") and not m.get("snapshot")):
             out.append({
                 "id": "mount:" + path,
                 "severity": SEV_RISK,
@@ -469,7 +491,7 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
                           "而且备份失败是不响的。别照数据目录的榜单来清这块盘。",
                 "fix": f"du -xh --max-depth=1 '{path}' 2>/dev/null | sort -h | tail -10",
             })
-        if m.get("ro") and ftype not in SNAPSHOT_FSTYPES and ftype not in RAM_FSTYPES:
+        if m.get("ro") and not m.get("snapshot") and ftype not in RAM_FSTYPES:
             out.append({
                 "id": "ro:" + path,
                 "severity": SEV_WARN,
