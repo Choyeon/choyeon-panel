@@ -419,7 +419,16 @@ class TestAuthorizedKeys(unittest.TestCase):
     def test_owner_only_mode_is_clean(self):
         line, _ = _key_line()
         self.write(line, 0o600)
-        self.assertEqual(self.scan()["files"][0]["flags"], [])
+        if os.geteuid() == 0:
+            # root 能把文件真的交给 bob，这条才验到"属主对 + 模式对 = 一个 flag 都没有"
+            os.chown(str(self.path), 1500, 1500)
+            self.assertEqual(self.scan()["files"][0]["flags"], [])
+            return
+        # CI 上的 runner 改不了属主，文件只能归跑测试的人——于是"属主不是这个用户"本来就该报。
+        # 这条要验的是 0600 的模式没问题，所以只挑模式类的 flag；
+        # 不加这个分支的话，同一份代码在 root 与非 root 下会得到相反结论（CI 就是这么红的）。
+        flags = [f for f in self.scan()["files"][0]["flags"] if "属主" not in f]
+        self.assertEqual(flags, [])
 
     @unittest.skipUnless(os.geteuid() == 0, "改属主需要 root")
     def test_wrong_owner_is_flagged(self):
