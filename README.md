@@ -26,7 +26,7 @@
 </p>
 
 > **原生 Linux 服务器管理面板：跑在宿主机上，不依赖 Docker。**
-> 装完自带 `choyeonctl`：应用部署与回滚、systemd 服务、nginx 站点、SSL 证书、PostgreSQL/Redis、备份、文件管理、Web 终端、12 项安全自检。
+> 装完自带 `choyeonctl`：应用部署与回滚、systemd 服务、nginx 站点、SSL 证书、PostgreSQL/Redis、备份、文件管理、Web 终端、13 项安全自检。
 
 <p align="center">
   <img src="./assets/preview-dark.svg" alt="choyeon-panel 概览页（暗色主题）" width="100%" />
@@ -136,7 +136,7 @@ choyeonctl upgrade --no-pull  # 只改了配置时：跳过拉代码，仅重建
 | --- | --- |
 | 应用管理 | Git 拉取 → 安装依赖 → systemd 托管部署 Node/Python 应用；环境变量、自定义启动命令、unit 模板，可回滚到上一次成功部署 |
 | 一键模板 | 建应用时选预设（`node-service` / `node-next` / `python-fastapi` / `static-site`），自动填运行时、安装与启动命令、端口 |
-| 安全自检 | 网页「安全自检」页与 `choyeonctl doctor`：监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI、证书续期是否真有人托管、定时器单元与任务记录对账，共 12 项只读检查，每项给可复制的修复命令 |
+| 安全自检 | 网页「安全自检」页与 `choyeonctl doctor`：监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI、证书续期是否真有人托管、定时器单元与任务记录对账、待装补丁与安全更新，共 13 项只读检查，每项给可复制的修复命令 |
 | 网站与证书 | 按域名/端口生成反代配置，开关 WebSocket 升级、请求体大小、重定向；`nginx -t` 校验后热加载，校验失败自动回滚原文件。certbot 签发/续期，域名 × 应用 × 端口的 vhost 总览能一键套用/移除与手动续期，并列出剩余天数与最早到期提醒 |
 | 系统监控 | psutil 进程内采集（无 fork）：CPU/内存/网速实时曲线，1h/6h/24h/7d 历史曲线（磁盘、负载、磁盘 IO）、Top 进程；systemd 服务启停；journalctl 实时日志（SSE）与关键词检索 |
 | 数据库 | PostgreSQL 库/角色管理 + SQL 控制台 + 表/行数据浏览（可编辑）；Redis 键浏览器（string/hash/list/set/zset，含 TTL 与内存），读路径走进程内 RESP 客户端，不 fork redis-cli |
@@ -157,7 +157,7 @@ choyeonctl upgrade --no-pull  # 只改了配置时：跳过拉代码，仅重建
 ```bash
 choyeonctl deploy --port 3210 --json                 # 与 scripts/install.sh 等价的一键部署
 choyeonctl status --json                             # 版本 / 监听 / 服务 / 健康 / 自检汇总
-choyeonctl doctor --json                             # 12 项只读自检，每项带修复命令
+choyeonctl doctor --json                             # 13 项只读自检，每项带修复命令
 
 printf '%s' "$PW" | choyeonctl user create admin --password-stdin --json
 choyeonctl app templates                             # node-service / node-next / python-fastapi / static-site

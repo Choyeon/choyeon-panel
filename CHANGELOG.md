@@ -40,6 +40,21 @@
 - 防火墙页窄屏（<900px）的删除按钮原先实测 28x44，两个字的按钮点不准；补齐横向内边距到 52x44。
   端口输入框限长 5 位，避免粘进整段文字后才发现报错。
 
+- 系统补丁可见性：`choyeonctl updates`、`GET /api/updates`、自检项「系统补丁」与服务页的「系统补丁」页签共用一份数据。
+  此前面板连"这台机器还差几个安全更新"都答不出来，而未打的安全更新正是最常见的横向跳板。探测严格只读：不跑
+  `apt update`（会写索引、和 dpkg 抢锁），不装任何包，升级命令只准备好供管理员自己执行——装包会顺带重启别的服务、
+  可能换内核，这些不该由"刷新一下页面"触发。发行版先按 `ID`/`ID_LIKE` 判族，判不出来再看包管理器在不在；
+  apt / dnf / pacman / zypper / apk 五套输出各配一个解析器，`dnf check-update` 有待装时退出码就是 100（那是约定不是失败）。
+- 判不出安全更新子集的发行版如实报 `null`，页面显示"判不出"而不是 0：把"不知道"写成"没有"，管理员就不会再看第二眼，
+  而这一行恰恰是唯一催他去装补丁的地方。同理，Arch/Alpine 上根本没有 `unattended-upgrades` 这类单元，自动更新状态报
+  「该发行版不适用」，不再对着 systemctl 空跑五趟再断言"未开启"。
+- 「系统补丁」页签给出待装 / 安全更新 / 自动安全更新 / 需重启四颗状态 chip、带「安全」标记的包列表、可复制的升级命令，
+  以及 apt 索引过期提醒（索引旧于 24 小时就说明结论可能偏旧）。有待装安全更新时页签点名一颗红点——这一页平时没人看，
+  而它最需要被看见。
+- `backend/tests/test_batch9a.py` 锁住五套解析器、"判不出≠没有"的口径、只读探测（`apt update`/`upgrade`/`install`
+  一次都不许被调用）、30 分钟缓存与 `--refresh` 回源、CLI 在未识别发行版时按前置条件不满足退 3，
+  以及 AGENTS.md 写的自检项数必须等于 `_CHECKS` 的真实长度（文档口径由 `test_repo_hygiene` 一并校验）。
+
 ### 修复
 - 单体仓库（monorepo）里的子目录组件现在能通过面板部署，也能回滚。原先三处按
   `{path}/.git` 判"是不是仓库"的代码统一改为共用 `resolve_repo_dir`（`git rev-parse --show-toplevel`）：
@@ -175,7 +190,7 @@
 
 ### 新增
 - **多发行版一键安装**：Debian 系（Ubuntu/Debian/Mint/Kali）、RHEL 系（CentOS Stream/Rocky/AlmaLinux/Fedora/Amazon Linux）、Arch 系、openSUSE、Alpine（musl）自动识别并安装全部依赖，含 Python 3.11+ 与 Node 22 LTS
-- **`choyeonctl doctor` 安全自检**扩展到 12 项只读检查（监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI、证书续期托管、timer 与任务记录对账），每项附可复制的修复命令；网页「安全自检」页同源
+- **`choyeonctl doctor` 安全自检**当时扩展到 12 个检查项（监听地址、管理员、服务、前端产物、nginx、防火墙、备份、磁盘、文件权限、全局 CLI、证书续期托管、timer 与任务记录对账），每项附可复制的修复命令；网页「安全自检」页同源。项数随版本增加，当前口径以 AGENTS.md 为准
 - **指标历史持久化**：CPU/内存/网速实时曲线 + 1h/6h/24h/7d 历史（磁盘、负载、磁盘 IO），每网卡独立速率
 - **告警历史与应用 HTTP 探活**、定时任务中心（cron 渲染为 systemd timer）、日志检索（unit/时间/级别/正则）、网站与证书总览页
 - PostgreSQL 表/行浏览与编辑、Redis 键浏览器（string/hash/list/set/zset 含 TTL 与内存），读路径走进程内 RESP 客户端

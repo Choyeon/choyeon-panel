@@ -15,6 +15,7 @@
     choyeonctl app list|create|deploy|rollback|logs
     choyeonctl backup run|list
     choyeonctl firewall list|allow|deny|remove|on|off
+    choyeonctl updates
     choyeonctl logs [-n 100] | restart | stop | start | upgrade
     choyeonctl schema --json         # 输出命令契约（AI 读取入口）
 """
@@ -40,7 +41,7 @@ from app import avatars, config, security  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.errors import BadInput, public_message  # noqa: E402
 from app.routers.meta import run_checks  # noqa: E402
-from app.services import firewall_service  # noqa: E402
+from app.services import firewall_service, updates_service  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -656,7 +657,7 @@ async def cmd_firewall(a: argparse.Namespace) -> dict:
     if verb == "list":
         Out.result(data, _firewall_table(data))
         return data
-    # 删除成功的答复要带上删掉了什么： 是服务重新列表确认过的结果，
+    # 删除成功的答复要带上删掉了什么：那个结果名是服务重新列表确认过的，
     # 只回一句"已执行"等于让用户再跑一次 list 才敢相信。
     text = data.get("detail") or ""
     if verb == "remove":
@@ -695,6 +696,51 @@ def _firewall_table(data: dict) -> str:
     lines.append(f"共 {len(rules)} 条")
     return "\n".join(lines)
 
+
+async def cmd_updates(a: argparse.Namespace) -> dict:
+    """待装补丁：只读回答"还差哪些更新、其中哪些是安全更新"。
+
+    面板不代跑 `apt update` / `apt upgrade`：前者写索引并和 dpkg 抢锁，后者会顺带重启
+    别的服务、可能换内核，而且失败了要人盯。命令给出来，按不按由人决定。
+    """
+    data = await updates_service.detect(refresh=bool(a.refresh))
+    if not data.get("supported"):
+        Out.error("未识别的发行版或没有受支持的包管理器，无法判断待装更新", EXIT_PRECONDITION)
+    Out.result(data, _updates_text(data))
+    return data
+
+
+def _updates_text(d: dict) -> str:
+    lines = [f"{d.get('distro') or '未知发行版'} · {d.get('family')}"]
+    sec = d.get("security_count")
+    total = int(d.get("pending_total") or 0)
+    head = f"待装 {total} 个" + (
+        f"，其中安全更新 {sec} 个" if sec is not None else "（该发行版判不出安全更新子集）"
+    )
+    auto = d.get("auto_updates") or {}
+    if auto.get("state") == "enabled":
+        head += f" · 自动安全更新已开启（{auto.get('unit')}）"
+    elif auto.get("state") == "disabled":
+        head += " · 自动安全更新未开启"
+    lines.append(head)
+    if d.get("reboot_required"):
+        lines.append("上次更新要求重启才生效")
+    for n in d.get("notes") or []:
+        lines.append(f"[note] {n}")
+    pkgs = d.get("packages") or []
+    shown = pkgs[:20]
+    for p in shown:
+        mark = "  [security]" if p.get("security") else ""
+        lines.append(f"  {p['name']:<38} {p.get('current') or '-':<26} -> {p.get('candidate') or '?'}{mark}")
+    if len(pkgs) > len(shown):
+        lines.append(f"  ...共 {len(pkgs)} 个，完整清单用 --json")
+    cmds = d.get("commands") or {}
+    if sec and cmds.get("apply_security"):
+        lines.append(f"只装安全更新：{cmds['apply_security']}")
+    if total and cmds.get("apply_all"):
+        lines.append(f"全部升级：  {cmds['apply_all']}")
+    lines.append(f"检查时间 {d.get('checked_at')}" + ("（命中缓存）" if d.get("cached") else ""))
+    return "\n".join(lines)
 
 async def cmd_schema(_a: argparse.Namespace) -> dict:
     """机器可读命令契约：AI 智能体读这一份就够，不用翻源码。"""
@@ -738,6 +784,11 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "remove 必须带 list 里读回的 sig（--expect）：编号会随任何一次删除前移",
                        "off 需要 --yes；on 会先确认 SSH 与面板入口端口已经在放行列表里",
                        "参数写歪退出码 2（用法错误），被自锁守卫拦下与防火墙自身报错为 1"]},
+            {"name": "updates", "args": ["--refresh"],
+             "desc": "待装系统补丁与安全更新（只读探测，面板不代跑 apt update/upgrade）",
+             "notes": ["结论来自本地包索引；索引过旧会在 notes 里如实说明",
+                       "判不出安全更新子集的发行版报 security_count=null，不会填 0 冒充没有",
+                       "supported=false 时退出码 3（前置条件不满足）"]},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
             {"name": "schema", "args": [], "desc": "输出本契约"},
@@ -821,6 +872,10 @@ def build_parser() -> argparse.ArgumentParser:
     fw.add_argument("--expect", help="remove：list 里那条规则的 sig，服务端重新列表比对")
     fw.add_argument("--yes", action="store_true", help="off：确认停用防火墙")
     fw.set_defaults(fn=cmd_firewall)
+
+    up = sub.add_parser("updates", help="待装系统补丁与安全更新（只读探测）", parents=[common])
+    up.add_argument("--refresh", action="store_true", help="忽略 30 分钟缓存，立即重新探测")
+    up.set_defaults(fn=cmd_updates)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

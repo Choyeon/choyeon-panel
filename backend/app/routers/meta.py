@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
-from ..services import cert_ops, systemd_ops
+from ..services import cert_ops, systemd_ops, updates_service
 from ..templates import list_templates
 from ..util import disk_usage_pct, run
 
@@ -329,6 +329,14 @@ async def _check_timer_units() -> dict:
     return {"status": "pass", "detail": "定时器单元与任务记录一一对应", "fix": ""}
 
 
+async def _check_updates() -> dict:
+    """待装补丁：把"这台机器还差哪些安全更新"变成自检里能看见的一行。
+
+    严格只读（不 `apt update`、不装包，理由见 updates_service 的模块说明），结果走 TTL
+    缓存，所以自检页反复刷新不会反复惊动包管理器，也不会和别的进程抢 dpkg 锁。
+    """
+    return updates_service.doctor_item(await updates_service.detect())
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -342,6 +350,7 @@ _CHECKS = [
     ("cli", "全局 CLI", _check_cli),
     ("cert-renew", "证书续期", _check_cert_renewal),
     ("timer-units", "定时器对账", _check_timer_units),
+    ("updates", "系统补丁", _check_updates),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
@@ -382,6 +391,11 @@ async def doctor(req: Request):
         return JSONResponse(status_code=403, content={"error": "仅管理员可执行自检"})
     return await run_checks()
 
+
+@router.get("/api/updates")
+async def updates(refresh: int = 0):
+    """待装补丁清单：只读探测，viewer 也能看——它不返回任何可写信息。"""
+    return await updates_service.detect(refresh=bool(refresh))
 
 @router.post("/api/doctor/fix")
 async def doctor_fix(req: Request):

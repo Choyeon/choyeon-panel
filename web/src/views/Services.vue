@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, h } from 'vue';
-import { NDataTable, NInput, NSelect, NAlert, NText, useMessage, NIcon } from 'naive-ui';
+import { NDataTable, NInput, NSelect, NAlert, NTag, NText, useMessage, NIcon } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, getRole } from '../api';
 import { icon, icons } from '../icons';
@@ -14,6 +14,8 @@ import EmptyBox from '../components/EmptyBox.vue';
 import { useCachedFetch, invalidateCache } from '../composables/useCachedFetch';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
 import { useTableHeight } from '../composables/useTableHeight';
+import { useCopy } from '../composables/useCopy';
+import { fmtDateTime } from '../composables/useFormat';
 
 const msg = useMessage();
 const isAdmin = getRole() === 'admin';
@@ -53,6 +55,57 @@ const rows = computed<any[]>(() => data.value ?? []);
 const { pending: pendingRefresh, later } = useDelayedRefresh();
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
 
+// 系统补丁是只读探测，服务端已有 30 分钟 TTL，这里再叠一层前端缓存：切走再回来秒开。
+// 「刷新」读服务端缓存（快），「重新探测」带 refresh=1 强制回源（apt list 在包多的机器上
+// 要跑几秒，所以它是用户主动点的按钮，不是每次进页都做）。
+const forceProbe = ref(false);
+const {
+  data: patches, error: patchError, loading: patchLoading, refreshing: patchRefreshing, refresh: refreshPatches,
+} = useCachedFetch<any>({
+  key: () => 'updates',
+  loader: () => api.updates(forceProbe.value),
+  maxAge: 60000,
+});
+const probing = ref(false);
+watch(patchError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+async function repost() {
+  forceProbe.value = true;
+  probing.value = true;
+  try {
+    await refreshPatches();
+  } catch {
+    /* 失败已经通过 patchError 走上面的 toast */
+  } finally {
+    forceProbe.value = false;
+    probing.value = false;
+  }
+}
+
+const secCount = computed<number | null>(() => {
+  const v = patches.value?.security_count;
+  return typeof v === 'number' ? v : null;
+});
+const totalPending = computed(() => Number(patches.value?.pending_total) || 0);
+const autoState = computed(() => patches.value?.auto_updates?.state || 'unknown');
+const patchBusy = computed(() => patchLoading.value || patchRefreshing.value || probing.value);
+// 判不出安全子集时不能说"没有安全更新"——那正是管理员最容易被劝走的一步。
+const patchAlert = computed(() => {
+  const p = patches.value;
+  if (!p || patchError.value) return null;
+  if (!p.supported) return { type: 'warning' as const, text: '未能识别这台机器的发行版或包管理器，面板不猜待装更新的数量。' };
+  if (secCount.value === null) {
+    return { type: totalPending.value ? 'warning' as const : 'info' as const, text: `${p.family} 判不出安全更新子集，只报待装总数 ${totalPending.value} 个。` };
+  }
+  if (secCount.value > 0) {
+    return { type: 'warning' as const, text: `${secCount.value} 个待装安全更新（共 ${totalPending.value} 个待装）。安全更新是最常见的横向跳板，建议尽快到 SSH 里执行下方命令。` };
+  }
+  if (totalPending.value) return { type: 'info' as const, text: `没有待装安全更新，另有 ${totalPending.value} 个功能更新。` };
+  return { type: 'success' as const, text: '补丁已全部装上（按本地包索引判断，索引过旧时结论会偏旧）。' };
+});
+
+const { copy } = useCopy();
+
 function reload() {
   invalidateCache('services');
   invalidateCache('unit-files');
@@ -77,6 +130,8 @@ const filtered = computed(() => {
 
 const tabs = computed(() => [
   { key: 'services', label: '系统服务' },
+  // 有待装安全更新时页签上点一颗红点：这一页平时没人看，而它恰恰是最需要被看见的。
+  { key: 'patches', label: '系统补丁', badge: (secCount.value ?? 0) > 0 },
   // 单元日志走 /api/system/services/{unit}/logs，服务端要求 admin（journal 是全机内容）。
   // 不给只读账号留这个页签，否则他点进来的是一片 403。
   ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
@@ -202,17 +257,53 @@ const columns: any[] = [
 // unit 数动辄几百行，一次全渲染会让首屏卡顿；分页只渲染当前页。
 // 不传 page/pageSize 之外的受控字段：分页状态交给 naive 自己维护。
 const paging = { pageSize: 50, showSizePicker: false, showQuickJumper: false };
+
+// 补丁表：包名带 suite（stable-security / baseos 之类），版本差是这一页唯一要看的东西，
+// 所以两列版本都给足宽度，窄屏靠 scroll-x 横滚而不是把版本号截成 "2.41-1…".
+const patchColumns: any[] = [
+  {
+    title: '包名', key: 'name', minWidth: 240,
+    render: (r: any) =>
+      h('div', { class: 'cell-main' }, [
+        h('span', { class: 'cell-ico' }, [
+          h(NIcon, {
+            component: r.security ? icons.ShieldCheckmarkOutline : icons.CubeOutline,
+            size: 17,
+            color: r.security ? 'var(--cp-warn)' : 'var(--cp-text-mute)',
+          }),
+        ]),
+        h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name', title: r.name }, r.name),
+          h('div', { class: 'cell-sub', title: r.suite || '—' }, r.suite || '—'),
+        ]),
+      ]),
+  },
+  { title: '当前版本', key: 'current', width: 200, render: (r: any) => h('span', { class: 'mono' }, r.current || '—') },
+  { title: '更新到', key: 'candidate', width: 200, render: (r: any) => h('span', { class: 'mono' }, r.candidate || '?') },
+  {
+    title: '类别', key: 'security', width: 92,
+    render: (r: any) => h(NTag, { size: 'small', type: r.security ? 'warning' : 'default', bordered: false }, () => (r.security ? '安全' : '功能')),
+  },
+];
+
+const patchPaging = { pageSize: 20, showSizePicker: false, showQuickJumper: false };
+// 通告号只在 dnf 那一支有：列出来能让管理员去查 CVE，但不为它单开一张表。
+const advisoryLine = computed(() => (patches.value?.advisories || []).slice(0, 8).map((a: any) => a.id).join('、'));
 </script>
 
 <template>
   <div>
     <PageTabBar :tabs="tabs" :value="tab" @update="(k: string) => (tab = k)">
       <template #extra>
-        <NText v-if="pendingRefresh" depth="3" style="font-size: var(--fs-xs)">状态回读中…</NText>
-        <NButton size="small" :quaternary="!showAll" :type="showAll ? 'primary' : 'default'" @click="showAll = !showAll">
-          {{ showAll ? '只看关键服务' : '查看全部单元' }}
-        </NButton>
-        <NButton size="small" tertiary :loading="loading || refreshing || pendingRefresh" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
+        <!-- 这三颗都是"系统服务"页签的工具：留在补丁页上会变成两个「刷新」并排，
+             而上面那颗刷的是服务表，用户按字面理解只会以为点了没反应。 -->
+        <template v-if="tab === 'services'">
+          <NText v-if="pendingRefresh" depth="3" style="font-size: var(--fs-xs)">状态回读中…</NText>
+          <NButton size="small" :quaternary="!showAll" :type="showAll ? 'primary' : 'default'" @click="showAll = !showAll">
+            {{ showAll ? '只看关键服务' : '查看全部单元' }}
+          </NButton>
+          <NButton size="small" tertiary :loading="loading || refreshing || pendingRefresh" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
+        </template>
       </template>
     </PageTabBar>
 
@@ -244,6 +335,72 @@ const paging = { pageSize: 50, showSizePicker: false, showQuickJumper: false };
       </NDataTable>
     </CpToolbarCard>
 
+    <CpToolbarCard v-else-if="tab === 'patches'" title="系统补丁" style="margin-top: 10px">
+      <template #right>
+        <div class="pt-toolbar">
+          <NText v-if="patches" depth="3" class="pt-time">
+            检查于 {{ fmtDateTime(patches.checked_at) }}<template v-if="patches.cached">（缓存）</template>
+          </NText>
+          <NButton size="small" tertiary :loading="patchBusy" :icon="icon('RefreshOutline', 14)" @click="refreshPatches">刷新</NButton>
+          <NButton size="small" :loading="probing" :icon="icon('SyncOutline', 14)" @click="repost">重新探测</NButton>
+        </div>
+      </template>
+
+      <NAlert v-if="!patches && patchError" type="error" :bordered="false" style="margin-bottom: var(--space-3)">
+        补丁探测失败：{{ (patchError as Error).message || '未知错误' }}。点上方「重新探测」重试。
+      </NAlert>
+      <NAlert v-else-if="patchAlert" :type="patchAlert.type" :bordered="false" style="margin-bottom: var(--space-3)">
+        {{ patchAlert.text }}
+      </NAlert>
+
+      <div v-if="patches" class="pt-chips">
+        <span class="pt-chip"><i>发行版</i>{{ patches.distro || patches.family || '—' }}</span>
+        <span class="pt-chip"><i>待装</i>{{ totalPending }} 个</span>
+        <span class="pt-chip">
+          <i>安全更新</i>
+          <template v-if="secCount === null">判不出</template>
+          <template v-else>{{ secCount }} 个</template>
+        </span>
+        <span class="pt-chip">
+          <i>自动安全更新</i>
+          <template v-if="autoState === 'enabled'">已开启</template>
+          <template v-else-if="autoState === 'disabled'">未开启</template>
+          <template v-else>该发行版不适用</template>
+        </span>
+        <span v-if="patches.reboot_required" class="pt-chip warn"><i>重启</i>上次更新需重启生效</span>
+      </div>
+
+      <div v-if="patches && (patches.notes || []).length" class="pt-notes">
+        <div v-for="(n, i) in patches.notes" :key="i" class="pt-note">{{ n }}</div>
+      </div>
+      <NText v-if="advisoryLine" depth="3" class="pt-advisories">安全通告：{{ advisoryLine }}</NText>
+
+      <div v-if="patches && (totalPending || secCount)" class="pt-cmds">
+        <div v-if="patches.commands?.apply_security" class="pt-cmd">
+          <NText depth="3" class="pt-cmd-label">只装安全更新</NText>
+          <code class="mono pt-cmd-text">{{ patches.commands.apply_security }}</code>
+          <NButton size="tiny" quaternary :icon="icon('CopyOutline', 13)" @click="copy(patches.commands.apply_security, '已复制，请到 SSH 会话里执行')">复制</NButton>
+        </div>
+        <div v-if="patches.commands?.apply_all" class="pt-cmd">
+          <NText depth="3" class="pt-cmd-label">全部升级</NText>
+          <code class="mono pt-cmd-text">{{ patches.commands.apply_all }}</code>
+          <NButton size="tiny" quaternary :icon="icon('CopyOutline', 13)" @click="copy(patches.commands.apply_all, '已复制，请到 SSH 会话里执行')">复制</NButton>
+        </div>
+        <NText depth="3" class="pt-cmd-hint">面板只读出清单，不会替你装包：装包会顺带重启别的服务、可能换内核，失败要人盯着。</NText>
+      </div>
+
+      <NDataTable
+        :columns="patchColumns" :data="patches?.packages || []" size="small" :bordered="false"
+        :loading="patchBusy && !patches" :scroll-x="620"
+        :max-height="(patches?.packages || []).length ? tableH : undefined" :pagination="patchPaging"
+        :row-key="(r: any) => r.name" class="cp-tbl tbl-patches"
+      >
+        <template #empty>
+          <EmptyBox :text="patchError && !patches ? '补丁清单获取失败，点上方「重新探测」重试' : '按本地包索引，没有待装更新'" />
+        </template>
+      </NDataTable>
+    </CpToolbarCard>
+
     <CpToolbarCard v-else :title="logUnit ? `${logUnit} · journalctl 实时日志` : '单元日志'" style="margin-top: 10px">
       <!-- LogStream 只在挂载时开流、不 watch urlPath：换 unit 必须重挂载，否则旧 SSE 还在推上一个服务的日志 -->
       <LogStream v-if="logUnit" :key="logUnit" :url-path="`/system/services/${encodeURIComponent(logUnit)}/logs`" class="svc-log" />
@@ -258,6 +415,34 @@ const paging = { pageSize: 50, showSizePicker: false, showQuickJumper: false };
 .svc-toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .svc-filter { width: 300px; }
 .svc-search { width: 180px; }
+/* 系统补丁：chip 摘要 + 可复制的升级命令。命令一定给横向滚动条，
+   `apt update && apt upgrade -y` 在 375px 上换行会把两行命令粘成一坨。 */
+.pt-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.pt-time { font-size: var(--fs-xs); }
+.pt-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-3); }
+.pt-chip {
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 10px;
+  border-radius: var(--radius-md); background: var(--cp-bg-soft); font-size: var(--fs-sm); color: var(--cp-text);
+}
+.pt-chip i { font-style: normal; font-size: var(--fs-xs); color: var(--cp-text-mute); }
+.pt-chip.warn { color: var(--cp-warn); }
+.pt-notes { margin: -4px 0 var(--space-3); }
+.pt-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
+.pt-advisories { display: block; margin: -4px 0 var(--space-3); font-size: var(--fs-xs); word-break: break-all; }
+.pt-cmds { display: grid; gap: 6px; margin-bottom: var(--space-3); }
+.pt-cmd { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pt-cmd-label { flex: 0 0 76px; font-size: var(--fs-xs); }
+.pt-cmd-text {
+  flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap;
+  padding: 4px 8px; border-radius: var(--radius-sm); background: var(--cp-bg-soft); font-size: var(--fs-sm);
+}
+.pt-cmd-hint { font-size: var(--fs-xs); }
+@media (max-width: 767px) {
+  .pt-cmd { flex-wrap: wrap; }
+  .pt-cmd-label { flex: 0 0 100%; }
+  .pt-cmd-text { flex: 1 1 auto; max-width: 100%; }
+  .pt-toolbar { justify-content: flex-start; }
+}
 @media (max-width: 1024px) {
   .svc-toolbar { flex-wrap: wrap; justify-content: flex-start; gap: 12px; }
   .svc-filter, .svc-search { flex: 1 1 220px; max-width: 300px; width: auto; }
