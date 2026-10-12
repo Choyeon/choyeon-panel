@@ -129,7 +129,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `deploy` | `--prefix --port --branch --skip-nginx --no-deps` | 一键部署（依赖→venv→前端构建→systemd→健康检查）；非交互，不会询问 nginx 反代 |
 | `upgrade` | `--no-pull` | 拉代码→备份→重建→重启，健康检查失败自动回滚；`--no-pull` 只重建并重新渲染 unit |
 | `status` | — | 版本/监听/服务/健康/自检汇总 |
-| `doctor` | — | 只读安全与健康自检（当前 15 项，以 JSON 的 `items` 为准），每项带修复命令 |
+| `doctor` | — | 只读安全与健康自检（当前 16 项，以 JSON 的 `items` 为准），每项带修复命令 |
 | `user list\|create\|reset\|revoke\|delete` | `<name> --password --password-stdin --role --yes` | 账号管理；create/reset 用 `--password-stdin` 传口令。改密与 `revoke` 都会吊销旧 token：`revoke <name>` 只踢这个账号，`revoke all` 踢全部（`delete` 必须加 `--yes`） |
 | `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --type --repo --branch --path --port --domain --start-cmd --install-cmd --lines` | 应用全生命周期；`create` 需 `--template` 或 `--start-cmd` 之一 |
 | `backup run\|list` | — | 面板数据备份（SQLite 在线备份 API） |
@@ -137,6 +137,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `updates` | `--refresh` | 待装系统补丁与安全更新（只读探测）；面板不代跑 apt update/upgrade，升级命令只准备好供管理员执行 |
 | `ports` | `--refresh` | 监听端口与对外可达性对账（只读）：每个端口给 internal/expected/blocked/exposed 一档判词，不改绑定也不动防火墙 |
 | `ssh-audit` | `--refresh` | 登录安全对账（严格只读）：`sshd -T` 有效配置、authorized_keys 指纹与权限、空口令/多余 uid=0、24h 认证日志与来源排行、fail2ban/sshguard 是否在拦。不写 sshd_config、不 reload sshd，修复命令只供管理员自己 SSH 执行；读不到 sshd 配置时退出码 3 |
+| `storage` | `--refresh` | 存储占用对账（只读扫描）：面板数据、面板备份、journald 落盘处与 `FILE_ROOTS` 登记的目录各给总量与一级子目录榜，判词点名日志过大、备份攒了多少份、分区吃紧、单个超大文件；不删文件、不改配额，清理动作只给可复制的命令；登记的目录一个都读不到时退出码 3 |
 | `start\|stop\|restart` | — | systemd 服务控制 |
 | `logs` | `--lines` | journalctl 日志 |
 | `schema` | — | 输出命令契约 |

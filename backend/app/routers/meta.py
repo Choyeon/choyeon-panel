@@ -23,6 +23,7 @@ from ..services import (
     cert_ops,
     exposure_service,
     login_audit_service,
+    storage_service,
     systemd_ops,
     updates_service,
 )
@@ -365,6 +366,18 @@ async def _check_login() -> dict:
     """
     return login_audit_service.doctor_item(await login_audit_service.audit())
 
+
+async def _check_storage() -> dict:
+    """存储占用：disk 那一项只说"还剩多少"，说不出"是被谁占掉的"。
+
+    这一项把面板数据、备份目录、journald 落盘处和 FILE_ROOTS 登记的目录各扫一遍，
+    给每个根的一级子目录占用榜，再把数字折成判词（日志过大、备份攒了多少份、
+    分区吃紧、单个超大文件）。严格只读：不删文件、不改配额，清理动作只给可复制的
+    命令。走 TTL 缓存，自检页反复刷新不会反复扫盘。
+    """
+    return storage_service.doctor_item(await storage_service.audit())
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -381,6 +394,7 @@ _CHECKS = [
     ("updates", "系统补丁", _check_updates),
     ("ports", "端口暴露面", _check_ports),
     ("login", "登录安全", _check_login),
+    ("storage", "存储占用", _check_storage),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
@@ -438,6 +452,12 @@ async def ports(refresh: int = 0):
 async def ssh_audit(refresh: int = 0):
     """登录安全对账：只读探测，viewer 也能看；修复动作一律回 SSH 里手工做。"""
     return await login_audit_service.audit(refresh=bool(refresh))
+
+
+@router.get("/api/storage")
+async def storage(refresh: int = 0):
+    """存储占用对账：只读扫描，viewer 也能看；清理动作一律回 CLI 里手工做。"""
+    return await storage_service.audit(refresh=bool(refresh))
 
 @router.post("/api/doctor/fix")
 async def doctor_fix(req: Request):

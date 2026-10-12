@@ -16,6 +16,7 @@
     choyeonctl backup run|list
     choyeonctl firewall list|allow|deny|remove|on|off
     choyeonctl updates
+    choyeonctl storage
     choyeonctl logs [-n 100] | restart | stop | start | upgrade
     choyeonctl schema --json         # 输出命令契约（AI 读取入口）
 """
@@ -45,6 +46,7 @@ from app.services import (  # noqa: E402
     exposure_service,
     firewall_service,
     login_audit_service,
+    storage_service,
     updates_service,
 )
 
@@ -876,6 +878,83 @@ def _ports_text(d: dict) -> str:
     lines.append(f"检查时间 {d.get('checked_at')}" + ("（命中缓存）" if d.get("cached") else ""))
     return "\n".join(lines)
 
+
+async def cmd_storage(a: argparse.Namespace) -> dict:
+    """存储占用对账：磁盘余量那一项只说"还剩多少"，这里回答"被谁占掉了"。
+
+    只读——不删文件、不改配额、不动备份任务的 keep。删除旧备份有自己的流程
+    （choyeonctl backup list 看清再动手），扫盘替人决定删哪个文件风险太大。
+    """
+    data = await storage_service.audit(refresh=bool(a.refresh))
+    if not any(r.get("exists") for r in data.get("roots") or []):
+        Out.error("登记的目录一个都没读到，无法对账", EXIT_PRECONDITION)
+    Out.result(data, _storage_text(data))
+    return data
+
+
+def _storage_text(d: dict) -> str:
+    c = d.get("counts") or {}
+    disk = d.get("disk") or {}
+    jr = d.get("journal") or {}
+    lines = ["存储占用对账（只读：不删文件、不改配额）"]
+    if disk.get("ok"):
+        lines.append(
+            f"分区（数据目录所在）共 {disk.get('total_human')}，已用 {disk.get('used_pct')}%，"
+            f"剩 {disk.get('free_human')}"
+        )
+    else:
+        lines.append("读不到分区信息，占用数字仍然有效，但没有总量可对")
+    lines.append(f"systemd 日志：{jr.get('bytes_human') or '读不到'}")
+    lines.append(f"合计 {c.get('bytes_total_human')}，{c.get('roots', 0)} 个目录：")
+    for r in d.get("roots") or []:
+        if not r.get("exists"):
+            lines.append(f"  {r['label']}  {r['path']} —— 目录不存在")
+            continue
+        tail = f"{r['files']} 个文件"
+        if r.get("nested_in"):
+            tail += f"，与 {r['nested_in']} 重叠，合计只算外层那一份"
+        if r.get("partial"):
+            tail += "，没扫完，数字是下界"
+        if r.get("errors"):
+            tail += f"，{r['errors']} 处读不到"
+        lines.append(f"  {r['label']} {r['bytes_human']}  {r['path']}（{tail}）")
+        subs = r.get("subdirs") or []
+        for sd in subs:
+            lines.append(f"      {sd['name']}/  {sd['bytes_human']}")
+        rest = int(r.get("branch_count") or 0) - len(subs)
+        if subs and rest > 0:
+            lines.append(f"      另有 {rest} 个一级子目录未列出（都不比上面这些大）")
+        bak = r.get("backups") or {}
+        if bak.get("count"):
+            lines.append(
+                f"      备份产物 {bak['count']} 份：最早 {bak.get('oldest')}，最新 {bak.get('newest')}"
+            )
+
+    lines.append(
+        f"判词：要紧 {c.get('risk', 0)} · 值得处理 {c.get('warn', 0)} · 知道就好 {c.get('info', 0)}"
+    )
+    for f in d.get("findings") or []:
+        sev = storage_service.SEV_LABEL.get(f["severity"], f["severity"])
+        lines.append(f"  [{sev}] {f['title']}")
+        if f.get("detail"):
+            lines.append(f"      {f['detail']}")
+        if f.get("fix"):
+            lines.append(f"      处置：{f['fix']}")
+    if not d.get("findings"):
+        lines.append("  没有异常占用。")
+
+    big = d.get("big_files") or []
+    if big:
+        lines.append(f"最大的 {len(big)} 个文件：")
+        for b in big:
+            lines.append(f"  {b['bytes_human']}  {b['path']}")
+
+    for n in d.get("notes") or []:
+        lines.append(f"说明：{n}")
+    lines.append(f"检查时间 {d.get('as_of')}" + ("（命中缓存）" if d.get("cached") else ""))
+    return "\n".join(lines)
+
+
 async def cmd_schema(_a: argparse.Namespace) -> dict:
     """机器可读命令契约：AI 智能体读这一份就够，不用翻源码。"""
     schema = {
@@ -939,6 +1018,16 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "只看本机视野：云上安全组、上游 NAT 不在判定范围内，这一条写在 notes 里",
                        "非 root 时 ss 不给进程名，as_root=false，判定只按端口号给",
                        "读不到监听表时退出码 3"]},
+            {"name": "storage", "args": ["--refresh"],
+             "desc": "存储占用对账（只读：不删文件、不改配额，清理只给可复制的命令）",
+             "notes": ["盘点面板数据、面板备份、journald 落盘处与 FILE_ROOTS 登记的目录，"
+                       "每个根给一级子目录占用榜",
+                       "扫盘有预算：每个根最多 ROOT_BUDGET_SEC 秒、MAX_DEPTH 层，"
+                       "没扫完的目录会标成下界，不会给你一个假的精确数字",
+                       "判词四档：journal 超 2GiB、备份累计超 4GiB、分区已用超 90%、"
+                       "单个文件超 2GiB 点名（后者只点不判断）",
+                       "只看本机文件系统：远端挂载、对象存储不在范围内",
+                       "登记的目录一个都读不到时退出码 3"]},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
             {"name": "schema", "args": [], "desc": "输出本契约"},
@@ -1034,6 +1123,10 @@ def build_parser() -> argparse.ArgumentParser:
     sa = sub.add_parser("ssh-audit", help="登录安全只读对账（不改任何 SSH 配置）", parents=[common])
     sa.add_argument("--refresh", action="store_true", help="忽略 5 分钟缓存，重新读一遍配置与日志")
     sa.set_defaults(fn=cmd_ssh_audit)
+
+    st = sub.add_parser("storage", help="存储占用对账（只读扫描）", parents=[common])
+    st.add_argument("--refresh", action="store_true", help="忽略 5 分钟缓存，立即重新扫一遍")
+    st.set_defaults(fn=cmd_storage)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

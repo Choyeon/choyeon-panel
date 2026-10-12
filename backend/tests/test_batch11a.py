@@ -1139,8 +1139,11 @@ class TestCli(unittest.TestCase):
 
 
 class TestWiring(unittest.TestCase):
-    def test_login_is_the_last_registered_check(self):
-        self.assertEqual(meta._CHECKS[-1][:2], ("login", "登录安全"))
+    def test_login_is_a_registered_check(self):
+        # 只认这一项在不在、叫什么：批次⒫在它后面加了「存储占用」，位置不该被这一层钉死。
+        ids = [c[0] for c in meta._CHECKS]
+        self.assertIn("login", ids)
+        self.assertEqual(meta._CHECKS[ids.index("login")][1], "登录安全")
 
     def test_check_ids_stay_unique(self):
         ids = [i[0] for i in meta._CHECKS]
