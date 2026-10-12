@@ -296,6 +296,24 @@ const exposedCount = computed(() => countOf('exposed'));
 const blockedCount = computed(() => countOf('blocked'));
 const silentApps = computed(() => (portData.value?.apps ?? []).filter((a: any) => a.port && !a.listening));
 const silentLine = computed(() => silentApps.value.map((a: any) => `${a.name}:${a.port}`).join('、'));
+// systemctl 的 unit-file 状态是英文长串，直接上表会把 96px 的胶囊撑到截断，
+// 也和左边中文的「状态」列对不上。这里给短标签，原始值留在 title 里供排障对照。
+// enabled-runtime 单列一档：重启后就没了，这是最容易让人误判的一档。
+const ENABLED_LABELS: Record<string, string> = {
+  enabled: '已启用',
+  'enabled-runtime': '临时启用',
+  disabled: '已关闭',
+  'disabled-runtime': '临时关闭',
+  'disabled-static': '已关闭',
+  masked: '已屏蔽',
+  static: '静态单元',
+  indirect: '按需触发',
+  generated: '生成式',
+  transient: '运行时一次性',
+  linked: '已链接',
+  alias: '别名',
+  bad: '状态异常',
+};
 const SCOPE_LABELS: Record<string, string> = {
   wildcard: '绑全网', 'public-ip': '绑公网地址', loopback: '仅本机回环', 'link-local': '链路本地',
 };
@@ -483,8 +501,8 @@ const columns: any[] = [
     title: '自启', key: 'enabled', width: 96,
     render: (r: any) => {
       const uf = enabledOf(r.unit);
-      const text = uf || (r.unit.endsWith('.service') ? '未知' : '');
-      const cls = uf === 'enabled' ? 'ok' : uf === 'disabled' ? 'idle' : uf === 'masked' ? 'err' : 'idle';
+      const text = uf ? ENABLED_LABELS[uf] || uf : r.unit.endsWith('.service') ? '未知' : '';
+      const cls = uf === 'enabled' ? 'ok' : uf === 'masked' ? 'err' : uf === 'enabled-runtime' ? 'warn' : 'idle';
       return h('span', {
         class: `st ${cls}`,
         title: uf ? `systemctl 状态：${uf}` : 'list-unit-files 未返回这个 unit 的自启状态',
@@ -552,7 +570,7 @@ const portColumns: any[] = [
         ]),
         h('div', { class: 'cell-txt' }, [
           h('span', { class: 'cell-name mono' }, String(r.port)),
-          h('div', { class: 'cell-sub', title: r.addrs.join('、') }, r.addrs.join('、')),
+          h('div', { class: 'cell-sub ls-wrap' }, r.addrs.join('、')),
         ]),
       ]),
   },
@@ -562,7 +580,7 @@ const portColumns: any[] = [
     render: (r: any) =>
       h('div', { class: 'cell-txt' }, [
         h('span', { class: 'cell-name', title: r.processes.join('、') || '未知' }, r.processes.join('、') || '未知'),
-        h('div', { class: 'cell-sub' }, r.pids.length ? `pid ${r.pids.slice(0, 3).join('、')}${r.pids.length > 3 ? '…' : ''}` : '—'),
+        h('div', { class: 'cell-sub ls-wrap' }, r.pids.length ? `pid ${r.pids.slice(0, 3).join('、')}${r.pids.length > 3 ? '…' : ''}` : '—'),
       ]),
   },
   {
