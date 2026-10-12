@@ -108,6 +108,182 @@ async function reaudit() {
   }
 }
 
+// 登录安全同样是只读对账（sshd -T 有效配置 + 24h 认证日志 + authorized_keys 权限，服务端 5 分钟 TTL）。
+// 这一层没有任何修复动作：SSH 配置猜错就是把人锁在门外，而唯一能改回来的入口正是 SSH 本身。
+// 页面只做一件事——把判词、判词的依据、以及"回去自己执行"的命令摆在一起。
+const forceLogin = ref(false);
+const probingLogin = ref(false);
+const {
+  data: loginData, error: loginError, loading: loginLoading, refreshing: loginRefreshing, refresh: refreshLogin,
+} = useCachedFetch<any>({
+  key: () => 'ssh-audit',
+  loader: () => api.sshAudit(forceLogin.value),
+  maxAge: 60000,
+});
+watch(loginError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+async function recheckLogin() {
+  forceLogin.value = true;
+  probingLogin.value = true;
+  try {
+    await refreshLogin();
+  } catch {
+    /* 失败已经通过 loginError 走上面的 toast */
+  } finally {
+    forceLogin.value = false;
+    probingLogin.value = false;
+  }
+}
+
+const loginBusy = computed(() => loginLoading.value || loginRefreshing.value || probingLogin.value);
+const loginCounts = computed(() => loginData.value?.counts ?? { risk: 0, warn: 0, note: 0 });
+const loginFindings = computed<any[]>(() => loginData.value?.findings ?? []);
+const loginSettings = computed<any[]>(() => loginData.value?.settings ?? []);
+const flaggedSettings = computed(() => loginSettings.value.filter((r: any) => r.flag));
+// 15 行有效配置里通常只有两三行需要处理，默认就只列那几行；要看证据再展开。
+const onlyFlagged = ref(true);
+const shownSettings = computed(() => (onlyFlagged.value ? flaggedSettings.value : loginSettings.value));
+const keyFiles = computed<any[]>(() => loginData.value?.keys?.files ?? []);
+const loginAttempts = computed<any>(() => loginData.value?.attempts ?? {});
+const guardRunning = computed(() => (loginData.value?.guard ?? []).some((g: any) => g.active));
+const guardLine = computed(() => {
+  const g = loginData.value?.guard ?? [];
+  const on = g.filter((u: any) => u.active).map((u: any) => u.name);
+  if (on.length) return `${on.join('、')} 在跑`;
+  if (g.some((u: any) => u.installed)) return '装了但没在跑';
+  return '都没在跑';
+});
+const acceptedLine = computed(() => {
+  const list = loginAttempts.value.accepted ?? [];
+  return list.length ? list.map((a: any) => `${a.method} ${a.count}`).join('、') : '无成功记录';
+});
+const sudoLine = computed(() => {
+  const g = loginData.value?.accounts?.sudo_groups ?? {};
+  const pairs = Object.entries(g).filter(([, m]) => (m as any[]).length);
+  return pairs.length ? pairs.map(([n, m]) => `${n}: ${(m as any[]).join('、')}`).join(' · ') : '空（没人能 sudo）';
+});
+const reachLine = computed(() => {
+  const r = loginData.value?.sshd?.reachable;
+  return r === true ? '外部可达' : r === false ? '外部不可达' : '可达性未探到';
+});
+
+const SEVERITY: Record<string, { text: string; type: any; icon: string }> = {
+  risk: { text: '要紧', type: 'error', icon: 'ShieldOutline' },
+  warn: { text: '值得处理', type: 'warning', icon: 'WarningOutline' },
+  note: { text: '知道就好', type: 'default', icon: 'InformationCircleOutline' },
+};
+const sevOf = (k: string) => SEVERITY[k] || SEVERITY.note;
+
+const loginAlert = computed(() => {
+  const d = loginData.value;
+  if (!d || loginError.value) return null;
+  if (d.sshd.source === 'missing' || d.sshd.source === 'unreadable') {
+    return { type: 'error' as const, text: `读不到 sshd 配置（${d.sshd.source === 'missing' ? '文件不存在' : '没有读权限'}），这一页的判定都不可信。` };
+  }
+  if (loginCounts.value.risk) {
+    const first = loginFindings.value[0];
+    return { type: 'error' as const, text: `${loginCounts.value.risk} 项要紧：${first ? first.title : ''}。面板不会替你改 SSH，下面的命令要你自己 SSH 进去执行。` };
+  }
+  if (loginCounts.value.warn) {
+    return { type: 'warning' as const, text: `没有要紧项，另有 ${loginCounts.value.warn} 项值得处理。` };
+  }
+  const a = d.attempts || {};
+  if (!a.ok) {
+    return { type: 'info' as const, text: `有效配置核对通过（读自 ${d.sshd.source}），但认证日志读不到：${a.note || '原因未知'}。` };
+  }
+  return {
+    type: 'success' as const,
+    text: `登录方式核对通过：过去 24 小时 ${a.failed} 次失败认证、来自 ${a.distinct_ips} 个地址，成功登录 ${acceptedLine.value}。`,
+  };
+});
+
+const findingColumns: any[] = [
+  {
+    title: '判词', key: 'title', minWidth: 320,
+    render: (r: any) =>
+      h('div', { class: 'cell-main' }, [
+        h('span', { class: 'cell-ico' }, [
+          h(NIcon, {
+            component: icons[sevOf(r.severity).icon],
+            size: 17,
+            color: r.severity === 'risk' ? 'var(--cp-err)' : r.severity === 'warn' ? 'var(--cp-warn)' : 'var(--cp-text-mute)',
+          }),
+        ]),
+        h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name ls-wrap' }, r.title),
+          h('div', { class: 'cell-sub ls-wrap' }, r.detail),
+        ]),
+      ]),
+  },
+  {
+    title: '档位', key: 'severity', width: 96,
+    render: (r: any) => h(NTag, { size: 'small', type: sevOf(r.severity).type, bordered: false }, () => sevOf(r.severity).text),
+  },
+  {
+    // 建议是"该怎么改"的中文，不是一行能粘贴的命令（"先确认自己的钥匙能登进来，再把
+    // PermitRootLogin 改成 prohibit-password"粘进 shell 只会得到一条报错）。所以这里给文本、
+    // 不给复制按钮：按钮会让人以为粘贴过去就算修完了。
+    title: '怎么修', key: 'fix', minWidth: 300,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [h('div', { class: 'px-reason' }, r.fix || '—')]),
+  },
+];
+
+const settingColumns: any[] = [
+  {
+    title: '配置项', key: 'label', width: 200,
+    render: (r: any) =>
+      h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name' }, r.label),
+        h('div', { class: 'cell-sub mono' }, r.key),
+      ]),
+  },
+  {
+    title: '此刻生效值', key: 'value', width: 180,
+    render: (r: any) => h('span', { class: 'mono ls-value', title: r.value }, r.value || '—'),
+  },
+  {
+    title: '判定', key: 'flag', width: 96,
+    render: (r: any) =>
+      (r.flag
+        ? h(NTag, { size: 'small', type: sevOf(r.flag).type, bordered: false }, () => sevOf(r.flag).text)
+        : h('span', { class: 'st idle' }, '合规')),
+  },
+  { title: '建议', key: 'fix', minWidth: 300, render: (r: any) => h('span', { class: 'px-fix' }, r.fix || '—') },
+];
+
+const keyColumns: any[] = [
+  {
+    title: '文件', key: 'path', minWidth: 240,
+    render: (r: any) =>
+      h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono', title: r.path }, r.path),
+        h('div', { class: 'cell-sub ls-wrap' }, `${r.user} · ${r.mode} · 属主 ${r.owner} · 改于 ${fmtDateTime(r.modified_at)}`),
+      ]),
+  },
+  {
+    // 只有指纹：公钥正文不进面板，页面上能复制走的就只剩这串哈希。
+    title: '公钥指纹', key: 'keys', minWidth: 300,
+    render: (r: any) =>
+      h('div', { class: 'cell-txt' },
+        r.keys.length
+          ? r.keys.map((k: any) =>
+              h('div', { class: 'ls-key' }, [
+                h('span', { class: 'mono ls-fp', title: k.fp }, k.fp),
+                h('span', { class: 'ls-key-name' }, k.comment || '无备注'),
+                k.weak ? h(NTag, { size: 'tiny', type: 'warning', bordered: false }, () => '算法偏弱') : null,
+                k.unparsed ? h(NTag, { size: 'tiny', bordered: false }, () => '无法解析') : null,
+              ]))
+          : h('span', { class: 'cell-sub' }, r.symlink ? '是指向别处的符号链接，面板没有跟进去读' : '没有公钥')),
+  },
+  {
+    title: '权限异常', key: 'flags', width: 220,
+    render: (r: any) =>
+      (r.flags.length
+        ? h('div', { class: 'cell-txt' }, r.flags.map((f: string) => h('div', { class: 'ls-flag' }, f)))
+        : h('span', { class: 'st idle' }, '权限正常')),
+  },
+];
+
 const allPorts = computed<any[]>(() => portData.value?.ports ?? []);
 const portBusy = computed(() => portLoading.value || portRefreshing.value || auditing.value);
 // 默认只列"能被外面碰到"的那几行：几百个仅本机监听的端口（rpc、metrics、数据库）
@@ -197,6 +373,8 @@ const tabs = computed(() => [
   { key: 'patches', label: '系统补丁', badge: (secCount.value ?? 0) > 0 },
   // 端口同理，且门槛更高：只有"外部可达且不在预期内"才点亮，被防火墙挡住的用告警说话。
   { key: 'ports', label: '端口暴露面', badge: exposedCount.value > 0 },
+  // 登录这道的红点门槛和端口一致：只有"要紧"才点，加固建议用页内告警说话。
+  { key: 'login', label: '登录安全', badge: loginCounts.value.risk > 0 },
   // 单元日志走 /api/system/services/{unit}/logs，服务端要求 admin（journal 是全机内容）。
   // 不给只读账号留这个页签，否则他点进来的是一片 403。
   ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
@@ -409,6 +587,7 @@ const portColumns: any[] = [
 ];
 
 const portPaging = { pageSize: 20, showSizePicker: false, showQuickJumper: false };
+const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: false };
 </script>
 
 <template>
@@ -584,6 +763,121 @@ const portPaging = { pageSize: 20, showSizePicker: false, showQuickJumper: false
       </NDataTable>
     </CpToolbarCard>
 
+    <CpToolbarCard v-else-if="tab === 'login'" title="登录安全" style="margin-top: 10px">
+      <template #right>
+        <div class="ls-toolbar">
+          <NText v-if="loginData" depth="3" class="ls-time">
+            对账于 {{ fmtDateTime(loginData.checked_at) }}<template v-if="loginData.cached">（缓存）</template>
+          </NText>
+          <NButton size="small" tertiary :loading="loginBusy" :icon="icon('RefreshOutline', 14)" @click="refreshLogin">刷新</NButton>
+          <NButton size="small" :loading="probingLogin" :icon="icon('SyncOutline', 14)" @click="recheckLogin">重新对账</NButton>
+        </div>
+      </template>
+
+      <NAlert v-if="!loginData && loginError" type="error" :bordered="false" style="margin-bottom: var(--space-3)">
+        登录安全对账失败：{{ (loginError as Error).message || '未知错误' }}。点上方「重新对账」重试。
+      </NAlert>
+      <NAlert v-else-if="loginAlert" :type="loginAlert.type" :bordered="false" style="margin-bottom: var(--space-3)">
+        {{ loginAlert.text }}
+      </NAlert>
+
+      <div v-if="loginData" class="ls-chips">
+        <span class="ls-chip" :class="{ err: loginCounts.risk > 0 }"><i>要紧</i>{{ loginCounts.risk }} 项</span>
+        <span class="ls-chip" :class="{ warn: loginCounts.warn > 0 }"><i>值得处理</i>{{ loginCounts.warn }} 项</span>
+        <span class="ls-chip"><i>知道就好</i>{{ loginCounts.note }} 项</span>
+        <span class="ls-chip"><i>24h 失败认证</i>{{ loginAttempts.failed ?? '—' }} 次</span>
+        <span class="ls-chip"><i>来源地址</i>{{ loginAttempts.distinct_ips ?? '—' }} 个</span>
+        <span class="ls-chip"><i>成功登录</i>{{ acceptedLine }}</span>
+        <span class="ls-chip" :class="{ warn: !guardRunning }"><i>爆破防护</i>{{ guardLine }}</span>
+        <span class="ls-chip"><i>公钥</i>{{ loginData.keys.total_keys }} 把 / {{ loginData.keys.scanned }} 个文件</span>
+        <span class="ls-chip" :class="{ err: loginData.sshd.reachable === true }">
+          <i>sshd 端口</i>{{ loginData.sshd.port }} {{ reachLine }}
+        </span>
+      </div>
+
+      <!-- 来源排行紧跟失败次数：只报"7187 次"是没有信息量的，攻击永远在打，
+           要看的是是不是就那么三五个人在轮。 -->
+      <div v-if="(loginAttempts.top || []).length" class="ls-ips">
+        <span v-for="t in loginAttempts.top" :key="t.ip" class="ls-ip">
+          <code class="mono">{{ t.ip }}</code><b>{{ t.count }}</b>
+        </span>
+      </div>
+
+      <div v-if="loginData && (loginData.notes || []).length" class="ls-notes">
+        <div v-for="(n, i) in loginData.notes" :key="i" class="ls-note">{{ n }}</div>
+      </div>
+
+      <NDataTable
+        :columns="findingColumns" :data="loginFindings" size="small" :bordered="false"
+        :loading="loginBusy && !loginData" :scroll-x="760" :pagination="loginPaging"
+        :row-key="(r: any) => r.id" class="cp-tbl tbl-findings"
+      >
+        <template #empty>
+          <EmptyBox :text="loginError && !loginData ? '登录对账失败，点上方「重新对账」重试' : '登录方式没有要紧项，也没有值得处理的加固建议'" />
+        </template>
+      </NDataTable>
+
+      <div class="ls-block">
+        <span class="section-title">
+          <NIcon :component="icons.TerminalOutline" :size="15" color="var(--cp-brand-soft)" /> SSHD 有效配置
+        </span>
+        <NText depth="3" class="ls-src">
+          读自 {{ loginData?.sshd.source }}{{ loginData?.sshd.effective ? '' : '（原文解析，Match 段内的值不计入）' }}
+        </NText>
+        <NButton
+          v-if="flaggedSettings.length && flaggedSettings.length !== loginSettings.length"
+          size="tiny" :quaternary="!onlyFlagged" :type="onlyFlagged ? 'primary' : 'default'"
+          @click="onlyFlagged = !onlyFlagged"
+        >
+          {{ onlyFlagged ? `展开全部 ${loginSettings.length} 项` : `只看有判定的 ${flaggedSettings.length} 项` }}
+        </NButton>
+      </div>
+      <NDataTable
+        :columns="settingColumns" :data="shownSettings" size="small" :bordered="false"
+        :loading="loginBusy && !loginData" :scroll-x="780" :pagination="loginPaging"
+        :row-key="(r: any) => r.key" class="cp-tbl tbl-settings"
+      >
+        <template #empty>
+          <EmptyBox text="有效配置里没有需要处理的项" />
+        </template>
+      </NDataTable>
+
+      <div class="ls-block">
+        <span class="section-title">
+          <NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-brand-soft)" /> authorized_keys
+        </span>
+        <NText v-if="loginData?.keys?.truncated" depth="3" class="ls-src">文件太多，只列了前若干把钥匙</NText>
+      </div>
+      <NDataTable
+        :columns="keyColumns" :data="keyFiles" size="small" :bordered="false"
+        :loading="loginBusy && !loginData" :scroll-x="740"
+        :row-key="(r: any) => r.path" class="cp-tbl tbl-keys"
+      >
+        <template #empty>
+          <EmptyBox :text="loginData && !loginData.as_root ? '非 root 只能扫到自己那一份' : '可登录账号里没有 authorized_keys'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="loginData" class="ls-block">
+        <span class="section-title">
+          <NIcon :component="icons.PeopleOutline" :size="15" color="var(--cp-brand-soft)" /> 账号面
+        </span>
+      </div>
+      <div v-if="loginData" class="ls-acc">
+        <div class="ls-acc-line">
+          <i>可交互登录的账号</i>{{ loginData.accounts.login_count }} 个：<span class="mono">{{ loginData.accounts.login_shells.join('、') || '无' }}</span>
+        </div>
+        <div class="ls-acc-line">
+          <i>空口令</i>
+          <template v-if="loginData.accounts.shadow_unreadable">/etc/shadow 读不到，这一项没核对</template>
+          <template v-else>{{ loginData.accounts.empty_password.length ? loginData.accounts.empty_password.join('、') : '没有' }}</template>
+        </div>
+        <div class="ls-acc-line"><i>多余的 uid=0</i>{{ loginData.accounts.uid0_extra.length ? loginData.accounts.uid0_extra.join('、') : '没有' }}</div>
+        <div class="ls-acc-line"><i>sudo / wheel 成员</i>{{ sudoLine }}</div>
+        <div v-for="(n, i) in loginData.accounts.notes || []" :key="i" class="ls-note">{{ n }}</div>
+      </div>
+    </CpToolbarCard>
+
     <CpToolbarCard v-else :title="logUnit ? `${logUnit} · journalctl 实时日志` : '单元日志'" style="margin-top: 10px">
       <!-- LogStream 只在挂载时开流、不 watch urlPath：换 unit 必须重挂载，否则旧 SSE 还在推上一个服务的日志 -->
       <LogStream v-if="logUnit" :key="logUnit" :url-path="`/system/services/${encodeURIComponent(logUnit)}/logs`" class="svc-log" />
@@ -635,8 +929,49 @@ const portPaging = { pageSize: 20, showSizePicker: false, showQuickJumper: false
 .px-silent { display: block; margin: -4px 0 var(--space-3); font-size: var(--fs-xs); }
 .px-notes { margin: -4px 0 var(--space-3); }
 .px-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
-.px-reason { font-size: var(--fs-sm); color: var(--cp-text); line-height: 1.6; }
-.px-fix { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.6; }
+/* 登录安全：判词 + 依据 + "回去自己执行"的命令同屏。指纹给 ellipsis + title，
+   不让一行 SHA256 把整张表顶出视口；判词是整句中文，折行（见 .ls-wrap）。
+   下面这些 .cp-tbl :deep(...) 不是冗余写法：单元格内容由 h() 生成，拿不到本组件的
+   data-v 作用域，纯 class 的 scoped 规则一条都不会命中（线上探针实测 .ls-fp 无 data-v）。
+   必须从模板上的表级类走 :deep，规则才真的落进格子里。 */
+.cp-tbl :deep(.ls-wrap) { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.6; }
+.cp-tbl :deep(.px-reason) { font-size: var(--fs-sm); color: var(--cp-text); line-height: 1.6; }
+.cp-tbl :deep(.px-fix) { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.6; }
+.cp-tbl :deep(.ls-value) { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.cp-tbl :deep(.ls-key) { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-xs); line-height: 1.8; }
+.cp-tbl :deep(.ls-fp) { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-tbl :deep(.ls-key-name) { color: var(--cp-text-dim); flex: 0 1 auto; }
+.cp-tbl :deep(.ls-flag) { font-size: var(--fs-xs); color: var(--cp-warn); line-height: 1.7; }
+.ls-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.ls-time { font-size: var(--fs-xs); }
+.ls-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-3); }
+.ls-chip {
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 10px; max-width: 100%;
+  border-radius: var(--radius-md); background: var(--cp-bg-soft); font-size: var(--fs-sm); color: var(--cp-text);
+}
+.ls-chip i { font-style: normal; font-size: var(--fs-xs); color: var(--cp-text-mute); }
+.ls-chip.warn { color: var(--cp-warn); }
+.ls-chip.err { color: var(--cp-err); }
+.ls-ips { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 var(--space-3); }
+.ls-ip {
+  display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 8px;
+  border-radius: var(--radius-sm); background: var(--cp-bg-soft); font-size: var(--fs-xs);
+}
+.ls-ip b { color: var(--cp-text-dim); font-weight: 500; }
+.ls-notes { margin: -4px 0 var(--space-3); }
+.ls-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
+.ls-block { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: var(--space-3) 0 6px; }
+.ls-src { font-size: var(--fs-xs); }
+.ls-acc { display: grid; gap: 4px; margin-bottom: var(--space-3); }
+.ls-acc-line { font-size: var(--fs-sm); color: var(--cp-text); }
+.ls-acc-line i { font-style: normal; display: inline-block; min-width: 130px; color: var(--cp-text-mute); font-size: var(--fs-xs); }
+@media (max-width: 767px) {
+  .ls-toolbar { justify-content: flex-start; }
+  .ls-acc-line i { min-width: 0; }
+  /* 窄屏上一行 SHA256 截掉尾巴就没法比对（指纹的全部意义是两边对得上），
+     所以这里放开 ellipsis，让它折成两行完整显示。 */
+  .cp-tbl :deep(.ls-fp) { max-width: none; white-space: normal; word-break: break-all; overflow: visible; text-overflow: clip; }
+}
 @media (max-width: 767px) {
   .px-toolbar { justify-content: flex-start; }
 }

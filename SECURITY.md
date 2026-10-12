@@ -29,9 +29,14 @@
 ## 加固建议（部署侧）
 
 ```bash
-choyeonctl doctor --json          # 14 项只读自检，fail 必须为 0
+choyeonctl doctor --json          # 15 项只读自检，fail 必须为 0
+choyeonctl ssh-audit --json       # 登录方式对账（只读），见下文 SSH 那一段
 ```
 
+- 面板之外还有正门：`choyeonctl ssh-audit` 核对 22 端口的登录方式（`PasswordAuthentication`、`PermitRootLogin`、
+  是否装了 fail2ban/sshguard、authorized_keys 的权限与属主、过去 24h 的失败来源排行）。这一层面板**严格只读**——
+  猜错一行 sshd_config 就是把管理员锁在机器外面，而唯一能改回来的入口正是 SSH 本身，所以判词只附修复命令，
+  由你自己 SSH 进去执行
 - 对外只走 nginx + TLS 反代，`CP_TRUST_PROXY=1` 让登录限速按真实 IP 计数
 - `CP_HSTS` 只在面板直连 HTTPS 时开，走 nginx 时由 nginx 统一发送
 - `.env` 权限 0600；`CP_DATA_DIR` 含 JWT 密钥与 SQLite，纳入备份但**不要**放进任何公开目录

@@ -587,14 +587,6 @@ async function delKeys(keys: string[]) {
 .rstat :deep(.n-card__content) { padding: var(--space-3) var(--space-4); }
 .rk { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-bottom: var(--space-1); }
 .rv { font-size: var(--fs-lg); font-weight: 600; color: var(--cp-text); }
-.mono-pre {
-  margin: 0; padding: var(--space-3); max-height: 300px; overflow: auto;
-  background: var(--cp-bg-soft);
-  border: 1px solid var(--cp-border);
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono); font-size: var(--fs-xs);
-  white-space: pre-wrap; word-break: break-all; color: var(--cp-text);
-}
 /* 窄容器（侧栏展开/窗口收窄）下 key 列表与详情上下堆叠，避免横向溢出裁切 */
 .rbr-flex { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
 .rk-list { flex: 1 1 320px; min-width: 0; }

@@ -384,9 +384,11 @@ class CliPortsTests(unittest.TestCase):
 
 
 class MetaWiringTests(unittest.TestCase):
-    def test_ports_is_the_last_doctor_item(self):
-        self.assertEqual(meta._CHECKS[-1][0], "ports")
-        self.assertEqual(meta._CHECKS[-1][1], "端口暴露面")
+    def test_ports_is_a_registered_doctor_item(self):
+        # 只认这一项在不在、叫什么：批次⑪在后面加了「登录安全」，位置不该被这一层钉死。
+        ids = [c[0] for c in meta._CHECKS]
+        self.assertIn("ports", ids)
+        self.assertEqual(meta._CHECKS[ids.index("ports")][1], "端口暴露面")
 
     def test_ports_route_is_registered(self):
         self.assertIn("/api/ports", [r.path for r in meta.router.routes])

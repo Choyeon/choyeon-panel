@@ -41,7 +41,12 @@ from app import avatars, config, security  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.errors import BadInput, public_message  # noqa: E402
 from app.routers.meta import run_checks  # noqa: E402
-from app.services import exposure_service, firewall_service, updates_service  # noqa: E402
+from app.services import (  # noqa: E402
+    exposure_service,
+    firewall_service,
+    login_audit_service,
+    updates_service,
+)
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -308,6 +313,10 @@ async def cmd_doctor(_a: argparse.Namespace) -> dict:
         lines.append(f"  {icon.get(i['status'], '[?]')} {i['title']}: {i['detail']}")
         if i["fix"] and i["status"] != "pass":
             lines.append(f"      修复: {i['fix']}")
+    # 登录安全那一项的 fix 只是"去看完整清单"：关口令、上 fail2ban 这些处置都要人
+    # 自己 SSH 进去做，不点明会让人以为照抄 fix 那一行就算修完了。
+    if any(i.get("id") == "login" and i["status"] != "pass" for i in res["items"]):
+        lines.append("      完整清单与判定依据：choyeonctl ssh-audit --json")
     lines.append(f"结论: {res['status']}")
     Out.result(res, "\n".join(lines))
     return res
@@ -743,6 +752,90 @@ def _updates_text(d: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_ssh_audit(a: argparse.Namespace) -> dict:
+    """登录安全对账：这台机器的正门是 SSH，不是面板。
+
+    只读——不写 sshd_config、不 reload sshd、不碰 authorized_keys。SSH 一旦改错
+    就是把人锁在门外，而面板自己也从那扇门进来，所以这里只给判词和可复制的命令。
+    """
+    data = await login_audit_service.audit(refresh=bool(a.refresh))
+    src = (data.get("sshd") or {}).get("source")
+    if src in ("missing", "unreadable"):
+        # 读不到 sshd 配置就没有对账的根基，编一份"看起来没问题"的清单比不查更坏。
+        Out.error(f"读不到 sshd 配置（{src}），无法对账", EXIT_PRECONDITION)
+    Out.result(data, _ssh_audit_text(data))
+    return data
+
+
+def _ssh_audit_text(d: dict) -> str:
+    ssh = d.get("sshd") or {}
+    att = d.get("attempts") or {}
+    counts = d.get("counts") or {}
+    kk = d.get("keys") or {}
+    acc = d.get("accounts") or {}
+    reach = {True: "对外可达", False: "仅本机或内网", None: "可达性判不出"}[ssh.get("reachable")]
+    lines = [
+        f"登录安全对账（配置来源：{ssh.get('source') or '—'} · sshd 端口 {ssh.get('port') or '—'} · {reach}）",
+        f"概览：要紧 {counts.get('risk', 0)} 项 · 值得处理 {counts.get('warn', 0)} 项 · "
+        f"知道就好 {counts.get('note', 0)} 项 · 过去 24 小时失败认证 {att.get('failed', 0)} 次"
+        f"（{att.get('distinct_ips', 0)} 个来源地址）",
+    ]
+    for f in d.get("findings") or []:
+        sev = login_audit_service.SEV_LABEL.get(f["severity"], f["severity"])
+        lines.append(f"[{sev}] {f['title']}")
+        if f.get("detail"):
+            lines.append(f"    {f['detail']}")
+        if f.get("fix"):
+            lines.append(f"    处置：{f['fix']}")
+    if not d.get("findings"):
+        lines.append("结论：登录方式没有查到需要处理的问题。")
+
+    lines.append("sshd 关键配置：")
+    for r in d.get("settings") or []:
+        flag = r.get("flag") or ""
+        mark = f"  ← {login_audit_service.SEV_LABEL.get(flag, flag)}" if flag else ""
+        lines.append(f"  {r['label']} = {r['value']}{mark}")
+        if r.get("fix"):
+            lines.append(f"      建议：{r['fix']}")
+
+    lines.append(
+        f"授权密钥：{kk.get('total_keys', 0)} 把，覆盖 {kk.get('scanned', 0)} 个账号"
+        "（只列指纹与元信息，不读私钥，也不回显公钥正文）"
+    )
+    for p in kk.get("files") or []:
+        lines.append(f"  {p['user']}  {p['path']}（{p['mode']} · 属主 {p['owner']}）")
+        for k in p.get("keys") or []:
+            tail = " · 算法偏弱" if k.get("weak") else ""
+            lines.append(f"    {k['algo']} {k['bits']}位  {k['comment'] or '（无备注）'}  {k['fp']}{tail}")
+        for flag in p.get("flags") or []:
+            lines.append(f"    注意：{flag}")
+
+    acc_line = (
+        f"账号面：可登录 {acc.get('login_count', 0)} 个 · 空口令 {len(acc.get('empty_password') or [])} 个 · "
+        f"额外 uid=0 {len(acc.get('uid0_extra') or [])} 个"
+    )
+    lines.append(acc_line + (" · /etc/shadow 读不到，空口令这项没核对" if acc.get("shadow_unreadable") else ""))
+    for g, members in (acc.get("sudo_groups") or {}).items():
+        lines.append(f"  {g} 组：{'、'.join(members) or '（无成员）'}")
+
+    if d.get("guard"):
+        parts = []
+        for g in d["guard"]:
+            state = "在跑" if g.get("active") else ("未运行" if g.get("installed") else "未安装")
+            parts.append(f"{g['name']} {state}")
+        lines.append("爆破防护：" + "、".join(parts))
+    top = att.get("top") or []
+    if top:
+        lines.append("失败来源：" + "、".join(f"{t['ip']}（{t['count']} 次）" for t in top))
+    ok = att.get("accepted") or []
+    if ok:
+        lines.append("成功登录方式：" + "、".join(f"{x['method']} {x['count']} 次" for x in ok))
+    for n in d.get("notes") or []:
+        lines.append(f"说明：{n}")
+    lines.append("这一层只读：不写 sshd_config、不 reload sshd、不改 authorized_keys。")
+    return "\n".join(lines)
+
+
 async def cmd_ports(a: argparse.Namespace) -> dict:
     """端口暴露面：回答"这台机器对外开了哪些口子"。
 
@@ -803,6 +896,14 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
             {"name": "upgrade", "args": ["--no-pull"],
              "desc": "升级到最新代码，失败自动回滚；--no-pull 只重建并重启（改配置后重新渲染 unit）"},
             {"name": "status", "args": [], "desc": "版本/监听/服务/健康/自检汇总"},
+            {"name": "ssh-audit", "args": ["--refresh"],
+             "desc": "登录安全只读对账（sshd 有效配置 / 密钥与文件权限 / 空口令与 uid0 / 24h 失败来源）",
+             "notes": ["严格只读：不写 sshd_config、不 reload sshd、不改 authorized_keys——"
+                       "SSH 是这台机器的主入口，改错就是把人锁在门外",
+                       "配置来源会如实标注：sshd -T 是有效值，回落 sshd_config 时含注释掉的行",
+                       "非 root 时 /etc/shadow 与他人 authorized_keys 读不到，在 notes 里说明而不是跳过",
+                       "公钥只列算法/位数/备注/指纹，不回显公钥正文",
+                       "读不到 sshd 配置时退出码 3；报告能产出就回 0，风险与否看 JSON 的 counts"]},
             {"name": "doctor", "args": [], "desc": "安全与健康自检，含每项修复建议"},
             {"name": "user list|create|reset|revoke|delete",
              "args": ["<name>", "--password", "--password-stdin", "--role", "--yes"],
@@ -929,6 +1030,10 @@ def build_parser() -> argparse.ArgumentParser:
     pt = sub.add_parser("ports", help="监听端口与对外可达性（只读对账）", parents=[common])
     pt.add_argument("--refresh", action="store_true", help="忽略 5 分钟缓存，立即重新对账")
     pt.set_defaults(fn=cmd_ports)
+
+    sa = sub.add_parser("ssh-audit", help="登录安全只读对账（不改任何 SSH 配置）", parents=[common])
+    sa.add_argument("--refresh", action="store_true", help="忽略 5 分钟缓存，重新读一遍配置与日志")
+    sa.set_defaults(fn=cmd_ssh_audit)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

@@ -1,0 +1,644 @@
+"""登录安全对账：谁能进这台机器、用什么方式进、过去一天有没有人在试着进。
+
+为什么值得做：面板已经摆出了 ufw 规则和监听端口，但 SSH 才是多数机器真正的入口。
+"22 对外开着"本身不危险，危险的是它后面写着"允许 root + 允许口令"，而门外一天有
+几百次撞库。这些事实本来就躺在 sshd -T、/etc/passwd、~/.ssh/authorized_keys 和
+journal 里，只是没有一个页面把它们拼成一句能照着做的事。
+
+严格只读，而且比端口那一层更要紧：SSH 配置写错就是把人——包括正在看这个页面的
+这个人——锁在门外。面板不写 sshd_config、不 reload sshd、不碰 authorized_keys，
+只给可复制的命令。
+
+如实承认的局限写进 notes，不装全知：
+① 非 root 时读不到 /etc/shadow，也读不到别的用户的 authorized_keys；
+② 拿不到 `sshd -T` 时退化成 sshd_config 原文，Include 与 Match 块都没展开过，
+   列出来的"值"可能是文件里的值而不是生效值——这一条会显式标出来。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import hashlib
+import os
+import re
+import shutil
+import stat
+import time
+from datetime import UTC, datetime
+
+from ..util import run
+from . import exposure_service
+
+CACHE_TTL = 300.0
+SSHD_TIMEOUT = 10.0
+JOURNAL_TIMEOUT = 25.0
+MAX_KEYS = 60  # 单个 authorized_keys 最多逐条列这么多行，再多只报总数
+MAX_FILES = 64
+JOURNAL_LINES = 50000
+
+NON_LOGIN_SHELLS = (
+    "/usr/sbin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false",
+    "/bin/sync", "/sbin/shutdown", "/sbin/halt",
+)
+SUDO_GROUPS = ("sudo", "wheel")
+GUARD_UNITS = ("fail2ban", "sshguard")
+ALGO_PREFIX = ("ssh-", "ecdsa-", "sk-", "x509-")
+
+_FAILED_RE = re.compile(
+    r"Failed (?:password|publickey|none)|Invalid user"
+    r"|Connection (?:closed|reset) by (?:authenticating|invalid) user"
+)
+_ACCEPTED_RE = re.compile(r"Accepted (?:password|publickey|keyboard-interactive(?:/published)?|none)")
+# 爆破行有两种写法：`... from <ip> port`，和 preauth 就断掉的
+# `Connection closed by authenticating user root <ip> port`（本机这种占了失败行的四成）。
+# 只认 from 会让这批来源从 IP 排行里整体消失，判词就成了"没几个人在打"。
+_IP_RE = re.compile(
+    r"\b(?:from|by (?:authenticating|invalid) user \S+) "
+    r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:]{3,45})"
+)
+
+_LOCK = asyncio.Lock()
+_cache: dict = {"at": 0.0, "data": None}
+
+
+def _read_text(path: str, limit: int = 200000) -> str | None:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read(limit)
+    except OSError:
+        return None
+
+
+def _parse_effective(text: str) -> dict[str, list[str]]:
+    """`sshd -T` 每行 `key value`；listenaddress 会重复出现，值本身可能带空格。"""
+    out: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        # 注释行和"只有键没有值"的行都不算读到一个设置，否则 "# X11Forwarding no"
+        # 会变成名为 "#" 的配置，让人以为核对过它。
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition(" ")
+        if not sep or not value:
+            continue
+        out.setdefault(key.strip().lower(), []).append(value.strip())
+    return out
+
+
+def _parse_config(text: str) -> dict[str, list[str]]:
+    """退路：直接读 sshd_config。Match 块是给特定条件用的，这里不评估也不采信。"""
+    vals: dict[str, list[str]] = {}
+    in_match = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith("match "):
+            in_match = True
+            continue
+        if in_match:
+            continue
+        key, sep, value = line.partition(" ")
+        if not sep:
+            continue
+        vals.setdefault(key.strip().lower(), []).append(value.strip())
+    return vals
+
+
+async def _sshd_settings() -> dict:
+    """生效配置优先：`sshd -T` 由 sshd 自己算，Include 进来的和内置默认都在里面。"""
+    if not shutil.which("sshd"):
+        return {
+            "source": "missing", "effective": False, "values": {},
+            "notes": ["这台机器上没有 sshd（或不在 PATH），SSH 设置无从判起"],
+        }
+    r = await run("sshd", ["-T"], timeout=SSHD_TIMEOUT)
+    if r["code"] == 0 and r["out"]:
+        return {"source": "sshd -T", "effective": True, "values": _parse_effective(r["out"]), "notes": []}
+    text = _read_text("/etc/ssh/sshd_config")
+    if text is None:
+        err = (r["out"] or "")[:120] or "读不到 /etc/ssh/sshd_config"
+        return {"source": "unreadable", "effective": False, "values": {},
+                "notes": [f"sshd -T 没成功且配置文件读不到：{err}（非 root 常见）"]}
+    return {
+        "source": "sshd_config", "effective": False, "values": _parse_config(text),
+        "notes": ["列的是 sshd_config 原文而不是 sshd -T：Include 进来的文件和 Match 条件块都没展开，"
+                  "这里的值是文件里的值，不一定是生效值（sshd -T 需要 root）。"],
+    }
+
+
+def _val(values: dict, key: str) -> str:
+    got = values.get(key)
+    return got[-1] if got else ""
+
+
+def _yes(values: dict, key: str) -> bool:
+    return _val(values, key) == "yes"
+
+
+def _setting_rows(values: dict, reachable: bool, guarded: bool) -> list[dict]:
+    """把关心的几项排成表：判词在这一层算完，前端只负责显示。"""
+    pw = _yes(values, "passwordauthentication")
+    root_yes = _val(values, "permitrootlogin") == "yes"
+    tries = _val(values, "maxauthtries")
+    tries_bad = tries.isdigit() and int(tries) > 6
+    # 三件事叠在一起才是最坏组合：口令能试、外面碰得到、没人管爆破
+    pw_exposed = pw and reachable
+    root_flag = "risk" if pw_exposed and root_yes else "note" if root_yes else ""
+    pw_flag = "risk" if pw_exposed and not guarded else "warn" if pw_exposed else ""
+    kbd_flag = "warn" if pw and _yes(values, "kbdinteractiveauthentication") else ""
+    empty_pw_yes = _yes(values, "permitemptypasswords")
+    x11_yes = _yes(values, "x11forwarding")
+    gateway_yes = _yes(values, "gatewayports")
+    pam_off = bool(values.get("usepam")) and not _yes(values, "usepam")
+    SPEC = [
+        ("port", "监听端口", "", ""),
+        ("listenaddress", "监听地址", "", ""),
+        ("permitrootlogin", "root 直接登录", root_flag,
+         "把 PermitRootLogin 设成 prohibit-password，root 只允许钥匙登录"),
+        ("passwordauthentication", "口令认证", pw_flag,
+         "改用 SSH 钥匙后设 PasswordAuthentication no（先确认自己的钥匙能登进来）"),
+        ("kbdinteractiveauthentication", "键盘交互认证", kbd_flag,
+         "它走 PAM 问的是同一套口令，设 KbdInteractiveAuthentication no"),
+        ("pubkeyauthentication", "公钥认证", "", ""),
+        ("permitemptypasswords", "允许空口令", "risk" if empty_pw_yes else "",
+         "设 PermitEmptyPasswords no"),
+        ("maxauthtries", "单次连接允许尝试次数", "note" if tries_bad else "",
+         "设 MaxAuthTries 3~6，让每次撞库连接更贵"),
+        ("authenticationmethods", "认证方式", "", ""),
+        ("usepam", "PAM", "note" if pam_off else "",
+         "关掉 PAM 后 faillock 之类策略不再生效，一般应保持 yes"),
+        ("x11forwarding", "X11 转发", "note" if x11_yes else "",
+         "不需要图形转发就设 X11Forwarding no"),
+        ("gatewayports", "远程转发是否对全网开放", "warn" if gateway_yes else "",
+         "设 GatewayPorts no，否则一条远程端口转发就能把端口开给整张网"),
+        ("clientaliveinterval", "空闲断连间隔", "", ""),
+        ("logingracetime", "登录宽限", "", ""),
+    ]
+    rows: list[dict] = []
+    for key, label, flag, fix in SPEC:
+        raw = values.get(key)
+        if not raw:
+            continue
+        # 建议只在真的有问题时才给：值本来就合规还附一句"设 X no"，读起来像没检查过。
+        rows.append({"key": key, "label": label, "value": "、".join(raw),
+                     "flag": flag, "fix": fix if flag else ""})
+    # 白名单：AllowUsers/AllowGroups 都没设，意味着任何有效账号都是一个可试的用户名
+    if not values.get("allowusers") and not values.get("allowgroups"):
+        rows.append({"key": "allowusers", "label": "允许登录的用户白名单", "value": "未设置", "flag": "note",
+                     "fix": "AllowUsers <你的账号>，把可试的用户名从整台机器缩到几个人"})
+    else:
+        got = "、".join((values.get("allowusers") or []) + (values.get("allowgroups") or []))
+        rows.append({"key": "allowusers", "label": "允许登录的用户白名单", "value": got, "flag": "", "fix": ""})
+    return rows
+
+
+def _is_algo(token: str) -> bool:
+    return token.startswith(ALGO_PREFIX)
+
+
+def _blob_meta(algo: str, b64: str) -> tuple[str | None, int | None, bool]:
+    """钥匙指纹（SHA256:…）、位数、以及是否强度过低：纯解析，不 fork ssh-keygen。"""
+    try:
+        blob = base64.b64decode(b64 + "=" * (-len(b64) % 4))
+    except (binascii.Error, ValueError):
+        return None, None, False
+    fp = "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+    parts: list[bytes] = []
+    i = 0
+    while i + 4 <= len(blob) and len(parts) < 4:
+        n = int.from_bytes(blob[i:i + 4], "big")
+        i += 4
+        if n <= 0 or i + n > len(blob):
+            break
+        parts.append(blob[i:i + n])
+        i += n
+    bits: int | None = None
+    if algo.startswith("ssh-rsa") or algo.startswith("rsa-sha2-"):
+        if len(parts) >= 3:
+            modulus = parts[2]
+            if modulus and modulus[0] == 0:
+                modulus = modulus[1:]
+            bits = len(modulus) * 8
+    elif algo.startswith("ecdsa-sha2-"):
+        curve = parts[1].decode(errors="replace") if len(parts) >= 2 else ""
+        bits = {"nistp256": 256, "nistp384": 384, "nistp521": 521}.get(curve)
+    elif algo.startswith("ssh-ed25519") or algo.startswith("sk-ssh-ed25519"):
+        bits = 256
+    elif algo == "ssh-dss":
+        bits = 1024
+    weak = algo == "ssh-dss" or (algo.startswith(("ssh-rsa", "rsa-sha2-")) and bits is not None and bits < 2048)
+    return fp, bits, weak
+
+
+def _passwd_users() -> list[dict]:
+    text = _read_text("/etc/passwd")
+    if text is None:
+        return []
+    out = []
+    for line in text.splitlines()[:4000]:
+        f = line.split(":")
+        if len(f) < 7:
+            continue
+        shell = f[6]
+        out.append({
+            "name": f[0],
+            "uid": int(f[2]) if f[2].isdigit() else -1,
+            "home": f[5],
+            "shell": shell,
+            "login": bool(shell) and shell not in NON_LOGIN_SHELLS,
+        })
+    return out
+
+
+def _authorized_keys(users: list[dict], as_root: bool) -> dict:
+    """逐个用户目录读 authorized_keys：只列指纹不列公钥本体，且不跟随符号链接。"""
+    name_by_uid = {u["uid"]: u["name"] for u in users}
+    files: list[dict] = []
+    scanned = 0
+    me = os.getuid()
+    for u in users:
+        home = u["home"]
+        if not home or not os.path.isdir(home):
+            continue
+        # 非 root 只可能读到自己（和 root 跑面板时的全部）
+        if not as_root and u["uid"] != me:
+            continue
+        path = os.path.join(home, ".ssh", "authorized_keys")
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        scanned += 1
+        entry = {
+            "user": u["name"], "path": path,
+            "mode": stat.filemode(st.st_mode)[-9:],
+            "owner": name_by_uid.get(st.st_uid, str(st.st_uid)),
+            "modified_at": datetime.fromtimestamp(st.st_mtime, UTC).isoformat(timespec="seconds"),
+            "symlink": stat.S_ISLNK(st.st_mode),
+            "count": 0, "keys": [], "flags": [],
+        }
+        if entry["symlink"]:
+            entry["flags"].append("是指向别处的符号链接，面板没有读它指向的内容")
+            files.append(entry)
+            continue
+        if st.st_mode & 0o022:
+            entry["flags"].append("同组或其他人可写：任何本地用户都能往里加钥匙")
+        if st.st_uid not in (0, u["uid"]):
+            entry["flags"].append(f"属主是 {name_by_uid.get(st.st_uid, st.st_uid)}，不是这个用户")
+        text = _read_text(path, 80000) or ""
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            entry["count"] += 1
+            if line.startswith("@"):
+                entry["flags"].append("含 @cert-authority / @revoked 指令行，面板不解析其约束")
+                continue
+            parts = line.split()
+            opts, comment = "", ""
+            if len(parts) >= 2 and _is_algo(parts[0]):
+                algo, b64, comment = parts[0], parts[1], " ".join(parts[2:])
+            elif len(parts) >= 3 and _is_algo(parts[1]):
+                opts, algo, b64, comment = parts[0], parts[1], parts[2], " ".join(parts[3:])
+            else:
+                if len(entry["keys"]) < MAX_KEYS:
+                    entry["keys"].append({"algo": "?", "bits": None, "comment": line[:48], "fp": None,
+                                          "weak": False, "options": "", "unparsed": True})
+                continue
+            fp, bits, weak = _blob_meta(algo, b64)
+            if len(entry["keys"]) < MAX_KEYS:
+                entry["keys"].append({"algo": algo, "bits": bits, "comment": comment, "fp": fp,
+                                      "weak": weak, "options": opts, "unparsed": not bool(fp)})
+        files.append(entry)
+        if len(files) >= MAX_FILES:
+            break
+    return {
+        "files": files,
+        "scanned": scanned,
+        "total_keys": sum(f["count"] for f in files),
+        "truncated": any(f["count"] > len(f["keys"]) for f in files),
+    }
+
+
+def _accounts(users: list[dict]) -> dict:
+    """空口令、多余 uid=0、有登录 shell 的账号、sudo/wheel 成员。"""
+    login_users = [u["name"] for u in users if u["login"]]
+    uid0_extra = [u["name"] for u in users if u["uid"] == 0 and u["name"] != "root"]
+    empty: list[str] = []
+    notes: list[str] = []
+    text = _read_text("/etc/shadow", 200000)
+    if text is None:
+        notes.append("读不到 /etc/shadow（需要 root），空口令账号这一项没核对成")
+    else:
+        for line in text.splitlines():
+            f = line.split(":")
+            if len(f) >= 2 and f[1] == "":
+                empty.append(f[0])
+    groups: dict[str, list[str]] = {}
+    for line in (_read_text("/etc/group") or "").splitlines():
+        f = line.split(":")
+        if len(f) >= 4 and f[0] in SUDO_GROUPS:
+            groups[f[0]] = [x for x in f[3].split(",") if x]
+    return {
+        "login_shells": login_users,
+        "login_count": len(login_users),
+        "uid0_extra": uid0_extra,
+        "empty_password": empty,
+        "shadow_unreadable": text is None,
+        "sudo_groups": groups,
+        "notes": notes,
+    }
+
+
+async def _guard_status() -> dict:
+    """fail2ban / sshguard 这类"撞库有没有人管"的东西，只看服务此刻在不在跑。"""
+    if not shutil.which("systemctl"):
+        return {"units": [], "any_active": False, "note": "没有 systemctl，无法判断爆破防护是否在跑"}
+    r = await run("systemctl", ["is-active", *GUARD_UNITS], timeout=SSHD_TIMEOUT)
+    words = (r["out"] or "").split()
+    units = []
+    for i, name in enumerate(GUARD_UNITS):
+        state = words[i] if i < len(words) else "unknown"
+        units.append({"name": name, "state": state, "active": state == "active", "installed": bool(shutil.which(name))})
+    return {"units": units, "any_active": any(u["active"] for u in units), "note": ""}
+
+
+def _no_attempts(note: str) -> dict:
+    """读不到日志时如实返回"这一项没核对成"，不给出 0 次这种看着像好消息的数。"""
+    return {"ok": False, "window": "24h", "failed": 0, "distinct_ips": 0, "top": [], "accepted": [], "note": note}
+
+
+async def _attempts() -> dict:
+    """过去 24h 的 sshd 认证日志：失败次数、来源 IP 排行、成功登录各用了什么方式。"""
+    if not shutil.which("journalctl"):
+        return _no_attempts("没有 journalctl，统计不到登录尝试")
+    r = await run(
+        "journalctl",
+        ["-u", "ssh", "-u", "sshd", "-u", "ssh.service",
+         "--since", "24 hours ago", "-n", str(JOURNAL_LINES), "--no-pager", "-q"],
+        timeout=JOURNAL_TIMEOUT,
+    )
+    out = r["out"] or ""
+    if r["code"] not in (0, 1):
+        return _no_attempts(f"journalctl 退出码 {r['code']}，这段窗口没读到")
+    if r["code"] == 1 and not out:
+        return _no_attempts("这台机器上没有 ssh 相关的 journal 单元（sshd 日志可能写在别处）")
+    failed, ips, accepted = 0, {}, {}
+    for line in out.splitlines():
+        if _FAILED_RE.search(line):
+            failed += 1
+            m = _IP_RE.search(line)
+            if m:
+                ips[m.group("ip")] = ips.get(m.group("ip"), 0) + 1
+        else:
+            m = _ACCEPTED_RE.search(line)
+            if m:
+                method = m.group(0).split()[1].split("/")[0]
+                accepted[method] = accepted.get(method, 0) + 1
+    top = sorted(ips.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+    return {
+        "ok": True, "window": "24h", "failed": failed, "distinct_ips": len(ips),
+        "top": [{"ip": ip, "count": c} for ip, c in top],
+        "accepted": [{"method": k, "count": v} for k, v in sorted(accepted.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "note": "",
+    }
+
+
+def _ssh_exposure(values: dict, ports_data: dict | None) -> dict:
+    """和端口暴露面那一层对个账：sshd 在听的这个端口，外面到底进得来吗。"""
+    port = _val(values, "port")
+    port_n = int(port) if port.isdigit() else 22
+    row = next((p for p in (ports_data or {}).get("ports", []) if p["port"] == port_n), None)
+    return {
+        "port": port_n,
+        "reachable": bool(row["reachable"]) if row else None,
+        "verdict": row["verdict"] if row else "",
+        "reason": row["reason"] if row else "端口表里没有这个端口（可能 sshd 没在跑）",
+    }
+
+
+def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict, exposure: dict) -> list[dict]:
+    out: list[dict] = []
+    vals = ssh["values"]
+    pw = _yes(vals, "passwordauthentication")
+    # reachable 为 None（端口表里没找到）时不能当成"安全"，按可达判。
+    reachable = exposure["reachable"] is not False
+    guarded = guard["any_active"]
+    failed = attempts["failed"] if attempts["ok"] else 0
+
+    if accounts["empty_password"]:
+        out.append({
+            "id": "empty-password", "severity": "risk",
+            "title": f"{len(accounts['empty_password'])} 个账号是空口令",
+            "detail": "、".join(accounts["empty_password"][:10]) + "。这些账号只要能连上服务就能直接登进去。",
+            "fix": "passwd <账号> 立刻设口令，不该存在的就锁掉：usermod -L <账号>",
+        })
+    if accounts["uid0_extra"]:
+        out.append({
+            "id": "uid0", "severity": "risk",
+            "title": "除 root 之外还有 uid=0 的账号：" + "、".join(accounts["uid0_extra"]),
+            "detail": "uid 0 就等于 root，这类账号通常不是装系统时装出来的，应当按入侵痕迹处理。",
+            "fix": "确认来源后删掉：userdel -r <账号>；顺带查它的家目录和 authorized_keys",
+        })
+    if pw and _val(vals, "permitrootlogin") == "yes" and reachable:
+        out.append({
+            "id": "root-password", "severity": "risk",
+            "title": "sshd 同时允许 root 登录和口令认证，且端口对外可达",
+            "detail": "这是撞库最省事的一组组合：用户名固定是 root，只需要猜口令。"
+                      + (f"过去 24 小时已有 {failed} 次失败认证。" if attempts["ok"] else ""),
+            "fix": "先确认自己的钥匙能登进来，再把 PermitRootLogin 改成 prohibit-password",
+        })
+    elif pw and reachable:
+        out.append({
+            "id": "password-auth", "severity": "warn",
+            "title": "sshd 允许口令认证且端口对外可达",
+            "detail": "root 直登已经关了，但普通账号的口令仍是可猜目标。"
+                      + (f"过去 24 小时 {failed} 次失败认证。" if attempts["ok"] else ""),
+            "fix": "改用 SSH 钥匙后设 PasswordAuthentication no（关之前拿另一台机器验证钥匙能登进来）",
+        })
+    if pw and not guarded:
+        out.append({
+            "id": "no-guard",
+            "severity": "risk" if failed >= 100 else "warn",
+            "title": "口令认证开着，却没有正在运行的爆破防护",
+            "detail": (f"fail2ban / sshguard 都不在跑，过去 24 小时 {failed} 次失败认证、来自 "
+                       f"{attempts['distinct_ips']} 个地址，全靠 sshd 自己扛。")
+                      if attempts["ok"] else "fail2ban / sshguard 都不在跑，而这段窗口又读不到 sshd 日志。",
+            "fix": "二选一：启用 fail2ban 的 sshd jail，或者干脆关掉口令认证（后者更彻底）",
+        })
+    if _yes(vals, "kbdinteractiveauthentication") and pw:
+        out.append({
+            "id": "kbdinteractive", "severity": "warn",
+            "title": "键盘交互认证（KbdInteractiveAuthentication）开着",
+            "detail": "它走 PAM 问的还是同一套口令；只关 PasswordAuthentication 而留着它，等于关了一扇门又留一扇窗。",
+            "fix": "在 sshd_config 里设 KbdInteractiveAuthentication no",
+        })
+    if _yes(vals, "permitemptypasswords"):
+        out.append({
+            "id": "empty-pw-config", "severity": "risk",
+            "title": "sshd 配置里 PermitEmptyPasswords 是 yes",
+            "detail": "只要有任何账号口令为空，就能免口令登进去。",
+            "fix": "设 PermitEmptyPasswords no 并 reload sshd（先确认没有空口令账号）",
+        })
+    if ssh["source"] != "sshd -T":
+        out.append({
+            "id": "config-source", "severity": "note",
+            "title": "这一轮读的不是生效配置",
+            "detail": "；".join(ssh["notes"]) or "Include 与 Match 块未展开。",
+            "fix": "用 root 执行 sshd -T 看真正的生效值",
+        })
+    weak = [f"{f['user']}：{k['comment'] or k['fp'] or '?'}" for f in keys["files"] for k in f["keys"] if k["weak"]]
+    if weak:
+        out.append({
+            "id": "weak-key", "severity": "warn",
+            "title": f"{len(weak)} 把已授权钥匙强度过低",
+            "detail": "、".join(weak[:6]) + "（DSA，或 RSA 小于 2048 位）。",
+            "fix": "换 ed25519 钥匙，再从对应 authorized_keys 里删掉旧行",
+        })
+    bad_files = [f for f in keys["files"] if f["flags"]]
+    if bad_files:
+        hard = any(f["symlink"] or "可写" in " ".join(f["flags"]) for f in bad_files)
+        out.append({
+            "id": "ak-file", "severity": "risk" if hard else "warn",
+            "title": f"{len(bad_files)} 个 authorized_keys 的权限或形态有问题",
+            "detail": "；".join(f"{f['user']}：{'，'.join(f['flags'])}" for f in bad_files[:4]),
+            "fix": "owner-only：chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys",
+        })
+    silent = [
+        f"{f['user']}：{k['fp'] or k['comment'][:20]}"
+        for f in keys["files"] for k in f["keys"]
+        if not k["comment"] and not k["unparsed"]
+    ]
+    if silent:
+        out.append({
+            "id": "no-comment", "severity": "warn",
+            "title": f"{len(silent)} 把已授权钥匙没有备注",
+            "detail": "备注是唯一记录「这把钥匙是谁的」的地方；没有它只能逐把去问。指纹：" + "、".join(silent[:5]),
+            "fix": "逐把核对指纹，认不出来源的就删；自己的钥匙重新加上注释",
+        })
+    unparsed = sum(1 for f in keys["files"] for k in f["keys"] if k["unparsed"])
+    if unparsed:
+        out.append({
+            "id": "ak-unparsed", "severity": "note",
+            "title": f"{unparsed} 行 authorized_keys 面板解析不了",
+            "detail": "解析不了不等于没有效：sshd 可能照样接受它。这一行需要人工看一眼。",
+            "fix": "cat 对应文件人工核对（面板不代替人判断未知格式）",
+        })
+    if failed >= 500 and not guarded:
+        out.append({
+            "id": "brute-volume", "severity": "risk",
+            "title": f"过去 24 小时 {failed} 次失败认证，来自 {attempts['distinct_ips']} 个地址",
+            "detail": "排行靠前：" + "、".join(f"{t['ip']}（{t['count']} 次）" for t in attempts["top"][:3]),
+            "fix": "在网关侧封来源，或让 sshd 只监听跳板/内网；量持续大时配合 fail2ban",
+        })
+    accepted_password = next((a["count"] for a in attempts.get("accepted", []) if a["method"] == "password"), 0)
+    if accepted_password:
+        out.append({
+            "id": "accepted-password", "severity": "warn" if not guarded else "note",
+            "title": f"过去 24 小时有 {accepted_password} 次口令方式登录成功",
+            "detail": "即使配置允许，口令登录成功本身也值得逐条核对是不是本人、是不是已知来源。",
+            "fix": "choyeonctl ssh-audit --json 看 accepted 明细，并核对该 IP 与时间",
+        })
+    order = {"risk": 0, "warn": 1, "note": 2}
+    out.sort(key=lambda f: (order[f["severity"]], f["id"]))
+    return out
+
+
+def _summary(findings: list[dict]) -> dict:
+    out = {"risk": 0, "warn": 0, "note": 0}
+    for f in findings:
+        out[f["severity"]] += 1
+    return out
+
+
+async def audit(refresh: bool = False) -> dict:
+    """带 TTL 的只读对账入口；并发调用只回源一次。"""
+    async with _LOCK:
+        now = time.time()
+        data = _cache["data"]
+        if not refresh and data and now - _cache["at"] < CACHE_TTL:
+            return {**data, "cached": True}
+        data = await _collect()
+        _cache["at"] = time.time()
+        _cache["data"] = data
+        return {**data, "cached": False}
+
+
+async def _collect() -> dict:
+    as_root = os.geteuid() == 0
+    ssh, users, guard, attempts = await asyncio.gather(
+        _sshd_settings(), asyncio.to_thread(_passwd_users), _guard_status(), _attempts(),
+    )
+    try:
+        ports_data = await exposure_service.audit()
+    except Exception:  # noqa: BLE001 - 端口那一层失败不该把这一页一起拖没
+        ports_data = None
+    keys = await asyncio.to_thread(_authorized_keys, users, as_root)
+    accounts = _accounts(users)
+    exposure = _ssh_exposure(ssh["values"], ports_data)
+    findings = _findings(ssh, keys, accounts, attempts, guard, exposure)
+
+    notes = list(ssh["notes"]) + list(accounts["notes"])
+    for extra in (guard.get("note"), attempts.get("note")):
+        if extra:
+            notes.append(extra)
+    if not as_root:
+        notes.append("本次不是 root 运行：/etc/shadow 和其它用户的 authorized_keys 读不到，这两项没有核对。")
+    if keys["truncated"]:
+        notes.append(f"单个 authorized_keys 最多逐条列 {MAX_KEYS} 行，超出的只计数没列出。")
+    notes.append(
+        "这一层严格只读：不写 sshd_config、不 reload sshd、不改 authorized_keys——"
+        "SSH 是这台机器的主入口，猜错就是把人锁在门外。"
+    )
+
+    return {
+        "ok": True,
+        "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "as_root": as_root,
+        "sshd": {"source": ssh["source"], "effective": ssh["effective"],
+                 "port": exposure["port"], "reachable": exposure["reachable"], "verdict": exposure["verdict"],
+                 "reason": exposure["reason"]},
+        "settings": _setting_rows(ssh["values"], exposure["reachable"] is not False, guard["any_active"]),
+        "guard": guard["units"],
+        "keys": keys,
+        "accounts": accounts,
+        "attempts": attempts,
+        "counts": _summary(findings),
+        "findings": findings,
+        "notes": notes,
+    }
+
+
+SEV_LABEL = {"risk": "要紧", "warn": "值得处理", "note": "知道就好"}
+
+
+def doctor_item(data: dict) -> dict:
+    """自检里的「登录安全」一行。
+
+    fail 只留给入侵迹象（空口令、多余 uid=0）——那是"这台机器可能已经被人进来了"；
+    加固建议一律 warn：它们是真问题，但不代表面板装坏了，硬凑成 fail 只会让人以为
+    部署出了问题，反而去看错地方。
+    """
+    if data["sshd"]["source"] in ("missing", "unreadable"):
+        first = data["notes"][0] if data["notes"] else ""
+        return {"status": "warn", "detail": f"读不到 sshd 配置，登录方式无从核对：{first}",
+                "fix": "choyeonctl ssh-audit", "fixable": False}
+    counts = data["counts"]
+    if data["accounts"]["empty_password"] or data["accounts"]["uid0_extra"]:
+        names = "、".join((data["accounts"]["empty_password"] + data["accounts"]["uid0_extra"])[:5])
+        return {"status": "fail", "detail": f"存在不该有的账号：{names}（空口令或额外 uid=0）",
+                "fix": "choyeonctl ssh-audit 里看完整判词，先按入侵痕迹处理", "fixable": False}
+    if counts["risk"]:
+        first = data["findings"][0]["title"]
+        return {"status": "warn", "detail": f"登录方式有 {counts['risk']} 项要紧、{counts['warn']} 项值得处理：{first}",
+                "fix": "choyeonctl ssh-audit", "fixable": False}
+    if counts["warn"]:
+        return {"status": "warn", "detail": f"没有要紧项，另有 {counts['warn']} 项加固建议",
+                "fix": "choyeonctl ssh-audit", "fixable": False}
+    detail = f"sshd 端口 {data['sshd']['port']} 的登录方式没有要紧项；24h 失败认证 {data['attempts']['failed']} 次"
+    if not data["as_root"]:
+        detail += "（非 root，空口令与他人的 authorized_keys 未核对）"
+    return {"status": "pass", "detail": detail, "fix": "", "fixable": False}

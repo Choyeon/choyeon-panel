@@ -395,7 +395,7 @@ const cols: any[] = [
         ref="tableAnchor"
         :columns="cols" :data="rows" size="small" :bordered="false" :loading="loading"
         :scroll-x="1220" :max-height="tableH"
-        :row-key="(r: Task) => r.id"
+        :row-key="(r: Task) => r.id" class="tbl-cron"
       >
         <template #empty>
           <EmptyBox :text="err ? '定时任务获取失败，点上方「刷新」重试' : (isAdmin ? '还没有定时任务，点「新建任务」加一条' : '还没有定时任务')" />
@@ -503,7 +503,10 @@ const cols: any[] = [
 </template>
 
 <style scoped>
-.cell-lastrun { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* h() 生成的单元格拿不到本组件的 data-v 作用域（scoped 纯 class 规则一条都不命中），
+必须从模板上的类走 :deep。
+   缺了这行时图标和时间各占一行、也撑不出 min-width:0，窄屏上这一列会把表顶宽。 */
+.tbl-cron :deep(.cell-lastrun) { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cr-preview {
   display: flex; flex-direction: column; gap: 4px; min-height: 44px;
   padding: var(--space-3); border: 1px solid var(--cp-border); border-radius: 8px;

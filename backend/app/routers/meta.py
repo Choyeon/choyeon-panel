@@ -19,7 +19,13 @@ from fastapi.responses import JSONResponse
 from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
-from ..services import cert_ops, exposure_service, systemd_ops, updates_service
+from ..services import (
+    cert_ops,
+    exposure_service,
+    login_audit_service,
+    systemd_ops,
+    updates_service,
+)
 from ..templates import list_templates
 from ..util import disk_usage_pct, run
 
@@ -347,6 +353,18 @@ async def _check_ports() -> dict:
     """
     return exposure_service.doctor_item(await exposure_service.audit())
 
+
+async def _check_login() -> dict:
+    """登录安全：SSH 才是这台机器的正门，面板自己被 nginx 挡在 127.0.0.1 后面。
+
+    这一项把四件平时各在一处的事拼成一行判词：sshd 的有效配置、authorized_keys
+    的指纹与文件权限、账号面（空口令 / 多余 uid=0 / sudo 成员）、过去 24 小时的
+    失败认证来源，外加 fail2ban 或 sshguard 到底在不在跑。
+    全部只读：本机 SSH 是唯一入口，配置改错就是把人锁在门外，所以这里只给可复制的
+    修复命令，绝不碰 sshd_config。
+    """
+    return login_audit_service.doctor_item(await login_audit_service.audit())
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -362,6 +380,7 @@ _CHECKS = [
     ("timer-units", "定时器对账", _check_timer_units),
     ("updates", "系统补丁", _check_updates),
     ("ports", "端口暴露面", _check_ports),
+    ("login", "登录安全", _check_login),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
@@ -413,6 +432,12 @@ async def updates(refresh: int = 0):
 async def ports(refresh: int = 0):
     """监听端口与可达性判定：只读探测，viewer 也能看。"""
     return await exposure_service.audit(refresh=bool(refresh))
+
+
+@router.get("/api/ssh-audit")
+async def ssh_audit(refresh: int = 0):
+    """登录安全对账：只读探测，viewer 也能看；修复动作一律回 SSH 里手工做。"""
+    return await login_audit_service.audit(refresh=bool(refresh))
 
 @router.post("/api/doctor/fix")
 async def doctor_fix(req: Request):
