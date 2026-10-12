@@ -905,6 +905,32 @@ def _storage_text(d: dict) -> str:
     else:
         lines.append("读不到分区信息，占用数字仍然有效，但没有总量可对")
     lines.append(f"systemd 日志：{jr.get('bytes_human') or '读不到'}")
+    mts = d.get("mounts") or {}
+    if mts:
+        if not mts.get("ok"):
+            lines.append(f"挂载点：{mts.get('reason') or '读不到 /proc/mounts'}，inode 与只读状态没法拉出来")
+        else:
+            def _pct(v):
+                return "—" if v is None else f"{v}%"
+
+            panel = mts.get("panel_mount")
+            lines.append(f"挂载点 {mts.get('total', 0)} 个（面板数据在 {panel or '未知'}）：")
+            for m in mts.get("items") or []:
+                if m.get("unknown"):
+                    lines.append(f"  {m['path']:<24} {m.get('fstype', '?'):<8} "
+                                 f"挂着却读不到（{m.get('device', '?')}）")
+                    continue
+                marks = []
+                if m.get("ro"):
+                    marks.append("只读")
+                if m.get("panel"):
+                    marks.append("面板数据在这")
+                line = (f"  {m['path']:<24} {m.get('fstype', '?'):<8} 已用 {_pct(m.get('used_pct'))}"
+                        f"  剩 {m.get('free_human', '—')}  inode {_pct(m.get('inode_pct'))}")
+                lines.append(line + ("  " + "，".join(marks) if marks else ""))
+            if int(mts.get("omitted") or 0) > 0:
+                lines.append(f"  另有 {mts['omitted']} 个挂载点没列出（都不比上面这些吃紧）")
+
     lines.append(f"合计 {c.get('bytes_total_human')}，{c.get('roots', 0)} 个目录：")
     for r in d.get("roots") or []:
         if not r.get("exists"):

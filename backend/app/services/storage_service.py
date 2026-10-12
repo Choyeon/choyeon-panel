@@ -11,7 +11,11 @@
 
 两处如实承认局限，不装成全知：
 ① 每个根目录最多扫 ROOT_BUDGET_SEC 秒、MAX_DEPTH 层，扫不完就标 partial，
-   给出的是下界而不是全量；② 只看本机文件系统，远端对象存储、别的挂载盘在视野之外。
+   给出的是下界而不是全量；② 只看得见本机文件系统，远端对象存储不在这张表里。
+
+挂载点单独占一节，因为"还剩多少"问的从来不是数据目录那一块盘。别的分区写满、inode 用尽
+（容量列还剩几十 GB，却已经建不出任何新文件）、内核把出错的文件系统重挂成只读——这三种情况
+过去在这块面板上完全不可见：余量自检只看数据目录所在的那块盘，占用扫描只看登记的目录。
 """
 
 from __future__ import annotations
@@ -39,6 +43,24 @@ JOURNAL_WARN = 2 * 1024**3
 BACKUP_WARN = 4 * 1024**3
 BIG_FILE_WARN = 2 * 1024**3
 DISK_TIGHT_PCT = 90
+INODE_WARN_PCT = 90
+INODE_RISK_PCT = 97
+TOP_MOUNTS = 24
+MOUNTS_PATH = "/proc/mounts"
+# /proc/mounts 里九成行是内核自己挂的东西，它们的 statvfs 毫无运维意义；overlay 更坏：
+# 它报的是下层目录所在那块盘的数字，多列一行会让人以为是两块盘各吃掉一半。
+PSEUDO_FSTYPES = frozenset({
+    "proc", "sysfs", "cgroup", "cgroup2", "devtmpfs", "devpts", "securityfs", "pstore",
+    "bpf", "autofs", "hugetlbfs", "mqueue", "debugfs", "tracefs", "fusectl", "configfs",
+    "selinuxfs", "ramfs", "efivarfs", "binfmt_misc", "rpc_pipefs", "nsfs", "overlay",
+})
+# snap 的 squashfs、光驱镜像这类天生"100% 已用"：那是只读镜像的性质，不是磁盘告急。
+SNAPSHOT_FSTYPES = frozenset({"squashfs", "iso9660", "udf", "cdfs"})
+# RAM 盘要进表（写满是真的会把构建和临时文件打死），但它天生带 ro 挂载
+# （这台机器上 /run/credentials/* 就是 5 个只读 tmpfs，systemd 设计如此），
+# 所以"只读"那一档跳过它，否则会常驻 5 条没意义的告警。
+RAM_FSTYPES = frozenset({"tmpfs"})
+
 
 SEV_RISK = "risk"
 SEV_WARN = "warn"
@@ -48,7 +70,7 @@ SEV_LABEL = {SEV_RISK: "要紧", SEV_WARN: "值得处理", SEV_INFO: "知道就�
 NOTES = (
     f"每个目录最多扫 {ROOT_BUDGET_SEC:.0f} 秒、{MAX_DEPTH} 层，标了「未扫完」的给出的是下界而不是全量。",
     "不跟随符号链接、不跨文件系统计数；备份产物只统计不删除。",
-    "只看本机文件系统：远端对象存储和其他挂载盘不在这一页视野里。",
+    "盘扫的只是登记的目录；挂载点表覆盖本机每一个真实文件系统，容量、inode、是否只读逐块列出来，远端对象存储仍然不在视野内。",
     "登记的根可以互相包含（数据目录就在应用根里面）：逐行各算各的，合计只算最外层那一份。",
 )
 
@@ -258,7 +280,120 @@ def _disk_info() -> dict:
     }
 
 
-def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict]) -> list[dict]:
+def _unescape_mount(name: str) -> str:
+    """/proc/mounts 把挂载点里的空格、制表符、换行写成八进制转义（反斜杠加三位八进制数）。
+
+    不还原的话，带空格的挂载点（外接盘上常见）会以转义原文出现在表里，既没法照着敲进
+    命令，也没法拿去 statvfs。
+    """
+    out: list[str] = []
+    i, n = 0, len(name)
+    while i < n:
+        if name[i] == "\\" and i + 4 <= n and all(c in "01234567" for c in name[i + 1 : i + 4]):
+            out.append(chr(int(name[i + 1 : i + 4], 8)))
+            i += 4
+        else:
+            out.append(name[i])
+            i += 1
+    return "".join(out)
+
+
+def _parse_mounts(text: str) -> list[dict]:
+    """把 /proc/mounts 折成"真正挂着的一块块盘"，同一个挂载点取最后一次挂载。
+
+    顺序即语义：后写的挂载盖住前面的，取第一次会把已经被盖掉的那块盘也算进来。
+    只读判定必须逐项比对选项，不能拿子串找 ro：内核挂在 errors=remount-ro 上的盘此刻
+    是读写着的（这台机器的根分区就是），而 squashfs 这类只读镜像天生带 ro，那是性质不是故障。
+    """
+    by_mp: dict[str, dict] = {}
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        mp = _unescape_mount(parts[1])
+        fstype, opts = parts[2], parts[3]
+        if not mp.startswith("/") or fstype in PSEUDO_FSTYPES:
+            continue
+        ro = "ro" in opts.split(",")
+        if fstype in RAM_FSTYPES and ro:
+            # 只读的 RAM 盘写不进任何东西，永远不会成为"这块盘满了"。这台机器上
+            # /run/credentials/* 就是五个这样的挂载点（systemd 设计如此），列出来只是噪声。
+            continue
+        by_mp[mp] = {"path": mp, "device": parts[0], "fstype": fstype, "ro": ro}
+    return list(by_mp.values())
+
+
+def _mount_of(path: str, items: list[dict]) -> str | None:
+    """某个路径落在哪块盘上：按最长前缀匹配，跟内核的判法一致。"""
+    norm = os.path.normpath(str(path))
+    best: str | None = None
+    for it in items:
+        mp = it["path"]
+        inside = mp == "/" or norm == mp or norm.startswith(mp.rstrip("/") + "/")
+        if inside and (best is None or len(mp) > len(best)):
+            best = mp
+    return best
+
+
+def _mounts(raw: str | None = None) -> dict:
+    """逐个挂载点当场 statvfs：容量、inode、是否只读。
+
+    inode 是这一节存在的理由：ext4 的 inode 表在 mkfs 时就定死了，用尽之后新建**任何**
+    文件都报 No space left on device，而 df 的容量列还显示剩几十 GB。只看余量的面板在那种
+    机器上会一直说"盘很空"。f_files 为 0 是 vfat 这类文件系统根本没有 inode 表，如实给 None，
+    不能折成 0%——0% 会被读成"没有问题"。
+    百分比与磁盘余量那一栏同口径：写不进去的都算已用（含 ext4 预留块），所以已用% 加剩余
+    正好是整块盘，同一页上两个百分比不会互相矛盾。df 的 Use% 会低几个点——它把预留块既
+    不算 Used 也不算 Avail；对数时以这一页「写不进去就算已用」为准。
+    """
+    if raw is None:
+        try:
+            with open(MOUNTS_PATH, encoding="utf-8", errors="replace") as fh:
+                raw = fh.read()
+        except OSError:
+            return {"ok": False, "items": [], "total": 0, "omitted": 0,
+                    "panel_mount": None, "reason": "读不到 " + MOUNTS_PATH}
+    items: list[dict] = []
+    for m in _parse_mounts(raw):
+        rec = dict(m)
+        try:
+            s = os.statvfs(m["path"])
+        except OSError:
+            # 挂着却读不到，也要如实列出来：/proc/mounts 上有它、statvfs 却失败，通常正是
+            # 那块盘出问题的样子（设备掉线、网络存储断了、挂载点权限被改）。藏起来等于把线索丢掉。
+            rec.update({"unknown": True, "total": 0, "total_human": "—", "used": 0,
+                        "used_human": "—", "free": 0, "free_human": "—",
+                        "used_pct": None, "inode_pct": None})
+            items.append(rec)
+            continue
+        fr = s.f_frsize or s.f_bsize
+        total = int(s.f_blocks) * fr
+        avail = int(s.f_bavail) * fr
+        used = max(total - avail, 0)
+        rec.update({
+            "unknown": False,
+            "total": total,
+            "total_human": _human(total),
+            "used": used,
+            "used_human": _human(used),
+            "free": avail,
+            "free_human": _human(avail),
+            "used_pct": round(used * 100 / total) if total else None,
+            "inode_pct": round((int(s.f_files) - int(s.f_ffree)) * 100 / int(s.f_files)) if s.f_files else None,
+        })
+        items.append(rec)
+    panel = _mount_of(config.DATA_DIR, items)
+    for it in items:
+        it["panel"] = it["path"] == panel
+    # 最吃紧的排前面，读不到的和 0% 的沉底：这张表的用途是先看见哪块盘要出事。
+    items.sort(key=lambda it: (it["used_pct"] is None, -(it["used_pct"] or 0), it["path"]))
+    shown = items[:TOP_MOUNTS]
+    return {"ok": True, "items": shown, "total": len(items),
+            "omitted": max(len(items) - TOP_MOUNTS, 0), "panel_mount": panel}
+
+
+def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict],
+              mounts: list[dict] | None = None) -> list[dict]:
     """把数字折成判词。每条都带一句"为什么"和一个能复制的动作，不写"建议关注"这种空话。"""
     out: list[dict] = []
     jb = journal.get("bytes")
@@ -294,6 +429,57 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
                       "往往是备份，而备份失败不会有任何提示音。",
             "fix": "choyeonctl storage",
         })
+
+    for m in mounts or []:
+        path, dev, ftype = m["path"], m.get("device") or "?", m.get("fstype") or "?"
+        if m.get("unknown"):
+            out.append({
+                "id": "mount:" + path,
+                "severity": SEV_WARN,
+                "title": f"挂载点 {path} 挂着却读不到（{dev}，{ftype}）",
+                "detail": "/proc/mounts 说它在那儿，statvfs 却失败。设备掉线、网络存储断了、"
+                          "挂载点权限被改过都会是这样。这一条问的不是占用，而是这块盘还能不能用："
+                          "往上面写的每一笔都会直接报错。",
+                "fix": f"findmnt --target '{path}'",
+            })
+            continue
+        ipct = m.get("inode_pct")
+        if isinstance(ipct, int) and ipct >= INODE_WARN_PCT:
+            cap = m.get("used_pct")
+            out.append({
+                "id": "inode:" + path,
+                "severity": SEV_RISK if ipct >= INODE_RISK_PCT else SEV_WARN,
+                "title": f"{path} 的 inode 已用 {ipct}%"
+                        + (f"，而容量才用 {cap}%" if isinstance(cap, int) else ""),
+                "detail": "ext4 的 inode 表在 mkfs 时就定死了，用尽之后新建任何文件都报 No space "
+                          "left on device，容量列看着还剩一大截也一样。吃掉它的通常是海量小文件"
+                          "（缓存、session、邮件目录、node_modules）。先数清楚是谁在占，"
+                          "删文件是快办法，改 inode 数要重建文件系统。",
+                "fix": f"find '{path}' -xdev -printf '%h\\n' | sort | uniq -c | sort -rn | head -20",
+            })
+        pct = m.get("used_pct")
+        if (isinstance(pct, int) and pct >= DISK_TIGHT_PCT
+                and not m.get("panel") and ftype not in SNAPSHOT_FSTYPES):
+            out.append({
+                "id": "mount:" + path,
+                "severity": SEV_RISK,
+                "title": f"{path}（{dev}）已用 {pct}%，剩 {m['free_human']}",
+                "detail": "这一块的紧张不会惊动面板自己的余量自检——那一项看的是数据目录所在的那块盘。"
+                          "先出事的是落在这上面的东西：上传临时文件、数据库 WAL、构建产物，"
+                          "而且备份失败是不响的。别照数据目录的榜单来清这块盘。",
+                "fix": f"du -xh --max-depth=1 '{path}' 2>/dev/null | sort -h | tail -10",
+            })
+        if m.get("ro") and ftype not in SNAPSHOT_FSTYPES and ftype not in RAM_FSTYPES:
+            out.append({
+                "id": "ro:" + path,
+                "severity": SEV_WARN,
+                "title": f"{path}（{dev}，{ftype}）现在是只读挂载",
+                "detail": "ext4 默认带 errors=remount-ro：内核一旦检测到文件系统错误就把这块盘改成"
+                          "只读把自己冻住。此时所有写入报 Read-only file system，而容量和 inode 看着"
+                          "一切正常，是最容易看漏的一种坏法。先读内核日志确认是不是 I/O 错误，"
+                          "不要直接 remount rw 把问题盖过去。",
+                "fix": "dmesg --level=err,warn | tail -50",
+            })
 
     partial = [r["path"] for r in roots if r.get("exists") and r.get("partial")]
     if partial:
@@ -367,7 +553,7 @@ def _collect() -> dict:
         seen.add(bf["path"])
         bf["bytes_human"] = _human(int(bf["bytes"]))
         big_files.append(bf)
-    return {"roots": roots, "disk": disk, "big_files": big_files[:TOP_FILES]}
+    return {"roots": roots, "disk": disk, "big_files": big_files[:TOP_FILES], "mounts": _mounts()}
 
 
 async def _journal_bytes() -> tuple[int | None, str]:
@@ -401,7 +587,7 @@ async def audit(refresh: bool = False) -> dict:
             "bytes_human": _human(jb) if isinstance(jb, int) else None,
             "raw": jraw[:200],
         }
-        findings = _findings(roots, journal, disk, picked["big_files"])
+        findings = _findings(roots, journal, disk, picked["big_files"], picked["mounts"]["items"])
         total = sum(int(r.get("bytes") or 0) for r in roots if not r.get("nested_in"))
         counts = {
             "risk": sum(1 for f in findings if f["severity"] == SEV_RISK),
@@ -410,11 +596,13 @@ async def audit(refresh: bool = False) -> dict:
             "bytes_total": total,
             "bytes_total_human": _human(total),
             "roots": len([r for r in roots if r.get("exists")]),
+            "mounts": len(picked["mounts"]["items"]),
         }
         data = {
             "as_of": datetime.now(UTC).isoformat(timespec="seconds"),
             "cached": False,
             "disk": disk,
+            "mounts": picked["mounts"],
             "journal": journal,
             "roots": roots,
             "big_files": picked["big_files"],

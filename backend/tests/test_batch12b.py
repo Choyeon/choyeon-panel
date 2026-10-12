@@ -499,7 +499,8 @@ class _AuditCase(unittest.TestCase):
         def fake_collect():
             self.calls["collect"] += 1
             return {"roots": [dict(r) for r in self.roots], "disk": dict(self.disk),
-                    "big_files": [dict(b) for b in self.big]}
+                    "big_files": [dict(b) for b in self.big],
+                    "mounts": {"ok": True, "items": [], "total": 0, "omitted": 0, "panel_mount": "/"}}
 
         for target, fn in (("_journal_bytes", fake_journal), ("_collect", fake_collect)):
             p = mock.patch.object(ss, target, fn)
@@ -530,7 +531,8 @@ class AuditTests(_AuditCase):
                 seen["loop"] = asyncio.get_running_loop()
             except RuntimeError:  # 工作线程里没有 running loop，这正是我们要的样子
                 seen["loop"] = None
-            return {"roots": [], "disk": {"ok": False}, "big_files": []}
+            return {"roots": [], "disk": {"ok": False}, "big_files": [],
+                    "mounts": {"ok": True, "items": [], "total": 0}}
 
         with mock.patch.object(ss, "_collect", fake_collect):
             asyncio.run(ss.audit())
@@ -559,7 +561,8 @@ class AuditTests(_AuditCase):
             return None, "Failed to open system journal: No space left on device"
 
         def fake_collect():
-            return {"roots": [dict(r) for r in self.roots], "disk": dict(self.disk), "big_files": []}
+            return {"roots": [dict(r) for r in self.roots], "disk": dict(self.disk),
+                    "big_files": [], "mounts": {"ok": True, "items": [], "total": 0}}
 
         with mock.patch.object(ss, "_journal_bytes", failing), mock.patch.object(ss, "_collect", fake_collect):
             d = asyncio.run(ss.audit())
