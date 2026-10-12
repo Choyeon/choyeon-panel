@@ -22,10 +22,23 @@
   没有"我已确认风险，继续执行"这类绕过参数：这条守卫的意义就是不给误操作留后门。
 - 设置页的防火墙卡片原先写着"面板对防火墙只读，开启/改规则请 SSH 手动操作，以免误锁 SSH"，
   现在改为指向新页并说明锁死风险由面板承担。
-- `backend/tests/test_batch8a.py`：58 条用例锁定上述语义（ufw / firewalld 规则表解析、
+- `backend/tests/test_batch8a.py`（64 条）与 `test_batch8d.py`（17 条 CLI 用例）锁定上述语义：ufw / firewalld 规则表解析、
   `LIMIT IN` 是带限速的 accept 因而算放行、自锁判定的同族冗余例外、v4/v6 签名互不相同、
   删除前签名比对、firewalld 运行期与 permanent 两份配置的差异、删掉 permanent 最后一条 ssh
-  放行时跳过 `--reload`、非管理员一律 403），以及只读的 ufw/firewalld 探测服务。
+  放行时跳过 `--reload`、非管理员一律 403，以及只读的 ufw/firewalld 探测服务。
+- `choyeonctl firewall list|allow|deny|remove|on|off`：终端里拿到的是同一套守卫与同一份判定，
+  不再有"页面拦住了、SSH 却能一把梭"的缝隙。`list` 的文本模式带编号、族、受保护标记和签名，
+  签名就是 `remove --expect` 要回传的那个值；`off` 必须 `--yes`，`remove` 必须带 `--expect`。
+  没有"我确认风险，继续"这类参数——守卫的意义就是不给出路。命令契约三处（`cmd_schema` 输出、
+  argparse 定义、AGENTS.md §4 表格）由 `test_deploy_contract` 的一致性用例锁在一起，
+  改一处漏改另两处会在测试里失败。
+- 删掉一条放行后，如果同一端口的另一个地址族规则还在放行，服务、CLI 与页面三处都会点名它
+  （`still_open`）：ufw 的一次 `allow` 写 v4+v6 两条，而 `delete N` 只删一条编号，只报"已删除"
+  等于骗人说端口关了。孪生按端口身份认（端口、区间、协议、来源、动作、方向），不能按状态表
+  解析出的 `token`——那条字段只有 firewalld 才有，ufw 的规则全是 None，第一版就是这么把
+  22/80/443 全报成"仍在放行 3399"的。
+- 防火墙页窄屏（<900px）的删除按钮原先实测 28x44，两个字的按钮点不准；补齐横向内边距到 52x44。
+  端口输入框限长 5 位，避免粘进整段文字后才发现报错。
 
 ### 修复
 - 单体仓库（monorepo）里的子目录组件现在能通过面板部署，也能回滚。原先三处按

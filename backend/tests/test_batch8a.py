@@ -102,7 +102,7 @@ class UfwMachine:
             act = f'{r["action"].upper()} {r["direction"].upper()}'
             src = f'{r["source"]} (v6)' if r["family"] == "ipv6" and r["source"] == "Anywhere" else r["source"]
             tail = f'  # {r["comment"]}' if r["comment"] else ""
-            lines.append(f'[{i:>2}] {r["to"]:<28} {act:<9}{src:<28}{tail}')
+            lines.append(f'[{i:>2}] {r["to"]:<28} {act:<9}  {src:<28}{tail}')
         return "\n".join(lines)
 
     def table(self):
@@ -584,6 +584,58 @@ class UfwWriteCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(("ufw", ["delete", str(target["num"])]), m.calls)
         self.assertEqual(m.calls[-1], ("ufw", ["status", "numbered"]), "删完必须重新列表确认")
         self.assertEqual([r["family"] for r in m.find(8000)], ["ipv6"], "v4 删了，v6 应当还在")
+        # ufw 的 allow 不带来源时一次写两条，delete 只删一条编号：报告"已删除"却不提孪生那条，
+        # 用户会以为这个端口已经关掉了。
+        self.assertEqual(len(out["still_open"]), 1)
+        self.assertIn("8000", out["still_open"][0])
+
+    async def test_deleting_a_rule_without_a_twin_reports_no_still_open(self):
+        m = _use_ufw(self, [_rule(port=22), _rule(port=8000)])
+        target = m.find(8000)[0]
+        out = await fw.remove_rule(target["num"], target["sig"], fw.UFW)
+        self.assertNotIn("still_open", out, "没有孪生规则就别凭空多一个字段")
+
+    async def test_deleting_the_ipv6_twin_does_not_blame_other_ports(self):
+        """回归：删 v6 那条时，22/80 这些无关的 v4 规则不是孪生。
+
+        早期实现比的是 token，而 ufw 状态表解析出的规则根本没有 token 字段（全是 None），
+        于是同动作同方向的跨族规则被无差别当成孪生报出来——线上探针实测误报了 22/80/443。
+        """
+        m = _use_ufw(self, [_rule(port=22), _rule(port=80), _rule(port=8000),
+                            _rule(port=8000, family="ipv6")])
+        target = [r for r in m.find(8000) if r["family"] == "ipv6"][0]
+        out = await fw.remove_rule(target["num"], target["sig"], fw.UFW)
+        self.assertEqual(out["still_open"], ["8000/tcp"], "只剩 v4 那条 8000，别的端口不该被点名")
+
+    async def test_a_twin_label_names_the_family(self):
+        """两条的 raw 都是 "8000/tcp"，不带族标签用户根本分不出删掉了哪条。"""
+        m = _use_ufw(self, [_rule(port=8000), _rule(port=8000, family="ipv6")])
+        target = [r for r in m.find(8000) if r["family"] == "ipv4"][0]
+        out = await fw.remove_rule(target["num"], target["sig"], fw.UFW)
+        self.assertEqual(out["still_open"], ["8000/tcp（IPv6）"])
+
+    async def test_another_protocol_on_the_same_port_is_not_a_twin(self):
+        m = _use_ufw(self, [_rule(port=8000, proto="tcp"),
+                            _rule(port=8000, proto="udp", family="ipv6")])
+        target = [r for r in m.find(8000) if r["proto"] == "tcp"][0]
+        out = await fw.remove_rule(target["num"], target["sig"], fw.UFW)
+        self.assertNotIn("still_open", out, "tcp 与 udp 是两个端口，不该互相点名")
+
+    async def test_a_rule_from_another_source_is_not_a_twin(self):
+        m = _use_ufw(self, [_rule(port=8000, source="203.0.113.9"),
+                            _rule(port=8000, source="2001:db8::/32", family="ipv6")])
+        target = [r for r in m.find(8000) if r["family"] == "ipv4"][0]
+        out = await fw.remove_rule(target["num"], target["sig"], fw.UFW)
+        self.assertNotIn("still_open", out, "来源不同的两条放行互不相干")
+
+    async def test_the_from_column_survives_the_status_table_render(self):
+        """夹具的列宽必须留出两个以上空格：Action 与 From 挤成一列时，parse_ufw 会把来源读成
+        Anywhere，来源判定就无从校验——这一版差点被它瞒过去。
+        """
+        m = _use_ufw(self, [_rule(port=8000, source="203.0.113.9"),
+                            _rule(port=9000, source="2001:db8::/32", family="ipv6")])
+        got = {r["port"]: r["source"] for r in m.table()}
+        self.assertEqual(got, {8000: "203.0.113.9", 9000: "2001:db8::/32"})
 
     async def test_delete_reports_failure_when_the_rule_survives(self):
         m = _use_ufw(self, [_rule(port=22), _rule(port=8000)])

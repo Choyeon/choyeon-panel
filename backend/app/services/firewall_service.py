@@ -735,12 +735,34 @@ async def remove_rule(num: int, expect: str, tool: str, request=None) -> dict:
             r = {"code": rl["code"], "out": (r.get("out") or "") + (rl.get("out") or "")}
     if r["code"] != 0:
         raise ExecFailed(_tool_message(r.get("out") or "", tool))
+    still_open: list[str] = []
     if tool == UFW:
         left = await read(tool, request)
         key = (target["raw"], target["action"], target["family"], target["source"])
         if [x for x in left["rules"] if (x["raw"], x["action"], x["family"], x["source"]) == key]:
             raise ExecFailed(f"规则 {target['raw']} 未被删除（仍在规则表里），请用 SSH 检查 ufw 状态")
-    return {"ok": True, "removed": target["raw"], "detail": (r.get("out") or "").strip()[:200]}
+        # ufw 的 `allow` 不带来源时一次写两条（v4 + v6），而 `delete N` 只删一条编号。
+        # 删完只剩孪生那条还在放行同一个端口——报告"已删除"却不提这件事，用户会以为端口关了。
+        # 孪生必须按端口身份认：状态表解析出的规则根本没有 token 字段（那是 firewalld 才有的），
+        # 按 token 比会让同机所有同动作规则互相误认——线上实测：删掉 3399 的 v6 那条，
+        # 22/80/443 全被报成"仍在放行同一端口"。raw 又不带 `(v6)`，所以标签要自己补上，
+        # 否则用户看到两条一模一样的 "8000/tcp" 更糊涂。
+        still_open = [
+            x["raw"] if x.get("family") != "ipv6" else f"{x['raw']}（IPv6）"
+            for x in left["rules"]
+            if target.get("port") is not None
+            and x.get("port") == target.get("port")
+            and x.get("port_to") == target.get("port_to")
+            and x.get("proto") == target.get("proto")
+            and x.get("source") == target.get("source")
+            and x.get("action") == target.get("action")
+            and x.get("direction") == target.get("direction")
+            and x.get("family") != target.get("family")
+        ]
+    out = {"ok": True, "removed": target["raw"], "detail": (r.get("out") or "").strip()[:200]}
+    if still_open:
+        out["still_open"] = still_open
+    return out
 
 
 async def set_enabled(active: bool, tool: str, request=None) -> dict:

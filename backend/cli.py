@@ -14,6 +14,7 @@
     choyeonctl user create alice --password 'xxx' [--role admin]
     choyeonctl app list|create|deploy|rollback|logs
     choyeonctl backup run|list
+    choyeonctl firewall list|allow|deny|remove|on|off
     choyeonctl logs [-n 100] | restart | stop | start | upgrade
     choyeonctl schema --json         # 输出命令契约（AI 读取入口）
 """
@@ -37,7 +38,9 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from app import avatars, config, security  # noqa: E402
 from app import database as dbm  # noqa: E402
+from app.errors import BadInput, public_message  # noqa: E402
 from app.routers.meta import run_checks  # noqa: E402
+from app.services import firewall_service  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -607,6 +610,92 @@ async def cmd_upgrade(a: argparse.Namespace) -> dict:
     return data
 
 
+async def cmd_firewall(a: argparse.Namespace) -> dict:
+    """防火墙读写：调用的是面板防火墙页同一套服务，也因此吃同一套自锁守卫。
+
+    刻意不提供 --force / --yes-i-know 之类的绕过参数。CLI 多半是脚本在跑，脚本读到
+    "SSH 可能要不通了"不会停下来想一想；把它做成不可绕过，人才是安全的。
+    """
+    verb = a.firewall_cmd
+    tool = await firewall_service.detect()
+
+    if verb != "list" and tool not in (firewall_service.UFW, firewall_service.FIREWALLD):
+        Out.error("这台机器上既没有 ufw 也没有 firewalld，没有可管理的防火墙", EXIT_PRECONDITION)
+
+    try:
+        if verb == "list":
+            data = await firewall_service.read(request=None)
+        elif verb in ("allow", "deny"):
+            if a.port is None:
+                Out.error("allow/deny 需要 --port（端口区间再加 --port-to）", EXIT_USAGE)
+            body = {"port": a.port, "action": verb, "proto": a.proto}
+            if a.port_to is not None:
+                body["port_to"] = a.port_to
+            if a.source:
+                body["source"] = a.source
+            if a.comment:
+                body["comment"] = a.comment
+            if a.rate:
+                body["rate"] = True
+            data = await firewall_service.add_rule(body, tool)
+        elif verb == "remove":
+            if a.num is None or not a.expect:
+                Out.error("remove 需要 --num 与 --expect：编号会随任何一次删除前移，"
+                          "先用 choyeonctl firewall list --json 读回那条规则的 sig", EXIT_USAGE)
+            data = await firewall_service.remove_rule(a.num, a.expect, tool)
+        else:
+            if verb == "off" and not a.yes:
+                Out.error("停用防火墙会让所有监听端口直接暴露到公网，确认请加 --yes", EXIT_USAGE)
+            data = await firewall_service.set_enabled(verb == "on", tool)
+    except BadInput as e:
+        # 参数写歪属于"用法错误"，让调用方按 AGENTS.md 的退出码表把它和真正的执行失败分开处理
+        Out.error(public_message(e), EXIT_USAGE)
+    except Exception as e:  # noqa: BLE001
+        Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
+
+    if verb == "list":
+        Out.result(data, _firewall_table(data))
+        return data
+    # 删除成功的答复要带上删掉了什么： 是服务重新列表确认过的结果，
+    # 只回一句"已执行"等于让用户再跑一次 list 才敢相信。
+    text = data.get("detail") or ""
+    if verb == "remove":
+        text = "已删除 " + (data.get("removed") or "") + ("；" + text if text else "")
+        for extra in data.get("still_open") or []:
+            # ufw 的 allow 一次写 v4+v6 两条，delete 只删一条；不把孪生那条说出来，
+            # 用户会以为这个端口已经不对外开放了。
+            text += f"\n注意：{extra} 仍在放行同一端口，需要单独删除"
+
+    Out.result(data, text or "已执行")
+    return data
+
+
+def _firewall_table(data: dict) -> str:
+    """`firewall list` 的人类可读形态：与表格页同样的列，另把 sig 印出来——
+    remove 需要它，而让人再去跑一次 --json 只会多一次可被删错的时间窗。"""
+    rules = data.get("rules") or []
+    reasons = data.get("protected_reasons") or {}
+    head = f"{data.get('tool', 'none')} · " + ("已启用" if data.get("active") else "未启用")
+    if data.get("default_incoming"):
+        head += f" · 默认入站 {data['default_incoming']}"
+    if data.get("zone"):
+        head += f" · 默认区域 {data['zone']}"
+    lines = [head]
+    if data.get("protected"):
+        lines.append("受保护端口（删掉这些端口唯一的放行来源会被拒绝）："
+                     + "、".join(f"{p}（{reasons.get(str(p), '')}）" for p in data["protected"]))
+    for r in rules:
+        lo, hi = r.get("port"), r.get("port_to")
+        span = "任意端口" if lo is None else (str(lo) if hi in (None, lo) else f"{lo}-{hi}")
+        cols = [f"[{r.get('num', '')}]", span, r.get("token") or "",
+                r.get("action") or "", r.get("source") or "Anywhere",
+                "IPv6" if r.get("family") == "ipv6" else "IPv4",
+                "受保护" if r.get("protected") else ""]
+        lines.append("  ".join(cols).rstrip() + f"  sig={r.get('sig', '')}")
+    lines.append(f"共 {len(rules)} 条")
+    return "\n".join(lines)
+
+
 async def cmd_schema(_a: argparse.Namespace) -> dict:
     """机器可读命令契约：AI 智能体读这一份就够，不用翻源码。"""
     schema = {
@@ -639,6 +728,16 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
              "desc": "应用全生命周期管理",
              "notes": ["create 需要 --template 或 --start-cmd 之一；用 --start-cmd 时可配 --type/--install-cmd"]},
             {"name": "backup run|list", "args": [], "desc": "面板数据备份"},
+            {"name": "firewall list|allow|deny|remove|on|off",
+             "args": ["--port", "--port-to", "--proto", "--source", "--comment", "--rate",
+                      "--num", "--expect", "--yes"],
+             "desc": "本机 ufw/firewalld 读写（与面板防火墙页同一套守卫）",
+             "notes": ["拒绝任何会让这台机器进不去的写操作：sshd 监听端口、反代到面板的 nginx 入口端口、"
+                                    "面板自身在非 loopback 上的监听端口，以及当前请求连进来的端口；没有绕过参数",
+
+                       "remove 必须带 list 里读回的 sig（--expect）：编号会随任何一次删除前移",
+                       "off 需要 --yes；on 会先确认 SSH 与面板入口端口已经在放行列表里",
+                       "参数写歪退出码 2（用法错误），被自锁守卫拦下与防火墙自身报错为 1"]},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
             {"name": "schema", "args": [], "desc": "输出本契约"},
@@ -709,6 +808,19 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("backup", help="备份管理", parents=[common])
     b.add_argument("backup_cmd", choices=["run", "list"])
     b.set_defaults(fn=cmd_backup)
+
+    fw = sub.add_parser("firewall", help="本机防火墙读写（ufw / firewalld）", parents=[common])
+    fw.add_argument("firewall_cmd", choices=["list", "allow", "deny", "remove", "on", "off"])
+    fw.add_argument("--port", type=int, help="端口，1-65535")
+    fw.add_argument("--port-to", type=int, dest="port_to", help="区间结束端口（含）")
+    fw.add_argument("--proto", choices=["tcp", "udp", "both"], default="tcp")
+    fw.add_argument("--source", help="来源 IP 或 CIDR，留空表示任意地址")
+    fw.add_argument("--comment", help="备注，最多 40 字")
+    fw.add_argument("--rate", action="store_true", help="放行且限速（ufw 的 limit）")
+    fw.add_argument("--num", type=int, help="remove：list 里的规则编号")
+    fw.add_argument("--expect", help="remove：list 里那条规则的 sig，服务端重新列表比对")
+    fw.add_argument("--yes", action="store_true", help="off：确认停用防火墙")
+    fw.set_defaults(fn=cmd_firewall)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

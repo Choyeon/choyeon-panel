@@ -115,6 +115,10 @@ async function removeRule(r: any) {
   try {
     const res = await api.remove(r.num, r.sig);
     if (res.reloaded === false) msg.warning(`已删除 ${res.removed}；${res.detail}`);
+    // ufw 的 allow 不带来源时一次写 v4+v6 两条，而删除只删一条编号。
+    // 不把剩下的那条说出来，用户会以为这个端口已经关了。
+    else if (res.still_open?.length)
+      msg.warning(`已删除 ${res.removed}，但 ${res.still_open.join('、')} 仍在放行同一端口，需再删一次`);
     else msg.success(`已删除 ${res.removed || ''}`);
     await load();
   } catch (e: any) {
