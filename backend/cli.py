@@ -46,6 +46,7 @@ from app.services import (  # noqa: E402
     exposure_service,
     firewall_service,
     login_audit_service,
+    memory_service,
     storage_service,
     updates_service,
 )
@@ -983,6 +984,140 @@ def _storage_text(d: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_memory(a: argparse.Namespace) -> dict:
+    """内存压力与 OOM 对账：概览的内存仪表只说"占了多少"，这里回答"有没有在缺、谁在拿着、杀过没有"。
+
+    只读——不 kill 进程、不改 sysctl、不动 unit 的 MemoryMax/MemoryHigh。被 OOM 杀掉的进程不会
+    自己报告，应用侧只表现为莫名其妙重启，这一项就是为了让那种事故在终端里也一眼可见。
+    """
+    data = await memory_service.audit(refresh=bool(a.refresh))
+    if not (data.get("mem") or {}).get("ok"):
+        Out.error((data.get("mem") or {}).get("reason") or "读不到 /proc/meminfo，无法对账",
+                  EXIT_PRECONDITION)
+    Out.result(data, _memory_text(data))
+    return data
+
+
+def _memory_text(d: dict) -> str:
+    hu = memory_service._human
+    c = d.get("counts") or {}
+    mem = d.get("mem") or {}
+    press = d.get("pressure") or {}
+    rates = d.get("rates") or {}
+    lines = ["内存压力与 OOM 对账（只读：不 kill 进程、不改 sysctl、不动 unit 上限）"]
+
+    if mem.get("ok"):
+        lines.append(
+            f"总量 {hu(mem.get('total'))}：已用 {mem.get('used_pct')}%（{hu(mem.get('used'))}），"
+            f"可腾出 {hu(mem.get('available'))}，其中页缓存与可回收 slab {hu(mem.get('reclaimable'))}"
+        )
+        devs = "、".join(f"{x['name']} {x['type']}" for x in mem.get("devices") or [])
+        if mem.get("swap_total"):
+            lines.append(
+                f"swap 已用 {mem.get('swap_pct')}%（{hu(mem.get('swap_used'))} / "
+                f"{hu(mem.get('swap_total'))}，{devs or '设备表读不到'}）"
+            )
+        else:
+            lines.append("没有启用 swap：物理内存顶到头就直接进 OOM，没有换出的缓冲")
+    else:
+        lines.append(mem.get("reason") or "读不到 /proc/meminfo")
+
+    some = press.get("some") if press.get("ok") else None
+    if some:
+        stalled = int((some.get("total") or 0) // 1_000_000)
+        lines.append(
+            f"PSI 停顿 some：avg10 {some.get('avg10')}% · avg300 {some.get('avg300')}%"
+            f" · 自启动累计因缺内存阻塞 {stalled} 秒"
+        )
+    else:
+        lines.append(f"PSI：{(press.get('reason') or '读不到') if not press.get('ok') else '读不到'}")
+
+    if rates.get("ok"):
+        seg = []
+        for key, label, as_bytes in (("swap_in", "换入", True), ("swap_out", "换出", True),
+                                     ("direct_reclaim", "直接回收", False),
+                                     ("allocstall", "同步回收", False),
+                                     ("majfault", "主缺页", False)):
+            v = rates.get(key)
+            if isinstance(v, int):
+                seg.append(f"{label} {hu(v) if as_bytes else v}/秒")
+        lines.append(f"{rates.get('secs')} 秒采样窗口：" +
+                     ("、".join(seg) if seg else "速率全都读不出（这个窗口没采到，不是 0）"))
+    else:
+        lines.append("速率：本轮没有采到有效窗口")
+
+    oom = d.get("oom") or {}
+    kills = int(oom.get("kernel_total") or 0)
+    uk = oom.get("unit_kills") or {}
+    if kills or uk:
+        head = f"OOM：内核自启动以来杀掉过 {kills} 个进程"
+        if uk:
+            head += f"，单元自己的上限另杀 {sum(int(v) for v in uk.values())} 次"
+        lines.append(head)
+        for e in oom.get("events") or []:
+            who = (f"{e.get('comm')}({e.get('pid')})" if e.get("comm")
+                   else (e.get("line") or "")[:70])
+            lines.append(f"  {e.get('at')}  {who}")
+        if oom.get("reason"):
+            lines.append(f"  {oom['reason']}")
+    else:
+        lines.append("OOM：自启动以来没有杀过进程")
+
+    units = d.get("units") or {}
+    if units.get("ok"):
+        rows = units.get("items") or []
+        more = f"，另有 {units.get('omitted')} 个更小的没列" if units.get("omitted") else ""
+        lines.append(f"占内存最多的 {len(rows)} 个单元（system.slice 共 {units.get('seen')} 个{more}）：")
+        for r in rows:
+            who = "面板自己" if r.get("self") else (r.get("app") or "")
+            tail = []
+            if isinstance(r.get("pct_of_host"), int):
+                tail.append(f"整机 {r['pct_of_host']}%")
+            if isinstance(r.get("pct_of_cap"), int):
+                tail.append(f"自己上限 {r['pct_of_cap']}%")
+            if r.get("kind") == "slice":
+                tail.append("分组，含子单元")
+            ev = r.get("events") or {}
+            if ev.get("oom_kill") or ev.get("max"):
+                tail.append(f"被上限杀 {ev.get('oom_kill', 0)} 次 / 拦过 {ev.get('max', 0)} 次")
+            mark = f"  [{who}]" if who else ""
+            extra = f"  （{'、'.join(tail)}）" if tail else ""
+            lines.append(f"  {r['unit']:<36}{hu(r.get('current')):>9}{mark}{extra}")
+    else:
+        lines.append(f"单元表：{units.get('reason') or '读不到'}")
+
+    procs = d.get("procs") or {}
+    if procs.get("ok"):
+        rows = procs.get("items") or []
+        cut = "，这一轮没扫完" if procs.get("budget_hit") else ""
+        lines.append(f"占内存最多的 {len(rows)} 个进程（全机 {procs.get('count')} 个{cut}）：")
+        for r in rows:
+            owner = (r.get("app") or r.get("unit")
+                     or ("登录会话，不归面板管" if r.get("kind") == "scope" else "归不到单元"))
+            lines.append(f"  {r['pid']:>7}  {hu(r.get('rss')):>9}  "
+                         f"{(r.get('comm') or '')[:18]:<18}  {owner}")
+    else:
+        lines.append(f"进程表：{procs.get('reason') or '读不到'}")
+
+    lines.append(
+        f"判词：要紧 {c.get('risk', 0)} · 值得处理 {c.get('warn', 0)} · 知道就好 {c.get('info', 0)}"
+    )
+    for f in d.get("findings") or []:
+        sev = memory_service.SEV_LABEL.get(f["severity"], f["severity"])
+        lines.append(f"  [{sev}] {f['title']}")
+        if f.get("detail"):
+            lines.append(f"      {f['detail']}")
+        if f.get("fix"):
+            lines.append(f"      处置：{f['fix']}")
+    if not d.get("findings"):
+        lines.append("  没有内存压力判词。")
+
+    for n in d.get("notes") or []:
+        lines.append(f"说明：{n}")
+    lines.append(f"检查时间 {d.get('as_of')}" + ("（命中缓存）" if d.get("cached") else ""))
+    return "\n".join(lines)
+
+
 async def cmd_schema(_a: argparse.Namespace) -> dict:
     """机器可读命令契约：AI 智能体读这一份就够，不用翻源码。"""
     schema = {
@@ -1056,6 +1191,18 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "单个文件超 2GiB 点名（后者只点不判断）",
                        "只看本机文件系统：远端挂载、对象存储不在范围内",
                        "登记的目录一个都读不到时退出码 3"]},
+            {"name": "memory", "args": ["--refresh"],
+             "desc": "内存压力与 OOM 对账（只读：不 kill 进程、不改 sysctl、不动 unit 上限）",
+             "notes": ["已用按 MemTotal - MemAvailable 计，与概览同口径；free(1) 的 used 含页缓存，"
+                       "会比这里高一截",
+                       "换页 / 直接回收 / PSI 只在 " + str(memory_service.RATE_WINDOW_SEC) +
+                       " 秒窗口内采一次，回答的是此刻有没有在抖，不是历史曲线",
+                       "单元表按 memory.current 排序，.slice 是分组（数字已含子单元），"
+                       "面板自己那一行无条件留在表里",
+                       "OOM：读 vmstat 的 oom_kill 计数，非 0 才去 kernel 日志取受害者；"
+                       "单元 memory.events 的 oom_kill 单独说明是上限设低了",
+                       "cgroup v2 与 CONFIG_PSI 读不到的节如实标原因，不会折成 0",
+                       "读不到 /proc/meminfo 时退出码 3"]},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
             {"name": "schema", "args": [], "desc": "输出本契约"},
@@ -1155,6 +1302,10 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("storage", help="存储占用对账（只读扫描）", parents=[common])
     st.add_argument("--refresh", action="store_true", help="忽略 5 分钟缓存，立即重新扫一遍")
     st.set_defaults(fn=cmd_storage)
+
+    mm = sub.add_parser("memory", help="内存压力与 OOM 对账（只读）", parents=[common])
+    mm.add_argument("--refresh", action="store_true", help="忽略 90 秒缓存，重新采一个速率窗口")
+    mm.set_defaults(fn=cmd_memory)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

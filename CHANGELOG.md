@@ -138,6 +138,34 @@
   8 行路径与标记无截断。
 - `test_batch13a.py` 扩到 40 条：`_parse_mounts` 的 snapshot 标志（squashfs 为真、带 `errors=remount-ro`
   的 ext4 为假）、同一 st_dev 的第二行被标注、不同 st_dev 不标注、`os.stat` 抛 OSError 时不标注。
+- 内存压力与 OOM 对账：`choyeonctl memory`、`GET /api/memory`、自检第 17 项。概览的内存仪表只答「占了
+  多少」，答不出管理员紧接着要问的三句：机器有没有因为缺内存变慢、内存被谁拿着、内核有没有已经杀过
+  进程。这台机器实测过 55 万次直接回收（`pgscan_direct` 550363）、累计换出约 12GB、PSI some 自启动
+  阻塞 82 秒，而已用只有 33%——这三段经历在总量曲线上一条都不存在。
+  速率取自 0.8 秒内的两个 vmstat 快照（换入 / 换出 / 直接回收 / allocstall / 主缺页），测不出给 None
+  而不是 0：「这个窗口没采到」折成 0 就等于宣布「这台机器没有在换页」；计数器倒退同样只能 None，
+  倒退填不出负速率。allocstall 按 zone 拆成几项，老内核只有其中几个，把所有存在的相加，一个都没有才
+  给 None，不猜那个叫 normal 的。
+  归属走 cgroup v2 的 `memory.current` / `pids.current`，面板管理的应用单元认领回应用名；`.slice` 是
+  分组、那个数字已经含组内所有子单元，CLI 与判词都写明「分组，含子单元」，免得有人把它和自己的子单元
+  再加一次。面板自己那一行无条件留在表里（当前 40.1MB，是自己 `MemoryMax=512M` 的 8%）：它被上限杀掉
+  就是整个面板没了，不该因为排不进前 12 名而隐身。
+  OOM 先读 vmstat 的 `oom_kill` 一个整数，非 0 才起一次 journalctl 取受害者；计数说杀过而当前 boot 的
+  内核日志里没有 OOM 行（日志已轮转）就标 `counter-only` 并写明原因，不交一份看着完整其实空的名单。
+  受害者认两种内核写法（`Killed process 1234 (node)` 与 `task:python,pid=1234`），认不出的行只留原文
+  不填名字——猜错的 pid 比没有 pid 更容易把人引到错方向。
+  严格只读：不 kill 进程、不改 sysctl、不动 unit 的 MemoryMax/MemoryHigh，也不进一键修复白名单。上限
+  该设多少是容量决策，只有管理员知道业务峰值；页面给的处置一律是可当场复制的只读命令
+  （`journalctl -k -b | grep -iE 'out of memory|oom-kill'`、`cat <单元>/memory.peak`、
+  `systemctl show <单元> -p TasksMax -p NRestarts`）。OOM 也是这一项唯一会报 fail 的分支：其它项最多
+  warn，而内核中断过业务进程是事故，不是提示。
+- `test_batch14a.py`（155 条）锁住这些方向：HugePages_* 是页数不许按 kB 折算、PSI 缺 full 行的老内核
+  仍算读到、`memory.max` 写着 `max` 时不折成数字、速率倒退给 None、allocstall 多 zone 求和、cgroup v1
+  形态不做兼容猜测、`.slice` 与 session scope 的归属、面板自己那行不被 top-N 挤掉、阈值边界（已用
+  79/80/90、swap 17/50/80、PSI 1%/5%、上限 80%/95%、线程配额 80%、换出 2MB/秒、直接回收 256 页/秒）、
+  `oom_kill=0` 时一个子进程都不起、journalctl 超时降级成 counter-only、两种受害者写法与认不出只留原文、
+  判词 id 不重复且每条都带「为什么」、所有处置命令扫过禁止写入的词表、CLI 文本不出现 None、
+  schema / argparse / AGENTS.md / README / SECURITY 五处的命令与自检项数一致。
 
 ### 修复
 - 服务器页「自启」列原先把 systemctl 的英文状态直接画进 96px 的胶囊，375px 上实测截成

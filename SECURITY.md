@@ -29,7 +29,7 @@
 ## 加固建议（部署侧）
 
 ```bash
-choyeonctl doctor --json          # 16 项只读自检，fail 必须为 0
+choyeonctl doctor --json          # 17 项只读自检，fail 必须为 0
 choyeonctl ssh-audit --json       # 登录方式对账（只读），见下文 SSH 那一段
 ```
 

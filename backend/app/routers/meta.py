@@ -23,6 +23,7 @@ from ..services import (
     cert_ops,
     exposure_service,
     login_audit_service,
+    memory_service,
     storage_service,
     systemd_ops,
     updates_service,
@@ -378,6 +379,18 @@ async def _check_storage() -> dict:
     return storage_service.doctor_item(await storage_service.audit())
 
 
+async def _check_memory() -> dict:
+    """内存压力：概览的内存仪表只说"占了多少"，这一项回答"有没有在缺、谁在拿着、杀过没有"。
+
+    一台"已用 60%"的机器照样能因为直接回收卡住请求、因为一次突发分配被 OOM 杀掉一个进程，
+    而这两件事在总量曲线上都不存在。这一项读 meminfo / vmstat 两个快照 / PSI / cgroup 的
+    memory.* 与 pids.* / 每进程 RSS，把内核 OOM 计数摆到台面上。
+    严格只读：不 kill 进程、不改 sysctl、不动 unit 的 MemoryMax/MemoryHigh——上限该设多少
+    只有管理员知道业务峰值。走 TTL 缓存，反复刷新不会反复采样。
+    """
+    return memory_service.doctor_item(await memory_service.audit())
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -395,6 +408,7 @@ _CHECKS = [
     ("ports", "端口暴露面", _check_ports),
     ("login", "登录安全", _check_login),
     ("storage", "存储占用", _check_storage),
+    ("memory", "内存压力", _check_memory),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
@@ -458,6 +472,13 @@ async def ssh_audit(refresh: int = 0):
 async def storage(refresh: int = 0):
     """存储占用对账：只读扫描，viewer 也能看；清理动作一律回 CLI 里手工做。"""
     return await storage_service.audit(refresh=bool(refresh))
+
+
+@router.get("/api/memory")
+async def memory(refresh: int = 0):
+    """内存压力与 OOM 对账：只读探测，viewer 也能看；处置命令一律回 CLI 或 SSH 里手工做。"""
+    return await memory_service.audit(refresh=bool(refresh))
+
 
 @router.post("/api/doctor/fix")
 async def doctor_fix(req: Request):
