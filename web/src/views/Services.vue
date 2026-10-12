@@ -858,6 +858,217 @@ const memFindingColumns: any[] = [
   },
 ];
 
+
+// 「改动未生效」也是只读对账，管的是别处都不显示的那一层：补丁装了、conf 改了、unit 编辑了，而进程
+// 里跑的还是旧的那份。这台机器的实测样本是 liblzma5 u2 于 10-08 装上、postgres 的 26 个后端仍映射旧
+// inode，而同期「系统补丁」页写着没有待装更新。判据在后端（inode 与 ctime），这一页只负责把它画出来。
+// 颜色与文案一律反查后端判词的 id，前端不重抄一遍安全库名单和阈值：两处各写一份，改一处就会悄悄分叉。
+// 这一页一个按钮都不按：restart / reload / daemon-reload / reboot 都会断连接或杀业务，
+// 什么时候能断这批连接只有管理员知道，面板准备的每条处置都是给人复制走、自己 SSH 进去执行的。
+const pendForce = ref(false);
+const rescanning = ref(false);
+const {
+  data: pendData, error: pendError, loading: pendLoading, refreshing: pendRefreshing, refresh: refreshPending,
+} = useCachedFetch<any>({
+  key: () => 'pending',
+  loader: () => api.pending(pendForce.value),
+  maxAge: 60000,
+});
+watch(pendError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+async function rescanPending() {
+  pendForce.value = true;
+  rescanning.value = true;
+  try {
+    await refreshPending();
+  } catch {
+    /* 失败已经通过 pendError 走上面的 toast */
+  } finally {
+    pendForce.value = false;
+    rescanning.value = false;
+  }
+}
+
+const pendBusy = computed(() => pendLoading.value || pendRefreshing.value || rescanning.value);
+const kernelInfo = computed<any>(() => pendData.value?.kernel ?? {});
+const staleInfo = computed<any>(() => pendData.value?.stale ?? {});
+const reloadInfo = computed<any>(() => pendData.value?.reloads ?? {});
+const aptInfo = computed<any>(() => pendData.value?.apt ?? {});
+const staleRows = computed<any[]>(() => staleInfo.value.units ?? []);
+const pendFindings = computed<any[]>(() => pendData.value?.findings ?? []);
+const pendCounts = computed(() => pendData.value?.counts ?? { risk: 0, warn: 0, info: 0 });
+const pendOnlySerious = ref(true);
+const pendShownFindings = computed(() => (pendOnlySerious.value
+  ? pendFindings.value.filter((f: any) => f.severity !== 'info')
+  : pendFindings.value));
+const pendInfoFindings = computed(() => pendFindings.value.filter((f: any) => f.severity === 'info'));
+
+// 判词列的形状和内存页一模一样（判词 / 档位 / 处置），直接复用同一套列定义：
+// 两处各写一份的话，「处置」那一列的复制文案迟早会分叉。
+const pendFindingColumns = memFindingColumns;
+const pendPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: false };
+
+const pendSevOf = (id: string) => String((pendFindings.value.find((f: any) => f.id === id) || {}).severity || '');
+const pendFixOf = (id: string) => String((pendFindings.value.find((f: any) => f.id === id) || {}).fix || '');
+const pendTone = (id: string) => {
+  const s = pendSevOf(id);
+  return s === 'risk' ? 'err' : s === 'warn' ? 'warn' : '';
+};
+
+const RELOAD_KIND: Record<string, string> = {
+  nginx: 'nginx 配置',
+  sshd: 'sshd 配置',
+  systemd: 'systemd unit 文件',
+};
+const RELOAD_FINDING_ID: Record<string, string> = {
+  nginx: 'nginx-reload',
+  sshd: 'sshd-reload',
+  systemd: 'daemon-reload',
+};
+const reloadRows = computed(() => ['nginx', 'sshd', 'systemd'].map((kind) => ({
+  kind,
+  finding: RELOAD_FINDING_ID[kind],
+  ...(reloadInfo.value[kind] || { ok: false, reason: '后端没返回这一节' }),
+})));
+
+const staleUnitColumns: any[] = [
+  {
+    title: '单元', key: 'unit', minWidth: 230,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('div', { class: 'cell-name mono ls-wrap mm-break' }, [
+        r.unit || '不归 systemd 管',
+        r.self ? h('span', { class: 'mm-tag self' }, '面板自己') : null,
+      ]),
+      h('div', { class: 'cell-sub mono ls-wrap mm-break' }, r.cmd || '命令行读不到'),
+    ]),
+  },
+  {
+    title: '几个进程', key: 'procs', width: 108,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name' }, String(r.procs)),
+      h('div', { class: 'cell-sub mono ls-wrap mm-break' },
+        (r.pids || []).length
+          ? `pid ${(r.pids || []).join('、')}${r.procs > (r.pids || []).length ? ' 等' : ''}`
+          : 'pid 读不到'),
+    ]),
+  },
+  {
+    title: '已经跑了', key: 'age', width: 150,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name' }, r.age_human || '启动时间读不到'),
+      h('div', { class: 'cell-sub' }, r.started_iso ? fmtDateTime(r.started_iso) : '—'),
+    ]),
+  },
+  {
+    // 路径整行给出来，不省略号：这一列的用途就是让人核对「到底是哪一份文件被换掉了」，
+    // 截断之后 node_modules 里那几个同名文件根本分不开。
+    title: '踩着的是哪份文件', key: 'files', minWidth: 330,
+    render: (r: any) => h('div', { class: 'cell-txt' },
+      (r.files || []).map((f: any) => h('div', { class: 'pd-file' }, [
+        h('div', { class: 'mono ls-wrap mm-break' }, f.path),
+        h('div', { class: 'cell-sub ls-wrap' }, [
+          f.pkg ? `${f.pkg}${f.pkg_version ? ` ${f.pkg_version}` : ''}` : '不是 dpkg 装的文件',
+          f.security ? h('span', { class: 'mm-tag app' }, '安全相关') : null,
+          h('span', null, ` 换成新版：${f.ctime_iso ? fmtDateTime(f.ctime_iso) : '时间读不到'}`),
+          f.gone ? h('span', null, '；原路径已经不在了') : null,
+        ]),
+      ]))),
+  },
+];
+
+const reloadColumns: any[] = [
+  {
+    title: '哪一层', key: 'kind', width: 150,
+    render: (r: any) => h('span', { class: 'cell-name' }, RELOAD_KIND[r.kind] || r.kind),
+  },
+  {
+    title: '对上了没有', key: 'verdict', minWidth: 230,
+    render: (r: any) => {
+      if (!r.ok) return h('span', { class: 'st idle' }, r.reason || '读不到');
+      if (r.kind === 'systemd') {
+        return r.need_reload?.length
+          ? h('div', { class: 'cell-txt' }, [
+            h('span', { class: 'st warn' }, `${r.need_reload.length} 个 unit 改过还没 daemon-reload`),
+            h('div', { class: 'cell-sub mono ls-wrap mm-break' }, r.need_reload.join('、')),
+          ])
+          : h('span', { class: 'st ok' }, `查过 ${r.checked} 个单元，没有改过没重载的`);
+      }
+      if (r.pending) return h('span', { class: 'st warn' }, '盘上的配置比进程里的新');
+      return h('span', { class: 'st ok' }, '进程里就是当前这份配置');
+    },
+  },
+  {
+    title: '拿什么比的', key: 'ref', minWidth: 250,
+    render: (r: any) => {
+      if (!r.ok) return h('span', { class: 'cell-sub' }, '—');
+      if (r.kind === 'systemd') {
+        return h('span', { class: 'cell-sub' }, `systemctl show -p NeedDaemonReload（${r.checked} 个单元）`);
+      }
+      const proc = r.kind === 'nginx'
+        ? `最晚启动的 worker（${(r.worker_pids || []).join('、') || 'pid 读不到'}）：${r.ref_start_iso ? fmtDateTime(r.ref_start_iso) : '启动时间读不到'}`
+        : `sshd pid ${r.pid ?? '读不到'}：${r.started_iso ? fmtDateTime(r.started_iso) : '启动时间读不到'}`;
+      const conf = r.newest_file
+        ? `${r.newest_file}：${r.newest_mtime_iso ? fmtDateTime(r.newest_mtime_iso) : '时间读不到'}（共 ${r.conf_files ?? r.files ?? 0} 个配置文件）`
+        : '配置文件列表读不到';
+      return h('div', { class: 'cell-txt' }, [
+        h('div', { class: 'cell-sub ls-wrap mm-break' }, proc),
+        h('div', { class: 'cell-sub ls-wrap mm-break' }, conf),
+      ]);
+    },
+  },
+  {
+    // 处置只从后端那条判词里取，前端不另写一份命令：同一件事两处各写一遍，迟早一处改了另一处没改。
+    title: '处置', key: 'fix', minWidth: 300,
+    render: (r: any) => {
+      const fix = pendFixOf(r.finding);
+      if (!r.ok) return h('span', { class: 'cell-sub' }, '这一节读不到，先按判词里的命令查');
+      return fix
+        ? h('div', { class: 'st-fix' }, [
+          h('code', { class: 'mono st-fix-cmd' }, fix),
+          h(NButton, {
+            size: 'tiny',
+            quaternary: true,
+            onClick: () => copy(fix, '已复制：面板不会替你执行，请 SSH 进去自己跑'),
+          }, { default: () => '复制', icon: () => h(NIcon, { component: icons.CopyOutline, size: 13 }) }),
+        ])
+        : h('span', { class: 'cell-sub' }, '对上了，这一层不用动手');
+    },
+  },
+];
+
+const pendAlertText = computed(() => {
+  const d = pendData.value;
+  if (!d) return '';
+  const k = d.kernel || {};
+  const s = d.stale || {};
+  if (!k.ok && s.ok === false) {
+    return `内核与进程映射两节都读不到（${(d.unreadable || []).join('、') || '原因未知'}）——`
+      + '这一页等于空白，别把它读成「没有问题」。';
+  }
+  const c = d.counts || {};
+  if (c.risk) {
+    const first = (d.findings || []).find((f: any) => f.severity === 'risk');
+    return `${c.risk} 项改动没进正在跑的进程：${first ? first.title : ''}。`
+      + '面板不替你 restart、不替你 reload、不替你 reboot——这些动作会断连接、会杀业务，'
+      + '什么时候能做只有你知道。下面每条处置都是准备好给你自己执行的。';
+  }
+  if (c.warn) return `没有要紧项，另有 ${c.warn} 项值得处理（配置改过还没重载、非安全库的旧映射这类）。`;
+  if (!k.ok) {
+    return `内核一节读不到（${k.reason || '原因未知'}）；进程映射扫了 ${s.scanned ?? 0} 个，`
+      + '没有发现被替换后还在继续跑的库。';
+  }
+  return `运行中的 ${k.running} 就是装着的那份内核，${s.scanned ?? 0} 个进程里没有谁踩着已被替换的映射，`
+    + 'nginx / sshd / unit 也没有改过没重载的。';
+});
+const pendAlert = computed(() => {
+  const d = pendData.value;
+  if (!d) return null;
+  const dead = !d.kernel?.ok && d.stale?.ok === false;
+  const c = pendCounts.value;
+  const type = dead || c.risk ? ('error' as const) : c.warn ? ('warning' as const) : ('success' as const);
+  return { type, text: pendAlertText.value };
+});
+
 const allPorts = computed<any[]>(() => portData.value?.ports ?? []);
 const portBusy = computed(() => portLoading.value || portRefreshing.value || auditing.value);
 // 默认只列"能被外面碰到"的那几行：几百个仅本机监听的端口（rpc、metrics、数据库）
@@ -971,6 +1182,9 @@ const tabs = computed(() => [
   { key: 'storage', label: '存储占用', badge: storageCounts.value.risk > 0 },
   // 内存这一层的红点只认「要紧」（正在停顿、OOM 杀过人、顶到自己的上限）：天天都有的小波动长期亮着就等于没亮。
   { key: 'memory', label: '内存压力', badge: memCounts.value.risk > 0 },
+  // 这一层的红点同样只认「要紧」：安全库的旧映射是要重启才算补上的，天天点没意义；
+  // 值得处理（配置改过没 reload）用页内告警说话。
+  { key: 'pending', label: '改动未生效', badge: pendCounts.value.risk > 0 },
   // 单元日志走 /api/system/services/{unit}/logs，服务端要求 admin（journal 是全机内容）。
   // 不给只读账号留这个页签，否则他点进来的是一片 403。
   ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
@@ -1728,6 +1942,126 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         :scroll-x="490" :pagination="false" :row-key="(r: any) => r.name" class="cp-tbl tbl-mem-swaps"
       />
     </CpToolbarCard>
+    <CpToolbarCard v-else-if="tab === 'pending'" title="改动未生效" style="margin-top: 10px">
+      <template #right>
+        <div class="mm-toolbar">
+          <NText v-if="pendData" depth="3" class="mm-time">
+            扫描于 {{ fmtDateTime(pendData.as_of) }}<template v-if="pendData.cached">（缓存）</template>
+          </NText>
+          <NButton size="small" tertiary :loading="pendBusy" :icon="icon('RefreshOutline', 14)" @click="refreshPending">刷新</NButton>
+          <NButton size="small" :loading="rescanning" :icon="icon('SyncOutline', 14)" @click="rescanPending">重新扫描</NButton>
+        </div>
+      </template>
+
+      <NAlert v-if="!pendData && pendError" type="error" :bordered="false" style="margin-bottom: var(--space-3)">
+        改动对账失败：{{ (pendError as Error).message || '未知错误' }}。点上方「重新扫描」重试。
+      </NAlert>
+      <NAlert v-else-if="pendAlert" :type="pendAlert.type" :bordered="false" style="margin-bottom: var(--space-3)">
+        {{ pendAlert.text }}
+      </NAlert>
+
+      <div v-if="pendData" class="mm-chips">
+        <span class="mm-chip" :class="{ err: kernelInfo.needs_reboot === true }">
+          <i>内核</i><template v-if="kernelInfo.ok">运行 {{ kernelInfo.running }}，已装 {{ (kernelInfo.installed || []).length }} 个镜像包<template v-if="(kernelInfo.newer || []).length">，其中 {{ kernelInfo.newer.map((x: any) => x.version).join('、') }} 还没用上</template>；{{ kernelInfo.needs_reboot === true ? '要重启才算补上' : kernelInfo.needs_reboot === false ? '跑的就是装着的那份' : '判定不了' }}</template>
+          <template v-else>{{ kernelInfo.reason || '读不到' }}</template>
+        </span>
+        <span class="mm-chip">
+          <i>本次启动</i>{{ kernelInfo.boot_iso ? `${fmtDateTime(kernelInfo.boot_iso)}（已跑 ${fmtDuration(pendData.uptime_sec)}）` : '读不到' }}
+        </span>
+        <span class="mm-chip" :class="{ err: staleRows.length > 0 }">
+          <i>踩着旧文件</i>{{ staleInfo.ok ? `${staleInfo.procs_stale ?? 0} 个进程，归成 ${staleInfo.unit_total ?? 0} 个单元` : (staleInfo.reason || '读不到') }}
+        </span>
+        <span class="mm-chip">
+          <i>这一轮扫了</i>{{ staleInfo.ok ? `${staleInfo.scanned ?? 0} / ${staleInfo.procs_total ?? 0} 个进程，${staleInfo.elapsed_ms ?? 0} 毫秒${staleInfo.budget_hit ? ' · 预算用完，没扫满' : ''}` : '—' }}
+        </span>
+        <span v-if="staleInfo.ok && staleInfo.orphan_total" class="mm-chip warn">
+          <i>认不出归属</i>{{ staleInfo.orphan_total }} 个单元不归 systemd 管，得自己认领
+        </span>
+        <span class="mm-chip" :class="{ warn: reloadInfo.nginx?.pending === true }">
+          <i>nginx 配置</i>{{ reloadInfo.nginx?.ok ? (reloadInfo.nginx.pending === true ? '盘上的比进程里的新，还没 reload' : reloadInfo.nginx.pending === false ? '进程里就是当前这份' : '判定不了') : (reloadInfo.nginx?.reason || '读不到') }}
+        </span>
+        <span class="mm-chip" :class="{ warn: reloadInfo.sshd?.pending === true }">
+          <i>sshd 配置</i>{{ reloadInfo.sshd?.ok ? (reloadInfo.sshd.pending === true ? '盘上的比进程里的新，还没重启进程' : reloadInfo.sshd.pending === false ? '进程里就是当前这份' : '判定不了') : (reloadInfo.sshd?.reason || '读不到') }}
+        </span>
+        <span class="mm-chip" :class="{ warn: (reloadInfo.systemd?.need_reload || []).length > 0 }">
+          <i>unit 文件</i>{{ reloadInfo.systemd?.ok ? ((reloadInfo.systemd.need_reload || []).length ? `${reloadInfo.systemd.need_reload.length} 个改过还没 daemon-reload` : `查了 ${reloadInfo.systemd.checked} 个单元，没有待重载`) : (reloadInfo.systemd?.reason || '读不到') }}
+        </span>
+        <span class="mm-chip">
+          <i>apt</i>{{ aptInfo.ok ? `最近一笔事务 ${aptInfo.last_start_date || '读不到'}（历史里共 ${aptInfo.transactions} 笔）` : (aptInfo.reason || '读不到') }}
+        </span>
+        <span class="mm-chip" :class="{ err: pendCounts.risk > 0 }"><i>要紧</i>{{ pendCounts.risk }} 项</span>
+        <span class="mm-chip" :class="{ warn: pendCounts.warn > 0 }"><i>值得处理</i>{{ pendCounts.warn }} 项</span>
+        <span class="mm-chip"><i>知道就好</i>{{ pendCounts.info }} 项</span>
+      </div>
+
+      <div v-if="pendData" class="mm-tun">
+        <span>只读对账：面板不 restart、不 reload、不 daemon-reload、不 reboot</span>
+        <span>处置命令按「复制」拿走，请 SSH 进去自己执行</span>
+        <span v-if="pendData.self_unit">面板自己跑在 {{ pendData.self_unit }}</span>
+      </div>
+
+      <div v-if="pendData && (pendData.notes || []).length" class="mm-notes">
+        <div v-for="(n, i) in pendData.notes" :key="i" class="mm-note">{{ n }}</div>
+      </div>
+
+      <div class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-brand-soft)" /> 判词
+        </span>
+        <NText depth="3" class="mm-src">先说结论：哪一份改动还没进到正在跑的东西里、什么时候重启才算补上</NText>
+        <NButton
+          v-if="pendInfoFindings.length"
+          size="tiny" :quaternary="pendOnlySerious" :type="pendOnlySerious ? 'default' : 'primary'"
+          @click="pendOnlySerious = !pendOnlySerious"
+        >
+          {{ pendOnlySerious ? `展开 ${pendInfoFindings.length} 条「知道就好」` : '只看在意的' }}
+        </NButton>
+      </div>
+      <NDataTable
+        :columns="pendFindingColumns" :data="pendShownFindings" size="small" :bordered="false"
+        :loading="pendBusy && !pendData" :scroll-x="696" :pagination="pager(pendShownFindings.length, pendPaging)"
+        :row-key="(r: any) => r.id" class="cp-tbl tbl-pend-findings"
+      >
+        <template #empty>
+          <EmptyBox :text="pendData && pendData.unreadable && pendData.unreadable.length ? '该出声的读不到，别把这一页读成「没有问题」' : '没有异常：装上去的都在跑着的那份里'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="pendData" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.CubeOutline" :size="15" color="var(--cp-brand-soft)" /> 还在跑旧文件的进程
+        </span>
+        <NText depth="3" class="mm-src">
+          <template v-if="staleInfo.ok === false">{{ staleInfo.reason || '读不到 /proc' }}</template>
+          <template v-else>
+            按单元分组，映射里的文件在盘上已经换成了另一份（inode 对不上）。<template v-if="(staleInfo.unit_total ?? 0) > staleRows.length">这一轮列了 {{ staleRows.length }} 个，其余 {{ (staleInfo.unit_total ?? 0) - staleRows.length }} 个都不比这些更值得看。</template><template v-if="staleInfo.budget_hit">预算用完、只扫了 {{ staleInfo.scanned }} 个进程，榜外可能还有。</template>
+          </template>
+        </NText>
+      </div>
+      <NDataTable
+        v-if="pendData" :columns="staleUnitColumns" :data="staleRows" size="small" :bordered="false"
+        :loading="pendBusy && !pendData" :scroll-x="900" :pagination="false"
+        :max-height="staleRows.length ? tableH : undefined" :row-key="(r: any) => `${r.unit}|${r.cmd}`"
+        class="cp-tbl tbl-pend-units"
+      >
+        <template #empty>
+          <EmptyBox :text="staleInfo.ok === false ? (staleInfo.reason || '读不到 /proc') : '没有进程踩着已被替换的映射'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="pendData" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.RefreshOutline" :size="15" color="var(--cp-brand-soft)" /> 配置和 unit 改过之后
+        </span>
+        <NText depth="3" class="mm-src">
+          比的是「盘上最新的 mtime」和「进程被重载的时刻」：nginx 拿最晚启动的 worker 比（<code>nginx -s reload</code> 只换 worker、不换 master，拿 master 比会把已经 reload 过的判成没 reload），sshd 拿主进程比，unit 文件直接问 systemctl 的 NeedDaemonReload。
+        </NText>
+      </div>
+      <NDataTable
+        v-if="pendData" :columns="reloadColumns" :data="reloadRows" size="small" :bordered="false"
+        :scroll-x="1010" :pagination="false" :row-key="(r: any) => r.kind" class="cp-tbl tbl-pend-reloads"
+      />
+    </CpToolbarCard>
     <CpToolbarCard v-else :title="logUnit ? `${logUnit} · journalctl 实时日志` : '单元日志'" style="margin-top: 10px">
       <!-- LogStream 只在挂载时开流、不 watch urlPath：换 unit 必须重挂载，否则旧 SSE 还在推上一个服务的日志 -->
       <LogStream v-if="logUnit" :key="logUnit" :url-path="`/system/services/${encodeURIComponent(logUnit)}/logs`" class="svc-log" />
@@ -1901,6 +2235,9 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 .mm-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
 .mm-block { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: var(--space-3) 0 6px; }
 .mm-src { font-size: var(--fs-xs); }
+/* 一个单元可以踩着好几份被替换的文件，逐份之间要有分隔：整行给路径，不截断。
+   和下面那组一样：格子里的内容是 h() 生成的，没有本组件的 scope id，不走 :deep 这条规则就静默丢掉 */
+.cp-tbl :deep(.pd-file + .pd-file) { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--cp-border); }
 .cp-tbl :deep(.mm-tag) {
   display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: var(--radius-sm);
   font-size: var(--fs-2xs); font-weight: 500; vertical-align: 1px; background: var(--cp-bg-soft); color: var(--cp-text-dim);

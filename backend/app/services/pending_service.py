@@ -307,7 +307,7 @@ def _kernel_state(btime: int) -> dict:
     running = os.uname().release
     out = {"ok": False, "reason": None, "running": running, "installed": [], "newer": [],
            "marker": {"present": False, "path": REBOOT_MARKER, "files": []},
-           "needs_reboot": None, "boot_epoch": btime or None}
+           "needs_reboot": None, "boot_epoch": btime or None, "boot_iso": _epoch_iso(btime)}
     try:
         r = subprocess.run(
             ["dpkg-query", "-W", "-f=${Package}|${Version}|${db:Status-Abbrev}\n", "linux-image-*"],
@@ -386,7 +386,8 @@ def _nginx_state(btime: int, hz: int) -> dict:
     取最晚的那个 worker 启动时刻作参照。
     """
     out = {"ok": False, "reason": None, "master_pid": None, "worker_pids": [], "ref_start": None,
-           "conf_files": 0, "newest_file": None, "newest_mtime": None, "pending": None}
+           "ref_start_iso": None, "conf_files": 0, "newest_file": None, "newest_mtime": None,
+           "newest_mtime_iso": None, "pending": None}
     try:
         pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
     except OSError:
@@ -426,8 +427,10 @@ def _nginx_state(btime: int, hz: int) -> dict:
     out["conf_files"] = len(confs)
     out["newest_file"] = newest[0]
     out["newest_mtime"] = newest[1] or None
+    out["newest_mtime_iso"] = _epoch_iso(newest[1])
     if ref and newest[0]:
         out["ref_start"] = ref
+        out["ref_start_iso"] = _epoch_iso(ref)
         out["pending"] = newest[1] > ref
     out["ok"] = True
     return out
@@ -447,8 +450,9 @@ def _nginx_conf_paths() -> list[str] | None:
 
 def _sshd_state(btime: int, hz: int) -> dict:
     """sshd 的配置文件比进程新，说明改了没生效（这一节严格只读，面板永远不碰 sshd）。"""
-    out = {"ok": False, "reason": None, "pid": None, "started": None, "files": [],
-           "newest_file": None, "newest_mtime": None, "pending": None}
+    out = {"ok": False, "reason": None, "pid": None, "started": None, "started_iso": None,
+           "files": [], "newest_file": None, "newest_mtime": None, "newest_mtime_iso": None,
+           "pending": None}
     pid = None
     for cand in [int(p) for p in os.listdir("/proc") if p.isdigit()]:
         if _read(f"/proc/{cand}/comm").strip() != "sshd":
@@ -478,8 +482,10 @@ def _sshd_state(btime: int, hz: int) -> dict:
     out["pid"] = pid
     out["files"] = len(paths)
     out["started"] = started
+    out["started_iso"] = _epoch_iso(started)
     out["newest_file"] = newest[0]
     out["newest_mtime"] = newest[1] or None
+    out["newest_mtime_iso"] = _epoch_iso(newest[1])
     if started and newest[0]:
         out["pending"] = newest[1] > started
     return out
@@ -565,6 +571,13 @@ def _epoch_iso(v) -> str:
     return datetime.fromtimestamp(v, UTC).astimezone().replace(microsecond=0).isoformat() if v else ""
 
 
+def _iso_hm(iso) -> str:
+    """判词是给人读的中文句子，ISO 的 T 和 +08:00 夹在中间是噪音。
+    表格那几列前端会格式化，文案这一路没人接手，所以后端自己缩成 2026-10-08 06:50:51；
+    缺字段返回空串，调用方会跳过整句。"""
+    return str(iso or "").replace("T", " ")[:19]
+
+
 def _attach_packages(stale: dict) -> None:
     """给前若干条命中路径补上 dpkg 归属；补不到就留空，判词不编包名。
 
@@ -619,8 +632,8 @@ def _findings(kernel: dict, stale: dict, reloads: dict) -> list[dict]:
         labels = sorted({(f.get("pkg") or f["path"].rsplit("/", 1)[-1]) for f in picked})
         unit = rec["unit"]
         shown = unit or "(不属于任何 systemd 单元)"
-        when = f"，进程从 {rec['started_iso']} 起一直在跑（{rec['age_human']}）"
-        replaced = [f["ctime_iso"] for f in picked if f.get("ctime_iso")]
+        when = f"，进程从 {_iso_hm(rec['started_iso'])} 起一直在跑（{rec['age_human']}）"
+        replaced = [t for t in (_iso_hm(f["ctime_iso"]) for f in picked) if t]
         at = f"，文件在 {min(replaced)} 被换掉" if replaced else ""
         if sec:
             sev = SEV_RISK

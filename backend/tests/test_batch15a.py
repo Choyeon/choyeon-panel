@@ -291,6 +291,12 @@ class KernelStateTests(unittest.TestCase):
                                lambda: mock.Mock(release="6.12.111+deb13-cloud-amd64")):
             return ps._kernel_state(1790765667)
 
+    def test_boot_time_is_readable_by_the_frontend(self):
+        """页面上要写「本次启动于」，就必须给 ISO：前端 fmtDateTime 不认裸 epoch。"""
+        out = self._run_with(self.DPKG_REAL)
+        self.assertEqual(out["boot_iso"], ps._epoch_iso(1790765667))
+        self.assertRegex(out["boot_iso"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
     def test_meta_package_is_never_counted_as_a_new_kernel(self):
         # linux-image-cloud-amd64 的名字后面接架构、版本号还一直在变新，把它当内核就是每台机器都待重启
         out = self._run_with(self.DPKG_REAL)
@@ -449,6 +455,53 @@ class ReloadStateTests(unittest.TestCase):
         self.assertIsNone(out["pending"])
 
 
+    def test_nginx_gives_readable_timestamps(self):
+        """页面上的时刻必须由后端给 ISO 串：前端 fmtDateTime 只吃字符串，喂 epoch 会显示成空白。"""
+        with tempfile.TemporaryDirectory() as d:
+            out = self._nginx_fixture(d, worker_start=1791128651, master_start=1790765680,
+                                      newest_mtime=1791670977)
+        self.assertEqual(out["ref_start_iso"], ps._epoch_iso(out["ref_start"]))
+        self.assertEqual(out["newest_mtime_iso"], ps._epoch_iso(out["newest_mtime"]))
+        for key in ("ref_start_iso", "newest_mtime_iso"):
+            with self.subTest(key=key):
+                self.assertIsInstance(out[key], str)
+                self.assertRegex(out[key], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+    def test_sshd_gives_readable_timestamps_and_pending(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = Path(d) / "sshd_config"
+            conf.write_text("PermitRootLogin no\n", encoding="utf-8")
+            os.utime(conf, (1791670977, 1791670977))
+            files = {
+                "/proc/900/comm": "sshd\n",
+                "/proc/900/cmdline": "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups\x00",
+            }
+            with mock.patch.object(os, "listdir", lambda p: ["900"] if p == "/proc" else []), \
+                 mock.patch.object(ps, "SSHD_CONFIG", str(conf)), \
+                 fake_proc(files), \
+                 mock.patch.object(ps, "_proc_start_epoch", lambda pid, b, h: 1791128651):
+                out = ps._sshd_state(1790765667, 250)
+        self.assertTrue(out["ok"], out["reason"])
+        self.assertTrue(out["pending"])
+        self.assertEqual(out["started_iso"], ps._epoch_iso(1791128651))
+        self.assertEqual(out["newest_mtime_iso"], ps._epoch_iso(1791670977))
+
+    def test_sshd_timestamps_stay_empty_when_conf_unreadable(self):
+        """配置读不到就早早返回：ISO 必须是 None，前端才会显示「—」而不是 1970。"""
+        files = {
+            "/proc/900/comm": "sshd\n",
+            "/proc/900/cmdline": "sshd: /usr/sbin/sshd -D [listener]\x00",
+        }
+        with mock.patch.object(os, "listdir", lambda p: ["900"] if p == "/proc" else []), \
+             mock.patch.object(ps, "SSHD_CONFIG", "/nonexistent/sshd_config"), \
+             fake_proc(files):
+            out = ps._sshd_state(1790765667, 250)
+        self.assertFalse(out["ok"])
+        self.assertIsNone(out["pending"])
+        self.assertIsNone(out["started_iso"])
+        self.assertTrue(out["reason"])
+
+
 class PackageLookupTests(unittest.TestCase):
     def test_security_prefixes_hit(self):
         for pkg in ("libssl3t64", "liblzma5", "openssh-server", "sudo", "libc6", "nginx",
@@ -532,6 +585,20 @@ class FindingsTests(unittest.TestCase):
         self.assertIn("26 个进程", out[0]["detail"])
         self.assertIn("2026-10-08", out[0]["detail"])
         self.assertIn("systemctl restart postgresql@17-main.service", out[0]["fix"])
+
+    def test_prose_times_are_readable_not_raw_iso(self):
+        # 表格里前端会格式化，判词文案没人格式化：这里锁住「句子中间不出现裸 ISO」，
+        # 否则同一次改动会在同一张页面上出现两种时间写法。
+        f = [{"path": "/usr/lib/liblzma.so.5.8.1", "gone": False, "ctime": 1,
+              "ctime_iso": "2026-10-08T06:50:51+08:00", "replaced_at": True,
+              "pkg": "liblzma5", "pkg_version": "5.8.1-1+deb13u2", "security": True}]
+        d = ps._findings(self.KERNEL_OK, self._stale("postgresql@17-main.service", f),
+                         self.NO_RELOADS)[0]["detail"]
+        self.assertIn("2026-10-08 06:50:51", d)
+        self.assertIn("2026-09-30 18:54:37", d)
+        self.assertNotIn("+08:00", d)
+        self.assertNotIn("T06:50", d)
+        self.assertNotIn("T18:54", d)
 
     def test_non_security_stale_unit_is_warn(self):
         f = [{"path": "/usr/lib/libfoo.so.1", "gone": False, "ctime": 1, "ctime_iso": "",
@@ -926,6 +993,46 @@ class DocsTests(unittest.TestCase):
         """硬性禁止事项里要说清：这一层只报不动手，处置由管理员在低峰做。"""
         text = (Path(cli.ROOT) / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("choyeonctl pending", text)
+
+
+class StyleReachabilityTests(unittest.TestCase):
+    """格子里的类只能由全局样式表或 `.cp-tbl :deep(...)` 提供。
+
+    Services.vue 的 `<style scoped>` 里裸写的规则落在 `h()` 生成的单元格内容上会静默失效：
+    那些 vnode 拿不到本组件的 scope id，产物里就是一条永远匹配不上的选择器。构建、vue-tsc、
+    接口测试全都发现不了，只有真 DOM 看得见——⑮B 的 `.pd-file` 分隔线就是这么漏的。
+    """
+
+    SV = Path(__file__).resolve().parents[2] / "web" / "src" / "views" / "Services.vue"
+    GLOBAL = Path(__file__).resolve().parents[2] / "web" / "src" / "style.css"
+
+    def _render_classes(self, src):
+        used = set()
+        for m in re.finditer(r"class:\s*'([^']+)'", src):
+            used.update(t for t in m.group(1).split() if re.fullmatch(r"[A-Za-z][\w-]*", t))
+        return used
+
+    def test_cell_classes_reach_the_dom(self):
+        src = self.SV.read_text(encoding="utf-8")
+        used = self._render_classes(src)
+        reachable = set(re.findall(r"\.([A-Za-z][\w-]*)", self.GLOBAL.read_text(encoding="utf-8")))
+        style = src.split("<style scoped>", 1)[1]
+        rules = re.findall(r"([^{}]+)\{([^{}]*)\}", style)
+        for sel, _body in rules:
+            if ":deep(" in sel:
+                reachable.update(re.findall(r"\.([A-Za-z][\w-]*)", sel))
+        bad = sorted({cls for sel, _b in rules if ":deep(" not in sel
+                      for cls in re.findall(r"\.([A-Za-z][\w-]*)", sel)
+                      if cls in used and cls not in reachable})
+        self.assertEqual(bad, [], "这些类只用在 h() 生成的格子里，却在 scoped 块里裸定义：" + str(bad))
+
+    def test_guard_is_not_a_no_op(self):
+        """守卫自己也得能被证明会红：把一条 :deep 规则改成裸规则，必须被上一条用例抓到。"""
+        src = self.SV.read_text(encoding="utf-8")
+        used = self._render_classes(src)
+        self.assertTrue(used, "render 里一个 class 都没抓到，说明用例正则在空转")
+        self.assertIn("pd-file", used)
+        self.assertIn("mm-tag", used)
 
 
 class NotesTests(unittest.TestCase):

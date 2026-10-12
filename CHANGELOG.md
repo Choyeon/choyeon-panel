@@ -196,7 +196,7 @@
   进程扫描实测 142 个进程 40 毫秒，上限 4000 个进程或 3 秒预算，超了就如实标 budget_hit 并说明
   只扫了前多少个；dpkg 归属按路径缓存、整轮最多查 12 个不同路径（`dpkg -S` 一次 0.2-0.5 秒）。
   整轮约 1.5 秒，缓存 120 秒。
-- `test_batch15a.py`（78 条）锁住这些方向：路径含空格的映射行整串保留（maps 的 path 可以带空格，
+- `test_batch15a.py`（85 条）锁住这些方向：路径含空格的映射行整串保留（maps 的 path 可以带空格，
   按 `split()[5]` 取会只剩前半段）、扫描中途退出的进程整条跳过（它名下的 deleted 映射还在，
   报出来只会让人去查一个已经不存在的进程）、映射 inode 与当前文件一致时丢弃、orphan 单元排到表尾并写明
   「systemctl 管不到」、版本比较按 dpkg 的退出码而非替身的布尔值（`returncode=False` 时 `False == 0` 成立，
@@ -204,7 +204,27 @@
   nginx 参照用 worker（回归 master 写法会误报还没 reload）、sshd 的相对 Include 按 /etc/ssh 补基准并展开 glob、
   非包路径不起子进程、所有 spawn 出去的 argv 字面量里不许出现 restart / reload / daemon-reload / reboot
   （用 AST 扫，grep 会被 findings 里那些本该给人执行的命令误伤）、读不到的节只许产 info 级判词、
-  CLI 文本 CJK 列按显示宽度补齐、schema / argparse / AGENTS.md / README / SECURITY 五处的命令与自检项数一致。
+  CLI 文本 CJK 列按显示宽度补齐、schema / argparse / AGENTS.md / README / SECURITY 五处的命令与自检项数一致、
+  时序字段只许给 ISO 且读不到留 None（不许折成 1970 年）、判词文案里的时刻不带 `T` 和时区、
+  格子类名从 `style.css` 或 `:deep(` 选择器可达（新类漏掉时用例必须红，用反例验过一次）。
+
+- 服务器页新增「改动未生效」页签，把上面那份对账画出来：结论条 + 判词表 +「还在跑旧文件的进程」
+  （单元 / 几个进程 / 已经跑了 / 踩着的是哪份文件；路径整行给出不省略号，node_modules 里那几个同名文件
+  要靠整行才分得开）+「配置和 unit 改过之后」（nginx / sshd / systemd 三层，各自写明拿什么比的）。
+  颜色与文案一律反查后端判词的 id，前端不重抄安全库名单和阈值；处置列的命令只从后端那条判词里取，
+  同一件事两处各写一遍迟早分叉。
+  时刻一律由后端给 ISO 字段（`ref_start_iso` / `started_iso` / `newest_mtime_iso` / `boot_iso`）：
+  前端的 `fmtDateTime` 只吃字符串，把 epoch 喂给它得到空串；判词文案那一路没人接手，所以后端自己
+  把它缩成 `2026-10-08 06:50:51` 再放进句子——同一页出现两种时间写法会被读成两件不同的事。
+  读不到的字段留 null 并画「读不到」，不折成 1970 年。
+  这一页一个按钮都不按：restart / reload / daemon-reload / reboot 都会断连接或杀业务，
+  每条处置只是一个复制按钮，toast 里写明「面板不会替你执行，请 SSH 进去自己跑」。
+  页签红点同样只认「要紧」：安全库的旧映射要重启才算补上，天天亮着等于没亮；
+  配置改过还没重载走页内告警说话。
+  同一类坑又踩回来一次：`.pd-file + .pd-file` 那条分隔线写在 `<style scoped>` 里，`h()` 造出的单元格
+  没有 `data-v-*`，构建、类型检查、接口与页面文本断言全绿，线上就是没有那条线——只有真 DOM 量得出
+  `border-top-style: none`。改成 `.cp-tbl :deep(...)` 之外，新增 `StyleReachabilityTests` 把
+  「render 函数里用过的类必须样式可达」固化为用例。
 
 ### 修复
 - 服务器页「自启」列原先把 systemctl 的英文状态直接画进 96px 的胶囊，375px 上实测截成
