@@ -82,6 +82,69 @@ async function repost() {
   }
 }
 
+// 端口暴露面也是只读对账（ss + 防火墙规则，服务端有 5 分钟 TTL）。前端再缓存一层，
+// 切走再回来秒开；「重新对账」带 refresh=1 强制回源，用于刚改完 ufw 规则想立刻确认。
+const forceAudit = ref(false);
+const {
+  data: portData, error: portError, loading: portLoading, refreshing: portRefreshing, refresh: refreshPorts,
+} = useCachedFetch<any>({
+  key: () => 'ports',
+  loader: () => api.ports(forceAudit.value),
+  maxAge: 60000,
+});
+const auditing = ref(false);
+watch(portError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+async function reaudit() {
+  forceAudit.value = true;
+  auditing.value = true;
+  try {
+    await refreshPorts();
+  } catch {
+    /* 失败已经通过 portError 走上面的 toast */
+  } finally {
+    forceAudit.value = false;
+    auditing.value = false;
+  }
+}
+
+const allPorts = computed<any[]>(() => portData.value?.ports ?? []);
+const portBusy = computed(() => portLoading.value || portRefreshing.value || auditing.value);
+// 默认只列"能被外面碰到"的那几行：几百个仅本机监听的端口（rpc、metrics、数据库）
+// 会把真正该看的一行挤到第二页。
+const showAllPorts = ref(false);
+const riskyPorts = computed(() => allPorts.value.filter((p) => p.verdict !== 'internal'));
+const shownPorts = computed(() => (showAllPorts.value ? allPorts.value : riskyPorts.value));
+const countOf = (v: string) => Number(portData.value?.counts?.[v]) || 0;
+const exposedCount = computed(() => countOf('exposed'));
+const blockedCount = computed(() => countOf('blocked'));
+const silentApps = computed(() => (portData.value?.apps ?? []).filter((a: any) => a.port && !a.listening));
+const silentLine = computed(() => silentApps.value.map((a: any) => `${a.name}:${a.port}`).join('、'));
+const SCOPE_LABELS: Record<string, string> = {
+  wildcard: '绑全网', 'public-ip': '绑公网地址', loopback: '仅本机回环', 'link-local': '链路本地',
+};
+const VERDICTS: Record<string, { text: string; type: any; note: string }> = {
+  exposed: { text: '对外可达', type: 'error', note: '外部能连上，且不在预期清单里' },
+  blocked: { text: '防火墙挡住', type: 'warning', note: '绑在全网，但入站规则没放行' },
+  expected: { text: '预期内', type: 'info', note: '面板或反代自己声明的对外端口' },
+  internal: { text: '仅本机', type: 'default', note: '只有这台机器自己能连' },
+};
+// 一页只说一件事：exposed 优先于 blocked，别让"还有个端口被挡着"稀释了真正的口子。
+const portAlert = computed(() => {
+  const d = portData.value;
+  if (!d || portError.value) return null;
+  if (!d.ports) return { type: 'error' as const, text: '读不到监听端口表（ss 不可用或退出码非 0），下面的判定都不可信。' };
+  if (exposedCount.value) {
+    return { type: 'error' as const, text: `${exposedCount.value} 个端口外部可达且不在预期内（共 ${d.counts.total} 个监听端口）。这是最该先看的一行。` };
+  }
+  if (blockedCount.value) {
+    return { type: 'warning' as const, text: `没有对外多开的口子，另有 ${blockedCount.value} 个端口绑在全网、只是被防火墙挡住——改绑 127.0.0.1 才算真的关死。` };
+  }
+  const base = `没有对外多开的口子：${d.counts.total} 个监听端口里 ${d.counts.internal} 个仅本机、${d.counts.expected} 个是预期内的对外端口。`;
+  if (!d.as_root) return { type: 'info' as const, text: `${base}（本次探测拿不到进程名，非 root 下 ss 会隐去它们）` };
+  return { type: 'success' as const, text: base };
+});
+
 const secCount = computed<number | null>(() => {
   const v = patches.value?.security_count;
   return typeof v === 'number' ? v : null;
@@ -132,6 +195,8 @@ const tabs = computed(() => [
   { key: 'services', label: '系统服务' },
   // 有待装安全更新时页签上点一颗红点：这一页平时没人看，而它恰恰是最需要被看见的。
   { key: 'patches', label: '系统补丁', badge: (secCount.value ?? 0) > 0 },
+  // 端口同理，且门槛更高：只有"外部可达且不在预期内"才点亮，被防火墙挡住的用告警说话。
+  { key: 'ports', label: '端口暴露面', badge: exposedCount.value > 0 },
   // 单元日志走 /api/system/services/{unit}/logs，服务端要求 admin（journal 是全机内容）。
   // 不给只读账号留这个页签，否则他点进来的是一片 403。
   ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
@@ -289,6 +354,61 @@ const patchColumns: any[] = [
 const patchPaging = { pageSize: 20, showSizePicker: false, showQuickJumper: false };
 // 通告号只在 dnf 那一支有：列出来能让管理员去查 CVE，但不为它单开一张表。
 const advisoryLine = computed(() => (patches.value?.advisories || []).slice(0, 8).map((a: any) => a.id).join('、'));
+
+// 端口表：一个端口一行，判定和它的理由必须同屏——只给"对外可达"三个字，
+// 管理员下一步还是得回 SSH 里手敲 ss + ufw status 才知道该拿它怎么办。
+const VERDICT_ICON: Record<string, string> = {
+  exposed: 'ShieldOutline', blocked: 'ShieldCheckmarkOutline', expected: 'GlobeOutline', internal: 'ServerOutline',
+};
+const portColumns: any[] = [
+  {
+    title: '端口', key: 'port', width: 130,
+    render: (r: any) =>
+      h('div', { class: 'cell-main' }, [
+        h('span', { class: 'cell-ico' }, [
+          h(NIcon, {
+            component: icons[VERDICT_ICON[r.verdict]] || icons.InformationCircleOutline,
+            size: 17,
+            color: r.verdict === 'exposed' ? 'var(--cp-err)' : r.verdict === 'blocked' ? 'var(--cp-warn)' : 'var(--cp-text-mute)',
+          }),
+        ]),
+        h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name mono' }, String(r.port)),
+          h('div', { class: 'cell-sub', title: r.addrs.join('、') }, r.addrs.join('、')),
+        ]),
+      ]),
+  },
+  {
+    // 非 root 时 ss 会隐去进程名，这里如实显示"未知"而不是留空——留空看着像解析漏了。
+    title: '进程', key: 'processes', width: 150,
+    render: (r: any) =>
+      h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name', title: r.processes.join('、') || '未知' }, r.processes.join('、') || '未知'),
+        h('div', { class: 'cell-sub' }, r.pids.length ? `pid ${r.pids.slice(0, 3).join('、')}${r.pids.length > 3 ? '…' : ''}` : '—'),
+      ]),
+  },
+  {
+    title: '绑定', key: 'scope', width: 110,
+    render: (r: any) => h('span', { class: 'st idle' }, SCOPE_LABELS[r.scope] || r.scope),
+  },
+  {
+    title: '判定', key: 'verdict', width: 112,
+    render: (r: any) => {
+      const v = VERDICTS[r.verdict] ?? { text: r.verdict, type: 'default', note: '' };
+      return h(NTag, { size: 'small', type: v.type, bordered: false, title: v.note }, () => v.text);
+    },
+  },
+  {
+    title: '说明与建议', key: 'reason', minWidth: 340,
+    render: (r: any) =>
+      h('div', { class: 'cell-txt' }, [
+        h('div', { class: 'px-reason' }, r.reason),
+        r.fix ? h('div', { class: 'px-fix' }, r.fix) : null,
+      ]),
+  },
+];
+
+const portPaging = { pageSize: 20, showSizePicker: false, showQuickJumper: false };
 </script>
 
 <template>
@@ -401,6 +521,69 @@ const advisoryLine = computed(() => (patches.value?.advisories || []).slice(0, 8
       </NDataTable>
     </CpToolbarCard>
 
+    <CpToolbarCard v-else-if="tab === 'ports'" title="端口暴露面" style="margin-top: 10px">
+      <template #right>
+        <div class="px-toolbar">
+          <NButton
+            v-if="allPorts.length && riskyPorts.length !== allPorts.length"
+            size="small" :quaternary="!showAllPorts" :type="showAllPorts ? 'primary' : 'default'"
+            @click="showAllPorts = !showAllPorts"
+          >
+            {{ showAllPorts ? '只列能被外面碰到的' : `展开全部 ${allPorts.length} 个端口` }}
+          </NButton>
+          <NText v-if="portData" depth="3" class="px-time">
+            对账于 {{ fmtDateTime(portData.checked_at) }}<template v-if="portData.cached">（缓存）</template>
+          </NText>
+          <NButton size="small" tertiary :loading="portBusy" :icon="icon('RefreshOutline', 14)" @click="refreshPorts">刷新</NButton>
+          <NButton size="small" :loading="auditing" :icon="icon('SyncOutline', 14)" @click="reaudit">重新对账</NButton>
+        </div>
+      </template>
+
+      <NAlert v-if="!portData && portError" type="error" :bordered="false" style="margin-bottom: var(--space-3)">
+        端口对账失败：{{ (portError as Error).message || '未知错误' }}。点上方「重新对账」重试。
+      </NAlert>
+      <NAlert v-else-if="portAlert" :type="portAlert.type" :bordered="false" style="margin-bottom: var(--space-3)">
+        {{ portAlert.text }}
+      </NAlert>
+
+      <div v-if="portData" class="px-chips">
+        <span class="px-chip"><i>监听端口</i>{{ countOf('total') }} 个</span>
+        <span class="px-chip" :class="{ err: exposedCount > 0 }"><i>外部可达</i>{{ exposedCount }} 个</span>
+        <span class="px-chip" :class="{ warn: blockedCount > 0 }"><i>被防火墙挡住</i>{{ blockedCount }} 个</span>
+        <span class="px-chip"><i>预期内</i>{{ countOf('expected') }} 个</span>
+        <span class="px-chip"><i>仅本机</i>{{ countOf('internal') }} 个</span>
+        <span class="px-chip">
+          <i>防火墙</i>
+          <template v-if="portData.firewall.tool === 'none'">未安装</template>
+          <template v-else>{{ portData.firewall.tool }}{{ portData.firewall.active ? ' 已启用' : ' 未启用' }}</template>
+        </span>
+        <span v-if="portData.firewall.default_incoming" class="px-chip">
+          <i>默认入站</i>{{ portData.firewall.default_incoming === 'deny' ? '拒绝' : portData.firewall.default_incoming }}
+        </span>
+        <span v-if="!portData.as_root" class="px-chip warn"><i>进程名</i>非 root，ss 未返回</span>
+      </div>
+
+      <!-- 登记过端口却没有监听的：这是"面板以为还在跑"和"机器上真在跑"的差额，
+           列在这里比只出现在应用页更可能被看见。 -->
+      <NText v-if="silentApps.length" depth="3" class="px-silent">
+        面板登记了 {{ silentApps.length }} 个应用端口当前没有监听：{{ silentLine }}
+      </NText>
+      <div v-if="portData && (portData.notes || []).length" class="px-notes">
+        <div v-for="(n, i) in portData.notes" :key="i" class="px-note">{{ n }}</div>
+      </div>
+
+      <NDataTable
+        :columns="portColumns" :data="shownPorts" size="small" :bordered="false"
+        :loading="portBusy && !portData" :scroll-x="842"
+        :max-height="shownPorts.length ? tableH : undefined" :pagination="portPaging"
+        :row-key="(r: any) => r.port" class="cp-tbl tbl-ports"
+      >
+        <template #empty>
+          <EmptyBox :text="portError && !portData ? '端口对账失败，点上方「重新对账」重试' : '这台机器上没有能被外面碰到的监听端口'" />
+        </template>
+      </NDataTable>
+    </CpToolbarCard>
+
     <CpToolbarCard v-else :title="logUnit ? `${logUnit} · journalctl 实时日志` : '单元日志'" style="margin-top: 10px">
       <!-- LogStream 只在挂载时开流、不 watch urlPath：换 unit 必须重挂载，否则旧 SSE 还在推上一个服务的日志 -->
       <LogStream v-if="logUnit" :key="logUnit" :url-path="`/system/services/${encodeURIComponent(logUnit)}/logs`" class="svc-log" />
@@ -437,6 +620,26 @@ const advisoryLine = computed(() => (patches.value?.advisories || []).slice(0, 8
   padding: 4px 8px; border-radius: var(--radius-sm); background: var(--cp-bg-soft); font-size: var(--fs-sm);
 }
 .pt-cmd-hint { font-size: var(--fs-xs); }
+/* 端口暴露面：判定结果用 chip 汇总，具体理由留在表里。
+   告警 + chip + 表三层读下来正好是"有没有事 / 事的规模 / 是哪一行"。 */
+.px-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.px-time { font-size: var(--fs-xs); }
+.px-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-3); }
+.px-chip {
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 10px;
+  border-radius: var(--radius-md); background: var(--cp-bg-soft); font-size: var(--fs-sm); color: var(--cp-text);
+}
+.px-chip i { font-style: normal; font-size: var(--fs-xs); color: var(--cp-text-mute); }
+.px-chip.warn { color: var(--cp-warn); }
+.px-chip.err { color: var(--cp-err); }
+.px-silent { display: block; margin: -4px 0 var(--space-3); font-size: var(--fs-xs); }
+.px-notes { margin: -4px 0 var(--space-3); }
+.px-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
+.px-reason { font-size: var(--fs-sm); color: var(--cp-text); line-height: 1.6; }
+.px-fix { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.6; }
+@media (max-width: 767px) {
+  .px-toolbar { justify-content: flex-start; }
+}
 @media (max-width: 767px) {
   .pt-cmd { flex-wrap: wrap; }
   .pt-cmd-label { flex: 0 0 100%; }

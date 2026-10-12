@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
-from ..services import cert_ops, systemd_ops, updates_service
+from ..services import cert_ops, exposure_service, systemd_ops, updates_service
 from ..templates import list_templates
 from ..util import disk_usage_pct, run
 
@@ -337,6 +337,16 @@ async def _check_updates() -> dict:
     """
     return updates_service.doctor_item(await updates_service.detect())
 
+
+async def _check_ports() -> dict:
+    """端口暴露面：把"哪些端口能被外面碰到"变成自检里能看见的一行。
+
+    已有的 listen 项只看面板自己绑在哪，firewall 项只看规则表，两者都对，
+    合起来却答不出"我有没有在不知情的情况下开了个口子"——这一项就是补这个洞。
+    判定走 exposure_service，TTL 缓存，自检页反复刷新不会反复跑 ss 和 ufw status。
+    """
+    return exposure_service.doctor_item(await exposure_service.audit())
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -351,6 +361,7 @@ _CHECKS = [
     ("cert-renew", "证书续期", _check_cert_renewal),
     ("timer-units", "定时器对账", _check_timer_units),
     ("updates", "系统补丁", _check_updates),
+    ("ports", "端口暴露面", _check_ports),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
@@ -396,6 +407,12 @@ async def doctor(req: Request):
 async def updates(refresh: int = 0):
     """待装补丁清单：只读探测，viewer 也能看——它不返回任何可写信息。"""
     return await updates_service.detect(refresh=bool(refresh))
+
+
+@router.get("/api/ports")
+async def ports(refresh: int = 0):
+    """监听端口与可达性判定：只读探测，viewer 也能看。"""
+    return await exposure_service.audit(refresh=bool(refresh))
 
 @router.post("/api/doctor/fix")
 async def doctor_fix(req: Request):

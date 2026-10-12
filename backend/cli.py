@@ -41,7 +41,7 @@ from app import avatars, config, security  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.errors import BadInput, public_message  # noqa: E402
 from app.routers.meta import run_checks  # noqa: E402
-from app.services import firewall_service, updates_service  # noqa: E402
+from app.services import exposure_service, firewall_service, updates_service  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -742,6 +742,47 @@ def _updates_text(d: dict) -> str:
     lines.append(f"检查时间 {d.get('checked_at')}" + ("（命中缓存）" if d.get("cached") else ""))
     return "\n".join(lines)
 
+
+async def cmd_ports(a: argparse.Namespace) -> dict:
+    """端口暴露面：回答"这台机器对外开了哪些口子"。
+
+    只读——不改绑定、不动防火墙。把一个端口从全网收回回环要改的是那个服务自己的启动
+    参数，CLI 替不了它，猜错了还会把一个正常服务关掉，所以这里只给判词和建议。
+    """
+    data = await exposure_service.audit(refresh=bool(a.refresh))
+    if not data.get("ports"):
+        Out.error("读不到监听端口表（缺 ss 或 ss 执行失败），无法判断暴露面", EXIT_PRECONDITION)
+    Out.result(data, _ports_text(data))
+    return data
+
+
+def _ports_text(d: dict) -> str:
+    c = d.get("counts") or {}
+    fw = d.get("firewall") or {}
+    lines = [
+        f"监听端口 {c.get('total', 0)} 个：外部可达 {c.get('exposed', 0)}、被防火墙挡住 {c.get('blocked', 0)}、"
+        f"预期内 {c.get('expected', 0)}、仅本机 {c.get('internal', 0)}"
+    ]
+    lines.append(
+        f"防火墙 {fw.get('tool')}{'：已启用' if fw.get('active') else '：未启用/未安装'}，"
+        f"默认入站 {fw.get('default_incoming') or '未知'}"
+    )
+    for n in d.get("notes") or []:
+        lines.append(f"[note] {n}")
+    risky = [p for p in d.get("ports") or [] if p["verdict"] != exposure_service.INTERNAL]
+    if risky:
+        for p in risky:
+            who = "、".join(p["processes"]) or "未知进程"
+            lines.append(f"  [{p['verdict']}] {str(p['port']):<6} {who:<24} {p['addrs'][0]}")
+            lines.append(f"          {p['reason']}")
+            if p.get("fix"):
+                lines.append(f"          建议：{p['fix']}")
+    else:
+        lines.append("对外端口都在预期清单里，没有多开的口子")
+    lines.append(f"仅本机监听的 {c.get('internal', 0)} 个端口用 --json 看")
+    lines.append(f"检查时间 {d.get('checked_at')}" + ("（命中缓存）" if d.get("cached") else ""))
+    return "\n".join(lines)
+
 async def cmd_schema(_a: argparse.Namespace) -> dict:
     """机器可读命令契约：AI 智能体读这一份就够，不用翻源码。"""
     schema = {
@@ -789,6 +830,14 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
              "notes": ["结论来自本地包索引；索引过旧会在 notes 里如实说明",
                        "判不出安全更新子集的发行版报 security_count=null，不会填 0 冒充没有",
                        "supported=false 时退出码 3（前置条件不满足）"]},
+            {"name": "ports", "args": ["--refresh"],
+             "desc": "监听端口与对外可达性对账（只读：不改绑定、不动防火墙）",
+             "notes": ["判词四档：internal 仅本机、expected 预期对外、blocked 绑在全网但防火墙未放行、"
+                       "exposed 外部可达且不在预期清单（含配了域名反代却绑全网的源站）",
+                       "未启用防火墙时按\"非回环端口全都可达\"判定，不给 unknown——关掉 ufw 就是没有过滤",
+                       "只看本机视野：云上安全组、上游 NAT 不在判定范围内，这一条写在 notes 里",
+                       "非 root 时 ss 不给进程名，as_root=false，判定只按端口号给",
+                       "读不到监听表时退出码 3"]},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
             {"name": "schema", "args": [], "desc": "输出本契约"},
@@ -876,6 +925,10 @@ def build_parser() -> argparse.ArgumentParser:
     up = sub.add_parser("updates", help="待装系统补丁与安全更新（只读探测）", parents=[common])
     up.add_argument("--refresh", action="store_true", help="忽略 30 分钟缓存，立即重新探测")
     up.set_defaults(fn=cmd_updates)
+
+    pt = sub.add_parser("ports", help="监听端口与对外可达性（只读对账）", parents=[common])
+    pt.add_argument("--refresh", action="store_true", help="忽略 5 分钟缓存，立即重新对账")
+    pt.set_defaults(fn=cmd_ports)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

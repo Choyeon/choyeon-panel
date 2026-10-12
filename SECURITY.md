@@ -29,7 +29,7 @@
 ## 加固建议（部署侧）
 
 ```bash
-choyeonctl doctor --json          # 13 项只读自检，fail 必须为 0
+choyeonctl doctor --json          # 14 项只读自检，fail 必须为 0
 ```
 
 - 对外只走 nginx + TLS 反代，`CP_TRUST_PROXY=1` 让登录限速按真实 IP 计数

@@ -132,6 +132,8 @@ export const api = {
   doctor: () => req('/doctor'),
   // 系统补丁：服务端有 30 分钟 TTL，refresh=true 强制回源（apt list 在包多的机器上要几秒）
   updates: (refresh = false) => req(`/updates${refresh ? '?refresh=1' : ''}`),
+  // 端口暴露面：服务端 5 分钟 TTL，refresh=true 重新跑一次 ss + 防火墙对账
+  ports: (refresh = false) => req(`/ports${refresh ? '?refresh=1' : ''}`),
   // 一键修复：前端构建项在服务端最长跑 900s，超时会让人误以为失败又点一次
   doctorFix: (id: string) => req('/doctor/fix', { body: { id }, timeout: 960000 }),
   templates: () => req('/templates'),
