@@ -197,6 +197,178 @@ const loginAlert = computed(() => {
   };
 });
 
+// 存储占用也是只读对账（走盘扫目录 + journalctl --disk-usage，服务端 5 分钟 TTL）。
+// 这一页一个修复按钮都没有：磁盘上的清理动作每一条都是"删了就没了"，面板只把占用摆清楚、
+// 把命令写清楚，按下去的那只手得是人的。
+const forceScan = ref(false);
+const scanning = ref(false);
+const {
+  data: storageData, error: storageError, loading: storageLoading, refreshing: storageRefreshing, refresh: refreshStorage,
+} = useCachedFetch<any>({
+  key: () => 'storage',
+  loader: () => api.storage(forceScan.value),
+  maxAge: 60000,
+});
+watch(storageError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+async function rescan() {
+  forceScan.value = true;
+  scanning.value = true;
+  try {
+    await refreshStorage();
+  } catch {
+    /* 失败已经通过 storageError 走上面的 toast */
+  } finally {
+    forceScan.value = false;
+    scanning.value = false;
+  }
+}
+
+const storageBusy = computed(() => storageLoading.value || storageRefreshing.value || scanning.value);
+const storageCounts = computed(() => storageData.value?.counts
+  ?? { risk: 0, warn: 0, info: 0, roots: 0, bytes_total: 0, bytes_total_human: '0B' });
+const storageRoots = computed<any[]>(() => storageData.value?.roots ?? []);
+const allFindings = computed<any[]>(() => storageData.value?.findings ?? []);
+const bigFiles = computed<any[]>(() => storageData.value?.big_files ?? []);
+const diskInfo = computed<any>(() => storageData.value?.disk ?? {});
+const tightDisk = computed(() => Number(diskInfo.value?.used_pct ?? 0) >= 90);
+// 「知道就好」那几档（没扫完、点名几个大文件）默认收着：一进来先看见一堆无关痛痒的行，
+// 真正的风险反而被埋在下面。
+const onlySerious = ref(true);
+const shownFindings = computed(() => (onlySerious.value
+  ? allFindings.value.filter((f: any) => f.severity !== 'info')
+  : allFindings.value));
+const infoFindings = computed(() => allFindings.value.filter((f: any) => f.severity === 'info'));
+const backupLine = computed(() => {
+  const b = storageRoots.value.find((r: any) => r.backups?.count)?.backups;
+  return b ? `${b.count} 份（最早 ${b.oldest}，最新 ${b.newest}）` : '';
+});
+// 条形按最大的那个根归一化：一眼看出谁在吃磁盘，而不是让人在心里除十进制。
+const maxRootBytes = computed(() => Math.max(1, ...storageRoots.value.map((r: any) => Number(r.bytes) || 0)));
+const shareOf = (r: any) => Math.max(2, Math.round(((Number(r.bytes) || 0) * 100) / maxRootBytes.value));
+// 占比的分母只用最外层那一份：登记的根可以互相包含（数据目录就落在应用根里面），
+// 拿全部根相加会让最外层那行显示成 60% 而实际上它装着另外两行。
+const outerBytes = computed(() => storageRoots.value
+  .filter((r: any) => r.exists && !r.nested_in)
+  .reduce((s: number, r: any) => s + (Number(r.bytes) || 0), 0));
+const shareLabel = (r: any) => (!r.exists
+  // 读不到的那一行没有"占多少"可言：给它算个 0% 会让人以为磁盘上真有这么一块空地。
+  ? '读不到'
+  : r.nested_in
+    ? '与外层目录重叠，不重复计入合计'
+    : `占外层 ${Math.round(((Number(r.bytes) || 0) * 100) / (outerBytes.value || 1))}%`);
+
+const storageAlert = computed(() => {
+  const d = storageData.value;
+  if (!d || storageError.value) return null;
+  const c = storageCounts.value;
+  if (!c.roots) {
+    return { type: 'error' as const, text: '一个目录都没读到，这一页的数字都不可信。先确认数据目录、备份目录与 CP_FILE_ROOTS 登记的根还在不在原处。' };
+  }
+  if (c.risk) {
+    const first = allFindings.value.find((f: any) => f.severity === 'risk');
+    return { type: 'error' as const, text: `${c.risk} 项要紧：${first ? first.title : ''}。面板不会替你删东西，下面的命令要你自己 SSH 进去执行。` };
+  }
+  if (c.warn) return { type: 'warning' as const, text: `没有要紧项，另有 ${c.warn} 项值得处理。` };
+  const disk = d.disk || {};
+  return {
+    type: 'success' as const,
+    text: `盘点了 ${c.roots} 个目录、合计 ${c.bytes_total_human}，没有异常占用${disk.ok ? `，分区已用 ${disk.used_pct}%` : '（分区总量读不到）'}。`,
+  };
+});
+
+const rootColumns: any[] = [
+  {
+    title: '目录', key: 'label', minWidth: 240,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name' }, r.label),
+      h('div', { class: 'cell-sub mono ls-wrap' }, r.path),
+    ]),
+  },
+  {
+    title: '占用', key: 'bytes_human', width: 136,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono' }, r.exists ? r.bytes_human : '—'),
+      h('div', { class: 'st-bar' }, [h('i', { style: `width:${r.exists ? shareOf(r) : 0}%` })]),
+      h('div', { class: 'cell-sub' }, shareLabel(r)),
+    ]),
+  },
+  {
+    title: '一级子目录构成', key: 'subdirs', minWidth: 280,
+    render: (r: any) => {
+      const pieces: any[] = (r.subdirs || []).map((s: any) =>
+        h('span', { class: 'st-piece' }, [h('code', { class: 'mono' }, s.name), h('b', s.bytes_human)]));
+      // 「未列出」的个数是一级分支里没进榜的那些，不是全部层级的目录数。
+      const rest = (r.branch_count || 0) - (r.subdirs || []).length;
+      if (rest > 0) pieces.push(h('span', { class: 'st-piece rest' }, `另有 ${rest} 个`));
+      if (!pieces.length) return h('span', { class: 'cell-sub' }, r.exists ? '没有成规模的子目录' : '—');
+      return h('div', { class: 'st-pieces' }, pieces);
+    },
+  },
+  {
+    title: '这一行的可信度', key: 'marks', minWidth: 220,
+    render: (r: any) => {
+      const marks: any[] = [];
+      if (!r.exists) marks.push(r.note || '目录不存在');
+      if (r.partial) marks.push('没扫完，数字是下界');
+      if (r.errors) marks.push(`${r.errors} 处读不到`);
+      if (r.nested_in) marks.push(`与 ${r.nested_in} 是同一份数据`);
+      if (!marks.length) return h('span', { class: 'cell-sub' }, '完整扫描');
+      return h('div', { class: 'st-marks' }, marks.map((m) => h('span', { class: 'st-mark' }, m)));
+    },
+  },
+];
+
+const storageFindingColumns: any[] = [
+  {
+    title: '判词', key: 'title', minWidth: 300,
+    render: (r: any) =>
+      h('div', { class: 'cell-main' }, [
+        h('span', { class: 'cell-ico' }, [
+          h(NIcon, {
+            component: icons[sevOf(r.severity).icon],
+            size: 17,
+            color: r.severity === 'risk' ? 'var(--cp-err)' : r.severity === 'warn' ? 'var(--cp-warn)' : 'var(--cp-text-mute)',
+          }),
+        ]),
+        h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name ls-wrap' }, r.title),
+          h('div', { class: 'cell-sub ls-wrap' }, r.detail),
+        ]),
+      ]),
+  },
+  {
+    title: '档位', key: 'severity', width: 96,
+    render: (r: any) => h(NTag, { size: 'small', type: sevOf(r.severity).type, bordered: false }, () => sevOf(r.severity).text),
+  },
+  {
+    // 存储这里的 fix 是一行能直接粘贴的命令（journalctl --vacuum-size=500M），所以给复制按钮；
+    // 按钮旁边写明面板不会替你执行——删文件的命令被人一键跑掉，是这个页面上最贵的一种方便。
+    title: '处置', key: 'fix', minWidth: 300,
+    render: (r: any) => (r.fix
+      ? h('div', { class: 'st-fix' }, [
+        h('code', { class: 'mono st-fix-cmd' }, r.fix),
+        h(NButton, {
+          size: 'tiny',
+          quaternary: true,
+          onClick: () => copy(r.fix, '已复制：面板不会替你执行，请 SSH 进去自己跑'),
+        }, { default: () => '复制', icon: () => h(NIcon, { component: icons.CopyOutline, size: 13 }) }),
+      ])
+      : h('span', { class: 'cell-sub' }, '这一条不用动手')),
+  },
+];
+
+const bigFileColumns: any[] = [
+  {
+    title: '文件', key: 'path', minWidth: 340,
+    render: (r: any) => h('span', { class: 'mono ls-wrap' }, r.path),
+  },
+  {
+    title: '占用', key: 'bytes_human', width: 110,
+    render: (r: any) => h('span', { class: 'mono' }, r.bytes_human),
+  },
+];
+const storagePaging = { pageSize: 10, showSizePicker: false, showQuickJumper: false };
 const findingColumns: any[] = [
   {
     title: '判词', key: 'title', minWidth: 320,
@@ -393,6 +565,8 @@ const tabs = computed(() => [
   { key: 'ports', label: '端口暴露面', badge: exposedCount.value > 0 },
   // 登录这道的红点门槛和端口一致：只有"要紧"才点，加固建议用页内告警说话。
   { key: 'login', label: '登录安全', badge: loginCounts.value.risk > 0 },
+  // 存储这层的红点只认「要紧」（分区快满），值得处理的占用用页内告警说话：日志偏大、备份偏多天天都有，长期亮着就等于没亮。
+  { key: 'storage', label: '存储占用', badge: storageCounts.value.risk > 0 },
   // 单元日志走 /api/system/services/{unit}/logs，服务端要求 admin（journal 是全机内容）。
   // 不给只读账号留这个页签，否则他点进来的是一片 403。
   ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
@@ -896,6 +1070,86 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
     </CpToolbarCard>
 
+    <CpToolbarCard v-else-if="tab === 'storage'" title="存储占用" style="margin-top: 10px">
+      <template #right>
+        <div class="st-toolbar">
+          <NText v-if="storageData" depth="3" class="st-time">
+            扫描于 {{ fmtDateTime(storageData.as_of) }}<template v-if="storageData.cached">（缓存）</template>
+          </NText>
+          <NButton size="small" tertiary :loading="storageBusy" :icon="icon('RefreshOutline', 14)" @click="refreshStorage">刷新</NButton>
+          <NButton size="small" :loading="scanning" :icon="icon('SyncOutline', 14)" @click="rescan">重新扫描</NButton>
+        </div>
+      </template>
+
+      <NAlert v-if="!storageData && storageError" type="error" :bordered="false" style="margin-bottom: var(--space-3)">
+        存储扫描失败：{{ (storageError as Error).message || '未知错误' }}。点上方「重新扫描」重试。
+      </NAlert>
+      <NAlert v-else-if="storageAlert" :type="storageAlert.type" :bordered="false" style="margin-bottom: var(--space-3)">
+        {{ storageAlert.text }}
+      </NAlert>
+
+      <div v-if="storageData" class="st-chips">
+        <span class="st-chip" :class="{ err: tightDisk }">
+          <i>分区已用</i>{{ diskInfo.ok ? `${diskInfo.used_pct}%（剩 ${diskInfo.free_human}）` : '读不到' }}
+        </span>
+        <span class="st-chip"><i>分区总量</i>{{ diskInfo.total_human || '—' }}</span>
+        <span class="st-chip"><i>systemd 日志</i>{{ storageData.journal?.bytes_human ?? '读不到' }}</span>
+        <span class="st-chip"><i>合计</i>{{ storageCounts.bytes_total_human }} / {{ storageCounts.roots }} 个目录</span>
+        <span class="st-chip" :class="{ err: storageCounts.risk > 0 }"><i>要紧</i>{{ storageCounts.risk }} 项</span>
+        <span class="st-chip" :class="{ warn: storageCounts.warn > 0 }"><i>值得处理</i>{{ storageCounts.warn }} 项</span>
+        <span class="st-chip"><i>知道就好</i>{{ storageCounts.info }} 项</span>
+        <span v-if="backupLine" class="st-chip"><i>备份产物</i>{{ backupLine }}</span>
+      </div>
+
+      <div v-if="storageData && (storageData.notes || []).length" class="st-notes">
+        <div v-for="(n, i) in storageData.notes" :key="i" class="st-note">{{ n }}</div>
+      </div>
+
+      <NDataTable
+        :columns="rootColumns" :data="storageRoots" size="small" :bordered="false"
+        :loading="storageBusy && !storageData" :scroll-x="876"
+        :max-height="storageRoots.length ? tableH : undefined" :pagination="false"
+        :row-key="(r: any) => r.path" class="cp-tbl tbl-roots"
+      >
+        <template #empty>
+          <EmptyBox :text="storageError && !storageData ? '存储扫描失败，点上方「重新扫描」重试' : '没有可扫描的目录：数据目录与 CP_FILE_ROOTS 都读不到'" />
+        </template>
+      </NDataTable>
+
+      <div class="st-block">
+        <span class="section-title">
+          <NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-brand-soft)" /> 判词
+        </span>
+        <NButton
+          v-if="infoFindings.length"
+          size="tiny" :quaternary="onlySerious" :type="onlySerious ? 'default' : 'primary'"
+          @click="onlySerious = !onlySerious"
+        >
+          {{ onlySerious ? `展开 ${infoFindings.length} 条「知道就好」` : '只看在意的' }}
+        </NButton>
+      </div>
+      <NDataTable
+        :columns="storageFindingColumns" :data="shownFindings" size="small" :bordered="false"
+        :loading="storageBusy && !storageData" :scroll-x="696" :pagination="storagePaging"
+        :row-key="(r: any) => r.id" class="cp-tbl tbl-findings"
+      >
+        <template #empty>
+          <EmptyBox :text="onlySerious && infoFindings.length ? '要紧的没有，值得处理的也没有' : '没有异常占用'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="bigFiles.length" class="st-block">
+        <span class="section-title">
+          <NIcon :component="icons.DocumentTextOutline" :size="15" color="var(--cp-brand-soft)" />
+          最大的 {{ bigFiles.length }} 个文件
+        </span>
+        <NText depth="3" class="st-src">只点名，不替你判断它还需不需要</NText>
+      </div>
+      <NDataTable
+        v-if="bigFiles.length" :columns="bigFileColumns" :data="bigFiles" size="small" :bordered="false"
+        :scroll-x="450" :pagination="storagePaging" :row-key="(r: any) => r.path" class="cp-tbl tbl-bigfiles"
+      />
+    </CpToolbarCard>
     <CpToolbarCard v-else :title="logUnit ? `${logUnit} · journalctl 实时日志` : '单元日志'" style="margin-top: 10px">
       <!-- LogStream 只在挂载时开流、不 watch urlPath：换 unit 必须重挂载，否则旧 SSE 还在推上一个服务的日志 -->
       <LogStream v-if="logUnit" :key="logUnit" :url-path="`/system/services/${encodeURIComponent(logUnit)}/logs`" class="svc-log" />
@@ -1003,6 +1257,50 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
   .svc-toolbar { flex-wrap: wrap; justify-content: flex-start; gap: 12px; }
   .svc-filter, .svc-search { flex: 1 1 220px; max-width: 300px; width: auto; }
 }
+/* 存储占用：分区余量 + 每个根的量与构成 + 判词。格子里的类同样走 .cp-tbl :deep，
+   理由和上面登录安全一样——h() 生成的节点拿不到本组件的 data-v 作用域。 */
+.cp-tbl :deep(.st-bar) {
+  display: block; width: 100%; height: 4px; margin: 4px 0 2px;
+  border-radius: 2px; background: var(--cp-bg-soft); overflow: hidden;
+}
+.cp-tbl :deep(.st-bar i) { display: block; height: 100%; border-radius: 2px; background: var(--cp-brand-soft); }
+.cp-tbl :deep(.st-pieces) { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.cp-tbl :deep(.st-piece) {
+  display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%; padding: 2px 7px;
+  border-radius: var(--radius-sm); background: var(--cp-bg-soft); font-size: var(--fs-xs); color: var(--cp-text);
+}
+.cp-tbl :deep(.st-piece code) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.cp-tbl :deep(.st-piece b) { font-weight: 500; color: var(--cp-text-dim); }
+.cp-tbl :deep(.st-piece.rest) { background: transparent; color: var(--cp-text-mute); }
+.cp-tbl :deep(.st-marks) { display: flex; flex-direction: column; gap: 3px; }
+.cp-tbl :deep(.st-mark) { font-size: var(--fs-xs); color: var(--cp-warn); line-height: 1.6; }
+.cp-tbl :deep(.st-fix) { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cp-tbl :deep(.st-fix-cmd) {
+  flex: 0 1 auto; min-width: 0; padding: 3px 7px; border-radius: var(--radius-sm);
+  background: var(--cp-bg-soft); font-size: var(--fs-xs); overflow-x: auto; white-space: nowrap;
+}
+.st-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.st-time { font-size: var(--fs-xs); }
+.st-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-3); }
+.st-chip {
+  display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%; padding: 4px 10px;
+  border-radius: var(--radius-md); background: var(--cp-bg-soft); font-size: var(--fs-sm); color: var(--cp-text);
+}
+.st-chip i { font-style: normal; font-size: var(--fs-xs); color: var(--cp-text-mute); }
+.st-chip.warn { color: var(--cp-warn); }
+.st-chip.err { color: var(--cp-err); }
+.st-notes { margin: -4px 0 var(--space-3); }
+.st-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
+.st-block { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: var(--space-3) 0 6px; }
+.st-src { font-size: var(--fs-xs); }
+@media (max-width: 767px) {
+  .st-toolbar { justify-content: flex-start; }
+  /* 窄屏上路径和清理命令都不能被截断：截了就没法照着敲，也就失去了这一页唯一的用途。 */
+  .cp-tbl :deep(.st-piece code) { max-width: none; white-space: normal; word-break: break-all; overflow: visible; text-overflow: clip; }
+  .cp-tbl :deep(.st-fix) { flex-wrap: wrap; }
+  .cp-tbl :deep(.st-fix-cmd) { flex: 1 1 100%; max-width: 100%; white-space: normal; word-break: break-all; }
+}
+
 /* 1Panel 日志盒参数压过 LogStream 的行内高度（组件根上的类，:deep 到 .log-view） */
 .svc-log :deep(.log-view) {
   height: calc(100vh - 320px) !important;

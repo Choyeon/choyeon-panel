@@ -136,6 +136,7 @@ export const api = {
   ports: (refresh = false) => req(`/ports${refresh ? '?refresh=1' : ''}`),
   // 登录安全：服务端 5 分钟 TTL，refresh=true 重跑 sshd -T + 24h 认证日志 + 公钥扫描（全程只读）
   sshAudit: (refresh = false) => req(`/ssh-audit${refresh ? '?refresh=1' : ''}`),
+  storage: (refresh = false) => req(`/storage${refresh ? '?refresh=1' : ''}`),
   // 一键修复：前端构建项在服务端最长跑 900s，超时会让人误以为失败又点一次
   doctorFix: (id: string) => req('/doctor/fix', { body: { id }, timeout: 960000 }),
   templates: () => req('/templates'),
