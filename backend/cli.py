@@ -45,6 +45,7 @@ from app.routers.meta import run_checks  # noqa: E402
 from app.services import (  # noqa: E402
     exposure_service,
     firewall_service,
+    load_service,
     login_audit_service,
     memory_service,
     pending_service,
@@ -1216,6 +1217,119 @@ def _pending_text(d: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_load(a: argparse.Namespace) -> dict:
+    """负载与 CPU 归因：机器有多忙、这份忙是谁造成的、有没有被自己的 CPU 配额压住。
+
+    严格只读——不 renice、不 kill、不 restart 服务、不改 CPUQuota= / cpu.weight。load 高有两类相反
+    的原因（CPU 不够 vs 磁盘跟不上），处置方向也相反；放宽配额是容量决策，杀进程与重启会直接断业务，
+    所以这里只报归因和能当场复制走的只读命令。
+    """
+    data = await load_service.audit(refresh=bool(a.refresh))
+    if not (data.get("load") or {}).get("ok") and not (data.get("cpu") or {}).get("ok"):
+        Out.error((data.get("load") or {}).get("reason")
+                  or (data.get("cpu") or {}).get("reason")
+                  or "读不到 load average 与 /proc/stat，无法归因", EXIT_PRECONDITION)
+    Out.result(data, _load_text(data))
+    return data
+
+
+def _load_text(d: dict) -> str:
+    c = d.get("counts") or {}
+    ld = d.get("load") or {}
+    cp = d.get("cpu") or {}
+    psi = d.get("psi") or {}
+    pr = d.get("procs") or {}
+    q = d.get("quota") or {}
+    pct = cp.get("pct") or {}
+    cores = d.get("cores") or 0
+    upt = d.get("uptime_sec") or 0
+    lines = ["负载与 CPU 归因（只读：不 renice、不 kill、不 restart、不改 CPUQuota=）"]
+    lines.append(f"采样：窗口 {d.get('window_sec')} 秒 · {cores} 核 · 时钟 {d.get('hz')} tick/秒"
+                 + (f" · 开机 {upt // 86400} 天" if upt else ""))
+
+    if ld.get("ok"):
+        per = round((ld.get("one") or 0) / cores, 2) if cores else None
+        per15 = round((ld.get("fifteen") or 0) / cores, 2) if cores else None
+        lines.append(f"load：{ld.get('one')}/{ld.get('five')}/{ld.get('fifteen')}"
+                     f"（每核排队 {per}，15 分钟档 {per15}）；"
+                     f"此刻 {ld.get('runnable')} 个可运行 / 整机 {ld.get('total_tasks')} 个任务")
+    else:
+        lines.append(f"load：{ld.get('reason') or '读不到'}")
+
+    if cp.get("ok"):
+        order = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal")
+        parts = " ".join(f"{k} {pct.get(k)}%" for k in order if pct.get(k) is not None)
+        lines.append("CPU 时间分解：" + (parts or "窗口里没有增量"))
+        lines.append(f"  上下文切换 {cp.get('ctxt_per_sec')} 次/秒 · 新建进程 {cp.get('forks_per_sec')} 个/秒"
+                     f" · run queue {cp.get('procs_running')} · 卡在等 IO {cp.get('procs_blocked')}")
+    else:
+        lines.append(f"CPU 时间分解：{cp.get('reason') or '读不到'}")
+
+    ctrl = psi.get("controllers") or {}
+    if psi.get("ok"):
+        seg = []
+        for kind in ("cpu", "io"):
+            some = (ctrl.get(kind) or {}).get("some") or {}
+            if some:
+                seg.append(f"{kind} some avg10 {some.get('avg10')}%（60 秒 {some.get('avg60')}%）")
+        lines.append("PSI 压力：" + "；".join(seg))
+    else:
+        lines.append(f"PSI 压力：{psi.get('reason') or '读不到'}")
+
+    if pr.get("ok"):
+        st = " · ".join(f"{k} {v}" for k, v in sorted((pr.get("states") or {}).items()))
+        cut = "，预算用完这一轮没扫完" if pr.get("budget_hit") else ""
+        lines.append(f"进程状态：看了 {pr.get('scanned')} 个{cut}（{st}），D/R 状态 {pr.get('blocked_total')} 个")
+        for r in (pr.get("busy") or [])[:8]:
+            unit = r.get("unit") or "(不归单元)"
+            busy = f" 窗口内 {r.get('cpu_ms'):>6}ms 状态 {r.get('state')}  "
+            lines.append("  " + _cpad(str(r.get("comm"))[:20], 22) + busy + unit[:34])
+        if not (pr.get("busy") or []):
+            lines.append("  这一秒没有任何进程消耗 CPU（窗口增量全为 0）")
+        hidden = (pr.get("busy_total") or 0) - len(pr.get("busy") or [])
+        if hidden > 0:
+            lines.append(f"  （另有 {hidden} 个进程的窗口增量没列出来）")
+        for r in (pr.get("blocked") or []):
+            if r.get("state") != "D":
+                continue
+            lines.append("  [D] " + _cpad(str(r.get("comm"))[:20], 22)
+                         + f" pid {r.get('pid')}  卡在 {r.get('wchan') or '（读不到 wchan）'}")
+    else:
+        lines.append(f"进程：{pr.get('reason') or '读不到'}")
+
+    if q.get("ok"):
+        units = q.get("units") or []
+        lines.append(f"配额与限流：{q.get('dirs')} 个 cgroup 有 cpu.max，{q.get('capped_total')} 个设了限额，"
+                     f"这一轮 {q.get('throttled_total')} 个被限流（列出 {len(units)}/{q.get('unit_total')} 个）")
+        for r in units:
+            cap = f"{r.get('quota_cores')} 核" if r.get("capped") else "未设限"
+            wp = r.get("window_pct")
+            tail = f"（{wp}%）" if wp is not None else ""
+            sec = round((r.get("total_throttled_usec") or 0) / 1e6, 2)
+            star = "  ← 面板自己" if r.get("self") else ""
+            lines.append("  " + _cpad(str(r.get("unit"))[:30], 32) + _cpad(cap, 9)
+                         + f"窗口 {r.get('window_throttled')}/{r.get('window_periods')} 周期{tail} "
+                         + f"累计 {r.get('total_throttled')} 次/{sec} 秒{star}")
+    else:
+        lines.append(f"配额与限流：{q.get('reason') or '读不到'}")
+
+    lines.append(f"判词：要紧 {c.get('risk', 0)} · 值得处理 {c.get('warn', 0)} · 知道就好 {c.get('info', 0)}")
+    for f in d.get("findings") or []:
+        sev = load_service.SEV_LABEL.get(f["severity"], f["severity"])
+        lines.append(f"  [{sev}] {f['title']}")
+        if f.get("detail"):
+            lines.append(f"      {f['detail']}")
+        if f.get("fix"):
+            lines.append(f"      处置：{f['fix']}")
+    if not d.get("findings"):
+        lines.append("  这一轮没有归因结论；读不到的节见上面几行的原因。")
+
+    for n in d.get("notes") or []:
+        lines.append(f"说明：{n}")
+    lines.append(f"检查时间 {d.get('as_of')}" + ("（命中缓存）" if d.get("cached") else ""))
+    return "\n".join(lines)
+
+
 async def cmd_schema(_a: argparse.Namespace) -> dict:
     """机器可读命令契约：AI 智能体读这一份就够，不用翻源码。"""
     schema = {
@@ -1313,6 +1427,26 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "扫 /proc 有预算：最多 " + str(pending_service.PROC_SCAN_CAP) + " 个进程、"
                        + str(pending_service.SCAN_BUDGET_SEC) + " 秒，没扫完会如实标出来",
                        "内核与进程映射都读不到时退出码 3"]},
+            {"name": "load", "args": ["--refresh"],
+             "desc": "负载与 CPU 归因对账（只读：不 renice、不 kill、不 restart、不改 CPUQuota=）",
+             "notes": ["load average 是绝对排队数不是百分比，判据一律除以核数（每核 "
+                       + str(load_service.LOAD_RISK_PER_CORE) + " 倍算要紧、"
+                       + str(load_service.LOAD_WARN_PER_CORE) + " 倍算值得处理）；"
+                       "2 核机器 load 4 与 64 核机器 load 4 是两件相反的事",
+                       "Linux 的 load 把 D 状态（等 IO、不可中断）也算进去，所以另给 /proc/stat 的 "
+                       "procs_blocked、D 名单与 iowait 占比，用来分开「CPU 不够」和「磁盘跟不上」",
+                       "/proc/loadavg 第 4 个字段是「可运行/已注册任务总数」，不是卡在 IO 的数量；"
+                       "真正的 blocked 只取 /proc/stat 的 procs_blocked 这一个数",
+                       "每进程 CPU 是 " + str(load_service.SAMPLE_WINDOW_SEC) + " 秒窗口内的 tick 差值，"
+                       "不是 ps 那种全生命周期平均（后者会把此刻空闲、跑了十几天的进程排到最前）",
+                       "限流只读 cgroupfs 的 cpu.max / cpu.stat：systemctl show -p CPUQuota 不是有效属性名"
+                       "（这台 Debian 13 返回空），CPUQuotaPerSecUSec 才是；cpu.max 的 80000 100000 就是 0.8 核",
+                       "被限流的进程既不在 run queue 也不进 D 状态，load 与 CPU 曲线都好看，只有 "
+                       "cpu.stat 的 nr_throttled 在涨——这是「机器不忙但活干不完」的第三种情况",
+                       "/proc/stat 的 guest / guest_nice 已计在 user / nice 里，算占比要剔掉，否则总账超 100%",
+                       "扫 /proc 有预算：最多 " + str(load_service.PROC_SCAN_CAP) + " 个进程、"
+                       + str(load_service.SCAN_BUDGET_SEC) + " 秒，没扫完会如实标出来",
+                       "load 与 /proc/stat 都读不到时退出码 3"]},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
             {"name": "schema", "args": [], "desc": "输出本契约"},
@@ -1420,6 +1554,10 @@ def build_parser() -> argparse.ArgumentParser:
     pd = sub.add_parser("pending", help="改动未生效对账（只读：不重启、不重载）", parents=[common])
     pd.add_argument("--refresh", action="store_true", help="忽略 2 分钟缓存，立即重新扫一遍 /proc")
     pd.set_defaults(fn=cmd_pending)
+
+    lo = sub.add_parser("load", help="负载与 CPU 归因对账（只读：不改配额、不杀进程）", parents=[common])
+    lo.add_argument("--refresh", action="store_true", help="忽略 60 秒缓存，立即重采一个窗口")
+    lo.set_defaults(fn=cmd_load)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

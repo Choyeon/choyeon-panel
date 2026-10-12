@@ -129,7 +129,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `deploy` | `--prefix --port --branch --skip-nginx --no-deps` | 一键部署（依赖→venv→前端构建→systemd→健康检查）；非交互，不会询问 nginx 反代 |
 | `upgrade` | `--no-pull` | 拉代码→备份→重建→重启，健康检查失败自动回滚；`--no-pull` 只重建并重新渲染 unit |
 | `status` | — | 版本/监听/服务/健康/自检汇总 |
-| `doctor` | — | 只读安全与健康自检（当前 18 项，以 JSON 的 `items` 为准），每项带修复命令 |
+| `doctor` | — | 只读安全与健康自检（当前 19 项，以 JSON 的 `items` 为准），每项带修复命令 |
 | `user list\|create\|reset\|revoke\|delete` | `<name> --password --password-stdin --role --yes` | 账号管理；create/reset 用 `--password-stdin` 传口令。改密与 `revoke` 都会吊销旧 token：`revoke <name>` 只踢这个账号，`revoke all` 踢全部（`delete` 必须加 `--yes`） |
 | `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --type --repo --branch --path --port --domain --start-cmd --install-cmd --lines` | 应用全生命周期；`create` 需 `--template` 或 `--start-cmd` 之一 |
 | `backup run\|list` | — | 面板数据备份（SQLite 在线备份 API） |
@@ -140,6 +140,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `storage` | `--refresh` | 存储占用对账（只读扫描）：面板数据、面板备份、journald 落盘处与 `FILE_ROOTS` 登记的目录各给总量与一级子目录榜，判词点名日志过大、备份攒了多少份、分区吃紧、单个超大文件；不删文件、不改配额，清理动作只给可复制的命令；登记的目录一个都读不到时退出码 3 |
 | `memory` | `--refresh` | 内存压力与 OOM 对账（严格只读）：已用按 `MemTotal - MemAvailable` 与概览同口径，PSI 停顿、换页与直接回收速率取自一个采样窗口的两次 vmstat 快照，单元表按 `memory.current` 排并认领回面板应用，OOM 先读 `oom_kill` 计数、非 0 才去 kernel 日志点名受害者。不 kill 进程、不改 sysctl、不动 unit 的 `MemoryMax`；读不到 `/proc/meminfo` 时退出码 3 |
 | `pending` | `--refresh` | 改动未生效对账（只读：不 restart、不 reload、不 daemon-reload、不 reboot）：新内核装上还没重启、哪些进程仍踩着已被替换的库文件映射（补丁装了但没进跑着的进程）、nginx/sshd 配置改过没 reload、unit 改过没 daemon-reload；判词分要紧/值得处理/知道就好三档，处置命令只准备给人复制；内核与 `/proc` 两节都读不到时退出码 3 |
+| `load` | `--refresh` | 负载与 CPU 归因对账（只读：不 renice、不 kill、不 restart、不改 `CPUQuota=`）：load 一律折成每核排队（它是绝对排队数不是百分比），并把「CPU 不够」与「在等 IO」分开给（`procs_blocked`、D 状态名单、iowait、PSI）；另读 cgroup 的 `cpu.max` / `cpu.stat` 指出谁被自己的配额限流（被限流的进程不进 run queue 也不进 D 状态，load 与曲线都好看）；判词分要紧/值得处理/知道就好，处置全是只读命令；load 与 `/proc/stat` 都读不到时退出码 3 |
 | `start\|stop\|restart` | — | systemd 服务控制 |
 | `logs` | `--lines` | journalctl 日志 |
 | `schema` | — | 输出命令契约 |
@@ -219,6 +220,7 @@ choyeonctl status --json
 7. **禁止**在容器内使用 Docker 化部署——本项目是**原生部署**方案，设计前提就是不用 Docker。
 8. **禁止**伪造自检结果：某项无法检查（如无 systemd）就如实标为 warn 并说明。
 9. **禁止**让面板替你重启：`choyeonctl pending` 只会指出「补丁装了但进程还踩着旧映射」「新内核还没重启」「配置改过没 reload」这类对不上的账，真正的处置（`reboot`、`systemctl restart <unit>`、`nginx -s reload`）由管理员在业务低峰自己按下——这些动作会断连接，面板不替你决定时机。
+10. **禁止**让面板替你调配额或动进程：`choyeonctl load` 只回答「每核排队多少、这份忙是 CPU 不够还是在等 IO、谁被自己的 `CPUQuota=` 限流」，给出的处置全是只读命令（`pidstat` / `mpstat` / `sar` / `iostat` / `systemctl show`）。放宽配额是容量决策（机器的配额本来就是拿来保业务进程的），`kill`、`renice` 与 `systemctl restart` 会直接影响正在跑的请求——这些由管理员自己判断、自己执行。
 
 ---
 

@@ -22,6 +22,7 @@ from ..log import warn
 from ..services import (
     cert_ops,
     exposure_service,
+    load_service,
     login_audit_service,
     memory_service,
     pending_service,
@@ -406,6 +407,19 @@ async def _check_pending() -> dict:
 
 
 
+async def _check_load() -> dict:
+    """负载与 CPU 归因：机器有多忙、这份忙是谁造成的、有没有被自己的 CPU 配额压住。
+
+    概览的 CPU 曲线只说了"过去几分钟平均用了多少"，它回答不了两件相反的事：load 高是 CPU 不够还是
+    磁盘在拖（前者加核有用，后者加核毫无用处），以及 2 核机器上的 load 4 到底算不算挤。更隐蔽的是
+    第三种忙——unit 写着 CPUQuota=80% 时，进程被限流的那段时间既不在 run queue 也不进 D 状态，
+    load 和曲线都好看，只有 cgroup 的 cpu.stat 在涨；面板自己就跑在这种配置下。
+    严格只读：不 renice、不 kill、不 restart 服务、不改 CPUQuota= / cpu.weight。放宽配额是容量决策
+    （这台机器只有 2 核，配额本来就是拿去保业务进程的），杀进程与重启会直接断业务。走 TTL 缓存。
+    """
+    return load_service.doctor_item(await load_service.audit())
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -425,6 +439,7 @@ _CHECKS = [
     ("storage", "存储占用", _check_storage),
     ("memory", "内存压力", _check_memory),
     ("pending", "改动未生效", _check_pending),
+    ("load", "负载与CPU", _check_load),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
@@ -500,6 +515,12 @@ async def memory(refresh: int = 0):
 async def pending(refresh: int = 0):
     """改动未生效对账：只读探测，viewer 也能看；重启/重载动作一律回 CLI 或 SSH 里手工做。"""
     return await pending_service.audit(refresh=bool(refresh))
+
+
+@router.get("/api/load")
+async def load(refresh: int = 0):
+    """负载与 CPU 归因对账：只读探测，viewer 也能看；处置命令一律回 CLI 或 SSH 里手工做。"""
+    return await load_service.audit(refresh=bool(refresh))
 
 
 

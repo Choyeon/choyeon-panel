@@ -897,11 +897,12 @@ class MetaWiringTests(unittest.TestCase):
     def test_endpoint_registered(self):
         self.assertIn("/api/pending", [r.path for r in meta.router.routes])
 
-    def test_doctor_item_present_and_last(self):
+    def test_doctor_item_present_after_memory(self):
         ids = [c[0] for c in meta._CHECKS]
         self.assertIn("pending", ids)
         self.assertEqual(meta._CHECKS[ids.index("pending")][1], "改动未生效")
-        self.assertEqual(ids[-1], "pending", "改动未生效排在内存压力之后")
+        # 按前一项锚定，不写「必须是最后一项」：清单是往尾部追加的，下一批加一项这条就会假报警。
+        self.assertEqual(ids.index("pending"), ids.index("memory") + 1, "改动未生效排在内存压力之后")
 
     def test_not_one_click_fixable(self):
         """一键修复白名单里不许出现 pending：重启服务、reload nginx 都是业务时机的决策。"""
