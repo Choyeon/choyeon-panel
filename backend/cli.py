@@ -47,6 +47,7 @@ from app.services import (  # noqa: E402
     firewall_service,
     login_audit_service,
     memory_service,
+    pending_service,
     storage_service,
     updates_service,
 )
@@ -1118,6 +1119,103 @@ def _memory_text(d: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_pending(a: argparse.Namespace) -> dict:
+    """改动未生效对账：补丁装上了、配置改了，但还在跑的进程没吃到它。
+
+    严格只读——不 restart、不 reload、不 daemon-reload、不 reboot。安全补丁装上而进程没重启，
+    是「以为修了」和「真修了」之间最容易出事的缝；而什么时候能断业务连接重启一个服务只有管理员
+    知道，面板替你按下去就是在业务高峰里掐连接，所以这里只给能当场复制走的命令。
+    """
+    data = await pending_service.audit(refresh=bool(a.refresh))
+    if not (data.get("kernel") or {}).get("ok") and not (data.get("stale") or {}).get("ok"):
+        Out.error((data.get("kernel") or {}).get("reason")
+                  or (data.get("stale") or {}).get("reason")
+                  or "读不到内核与进程映射信息，无法对账", EXIT_PRECONDITION)
+    Out.result(data, _pending_text(data))
+    return data
+
+
+def _cpad(text: str, width: int) -> str:
+    """按显示宽度补空格：中日韩字符在等宽终端里占两格，用 str.ljust 会把中文那一列排歪。"""
+    w = sum(2 if ord(ch) > 0x2E7F else 1 for ch in text)
+    return text + " " * max(0, width - w)
+
+
+def _pending_text(d: dict) -> str:
+    c = d.get("counts") or {}
+    k = d.get("kernel") or {}
+    st = d.get("stale") or {}
+    rl = d.get("reloads") or {}
+    lines = ["改动未生效对账（只读：不 restart、不 reload、不 daemon-reload、不 reboot）"]
+
+    if k.get("ok"):
+        verdict = {True: "需要重启", False: "不需要重启"}.get(k.get("needs_reboot"), "判定不了")
+        newer = ", ".join(x.get("pkg", "") for x in (k.get("newer") or [])[:3])
+        mark = "挂着" if (k.get("marker") or {}).get("present") else "没有"
+        lines.append(f"内核：running {k.get('running')}，已装 {len(k.get('installed') or [])} 个镜像包"
+                     + (f"，比它新的：{newer}" if newer else "") + f"；重启标记{mark} → {verdict}")
+        if k.get("reason"):
+            lines.append(f"  说明：{k['reason']}")
+    else:
+        lines.append(f"内核：{k.get('reason') or '读不到'}")
+
+    if st.get("ok"):
+        rows = st.get("units") or []
+        cut = "，预算用完这一轮没扫完" if st.get("budget_hit") else ""
+        lines.append(f"踩旧映射：看了 {st.get('scanned')} 个进程（全机 {st.get('procs_total')} 个，"
+                     f"{st.get('elapsed_ms')} 毫秒{cut}），其中 {st.get('procs_stale')} 个踩着已被替换的文件，"
+                     f"归成 {st.get('unit_total')} 个单元（{st.get('orphan_total')} 个不归 systemd 管）")
+        for r in rows:
+            labels = sorted({(f.get("pkg") or f["path"].rsplit("/", 1)[-1]) for f in r.get("files") or []})
+            shown = r["unit"] or "(不属于任何单元)"
+            star = "  ← 面板自己" if r.get("self") else ""
+            lines.append("  " + _cpad(shown[:34], 36) + f" {r['procs']:>3} 进程  "
+                         f"跑了 {_cpad(r['age_human'], 7)} {', '.join(labels[:3])[:46]}{star}")
+        if st.get("unit_total", 0) > len(rows):
+            lines.append(f"  （另有 {st['unit_total'] - len(rows)} 个单元没列出来）")
+    else:
+        lines.append(f"踩旧映射：{st.get('reason') or '读不到'}")
+
+    for key, name in (("nginx", "nginx"), ("sshd", "sshd"), ("systemd", "systemd")):
+        v = rl.get(key) or {}
+        if not v.get("ok"):
+            lines.append(f"{name}：{v.get('reason') or '读不到'}")
+        elif key == "systemd":
+            need = v.get("need_reload") or []
+            lines.append(f"{name}：查了 {v.get('checked')} 个单元，"
+                         + (f"{len(need)} 个待 daemon-reload（{', '.join(need[:4])}）" if need else "没有待重载"))
+        else:
+            pend = {True: "有待重载的改动", False: "没有待重载的改动"}.get(v.get("pending"), "判定不了")
+            cnt = v.get("conf_files") if key == "nginx" else v.get("files")
+            newest = str(v.get("newest_file") or "").rsplit("/", 1)[-1]
+            extra = f"，最晚改的是 {newest}" if newest else ""
+            lines.append(f"{name}：{cnt} 个配置文件参与比较{extra} → {pend}")
+
+    apt = d.get("apt") or {}
+    if apt.get("ok") and apt.get("last_start_date"):
+        lines.append(f"最近一次 apt 事务：{apt['last_start_date']}（历史里共 {apt.get('transactions')} 笔）")
+
+    lines.append(f"判词：要紧 {c.get('risk', 0)} · 值得处理 {c.get('warn', 0)} · 知道就好 {c.get('info', 0)}")
+    for f in d.get("findings") or []:
+        sev = pending_service.SEV_LABEL.get(f["severity"], f["severity"])
+        lines.append(f"  [{sev}] {f['title']}")
+        if f.get("detail"):
+            lines.append(f"      {f['detail']}")
+        for it in (f.get("files") or [])[:4]:
+            pkg = it["pkg"] + (f" {it['version']}" if it.get("version") else "") if it.get("pkg") else "非 dpkg 归属"
+            gone = "，路径整个没了" if it.get("gone") else ""
+            lines.append(f"      · {it['path']}  [{pkg}]{gone}")
+        if f.get("fix"):
+            lines.append(f"      处置：{f['fix']}")
+    if not d.get("findings"):
+        lines.append("  没有待生效的改动。")
+
+    for n in d.get("notes") or []:
+        lines.append(f"说明：{n}")
+    lines.append(f"检查时间 {d.get('as_of')}" + ("（命中缓存）" if d.get("cached") else ""))
+    return "\n".join(lines)
+
+
 async def cmd_schema(_a: argparse.Namespace) -> dict:
     """机器可读命令契约：AI 智能体读这一份就够，不用翻源码。"""
     schema = {
@@ -1203,6 +1301,18 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "单元 memory.events 的 oom_kill 单独说明是上限设低了",
                        "cgroup v2 与 CONFIG_PSI 读不到的节如实标原因，不会折成 0",
                        "读不到 /proc/meminfo 时退出码 3"]},
+            {"name": "pending", "args": ["--refresh"],
+             "desc": "改动未生效对账（只读：不 restart、不 reload、不 daemon-reload、不 reboot）",
+             "notes": ["判据是 /proc/<pid>/maps 里结尾带 (deleted) 的映射，再和同路径当前文件的 inode 对一遍；"
+                       "设备、/SYSV*、/dev/shm、memfd、匿名映射先滤掉，否则 postgres 的每个后端都是假阳性",
+                       "需要重启是自己推的（已装 linux-image 与 running 内核做 dpkg 版本比较）；Debian 的 "
+                       "/run/reboot-required 来自 update-notifier-common，服务器镜像默认不装它",
+                       "nginx 比的是最晚启动的那个 worker 的时刻而不是 master：nginx -s reload 只换 worker",
+                       "包名归属取自 dpkg，读不到就只说文件路径；判断「什么时候被装上」用 ctime 不用 mtime，"
+                       "因为 dpkg 会保留包内文件的原始 mtime",
+                       "扫 /proc 有预算：最多 " + str(pending_service.PROC_SCAN_CAP) + " 个进程、"
+                       + str(pending_service.SCAN_BUDGET_SEC) + " 秒，没扫完会如实标出来",
+                       "内核与进程映射都读不到时退出码 3"]},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
             {"name": "schema", "args": [], "desc": "输出本契约"},
@@ -1306,6 +1416,10 @@ def build_parser() -> argparse.ArgumentParser:
     mm = sub.add_parser("memory", help="内存压力与 OOM 对账（只读）", parents=[common])
     mm.add_argument("--refresh", action="store_true", help="忽略 90 秒缓存，重新采一个速率窗口")
     mm.set_defaults(fn=cmd_memory)
+
+    pd = sub.add_parser("pending", help="改动未生效对账（只读：不重启、不重载）", parents=[common])
+    pd.add_argument("--refresh", action="store_true", help="忽略 2 分钟缓存，立即重新扫一遍 /proc")
+    pd.set_defaults(fn=cmd_pending)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

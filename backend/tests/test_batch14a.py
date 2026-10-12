@@ -1263,7 +1263,7 @@ class MetaWiringTests(unittest.TestCase):
         ids = [c[0] for c in meta._CHECKS]
         self.assertIn("memory", ids)
         self.assertEqual(meta._CHECKS[ids.index("memory")][1], "内存压力")
-        self.assertEqual(ids[-1], "memory", "内存压力排在存储占用之后")
+        self.assertLess(ids.index("storage"), ids.index("memory"), "内存压力排在存储占用之后")
 
     def test_not_one_click_fixable(self):
         """一键修复白名单里不许出现内存：加上限、重启服务都是容量决策。"""

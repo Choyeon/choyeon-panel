@@ -176,6 +176,36 @@
   「要紧」：天天都有的小波动长期亮着就等于没亮。swappiness / overcommit_memory /
   min_free_kbytes / panic_on_oom 只展示不修改，处置列全是只读命令 + 复制按钮。
 
+- 改动未生效对账：`choyeonctl pending`、`GET /api/pending`、自检第 18 项。这一页管的是「装上去的东西
+  没进正在跑的进程」这一层，此前面板所有页面都看不见它：`updates` 说没有待装补丁、服务页全绿、
+  `doctor` 一路 pass，而生产机上 postgres 的 26 个后端从 10-08 起还映射着 liblzma5 5.8.1-1+deb13u1
+  的旧 inode（u2 由 unattended-upgrade 当天装上），同一份映射还挂在 unattended-upgrades 自己身上。
+  判据是 inode：映射行末尾的 `(deleted)` 只说明路径没了，同路径当前文件 inode 相同就不算被替换，
+  `/dev/zero`、`/SYSV*`、memfd、匿名映射这些天生带 `(deleted)` 的噪声必须滤掉，否则整机每一条都是假阳性；
+  dpkg 安装时会把包内记录的 mtime 原样落到盘上，所以 mtime 回答不了「这文件什么时候装上的」，
+  只有 ctime 能，而 ctime 晚于进程启动才算「装上时它还在跑旧的」。元包 `linux-image-cloud-amd64`
+  的名字后面接架构、自己的版本号一直在变新，拿它当新内核会把每台正常机器判成待重启，
+  所以只认 `linux-image-` 后面紧跟数字的包。nginx 的参照时刻取最晚启动的 worker 而不是 master，
+  `nginx -s reload` 只换 worker。`/run/reboot-required` 来自 update-notifier-common，服务器镜像默认不装它，
+  只认这个标记的实现在这台机器上永远显示绿灯。
+  严格只读：不 restart、不 reload、不 daemon-reload、不 reboot，也不进一键修复白名单——这些动作会断连接、
+  会杀业务，时机只有管理员知道。fix 全是给人复制走的命令，并且带上前置确认（`systemctl status <unit>`
+  先看会断多少连接、`nginx -t` 先过语法再 reload）。安全库（libc6 / libssl / openssh / sudo / systemd /
+  liblzma / zlib / libxml2 / libcurl / nginx / postfix / dovecot 一类的包名前缀表）还踩着旧映射时报 fail
+  而不是 warn，这是自检里唯一一个由外部包状态触发 fail 的项，宁可响一次让人查一次。
+  进程扫描实测 142 个进程 40 毫秒，上限 4000 个进程或 3 秒预算，超了就如实标 budget_hit 并说明
+  只扫了前多少个；dpkg 归属按路径缓存、整轮最多查 12 个不同路径（`dpkg -S` 一次 0.2-0.5 秒）。
+  整轮约 1.5 秒，缓存 120 秒。
+- `test_batch15a.py`（78 条）锁住这些方向：路径含空格的映射行整串保留（maps 的 path 可以带空格，
+  按 `split()[5]` 取会只剩前半段）、扫描中途退出的进程整条跳过（它名下的 deleted 映射还在，
+  报出来只会让人去查一个已经不存在的进程）、映射 inode 与当前文件一致时丢弃、orphan 单元排到表尾并写明
+  「systemctl 管不到」、版本比较按 dpkg 的退出码而非替身的布尔值（`returncode=False` 时 `False == 0` 成立，
+  替身自己就能把旧内核说成新内核）、元包不计入待重启、`rc` 残留行忽略、判定不了时不落成「要重启」、
+  nginx 参照用 worker（回归 master 写法会误报还没 reload）、sshd 的相对 Include 按 /etc/ssh 补基准并展开 glob、
+  非包路径不起子进程、所有 spawn 出去的 argv 字面量里不许出现 restart / reload / daemon-reload / reboot
+  （用 AST 扫，grep 会被 findings 里那些本该给人执行的命令误伤）、读不到的节只许产 info 级判词、
+  CLI 文本 CJK 列按显示宽度补齐、schema / argparse / AGENTS.md / README / SECURITY 五处的命令与自检项数一致。
+
 ### 修复
 - 服务器页「自启」列原先把 systemctl 的英文状态直接画进 96px 的胶囊，375px 上实测截成
   "enabled-ru…"，而它是那一页唯一还在说英文的一列（左边的「状态」列早就是运行中/已停止）。

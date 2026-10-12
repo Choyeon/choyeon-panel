@@ -24,6 +24,7 @@ from ..services import (
     exposure_service,
     login_audit_service,
     memory_service,
+    pending_service,
     storage_service,
     systemd_ops,
     updates_service,
@@ -391,6 +392,20 @@ async def _check_memory() -> dict:
     return memory_service.doctor_item(await memory_service.audit())
 
 
+async def _check_pending() -> dict:
+    """改动未生效：补丁装上了、配置改了，但还在跑的进程没吃到它。
+
+    updates / ports / login / storage / memory 这几项回答的都是「现在是什么样」，管理员真正会
+    踩的坑在另一头：apt 把 liblzma 升到 u2 了，可 postgres 是十几天前起的，还踩着那份已经被
+    unlink 掉的旧库在跑；nginx 的 conf 昨晚改过，而它的 worker 是今早才换的。这类状态在别的
+    页面上全是绿的——unit 在跑、端口在听、补丁清单也确实是空的。
+    严格只读：不 restart 任何服务、不 reload nginx/sshd、不 daemon-reload、不 reboot。什么时候
+    能断业务连接重启一个服务只有管理员知道，面板替你按下去就是在业务高峰里掐连接。走 TTL 缓存。
+    """
+    return pending_service.doctor_item(await pending_service.audit())
+
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -409,6 +424,7 @@ _CHECKS = [
     ("login", "登录安全", _check_login),
     ("storage", "存储占用", _check_storage),
     ("memory", "内存压力", _check_memory),
+    ("pending", "改动未生效", _check_pending),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
@@ -478,6 +494,13 @@ async def storage(refresh: int = 0):
 async def memory(refresh: int = 0):
     """内存压力与 OOM 对账：只读探测，viewer 也能看；处置命令一律回 CLI 或 SSH 里手工做。"""
     return await memory_service.audit(refresh=bool(refresh))
+
+
+@router.get("/api/pending")
+async def pending(refresh: int = 0):
+    """改动未生效对账：只读探测，viewer 也能看；重启/重载动作一律回 CLI 或 SSH 里手工做。"""
+    return await pending_service.audit(refresh=bool(refresh))
+
 
 
 @router.post("/api/doctor/fix")
