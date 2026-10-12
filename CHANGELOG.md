@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+### 新增
+- 防火墙页（运维工具 → 防火墙，仅管理员）。此前面板只能告诉你"防火墙开着/没开着"，
+  改规则要另开一个 SSH 会话。现在 ufw 与 firewalld 的规则都在表里：编号、动作、来源、
+  端口区间、地址族、备注，窄屏（<900px）换成卡片列表。添加走 `ufw allow` /
+  `firewall-cmd --add-*`（firewalld 同时写 permanent 并重载），删除按编号但必须带上
+  前一次列表里读到的签名——编号会随任何一次删除前移，签名对不上就拒绝执行而不是盲删。
+  `ufw delete 3` 不带 `--force` 会打印 "Proceed with operation (y|n)? Aborted" 而退出码仍是 0，
+  所以删除除了带 flag 还要重新列表确认那条真的没了。
+- 自锁保护：面板拒绝任何会让这台机器进不去的写操作。受保护端口取 sshd 实际监听的端口
+  （含 `sshd_config` 的 Include 片段）、反代到面板的 nginx 入口端口、面板自身在非 loopback
+  地址上的监听端口，以及你当前这个浏览器实际连进来的端口（Origin / Referer / X-Forwarded-Host）。
+  只有当被删的这条是该地址族唯一的放行来源时才拦——`22/tcp` 和 `22:25/tcp` 同时存在时删掉前者
+  仍然通，照单全拦会让人以为面板在胡闹；IPv6 的孪生规则不替 IPv4 顶岗，管理员大概率走 v4。
+  没有"我已确认风险，继续执行"这类绕过参数：这条守卫的意义就是不给误操作留后门。
+- 设置页的防火墙卡片原先写着"面板对防火墙只读，开启/改规则请 SSH 手动操作，以免误锁 SSH"，
+  现在改为指向新页并说明锁死风险由面板承担。
+- `backend/tests/test_batch8a.py`：58 条用例锁定上述语义（ufw / firewalld 规则表解析、
+  `LIMIT IN` 是带限速的 accept 因而算放行、自锁判定的同族冗余例外、v4/v6 签名互不相同、
+  删除前签名比对、firewalld 运行期与 permanent 两份配置的差异、删掉 permanent 最后一条 ssh
+  放行时跳过 `--reload`、非管理员一律 403），以及只读的 ufw/firewalld 探测服务。
+
 ### 修复
 - 单体仓库（monorepo）里的子目录组件现在能通过面板部署，也能回滚。原先三处按
   `{path}/.git` 判"是不是仓库"的代码统一改为共用 `resolve_repo_dir`（`git rev-parse --show-toplevel`）：

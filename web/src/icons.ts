@@ -15,6 +15,7 @@ import {
   WarningOutline, InformationCircleOutline, CopyOutline, EyeOutline,
   PersonCircleOutline, PeopleOutline, GitNetworkOutline, RadioOutline,
   LayersOutline, CodeSlashOutline, BuildOutline, OpenOutline, CloudDownloadOutline,
+  ShieldOutline,
 } from '@vicons/ionicons5';
 
 /** 全站图标按名称索引，统一 ionicons5 图标集（24x24 viewBox，避免混用 emoji）。 */
@@ -32,6 +33,7 @@ export const icons: Record<string, any> = {
   WarningOutline, InformationCircleOutline, CopyOutline, EyeOutline,
   PersonCircleOutline, PeopleOutline, GitNetworkOutline, RadioOutline,
   LayersOutline, CodeSlashOutline, BuildOutline, OpenOutline, CloudDownloadOutline,
+  ShieldOutline,
 };
 
 export function icon(name: string, size = 18, color?: string) {

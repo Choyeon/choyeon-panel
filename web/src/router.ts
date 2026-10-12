@@ -27,7 +27,7 @@ function lazy(loader: () => Promise<any>) {
 export const TITLES: Record<string, string> = {
   '/dashboard': '总览', '/apps': '应用', '/services': '系统服务', '/db': '数据库', '/sites': '网站与证书',
   '/backups': '备份', '/backups/files': '备份文件', '/alerts': '告警中心', '/cron': '定时任务',
-  '/files': '文件', '/terminal': '终端', '/doctor': '安全自检',
+  '/files': '文件', '/terminal': '终端', '/doctor': '安全自检', '/firewall': '防火墙',
   '/users': '用户管理', '/audit': '操作审计', '/logs': '面板日志', '/logsearch': '日志中心', '/settings': '设置',
 };
 
@@ -47,6 +47,7 @@ export const router = createRouter({
     { path: '/alerts', component: lazy(() => import('./views/Alerts.vue')) },
     { path: '/cron', component: lazy(() => import('./views/CronTasks.vue')) },
     { path: '/files', component: lazy(() => import('./views/Files.vue')) },
+    { path: '/firewall', component: lazy(() => import('./views/Firewall.vue')) },
     { path: '/terminal', component: lazy(() => import('./views/Terminal.vue')) },
     { path: '/doctor', component: lazy(() => import('./views/Doctor.vue')) },
     { path: '/users', component: lazy(() => import('./views/Users.vue')) },
@@ -66,7 +67,7 @@ export const router = createRouter({
 // 同样按 admin 收口，所以这一页对只读账号也不该留。
 // db（数据浏览）能翻出任意 PG 表的任意行、任意 Redis 键值——会话 token 就存在里面，
 // 后端整块路由已挂 require_admin，少了这一条，只读账号会停在一个请求全 403 的空页面上。
-export const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/users', '/audit', '/cron', '/logsearch', '/logs', '/db'];
+export const ADMIN_ONLY = ['/files', '/terminal', '/doctor', '/firewall', '/users', '/audit', '/cron', '/logsearch', '/logs', '/db'];
 
 router.beforeEach((to) => {
   if (to.path !== '/login' && !getToken()) return '/login';

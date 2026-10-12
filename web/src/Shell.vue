@@ -102,6 +102,7 @@ const MENU_ICON: Record<string, string> = {
   '/files': 'FolderOpenOutline',
   '/terminal': 'TerminalOutline',
   '/doctor': 'ShieldCheckmarkOutline',
+  '/firewall': 'ShieldOutline',
   '/users': 'PeopleOutline',
   '/audit': 'GitNetworkOutline',
   '/settings': 'SettingsOutline',
@@ -115,7 +116,7 @@ const MENU_GROUPS: { label: string; icon: string; items: string[] }[] = [
   { label: '网站与服务', icon: 'GlobeOutline', items: ['/apps', '/sites', '/services', '/db'] },
   { label: '数据与备份', icon: 'TimeOutline', items: ['/backups', '/cron', '/files'] },
   { label: '日志与告警', icon: 'DocumentTextOutline', items: ['/alerts', '/logs', '/logsearch'] },
-  { label: '运维工具', icon: 'BuildOutline', items: ['/terminal', '/doctor'] },
+  { label: '运维工具', icon: 'BuildOutline', items: ['/firewall', '/terminal', '/doctor'] },
   { label: '面板管理', icon: 'SettingsOutline', items: ['/users', '/audit', '/settings'] },
 ];
 

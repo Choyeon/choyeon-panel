@@ -309,12 +309,12 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       <section v-if="isAdmin">
         <div class="sec-head">
           <h2 class="sec-title">防火墙</h2>
-          <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? (fw.active ? 'ufw 已启用' : 'ufw 未启用') : '检测中…' }}</span>
+          <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? `${fw.tool === 'firewalld' ? 'firewalld' : fw.tool === 'ufw' ? 'ufw' : '未检测到'} ${fw.active ? '已启用' : '未启用'}` : '检测中…' }}</span>
         </div>
-        <span class="cp-help">面板对防火墙只读；开启/改规则请 SSH 手动操作，以免误锁 SSH。</span>
+        <span class="cp-help">规则的增删与启停在侧栏「运维工具 → 防火墙」页做，这里只留状态摘要，避免两个入口改同一份配置。那一页会拒绝删掉 SSH、面板入口与你当前访问所用端口的唯一放行来源，所以不必担心一次误删把自己关在门外。</span>
         <NSpace vertical :size="12" style="margin-top: var(--space-3)">
           <div v-if="fw?.output" class="log-view" style="max-height: 220px">{{ fw.output }}</div>
-          <EmptyBox v-else-if="fw" text="ufw 未返回规则输出：未安装时属正常，规则请用 SSH 手动维护" />
+          <EmptyBox v-else-if="fw" text="既没有 ufw 也没有 firewalld；装好任意一个后到「防火墙」页管理规则" />
         </NSpace>
       </section>
 

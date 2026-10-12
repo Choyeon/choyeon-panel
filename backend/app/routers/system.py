@@ -11,8 +11,8 @@ from starlette.concurrency import run_in_threadpool
 
 from .. import aio_db, config, security
 from ..deps import need_admin
-from ..errors import err_json
-from ..services import system_metrics, systemd_ops
+from ..errors import BadInput, err_json, public_message
+from ..services import firewall_service, system_metrics, systemd_ops
 from ..util import is_unit, parse_lines, redact_creds, run
 
 router = APIRouter()
@@ -188,17 +188,79 @@ async def service_logs(unit: str, request: Request):
 
 @router.get("/api/firewall")
 async def firewall(req: Request):
-    # 规则表等于一张"这台机器开了哪些端口、从哪些地址段能连"的地图，
-    # 只读账号不需要它（设置页的防火墙区块本来就只对 admin 显示），
-    # 而拿到它的人可以是任何一个用 viewer 账号登录成功的人。
+    """防火墙状态与规则表（结构化 + 原文）。
+
+    规则表等于一张"这台机器开了哪些端口、从哪些地址段能连"的地图，只读账号不需要它
+    （防火墙页本来就只对 admin 显示），而拿到它的人可以是任何一个用 viewer 账号登录成功的人。
+    `protected` 是"删掉会把自己锁在外面"的端口清单，前端据此把删除按钮置灰；这只是显示层
+    的提示，写接口每次都会重新判定，不信任前端传来的那份状态。
+    """
     if r := need_admin(req):
         return r
-    has = await run("which", ["ufw"])
-    if has["code"] != 0:
-        return {"tool": "none", "active": False, "output": "未安装 ufw"}
-    st = await run("ufw", ["status", "verbose"])
-    active = bool(re.search(r"Status: active", st["out"]))
-    return {"tool": "ufw", "active": active, "output": "\n".join(st["out"].split("\n")[:80])}
+    return await firewall_service.read(request=req)
+
+
+def _rule_desc(body: dict, outcome: str) -> str:
+    """审计里的一句话：把请求体收成一行可审计文本，不接受未过滤的原样 dict。"""
+    keys = ("action", "proto", "port", "port_to", "source", "comment", "rate")
+    parts = [f"{k}={body.get(k)}" for k in keys if body.get(k) not in (None, "", False)]
+    return " ".join(parts)[:200] + f" -> {outcome[:120]}"
+
+
+@router.post("/api/firewall/rules")
+async def firewall_add(req: Request):
+    """新增放行/拒绝规则。拒绝理由（含自锁保护）原样回给前端，成功与失败都进审计。"""
+    if r := need_admin(req):
+        return r
+    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
+    tool = await firewall_service.detect()
+    try:
+        out = await firewall_service.add_rule(body or {}, tool, req)
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "firewall:add", _rule_desc(body or {}, f"拒绝：{public_message(e)}"))
+        return err_json(e)
+    await aio_db.audit(req.state.cp_sub, "firewall:add", _rule_desc(body or {}, "已生效"))
+    return out
+
+
+@router.delete("/api/firewall/rules/{num}")
+async def firewall_remove(num: int, req: Request):
+    """按编号删除规则。`expect` 是前端那次列表里读到的签名，服务端会重新列表比对，
+    比对不上就拒绝——编号会随其他规则的新增/删除移动，靠它寻址而不核对等于盲删。"""
+    if r := need_admin(req):
+        return r
+    expect = req.query_params.get("expect", "")[:160]
+    tool = await firewall_service.detect()
+    try:
+        out = await firewall_service.remove_rule(num, expect, tool, req)
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "firewall:remove", f"num={num} -> 拒绝：{public_message(e)}")
+        return err_json(e)
+    await aio_db.audit(req.state.cp_sub, "firewall:remove", f"num={num} -> 已删除 {out.get('removed', '')}")
+    return out
+
+
+@router.post("/api/firewall/state")
+async def firewall_state(req: Request):
+    """启用/停用防火墙。启用前必须已经放行 SSH 与当前访问面板的端口，否则直接拒绝。"""
+    if r := need_admin(req):
+        return r
+    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
+    raw = (body or {}).get("active")
+    if not isinstance(raw, bool):
+        # 缺字段或字符串以前会被 bool() 读成 False，于是"一次写歪的请求"就等于"把防火墙关掉"。
+        # 关防火墙是这条路径上最危险的副作用，宁可拒绝，不猜意图。
+        return err_json(BadInput("active 必须是 true 或 false"))
+    active = raw
+    verb = "启用" if active else "停用"
+    tool = await firewall_service.detect()
+    try:
+        out = await firewall_service.set_enabled(active, tool, req)
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "firewall:state", f"{verb} -> 拒绝：{public_message(e)}")
+        return err_json(e)
+    await aio_db.audit(req.state.cp_sub, "firewall:state", f"{verb}成功")
+    return out
 
 
 # ------------------------------------------------------------------ 日志检索
