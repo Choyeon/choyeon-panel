@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+## [1.1.10] - 2026-10-12
+
+本轮的改动集中在三处：认证与会话的安全边界、移动端触控与窄屏版式、仓库门面（品牌资产与 README）。
+
 ### 新增
 - GitHub 门面资产：`assets/` 下 logo、banner、架构图、部署流程图与界面示意图（SVG，随仓库渲染）
 - `LICENSE`（MIT，此前 README 已声明 MIT 但仓库缺少该文件）、`CONTRIBUTING.md`、`SECURITY.md`、`CHANGELOG.md`
@@ -143,5 +147,6 @@
 - 测试：非 root 环境可运行（数据目录与文件根改为按测试模块自带默认值），`TestSafePath` 改为从 `config.FILE_ROOTS` 推导
 - Release：打包产物写入被读目录导致的 `tar: file changed as we read it` 修复，改为 out-of-tree 打包后移回，SHA256 用 basename
 
-[Unreleased]: https://github.com/Choyeon/choyeon-panel/compare/v1.1.8...HEAD
+[Unreleased]: https://github.com/Choyeon/choyeon-panel/compare/v1.1.10...HEAD
+[1.1.10]: https://github.com/Choyeon/choyeon-panel/releases/tag/v1.1.10
 [1.1.8]: https://github.com/Choyeon/choyeon-panel/releases/tag/v1.1.8

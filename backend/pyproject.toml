@@ -1,6 +1,6 @@
 [project]
 name = "choyeon-panel-backend"
-version = "1.1.8"
+version = "1.1.10"
 description = "choyeon 面板后端：FastAPI + SQLite，管理本机应用/服务/备份"
 requires-python = ">=3.11"
 dependencies = [

@@ -71,7 +71,7 @@ body:
     attributes:
       label: 面板版本
       description: "choyeonctl status --json 输出里的 version"
-      placeholder: "1.1.8"
+      placeholder: "1.1.10"
     validations:
       required: true
 

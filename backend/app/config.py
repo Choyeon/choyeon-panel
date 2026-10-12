@@ -146,7 +146,7 @@ TERMINAL_OUT_BUFFER = _int("CP_TERMINAL_OUT_BUFFER_KB", 4096, 256, 65536) * 1024
 # 是否发送 HSTS 头（仅在 HTTPS 直接暴露时开启；反代场景由 nginx 负责）
 HSTS = _bool("CP_HSTS")
 
-VERSION = "1.1.8"
+VERSION = "1.1.10"
 
 
 def as_dict() -> dict:
