@@ -1069,6 +1069,315 @@ const pendAlert = computed(() => {
   return { type, text: pendAlertText.value };
 });
 
+// 负载与 CPU 归因也是只读对账（/proc/loadavg + /proc/stat 双快照 + PSI + cgroup 的 cpu.max/cpu.stat，服务端 60 秒 TTL）。
+// 概览那条 CPU 曲线只说「过去几分钟平均用了多少」，回答不了管理员紧接着要问的三句话：这份忙是 CPU 不够还是磁盘在拖
+// （前者加核有用、后者加核白费，处置方向相反）；2 核机器上的 load 4 到底算不算挤（load 是绝对排队数，必须除以核数才读得对）；
+// 以及第三种忙——unit 带着 CPUQuota= 时，被限流的周期既不进 run queue 也不进 D 状态，load 和曲线都好看，只有 cpu.stat 的
+// nr_throttled 在涨。这台机器的面板自己就跑在这种配置下（0.8 核）。
+// 阈值（每核 2.0、iowait 25%、steal 20%、限流 40%）只写在服务层，这一页一律反查后端判词的 id：前端抄一份的话，
+// 改一处就会悄悄分叉，颜色先于判词变红。
+// 这一页一个修复动作都不给：放宽配额是容量决策（配额本来就是拿来保业务进程的），renice / kill / restart 会直接断正在跑的请求。
+const ldForce = ref(false);
+const reprofiling = ref(false);
+const {
+  data: ldData, error: ldError, loading: ldLoading, refreshing: ldRefreshing, refresh: refreshLoad,
+} = useCachedFetch<any>({
+  key: () => 'load',
+  loader: () => api.load(ldForce.value),
+  maxAge: 60000,
+});
+watch(ldError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+async function reprofile() {
+  ldForce.value = true;
+  reprofiling.value = true;
+  try {
+    await refreshLoad();
+  } catch {
+    /* 失败已经通过 ldError 走上面的 toast */
+  } finally {
+    ldForce.value = false;
+    reprofiling.value = false;
+  }
+}
+
+const ldBusy = computed(() => ldLoading.value || ldRefreshing.value || reprofiling.value);
+const loadInfo = computed<any>(() => ldData.value?.load ?? {});
+const statInfo = computed<any>(() => ldData.value?.cpu ?? {});
+const psiInfo = computed<any>(() => ldData.value?.psi ?? {});
+const procInfo = computed<any>(() => ldData.value?.procs ?? {});
+const quotaInfo = computed<any>(() => ldData.value?.quota ?? {});
+const busyRows = computed<any[]>(() => procInfo.value.busy ?? []);
+const stateRows = computed<any[]>(() => procInfo.value.blocked ?? []);
+const quotaRows = computed<any[]>(() => quotaInfo.value.units ?? []);
+const ldFindings = computed<any[]>(() => ldData.value?.findings ?? []);
+const ldCounts = computed(() => ldData.value?.counts ?? { risk: 0, warn: 0, info: 0 });
+const ldOnlySerious = ref(true);
+const ldShownFindings = computed(() => (ldOnlySerious.value
+  ? ldFindings.value.filter((f: any) => f.severity !== 'info')
+  : ldFindings.value));
+const ldInfoFindings = computed(() => ldFindings.value.filter((f: any) => f.severity === 'info'));
+// 判词表的形状和内存页、改动未生效页一模一样（判词 / 档位 / 处置），直接复用同一套列定义。
+const ldFindingColumns = memFindingColumns;
+const ldPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: false };
+
+// 同一件事后端给两档（iowait 与 iowait-warm 这类），按顺序取第一个命中的档位。
+const ldSevOf = (...ids: string[]) => {
+  for (const id of ids) {
+    const hit = ldFindings.value.find((f: any) => String(f.id) === id || String(f.id).startsWith(`${id}:`));
+    if (hit) return String(hit.severity);
+  }
+  return '';
+};
+const loadTone = computed(() => tone(ldSevOf('load-io', 'load-cpu', 'load-warm')));
+const blockedTone = computed(() => tone(ldSevOf('blocked-d')));
+const iowaitTone = computed(() => tone(ldSevOf('iowait', 'iowait-warm')));
+const stealToneLd = computed(() => tone(ldSevOf('steal', 'steal-warm')));
+const psiCpuTone = computed(() => tone(ldSevOf('psi-cpu')));
+const throttleTone = (unit: string) => tone(ldSevOf(`throttle:${unit}`));
+
+const coreCount = computed(() => Number(ldData.value?.cores) || 0);
+// 每核排队：load 是「平均有多少任务在排队」的绝对数，不除核数就没法在 2 核与 64 核之间比较。
+const perCore = computed(() => {
+  const one = Number(loadInfo.value.one);
+  return loadInfo.value.ok && coreCount.value ? Math.round((one / coreCount.value) * 100) / 100 : null;
+});
+const perCoreLong = computed(() => {
+  const f = Number(loadInfo.value.fifteen);
+  return loadInfo.value.ok && coreCount.value ? Math.round((f / coreCount.value) * 100) / 100 : null;
+});
+const cpuPct = computed<any>(() => statInfo.value.pct ?? {});
+// 「忙」= user+nice+system+irq+softirq：由面板加好，别让人在页面上自己心算一遍。
+const busyPct = computed(() => {
+  const vals = ['user', 'nice', 'system', 'irq', 'softirq']
+    .map((k) => cpuPct.value[k]).filter((v: any) => typeof v === 'number');
+  return vals.length ? Math.round(vals.reduce((a: number, b: number) => a + b, 0) * 10) / 10 : null;
+});
+// 读不到就是「—」，不折成 0：0 会被读成「没有任务在等 IO」，而真实情况可能是这一节没读到。
+const ldNum = (v: any, suffix = '') => (typeof v === 'number' ? `${v}${suffix}` : '—');
+
+// CPU 时间分解走一条堆叠条：这一秒的 tick 只有一份，八段拼起来才是完整的账。
+// guest / guest_nice 不上条子——内核已把它们计在 user / nice 里，再列一遍总账会超 100%（服务层算百分比时剔掉了）。
+const SPLIT_FIELDS: { key: string; label: string; color: string }[] = [
+  { key: 'user', label: '用户态', color: 'var(--cp-brand)' },
+  { key: 'nice', label: '低优先用户态', color: 'color-mix(in srgb, var(--cp-brand) 45%, var(--cp-bg-soft))' },
+  { key: 'system', label: '内核态', color: 'var(--cp-brand-accent)' },
+  { key: 'irq', label: '硬中断', color: 'color-mix(in srgb, var(--cp-brand-accent) 45%, var(--cp-bg-soft))' },
+  { key: 'softirq', label: '软中断', color: 'color-mix(in srgb, var(--cp-brand-accent) 22%, var(--cp-bg-soft))' },
+  { key: 'iowait', label: '等 IO', color: 'var(--cp-warn)' },
+  { key: 'steal', label: '被宿主机拿走', color: 'var(--cp-err)' },
+  { key: 'idle', label: '空闲', color: 'var(--cp-border-strong)' },
+];
+const splitTotal = computed(() => SPLIT_FIELDS
+  .map((f) => Number(cpuPct.value[f.key]))
+  .filter((v: any) => typeof v === 'number' && Number.isFinite(v))
+  .reduce((a: number, b: number) => a + b, 0));
+const splitSegs = computed(() => {
+  const total = splitTotal.value || 0;
+  return SPLIT_FIELDS
+    .map((f) => ({ ...f, value: typeof cpuPct.value[f.key] === 'number' ? Number(cpuPct.value[f.key]) : null }))
+    .filter((f) => f.value !== null && f.value > 0)
+    .map((f) => ({ ...f, width: `${((f.value as number) * 100 / Math.max(total, 0.001)).toFixed(2)}%` }));
+});
+
+const psiSome = (kind: string) => ((psiInfo.value.controllers || {})[kind] || {}).some || {};
+const psiAvg = (kind: string, k: string) => {
+  const v = psiSome(kind)[k];
+  return typeof v === 'number' ? v.toFixed(1) : '—';
+};
+const psiStopOf = (kind: string) => {
+  const t = Number(psiSome(kind).total) || 0;
+  return t > 0 ? fmtDuration(t / 1e6) : '';
+};
+const psiIoStop = computed(() => psiStopOf('io'));
+const psiCpuStop = computed(() => psiStopOf('cpu'));
+// 限流那颗 chip 的深浅看所有 throttle:<unit> 判词里最重的一档：面板自己那条只是其中一个单元。
+const throttleChipTone = computed(() => {
+  const hits = ldFindings.value.filter((f: any) => String(f.id).startsWith('throttle:'));
+  if (hits.some((f: any) => f.severity === 'risk')) return 'err';
+  if (hits.some((f: any) => f.severity === 'warn')) return 'warn';
+  return '';
+});
+
+const PROC_STATE_LABEL: Record<string, string> = {
+  R: '正在跑，或已经在 run queue 里等 CPU',
+  D: '不可中断睡眠，通常在等 IO；这份占用算进 load 但不算 CPU 忙',
+  S: '可中断睡眠（等事件、等超时），不占 CPU',
+  I: '空闲内核线程，不计 CPU 也不排队',
+  Z: '僵尸：已经退出，只等父进程收尸',
+  T: '被停住（SIGSTOP 或调试器）',
+};
+
+const ldAlertText = computed(() => {
+  const d = ldData.value;
+  if (!d) return '';
+  const l = d.load || {};
+  const s = d.cpu || {};
+  if (!l.ok && !s.ok) {
+    return `load 与 /proc/stat 两节都读不到（${(d.unreadable || []).join('、') || '原因未知'}）——`
+      + '这一页等于空白，别把它读成「机器很闲」。';
+  }
+  const c = d.counts || {};
+  if (c.risk) {
+    const first = (d.findings || []).find((f: any) => f.severity === 'risk');
+    return `${c.risk} 项要紧的负载问题：${first ? first.title : ''}。`
+      + '面板不会替你 renice、kill、restart，也不会替你改 CPUQuota= / cpu.weight——'
+      + '放宽配额是容量决策，杀进程与重启会直接断正在跑的请求。下面每条处置都是只读命令，请自己复制走。';
+  }
+  if (c.warn) return `没有要紧项，另有 ${c.warn} 项值得处理。`;
+  const pc = (typeof l.one === 'number' && d.cores) ? Math.round((l.one / d.cores) * 100) / 100 : null;
+  const q = d.quota || {};
+  const busy = Number.isFinite(Number(s.procs_blocked)) ? s.procs_blocked : '—';
+  return `每核排队 ${pc ?? '—'}（load ${l.one}/${l.five}/${l.fifteen}，${d.cores} 核），`
+    + `这一秒 ${busy} 个任务卡在不可中断、${s.procs_running ?? '—'} 个在 run queue 里；`
+    + (q.throttled_total
+      ? `有 ${q.throttled_total} 个单元在这个窗口里被自己的 CPU 配额限流（load 与曲线都看不出来）。`
+      : '这个窗口里没有任何单元被配额限流。');
+});
+const ldAlert = computed(() => {
+  const d = ldData.value;
+  if (!d) return null;
+  const dead = !d.load?.ok && !d.cpu?.ok;
+  const c = ldCounts.value;
+  const type = dead || c.risk ? ('error' as const) : c.warn ? ('warning' as const) : ('success' as const);
+  return { type, text: ldAlertText.value };
+});
+
+const busyColumns: any[] = [
+  {
+    title: '进程', key: 'comm', minWidth: 190,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name ls-wrap' }, r.comm),
+      h('div', { class: 'cell-sub mono' }, `pid ${r.pid}`),
+    ]),
+  },
+  {
+    // 一列摆两个数：窗口增量才是「这一秒它忙不忙」，自启动累计只用来对照（ps 那种口径会把
+    // 跑了几天而此刻空闲的进程排到最前面）。分成两列的话，窄屏上真正要看的那一列先被挤掉。
+    title: '这一秒用了', key: 'cpu_ms', width: 190,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono' }, `${r.cpu_ms} 毫秒`),
+      h('div', { class: 'cell-sub' }, `自启动累计 ${fmtDuration(Math.round((r.cpu_total_ms || 0) / 1000))}`),
+    ]),
+  },
+  {
+    title: '此刻状态', key: 'state', minWidth: 210,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h(NTag, {
+        size: 'small',
+        type: r.state === 'D' ? 'error' : r.state === 'R' ? 'warning' : 'default',
+        bordered: false,
+      }, () => `${r.state} 状态`),
+      h('div', { class: 'cell-sub ls-wrap' }, PROC_STATE_LABEL[r.state] || '这个状态字母内核没写过'),
+    ]),
+  },
+  {
+    title: '归属单元', key: 'unit', minWidth: 240,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono ls-wrap mm-break' }, r.unit || '归不到单元'),
+      ...(r.unit && r.unit === quotaInfo.value.self_unit
+        ? [h('div', { class: 'cell-sub' }, '面板自己：这一行慢，整个面板的取数都会慢')]
+        : []),
+    ]),
+  },
+];
+
+const stateColumns: any[] = [
+  {
+    title: '任务', key: 'comm', minWidth: 180,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name ls-wrap' }, r.comm),
+      h('div', { class: 'cell-sub mono' }, `pid ${r.pid}`),
+    ]),
+  },
+  {
+    title: '哪一种', key: 'state', minWidth: 200,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h(NTag, { size: 'small', type: r.state === 'D' ? 'error' : 'warning', bordered: false }, () => `${r.state} 状态`),
+      h('div', { class: 'cell-sub ls-wrap' }, PROC_STATE_LABEL[r.state] || '这个状态字母内核没写过'),
+    ]),
+  },
+  {
+    // wchan 只说明"卡在内核哪个入口"，不等于"卡在磁盘"：running 是这一瞬间它在 CPU 上，别读成事故。
+    title: '卡在哪个内核入口', key: 'wchan', minWidth: 220,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'mono ls-wrap mm-break' }, r.wchan || '读不到'),
+      ...(r.wchan === 'running' ? [h('div', { class: 'cell-sub' }, '这一瞬间它在 CPU 上跑，不是卡住')] : []),
+    ]),
+  },
+  {
+    title: '这一秒用了', key: 'cpu_ms', width: 120,
+    render: (r: any) => h('span', { class: 'mono' }, `${r.cpu_ms} 毫秒`),
+  },
+  {
+    title: '归属单元', key: 'unit', minWidth: 220,
+    render: (r: any) => h('span', { class: 'mono ls-wrap mm-break' }, r.unit || '归不到单元'),
+  },
+];
+
+const quotaColumns: any[] = [
+  {
+    title: '单元', key: 'unit', minWidth: 240,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('div', { class: 'cell-name mono ls-wrap mm-break' }, [
+        r.unit,
+        r.self ? h('span', { class: 'mm-tag self' }, '面板自己') : null,
+      ]),
+      h('div', { class: 'cell-sub mono ls-wrap mm-break' }, r.path),
+    ]),
+  },
+  {
+    title: '分到几个核', key: 'quota', minWidth: 200,
+    render: (r: any) => {
+      if (!r.capped) {
+        return h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name' }, '没设 CPU 上限'),
+          h('div', { class: 'cell-sub ls-wrap' }, '只是 cpu.stat 里还留着历史限流记录'),
+        ]);
+      }
+      const per = Math.round((r.period_us || 100000) / 1000);
+      const slice = Math.round((r.quota_cores || 0) * per);
+      return h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono' }, `${r.quota_cores} 核`),
+        h('div', { class: 'cell-sub mono ls-wrap' }, `cpu.max：每 ${per} 毫秒最多跑 ${slice} 毫秒`),
+      ]);
+    },
+  },
+  {
+    title: '这一秒被限流', key: 'window', minWidth: 230,
+    render: (r: any) => {
+      // 窗口里没有新周期结束 = 这一秒无从判定，写成空而不是 0%：0% 会被读成「没被压」，
+      // 而真实情况是这个 cgroup 这一秒压根没排满过一个周期。
+      if (typeof r.window_pct !== 'number') {
+        return h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-sub' }, '这一秒没有周期结束，不作判定'),
+          h('div', { class: 'cell-sub mono' }, `这一秒实际用了 ${Math.round((r.window_usage_usec || 0) / 1000)} 毫秒`),
+        ]);
+      }
+      const hot = throttleTone(r.unit) === 'err';
+      return h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name mono' }, `${r.window_throttled} / ${r.window_periods} 周期（${r.window_pct}%）`),
+        h('div', { class: 'st-bar' }, [h('i', { class: hot ? 'hot' : '', style: barStyle(r.window_pct) })]),
+        h('div', { class: 'cell-sub mono' }, `这一秒实际用了 ${Math.round((r.window_usage_usec || 0) / 1000)} 毫秒`),
+      ]);
+    },
+  },
+  {
+    title: '自单元启动以来', key: 'total', minWidth: 220,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono' }, `${r.total_throttled ?? 0} 次被压`),
+      h('div', { class: 'cell-sub' }, `累计压住 ${fmtDuration(Math.round((r.total_throttled_usec || 0) / 1e6))} · 共 ${r.total_periods ?? 0} 个周期`),
+    ]),
+  },
+  {
+    title: '权重与总账', key: 'weight', minWidth: 200,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'mono' }, `cpu.weight ${r.weight ?? '读不到'}`),
+      h('div', { class: 'cell-sub' }, `内核记的累计 CPU ${fmtDuration(Math.round((r.usage_usec || 0) / 1e6))}`),
+    ]),
+  },
+];
+
 const allPorts = computed<any[]>(() => portData.value?.ports ?? []);
 const portBusy = computed(() => portLoading.value || portRefreshing.value || auditing.value);
 // 默认只列"能被外面碰到"的那几行：几百个仅本机监听的端口（rpc、metrics、数据库）
@@ -1185,6 +1494,9 @@ const tabs = computed(() => [
   // 这一层的红点同样只认「要紧」：安全库的旧映射是要重启才算补上的，天天点没意义；
   // 值得处理（配置改过没 reload）用页内告警说话。
   { key: 'pending', label: '改动未生效', badge: pendCounts.value.risk > 0 },
+  // 这一层的红点同样只认「要紧」：每核排队超阈值、面板自己被配额压住才算；
+  // iowait 偏高、被宿主抢走时间片这类用页内告警说话，天天亮就等于没亮。
+  { key: 'load', label: '负载与 CPU', badge: ldCounts.value.risk > 0 },
   // 单元日志走 /api/system/services/{unit}/logs，服务端要求 admin（journal 是全机内容）。
   // 不给只读账号留这个页签，否则他点进来的是一片 403。
   ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
@@ -2062,6 +2374,156 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         :scroll-x="1010" :pagination="false" :row-key="(r: any) => r.kind" class="cp-tbl tbl-pend-reloads"
       />
     </CpToolbarCard>
+    <CpToolbarCard v-else-if="tab === 'load'" title="负载与 CPU 归因" style="margin-top: 10px">
+      <template #right>
+        <div class="mm-toolbar">
+          <NText v-if="ldData" depth="3" class="mm-time">
+            采样于 {{ fmtDateTime(ldData.as_of) }}<template v-if="ldData.cached">（缓存）</template>
+          </NText>
+          <NButton size="small" tertiary :loading="ldBusy" :icon="icon('RefreshOutline', 14)" @click="refreshLoad">刷新</NButton>
+          <NButton size="small" :loading="reprofiling" :icon="icon('SyncOutline', 14)" @click="reprofile">重新采样</NButton>
+        </div>
+      </template>
+
+      <NAlert v-if="!ldData && ldError" type="error" :bordered="false" style="margin-bottom: var(--space-3)">
+        负载探测失败：{{ (ldError as Error).message || '未知错误' }}。点上方「重新采样」重试。
+      </NAlert>
+      <NAlert v-else-if="ldAlert" :type="ldAlert.type" :bordered="false" style="margin-bottom: var(--space-3)">
+        {{ ldAlert.text }}
+      </NAlert>
+
+      <div v-if="ldData" class="mm-chips">
+        <span class="mm-chip" :class="loadTone">
+          <i>每核排队</i><template v-if="loadInfo.ok">{{ perCore ?? '—' }}（load {{ loadInfo.one }}/{{ loadInfo.five }}/{{ loadInfo.fifteen }}，{{ coreCount }} 核）</template>
+          <template v-else>{{ loadInfo.reason || '读不到' }}</template>
+        </span>
+        <span class="mm-chip"><i>15 分钟档</i>{{ perCoreLong === null ? '—' : `每核 ${perCoreLong}` }}</span>
+        <span class="mm-chip"><i>在跑</i>{{ ldNum(statInfo.procs_running, ' 个在 run queue') }}</span>
+        <span class="mm-chip" :class="blockedTone"><i>等 IO</i>{{ ldNum(statInfo.procs_blocked, ' 个不可中断') }}</span>
+        <span class="mm-chip" :class="iowaitTone"><i>忙</i>{{ busyPct === null ? '读不到' : `${busyPct}%（其中等 IO ${ldNum(cpuPct.iowait, '%')}）` }}</span>
+        <span class="mm-chip" :class="stealToneLd"><i>被宿主拿走</i>{{ ldNum(cpuPct.steal, '%') }}</span>
+        <span class="mm-chip" :class="psiCpuTone">
+          <i>PSI CPU</i>{{ psiInfo.ok ? `近 10 秒停顿 ${psiAvg('cpu', 'avg10')}% · 近 5 分钟 ${psiAvg('cpu', 'avg300')}%` : (psiInfo.reason || '读不到（内核没开 CONFIG_PSI）') }}
+        </span>
+        <span class="mm-chip"><i>PSI IO</i>{{ psiInfo.ok ? `近 10 秒 ${psiAvg('io', 'avg10')}%` : '读不到' }}</span>
+        <span v-if="psiCpuStop || psiIoStop" class="mm-chip"><i>累计停顿</i>CPU {{ psiCpuStop || '—' }} · IO {{ psiIoStop || '—' }}</span>
+        <span class="mm-chip"><i>上下文切换</i>{{ ldNum(statInfo.ctxt_per_sec, ' 次/秒') }}</span>
+        <span class="mm-chip"><i>新建进程</i>{{ ldNum(statInfo.forks_per_sec, ' 个/秒') }}</span>
+        <span class="mm-chip"><i>这一轮扫了</i>{{ procInfo.ok ? `${procInfo.scanned} 个任务，窗口 ${ldData.window_sec} 秒${procInfo.budget_hit ? ' · 预算用完，没扫满' : ''}` : (procInfo.reason || '读不到 /proc') }}</span>
+        <span class="mm-chip" :class="throttleChipTone">
+          <i>配额与限流</i>{{ quotaInfo.ok ? `共查 ${quotaInfo.dirs} 个 cgroup，${quotaInfo.capped_total} 个设了限额，这一轮 ${quotaInfo.throttled_total} 个正被压住` : (quotaInfo.reason || '读不到 /sys/fs/cgroup') }}
+        </span>
+        <span class="mm-chip" :class="{ err: ldCounts.risk > 0 }"><i>要紧</i>{{ ldCounts.risk }} 项</span>
+        <span class="mm-chip" :class="{ warn: ldCounts.warn > 0 }"><i>值得处理</i>{{ ldCounts.warn }} 项</span>
+        <span class="mm-chip"><i>知道就好</i>{{ ldCounts.info }} 项</span>
+      </div>
+
+      <div v-if="ldData && statInfo.ok && splitSegs.length" class="ld-split-wrap">
+        <div class="ld-split">
+          <i v-for="f in splitSegs" :key="f.key" :style="{ width: f.width, background: f.color }" />
+        </div>
+        <div class="ld-legend">
+          <span v-for="f in splitSegs" :key="f.key" class="ld-key">
+            <b :style="{ background: f.color }" /><em>{{ f.label }}</em> {{ f.value }}%
+          </span>
+          <span class="ld-key mute">合计 {{ splitTotal.toFixed(1) }}%（guest / guest_nice 已计在 user / nice 里，不重复列）</span>
+        </div>
+      </div>
+
+      <div v-if="ldData" class="mm-tun">
+        <span>只读对账：面板不 renice、不 kill、不 restart，也不改 CPUQuota= / cpu.weight</span>
+        <span>处置命令按「复制」拿走，请 SSH 进去自己执行</span>
+        <span v-if="ldData.hz">时钟一 tick = {{ (1000 / ldData.hz).toFixed(0) }} 毫秒（内核给的，不是猜的 100）</span>
+        <span v-if="(ldData.unreadable || []).length">读不到的节：{{ ldData.unreadable.join('、') }}</span>
+      </div>
+
+      <div v-if="ldData && (ldData.notes || []).length" class="mm-notes">
+        <div v-for="(n, i) in ldData.notes" :key="i" class="mm-note">{{ n }}</div>
+      </div>
+
+      <div class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.AlertCircleOutline" :size="15" color="var(--cp-brand-soft)" /> 判词
+        </span>
+        <NText depth="3" class="mm-src">先说结论：这份忙是 CPU 不够还是在等 IO、有没有被自己的配额压住</NText>
+        <NButton
+          v-if="ldInfoFindings.length"
+          size="tiny" :quaternary="ldOnlySerious" :type="ldOnlySerious ? 'default' : 'primary'"
+          @click="ldOnlySerious = !ldOnlySerious"
+        >
+          {{ ldOnlySerious ? `展开 ${ldInfoFindings.length} 条「知道就好」` : '只看在意的' }}
+        </NButton>
+      </div>
+      <NDataTable
+        :columns="ldFindingColumns" :data="ldShownFindings" size="small" :bordered="false"
+        :loading="ldBusy && !ldData" :scroll-x="696" :pagination="pager(ldShownFindings.length, ldPaging)"
+        :row-key="(r: any) => r.id" class="cp-tbl tbl-ld-findings"
+      >
+        <template #empty>
+          <EmptyBox :text="ldData && (ldData.unreadable || []).length ? '该出声的读不到，别把这一页读成「没有问题」' : '没有异常：每核排队不高、没有任务卡在不可中断，也没有单元被配额压住'" />
+        </template>
+      </NDataTable>
+
+      <div v-if="ldData" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.PulseOutline" :size="15" color="var(--cp-brand-soft)" /> 这一秒谁在占 CPU
+        </span>
+        <NText depth="3" class="mm-src">
+          <template v-if="procInfo.ok === false">{{ procInfo.reason || '读不到 /proc' }}</template>
+          <template v-else>
+            每个数字都是这 {{ ldData.window_sec }} 秒里的增量，不是全生命周期平均。{{ procInfo.scanned }} 个任务里只列增量大于 0 的
+            <template v-if="(procInfo.busy_total ?? 0) > busyRows.length">{{ busyRows.length }} 个，其余 {{ (procInfo.busy_total ?? 0) - busyRows.length }} 个不比这些用得多</template>。<template v-if="procInfo.budget_hit">预算用完，榜外可能还有。</template>
+          </template>
+        </NText>
+      </div>
+      <NDataTable
+        v-if="ldData" :columns="busyColumns" :data="busyRows" size="small" :bordered="false"
+        :loading="ldBusy && !ldData" :scroll-x="830" :pagination="false"
+        :max-height="busyRows.length ? tableH : undefined" :row-key="(r: any) => r.pid"
+        class="cp-tbl tbl-ld-busy"
+      >
+        <template #empty>
+          <EmptyBox :text="procInfo.ok === false ? (procInfo.reason || '读不到 /proc') : `这一秒没有进程消耗 CPU（扫了 ${procInfo.scanned} 个任务，全在睡）`" />
+        </template>
+      </NDataTable>
+
+      <div v-if="ldData && (procInfo.blocked_total ?? 0) > 0" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.WarningOutline" :size="15" :color="blockedTone === 'err' ? 'var(--cp-err)' : 'var(--cp-warn)'" /> 没在睡的任务（D 与 R）
+        </span>
+        <NText depth="3" class="mm-src">
+          D 是不可中断睡眠（多半在等磁盘，算进 load 但不算 CPU 忙），R 是正在跑或已在 run queue 里等。<template v-if="(procInfo.blocked_total ?? 0) > stateRows.length">这一轮列了 {{ stateRows.length }} 个，还有 {{ (procInfo.blocked_total ?? 0) - stateRows.length }} 个没列出来。</template>
+        </NText>
+      </div>
+      <NDataTable
+        v-if="ldData && (procInfo.blocked_total ?? 0) > 0" :columns="stateColumns" :data="stateRows" size="small" :bordered="false"
+        :scroll-x="950" :pagination="false" :max-height="stateRows.length ? tableH : undefined"
+        :row-key="(r: any) => `${r.pid}|${r.state}`" class="cp-tbl tbl-ld-states"
+      />
+
+      <div v-if="ldData" class="mm-block">
+        <span class="section-title">
+          <NIcon :component="icons.LayersOutline" :size="15" color="var(--cp-brand-soft)" /> 配额与限流
+        </span>
+        <NText depth="3" class="mm-src">
+          <template v-if="quotaInfo.ok === false">{{ quotaInfo.reason || '读不到 /sys/fs/cgroup' }}</template>
+          <template v-else>
+            只读 cgroup v2 的 cpu.max 与 cpu.stat：{{ quotaInfo.dirs }} 个 cgroup 里有 {{ quotaInfo.capped_total }} 个设了限额。
+            这一页只列「设了限额」或「历史上被压过」的单元<template v-if="(quotaInfo.unit_total ?? 0) > quotaRows.length">，共 {{ quotaInfo.unit_total }} 个、列了 {{ quotaRows.length }} 个</template>。面板自己那一行无条件留在表里。
+          </template>
+        </NText>
+      </div>
+      <NDataTable
+        v-if="ldData" :columns="quotaColumns" :data="quotaRows" size="small" :bordered="false"
+        :loading="ldBusy && !ldData" :scroll-x="1090" :pagination="false"
+        :max-height="quotaRows.length ? tableH : undefined" :row-key="(r: any) => r.unit"
+        class="cp-tbl tbl-ld-quota"
+      >
+        <template #empty>
+          <EmptyBox :text="quotaInfo.ok === false ? (quotaInfo.reason || '读不到 /sys/fs/cgroup') : '没有任何单元带 CPU 配额，也没有被限流过的记录'" />
+        </template>
+      </NDataTable>
+    </CpToolbarCard>
     <CpToolbarCard v-else :title="logUnit ? `${logUnit} · journalctl 实时日志` : '单元日志'" style="margin-top: 10px">
       <!-- LogStream 只在挂载时开流、不 watch urlPath：换 unit 必须重挂载，否则旧 SSE 还在推上一个服务的日志 -->
       <LogStream v-if="logUnit" :key="logUnit" :url-path="`/system/services/${encodeURIComponent(logUnit)}/logs`" class="svc-log" />
@@ -2250,6 +2712,18 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 @media (max-width: 767px) {
   .mm-toolbar { justify-content: flex-start; }
 }
+
+/* 负载与 CPU 归因：这一秒的 CPU 时间只有一份，用一条堆叠条摆出来，图例给每段的数字。
+   色板全走主题变量（color-mix 出来的两段中间色也是），深浅两版都看得见；空闲那段用描边色，不抢主色。
+   这几个类只用在模板里（不是 h() 生成的格子），所以按 scoped 裸写即可，不用 :deep。 */
+.ld-split-wrap { margin: 0 0 var(--space-3); }
+.ld-split { display: flex; width: 100%; height: 14px; overflow: hidden; border-radius: var(--radius-sm); background: var(--cp-bg-soft); }
+.ld-split i { display: block; height: 100%; min-width: 2px; }
+.ld-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; font-size: var(--fs-xs); color: var(--cp-text-dim); }
+.ld-key { display: inline-flex; align-items: center; gap: 5px; }
+.ld-key b { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.ld-key em { font-style: normal; color: var(--cp-text-mute); }
+.ld-key.mute { color: var(--cp-text-mute); }
 
 /* 1Panel 日志盒参数压过 LogStream 的行内高度（组件根上的类，:deep 到 .log-view） */
 .svc-log :deep(.log-view) {

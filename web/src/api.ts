@@ -139,6 +139,8 @@ export const api = {
   storage: (refresh = false) => req(`/storage${refresh ? '?refresh=1' : ''}`),
   // 内存压力：服务端 90 秒 TTL，速率只有 0.8 秒的采样窗口；refresh=1 是重新开一次窗口，不是重新分配内存
   memory: (refresh = false) => req(`/memory${refresh ? '?refresh=1' : ''}`),
+  // 负载归因：服务端 60 秒 TTL；refresh=1 是重新开一个 1 秒采样窗口，不是让机器多干活
+  load: (refresh = false) => req(`/load${refresh ? '?refresh=1' : ''}`),
   pending: (refresh = false) => req(`/pending${refresh ? '?refresh=1' : ''}`),
   // 一键修复：前端构建项在服务端最长跑 900s，超时会让人误以为失败又点一次
   doctorFix: (id: string) => req('/doctor/fix', { body: { id }, timeout: 960000 }),

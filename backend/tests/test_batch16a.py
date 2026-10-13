@@ -30,8 +30,10 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import inspect
 import io
 import os
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -1285,6 +1287,11 @@ class NotesTests(unittest.TestCase):
                        "严格只读", "不 restart", "窗口增量", "0ms"):
             self.assertIn(phrase, joined, f"说明里缺了 {phrase}")
 
+    def test_notes_have_no_markdown_backticks(self):
+        """NOTES 同时喂 CLI 与网页：反引号在网页里会原样画出来，不是斜体。"""
+        for n in ls.NOTES:
+            self.assertNotIn("`", n, f"说明文案里出现了反引号：{n[:40]}")
+
     def test_service_is_strictly_readonly(self):
         """源码级守卫：本服务不许 spawn 任何东西，也不许以写模式打开文件。
 
@@ -1332,6 +1339,140 @@ class NotesTests(unittest.TestCase):
             after = " ".join(_load_entry()["notes"])
         self.assertIn("7.75", after, "schema 里的阈值是抄的，改常量它不跟着变")
         self.assertNotIn(str(ls.LOAD_RISK_PER_CORE) + " 倍算要紧", after)
+
+class LoadFrontendWiringTests(unittest.TestCase):
+    """⑯B 的前端接线守卫：构建与 vue-tsc 只证明类型对得上，证明不了三层说的是同一件事。
+
+    负载页是纯展示，最容易被抄第二份的就是判词 id 与阈值：服务层改了常量，前端那一份
+    会安静地留在旧值上，页面上的表现是颜色先于判词变红——同一件事给出两个档位。
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+    API = ROOT / "web" / "src" / "api.ts"
+    SV = ROOT / "web" / "src" / "views" / "Services.vue"
+
+    SCRIPT_START = "const ldForce = ref(false);"
+    SCRIPT_END = "const ldAlert = computed(() => {"
+    TPL_START = """<CpToolbarCard v-else-if="tab === 'load'"""
+    TPL_END = """<CpToolbarCard v-else :title="logUnit"""
+
+    def setUp(self):
+        self.api_text = self.API.read_text(encoding="utf-8")
+        self.sv_text = self.SV.read_text(encoding="utf-8")
+
+    def api_load_line(self):
+        for line in self.api_text.splitlines():
+            if line.strip().startswith("load:"):
+                return line
+        return ""
+
+    def script_region(self):
+        """只取负载页的 <script> 段：模板段的「15 分钟档」这类文案会被比较正则误伤。"""
+        i = self.sv_text.index(self.SCRIPT_START)
+        j = self.sv_text.index(self.SCRIPT_END, i)
+        return self.sv_text[i:self.sv_text.index("\n});", j)]
+
+    def template_region(self):
+        k = self.sv_text.index(self.TPL_START)
+        m = self.sv_text.index(self.TPL_END, k)
+        return self.sv_text[k:m]
+
+    @staticmethod
+    def service_ids():
+        src = Path(ls.__file__).read_text(encoding="utf-8")
+        # f-string 那两条（throttle / unreadable）在 "{" 处断掉，正好留下前缀本身
+        return set(re.findall(r'"id":\s*f?"([A-Za-z0-9_:.-]+)', src))
+
+    @classmethod
+    def threshold_literals(cls):
+        out = set()
+        for name in ("LOAD_RISK_PER_CORE", "LOAD_WARN_PER_CORE", "LOAD_LONG_WARN",
+                     "IOWAIT_WARN", "IOWAIT_RISK", "STEAL_WARN", "STEAL_RISK",
+                     "PSI_CPU_WARN", "THROTTLE_WARN", "THROTTLE_RISK"):
+            v = float(getattr(ls, name))
+            out.add(f"{v:.1f}")
+            if v == int(v):
+                out.add(str(int(v)))
+        return out
+
+    def threshold_hits(self, text):
+        hits = []
+        for num in sorted(self.threshold_literals(), key=len, reverse=True):
+            for m in re.finditer(r"[<>]=?\s*" + re.escape(num) + r"(?![0-9.])", text):
+                hits.append(text[max(0, m.start() - 40):m.end() + 10].replace("\n", " "))
+        return hits
+
+    def test_api_router_and_view_agree_on_the_load_path(self):
+        self.assertIn("req(`/load", self.api_load_line())
+        self.assertIn('@router.get("/api/load")', inspect.getsource(meta))
+        self.assertIn("api.load(", self.sv_text)
+        self.assertIn(self.TPL_START, self.sv_text)
+
+    def test_refresh_is_a_number_not_a_boolean(self):
+        """路由签名是 refresh: int，前端传 true 会得到 422（⑯A 冒烟时真撞过一次）。"""
+        self.assertIn("refresh: int", inspect.getsource(meta.load))
+        self.assertIn("?refresh=1", self.api_load_line())
+        self.assertNotIn("refresh=true", self.api_load_line())
+
+    def test_cache_age_matches_service_ttl(self):
+        """前端 maxAge 必须与服务层 TTL 同值，否则「缓存」标注与实际回源时机不一致。"""
+        self.assertIn(f"maxAge: {int(ls.CACHE_TTL * 1000)}", self.script_region())
+
+    def test_finding_ids_come_from_the_service(self):
+        ids = self.service_ids()
+        region = self.script_region()
+        static_ids = set()
+        for call in re.findall(r"ldSevOf\(([^)]*)\)", region):
+            static_ids.update(re.findall(r"'([A-Za-z0-9_:.-]+)'", call))
+        prefixes = set(re.findall(r"startsWith\('([A-Za-z0-9_:]+)'\)", region))
+        self.assertGreaterEqual(len(static_ids), 8, "判词反查退化成了硬编码颜色")
+        unknown = sorted(s for s in static_ids if s not in ids)
+        self.assertFalse(unknown, f"前端用了服务层没有的判词 id：{unknown}")
+        self.assertIn("throttle:", ids)
+        self.assertIn("throttle:", prefixes, "动态判词族只在表里有颜色，chip 上不跟着变")
+
+    def test_load_script_recomputes_no_service_threshold(self):
+        hits = self.threshold_hits(self.script_region())
+        self.assertFalse(hits, f"负载页自己算了一次阈值：{hits}")
+
+    def test_threshold_guard_is_not_a_no_op(self):
+        """反证：把阈值抄进页面必须被上一条拦住（否则守卫只是看起来很严）。"""
+        fake = "const loadTone = computed(() => (perCore.value > 2.0 ? 'err' : ''));"
+        self.assertTrue(self.threshold_hits(fake), "检测器抓不到抄出来的 2.0")
+
+    def test_load_page_offers_no_write_action(self):
+        """这一页一个修复动作都不给：改配额是容量决策，renice / kill / restart 会断业务。"""
+        both = self.script_region() + self.template_region()
+        for verb in ("serviceAction(", "doctorFix(", "appAction(", "certbotRenew("):
+            self.assertNotIn(verb, both)
+        self.assertIn("复制", self.template_region())
+
+    def test_split_bar_leaves_out_guest_fields(self):
+        block = self.script_region()[self.script_region().index("const SPLIT_FIELDS"):]
+        block = block[:block.index("const psiSome")]
+        self.assertNotIn("'guest'", block, "guest 会与 user 重复计账，堆叠条合计超过 100%")
+        self.assertEqual(len(re.findall(r"key: '", block)), 8)
+
+    def test_tick_ms_uses_backend_hz(self):
+        self.assertIn("1000 / ldData.hz", self.template_region())
+
+    def test_load_template_has_no_markdown_backticks(self):
+        """模板的文本节点是 HTML 文本，反引号会原样显示成怪字符。
+
+        属性值与插值里的反引号是 JS 模板字符串的语法（row-key 那一类），不是给人看的话，
+        不是给人看的话，所以先把这两类整体摘掉再查。
+        """
+        prose = re.sub(r'"[^"]*"', "", self.template_region())
+        prose = re.sub(r"\{\{.*?\}\}", "", prose, flags=re.S)
+        self.assertNotIn("`", prose, "负载页模板里写了 markdown 反引号")
+
+    def test_load_tab_is_not_gated_behind_admin(self):
+        """路由 viewer 可读，页签也必须对 viewer 存在，否则等于把只读账号挡在门外。"""
+        tabs = self.sv_text[self.sv_text.index("const tabs = computed("):]
+        tabs = tabs[:tabs.index("]);")]
+        self.assertLess(tabs.index("{ key: 'load'"), tabs.index("...(isAdmin"),
+                        "负载页签被塞进 admin 分支，只读账号看不见")
+
 
 
 if __name__ == "__main__":

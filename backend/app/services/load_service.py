@@ -522,8 +522,8 @@ NOTES = [
     "CPU 不够与磁盘跟不上，处置方向完全不同，所以这里把 procs_blocked、D 名单、iowait 单独列出。",
     "每个进程的 CPU 数字是这次采样窗口（默认 1 秒）内的增量，不是 ps 那种全生命周期平均值；"
     "后者会把跑了几天而此刻空闲的进程排到最前面。",
-    "配额与限流只读 cgroupfs 的 cpu.max / cpu.stat。`systemctl show -p CPUQuota` 不是有效属性名"
-    "（这台 Debian 13 上返回空），要问的是 CPUQuotaPerSecUSec；真值在 cpu.max（`80000 100000` 就是 0.8 核）。"
+    "配额与限流只读 cgroupfs 的 cpu.max / cpu.stat。「systemctl show -p CPUQuota」不是有效属性名"
+    "（这台 Debian 13 上返回空），要问的是 CPUQuotaPerSecUSec；真值在 cpu.max（80000 100000 就是 0.8 核）。"
     "cgroup v1 或没开 CPU 会计的 unit 只能标读不到。",
     "被限流（throttled）的进程不出现在 run queue 也不进 D 状态：load 与 CPU 曲线都好看，"
     "只有 cpu.stat 的 nr_throttled 在涨。这就是「机器不忙但活干不完」的第三种情况。",
