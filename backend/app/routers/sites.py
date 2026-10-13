@@ -231,7 +231,6 @@ async def ssl_certs():
     return {
         **data,
         "timer": timer,
-        "expiring_days": cert_ops.EXPIRING_DAYS,
         "earliest": {"name": earliest["name"], "days_left": earliest["days_left"], "status": earliest["status"]}
         if earliest else None,
         "hint": cert_ops.renewal_hint(timer, data["certs"]),

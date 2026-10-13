@@ -345,6 +345,42 @@
   浏览器端把 `/api/system/stats` 的载荷改写后按仪表顺序取环色：CPU 75% 配要紧档 70 时环是红、
   内存 95% 配警戒 90 时是黄、CPU 65%（两线之间）也是黄，把载荷改回 30%/10% 两只环回品牌色；
   设置页那三句说明在 375px 宽下换行不撑破容器（`scrollWidth == 375`），console 无报错。
+- 「还剩几天算快到期」原先有两个出处：`cert_ops.EXPIRING_DAYS = 21`（证书页标"即将到期"用它）与告警配置
+  `alert_ssl_days`（默认 14，巡检决定发不发通知用它）。两份数字没有任何机制一起改，坏法是镜像的两侧都觉得自己对：
+  把配置调到 30，第 30 天通知已经响了、证书页上还是"正常"，人以为面板没当回事；调到 7，证书页满屏"即将到期"
+  却一条通知都不发，红牌变成装饰；调成 0（关掉证书提醒），页面照样按 21 天标黄，看起来像提醒还在生效。
+  现在 `status_of(days_left, threshold, invalid)` 只认入参，线由调用方给：`cert_ops` 里那份常量已经删掉，
+  certbot 与 openssl 两条来源都从 `setting_int("alert_ssl_days")` 拿线，`list_certs()` 随载荷带出
+  `expiring_days`，站点页把这条线直接写给人看（「剩余 ≤ N 天算即将到期」），前端不再自己抄数字；
+  `/api/ssl/certs` 也删掉了路由自己重拼的那份 `"expiring_days"`（⑰B 的老毛病：服务层算好了、路由再拼一遍，
+  两份数字在响应里打架）。配置为 0 时页面只判有没有过期，巡检整段跳过、连 certbot 都不查。
+- 第二个缺陷更隐蔽：天数读不到被说成"没事"，而且是被推送说成没事。certbot 的输出里少数证书读不到剩余天数
+  （旧版格式、异常行），`parse_certbot` 老实地给 `days=None`，而巡检的分支只有 `invalid / days<=线 / else`，
+  None 一路落进 else，于是往历史里写一行「证书 X 有效期正常」；上一轮这张证书真报过警的话，还会补推一条
+  「已恢复：证书 X 有效期正常」——同一张证书在站点页显示的是"未知"。读不到就只记一条 warn 日志、不动档位、
+  不发恢复，同时把 `notified` 标记留着（不留的话这张证书下次真恢复时也不发了）；天数能读出来且回到线上时
+  照旧落 ok 并补「已恢复」，恢复通知没被一起掐死。
+- 新增 `backend/tests/test_batch19a.py`（24 条）：档位只随入参走（21 天配 25 是 expiring、配 20 是 ok、
+  负数优先 expired、None 是 unknown 而不是 ok、0 只关 expiring 不关 expired）、四条源码级守卫
+  （`cert_ops` 里不许再出现 `EXPIRING_DAYS`；每个 `status_of(` 调用必须带线；sites 路由不许重拼
+  `expiring_days` 且必须由 `**data` 带出；巡检段不许有 `low =` 这类第二跳板）、None 不落 ok 历史也不发恢复且留标记、
+  后续可读轮仍补恢复并清标记、阈值同时进正文与 meta、线调到 7 就不发、invalid 恒 crit、一张读不到不带崩整轮
+  （防止 continue 写成 return）、0 时不查 certbot，以及"同一条配置同时决定页面档位与巡检通知"的三档对照
+  （25→页面 expiring + 1 条通知；7→ok + 0 条；0→ok + 0 条）。`test_sites.py` 里原来那条
+  `test_expiring_boundary_is_21_days` 换成四条边界用例。反证：把四只产品文件（`cert_ops` / `alerts_service` /
+  sites 路由 / `Sites.vue`）退回上一版，本批 24 条里 17 条红；仍绿的 7 条是
+  `test_the_negative_days_still_wins_over_the_line`、`test_a_cert_above_the_line_is_not_alerted`、
+  `test_breach_uses_the_configured_line_in_the_message`、`test_invalid_cert_is_crit_regardless_of_days`、
+  `test_the_round_still_finishes_when_a_cert_is_unreadable`、`test_zero_skips_the_certificate_check`、
+  `test_sites_page_has_no_hardcoded_day_count`——它们守的是旧代码本来就对的行为（负数、invalid、整轮不中断、
+  前端没有硬编码天数），不是这批的收敛。
+- 线上实测（生产机 3210，跑的是这批代码）：`alert_ssl_days` 原值 20，certbot 三张证书剩 76/77 天，
+  `/api/ssl/certs` 带出 `expiring_days: 20`、页面文案「剩余 ≤ 20 天算即将到期」、徽章全"正常"；把它存成 45、
+  再存成 60，同一个接口的线跟着变、页面数字跟着变，复位 20 后文案回到「≤ 20 天」；配成 0 时页面切到
+  「该提醒已关闭（配 0），这里只判有没有过期」；999 判 400，报错句子里带的区间就是登记表那条，库里也没落这个值。
+  浏览器端把 `/api/ssl/certs` 的载荷改写（线改成 80、其中一张的 `status` 改成 expiring）后重挂载站点页：
+  说明行跟着写「≤ 80 天」、那张徽章变成"即将到期"，证明徽章取的是后端 `status` 而不是前端拿 `days_left` 再算一遍。
+  新说明行在 375px 宽下换行不撑破容器（`scrollWidth == 375`），console 无报错。
 - 补丁自检的假绿：`apt list --upgradable` 因为 dpkg 锁、超时（退出码 124）或命令不存在（127）而
   失败时，旧代码只往 notes 里塞一句话，然后照旧 `security_known = True`——清单是空的，
   `pending_total=0` 于是顺流走到自检项，输出「没有待装安全更新」。这台机器最怕的就是没打的安全更新，

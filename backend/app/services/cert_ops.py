@@ -14,11 +14,9 @@ from pathlib import Path
 
 from .. import config
 from ..util import run
-from .alerts_service import parse_certbot
+from .alerts_service import parse_certbot, setting_int
 
-# 21 天：certbot 默认在 30 天窗口内尝试续期，留出一次失败的余量再算"快到期"
-EXPIRING_DAYS = 21
-
+# 「还剩几天算快到期」这条线不在这里定义，见 status_of()：它读的是告警配置 alert_ssl_days。
 # 只用于切分 certbot 的输出块；到期天数/无效标记仍然复用 alerts_service.parse_certbot，
 # 这里刻意不 import 它的私有正则——那个文件在并行改动，私有名随时会挪位置。
 _CERT_MARK_RE = re.compile(r"Certificate Name: (\S+)")
@@ -46,13 +44,19 @@ def valid_cert_name(name: str) -> bool:
     return bool(_VALID_NAME_RE.match(name or ""))
 
 
-def status_of(days_left: int | None, invalid: bool = False) -> str:
-    """ok / expiring / expired；天数拿不到时返回 unknown，而不是默认"没事"。"""
+def status_of(days_left: int | None, threshold: int, invalid: bool = False) -> str:
+    """ok / expiring / expired；天数拿不到时返回 unknown，而不是默认"没事"。
+
+    `threshold` 就是那条生效的告警配置（`alert_ssl_days`，单位：天）。证书页标"即将到期"
+    和巡检决定发不发通知，读的是同一个数；以前这里写死 21 而配置默认 14，于是把线调到 30
+    时第 30 天通知已经响了、页面上还是"正常"，调到 7 时列表满屏"即将到期"却一条都不发。
+    配置为 0 表示证书提醒已关：只判过没过期，不再标 expiring。
+    """
     if days_left is None:
         return "expired" if invalid else "unknown"
     if days_left < 0:
         return "expired"
-    if days_left <= EXPIRING_DAYS:
+    if threshold > 0 and days_left <= threshold:
         return "expiring"
     return "ok"
 
@@ -155,7 +159,7 @@ def _issuer_label(raw: str) -> str | None:
     return _field_value(raw, "O") or _field_value(raw, "CN") or (raw.strip() or None)
 
 
-async def _from_certbot(now: datetime) -> tuple[list | None, str | None]:
+async def _from_certbot(now: datetime, threshold: int) -> tuple[list | None, str | None]:
     """(certs, reason)；certs 为 None 表示 certbot 这条来源不可用，[] 表示可用但确实没证书。"""
     r = await run("certbot", ["certificates"], timeout=60)
     if r["code"] != 0:
@@ -177,11 +181,12 @@ async def _from_certbot(now: datetime) -> tuple[list | None, str | None]:
         issuer = None
         if pm:
             issuer = (await _openssl_x509(pm.group(1))).get("issuer")
-        rows.append(_row(name, domains, issuer, expiry, days_left, status_of(days_left, invalid), invalid))
+        rows.append(_row(name, domains, issuer, expiry, days_left,
+                         status_of(days_left, threshold, invalid), invalid))
     return rows, None
 
 
-async def _from_openssl(now: datetime) -> tuple[list | None, str | None]:
+async def _from_openssl(now: datetime, threshold: int) -> tuple[list | None, str | None]:
     """certbot 缺失的机器：直接把 TLS_DIR 下每张 fullchain.pem 读出来。"""
     live = Path(config.TLS_DIR)
     try:
@@ -195,27 +200,36 @@ async def _from_openssl(now: datetime) -> tuple[list | None, str | None]:
         expiry = meta.get("expiry")
         days_left = _days_left(expiry, now)
         rows.append(_row(name, meta.get("domains") or [name], meta.get("issuer"), expiry, days_left,
-                         status_of(days_left), False))
+                         status_of(days_left, threshold), False))
     return rows, None
 
 
-async def list_certs(now: datetime | None = None) -> dict:
-    """返回 {"certs": [...], "source": "certbot|openssl|none", "reason": str|None}。"""
-    ref = now or datetime.now(UTC)
-    certbot_certs, certbot_reason = await _from_certbot(ref)
-    if certbot_certs:
-        return {"certs": certbot_certs, "source": "certbot", "reason": None}
+async def list_certs(now: datetime | None = None, threshold: int | None = None) -> dict:
+    """返回 {"certs": [...], "source": "certbot|openssl|none", "reason": str|None,
+    "expiring_days": int}。
 
-    live_certs, live_reason = await _from_openssl(ref)
+    `expiring_days` 就是这批证书被判"即将到期"用的那条线（来自 `alert_ssl_days`），
+    随载荷一起给出去，页面才不用再自己抄一个数字、也不用猜后端按什么判的。
+    """
+    ref = now or datetime.now(UTC)
+    line = setting_int("alert_ssl_days") if threshold is None else threshold
+    certbot_certs, certbot_reason = await _from_certbot(ref, line)
+    if certbot_certs:
+        return {"certs": certbot_certs, "source": "certbot", "reason": None, "expiring_days": line}
+
+    live_certs, live_reason = await _from_openssl(ref, line)
     if live_certs:
         # certbot 不在也能给出准确清单，但口径变了（没有 lineage 之外的元数据），reason 要带回去
-        return {"certs": live_certs, "source": "openssl", "reason": certbot_reason}
+        return {"certs": live_certs, "source": "openssl", "reason": certbot_reason, "expiring_days": line}
 
     if certbot_reason is None and live_reason is None:
-        return {"certs": [], "source": "none", "reason": "本机没有证书（certbot 与证书目录都为空）"}
+        return {"certs": [], "source": "none", "expiring_days": line,
+                "reason": "本机没有证书（certbot 与证书目录都为空）"}
     if certbot_reason is None:
-        return {"certs": [], "source": "certbot", "reason": "certbot 报告本机没有证书"}
-    return {"certs": [], "source": "none", "reason": f"{certbot_reason}；{live_reason or '证书目录为空'}"}
+        return {"certs": [], "source": "certbot", "expiring_days": line,
+                "reason": "certbot 报告本机没有证书"}
+    return {"certs": [], "source": "none", "expiring_days": line,
+            "reason": f"{certbot_reason}；{live_reason or '证书目录为空'}"}
 
 
 async def _check_cron() -> dict | None:

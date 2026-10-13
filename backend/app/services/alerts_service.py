@@ -394,12 +394,16 @@ async def run_checks():
             warn("certbot 不可用，跳过证书巡检:", certs["out"][:120])
         else:
             for c in parse_certbot(certs["out"]):
-                low = c["days"] is not None and c["days"] <= ssl_days
                 if c["invalid"]:
                     await _check(f"ssl-{c['name']}", True, f"证书 {c['name']} 已过期或无效！",
                                  code=f"ssl:{c['name']}", level="crit",
                                  meta=_meta(cert=c["name"], days=c["days"]))
-                elif low:
+                elif c["days"] is None:
+                    # 天数读不出来不等于"有效期正常"。落到 else 分支就是往历史里写一行
+                    # 「证书 X 有效期正常」，上一轮真报过警的话还会推一条「已恢复」——
+                    # 而站点页同一张证书显示的是"未知"。读不到就只记日志，档位不动。
+                    warn(f"证书 {c['name']} 的剩余天数读不到，本轮跳过（不记正常，也不发恢复通知）")
+                elif c["days"] <= ssl_days:
                     await _check(f"ssl-{c['name']}", True,
                                  f"证书 {c['name']} 将在 {c['days']} 天后到期（阈值 {ssl_days} 天）",
                                  code=f"ssl:{c['name']}", level="warn",

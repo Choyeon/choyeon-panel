@@ -367,6 +367,14 @@ onMounted(refresh);
           证书清单不可用：{{ certsInfo.reason }}。此处不伪造到期信息。
         </NAlert>
 
+        <!-- 这条线只由后端给（来自告警配置 alert_ssl_days），页面不自己写数字：
+             以前这里按写死的 21 天标"即将到期"，而通知按配置发，两个答案能差出一周。 -->
+        <div class="cp-help">
+          「即将到期」按设置里那条 SSL 剩余天数判：{{ Number(certsInfo.expiring_days) > 0
+            ? `剩余 ≤ ${certsInfo.expiring_days} 天算即将到期`
+            : '该提醒已关闭（配 0），这里只判有没有过期' }}；巡检发通知用的也是同一条。
+        </div>
+
         <NDataTable
           :columns="certColumns"
           :data="certs"

@@ -157,12 +157,42 @@ class TestCertbotParsing(unittest.TestCase):
         self.assertLess(c["days_left"], 0)
         self.assertTrue(c["invalid"])
 
-    def test_expiring_boundary_is_21_days(self):
+    def test_expiring_boundary_is_the_line_it_was_given(self):
         out = ("Certificate Name: edge.example.com\n  Domains: edge.example.com\n"
                "  Expiry Date: 2026-10-31 00:00:00+00:00 (VALID: 21 days)\n")
         with mock.patch.object(cert_ops, "run", _fake_run({"certbot": {"code": 0, "out": out}})):
-            data = asyncio.run(cert_ops.list_certs(NOW))
+            data = asyncio.run(cert_ops.list_certs(NOW, threshold=21))
         self.assertEqual(data["certs"][0]["days_left"], 21)
+        self.assertEqual(data["certs"][0]["status"], "expiring")
+        self.assertEqual(data["expiring_days"], 21, "线要随载荷回去，页面才不用自己抄数字")
+
+    def test_the_21_day_line_is_no_longer_hardcoded(self):
+        """⑰ 之前这里写死 21：把配置调到 14，页面仍然满屏"即将到期"，通知一条都不发。"""
+        out = ("Certificate Name: edge.example.com\n  Domains: edge.example.com\n"
+               "  Expiry Date: 2026-10-31 00:00:00+00:00 (VALID: 21 days)\n")
+        with mock.patch.object(cert_ops, "run", _fake_run({"certbot": {"code": 0, "out": out}})):
+            data = asyncio.run(cert_ops.list_certs(NOW, threshold=14))
+        self.assertEqual(data["certs"][0]["status"], "ok")
+        self.assertEqual(data["expiring_days"], 14)
+
+    def test_zero_line_only_judges_expiry(self):
+        """配置为 0 是"关掉证书提醒"，不是"所有证书都要到期"。"""
+        out = ("Certificate Name: edge.example.com\n  Domains: edge.example.com\n"
+               "  Expiry Date: 2026-10-20 00:00:00+00:00 (VALID: 10 days)\n")
+        with mock.patch.object(cert_ops, "run", _fake_run({"certbot": {"code": 0, "out": out}})):
+            data = asyncio.run(cert_ops.list_certs(NOW, threshold=0))
+        self.assertEqual(data["certs"][0]["status"], "ok")
+        self.assertEqual(data["expiring_days"], 0)
+
+    def test_default_line_comes_from_the_alert_setting(self):
+        """不传 threshold 时读的就是那条生效配置：证书页与巡检不许两套数。"""
+        out = ("Certificate Name: edge.example.com\n  Domains: edge.example.com\n"
+               "  Expiry Date: 2026-10-31 00:00:00+00:00 (VALID: 21 days)\n")
+        dbm.set_setting("alert_ssl_days", "25")
+        self.addCleanup(dbm.execute, "DELETE FROM settings WHERE key=?", ("alert_ssl_days",))
+        with mock.patch.object(cert_ops, "run", _fake_run({"certbot": {"code": 0, "out": out}})):
+            data = asyncio.run(cert_ops.list_certs(NOW))
+        self.assertEqual(data["expiring_days"], 25)
         self.assertEqual(data["certs"][0]["status"], "expiring")
 
     def test_unparseable_expiry_is_unknown_not_ok(self):
