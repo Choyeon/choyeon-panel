@@ -102,7 +102,10 @@ const loadVal = computed(() => {
 });
 function band(v: number | null, warn: number, err: number) {
   if (v == null) return 'var(--cp-brand)';
-  return v >= err ? 'var(--cp-err)' : v >= warn ? 'var(--cp-warn)' : 'var(--cp-brand)';
+  // 阈值 ≤0 一律当作"这一档没给"，不染红：载荷缺字段时宁可中性，也不要一个平白的红仪表。
+  if (err > 0 && v >= err) return 'var(--cp-err)';
+  if (warn > 0 && v >= warn) return 'var(--cp-warn)';
+  return 'var(--cp-brand)';
 }
 const loadWord = computed(() => {
   const v = loadVal.value;
@@ -129,7 +132,7 @@ const gauges = computed(() => [
   {
     key: 'disk', label: `磁盘 ${stat.value.diskPath || '/'}`, percent: diskVal.value, text: diskVal.value == null ? '-' : String(diskVal.value),
     unit: '%', detail: `${fmtBytes(stat.value.diskUsed || 0)} / ${fmtBytes(stat.value.diskTotal || 0)}`,
-    color: band(diskVal.value, 80, 90),
+    color: band(diskVal.value, num(stat.value.diskWarnPct) ?? 0, num(stat.value.diskCritPct) ?? 0),
   },
 ]);
 

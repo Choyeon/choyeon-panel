@@ -312,7 +312,9 @@ class FindingsTests(unittest.TestCase):
         rec.update(kw)
         return rec
 
-    def _disk(self, pct=50):
+    def _disk(self, pct=10):
+        # 默认取一个远低于任何可配警戒线的值（alert_disk_pct 允许配到 50）：
+        # 判词现在读的是设置里那条线，夹具贴着 85/90 写就会随别的用例留下的配置变红。
         return {"ok": True, "path": "/data", "total": 100 * GIB, "free": (100 - pct) * GIB,
                 "used_pct": pct}
 
@@ -343,11 +345,18 @@ class FindingsTests(unittest.TestCase):
         roots = [self._root("面板备份", "/bak", 0, exists=False)]
         self.assertNotIn("backups", _ids(ss._findings(roots, {"bytes": None}, self._disk(), [])))
 
-    def test_tight_partition_is_the_only_risk(self):
-        out = ss._findings([], {"bytes": None}, self._disk(90), [])
-        self.assertEqual([f["severity"] for f in out], [ss.SEV_RISK])
+    def test_tight_partition_follows_the_configured_lines(self):
+        # 两条线由调用方给（出处是设置页的 alert_disk_pct，见 alerts_service.disk_thresholds）：
+        # 越过警戒线出声、越过要紧线才是要紧项。夹具不写死 90，配置改了用例不会跟着漂。
+        lines = {"warn": 85, "crit": 95}
+        out = ss._findings([], {"bytes": None}, self._disk(90), [], thresholds=lines)
+        self.assertEqual([f["severity"] for f in out], [ss.SEV_WARN])
         self.assertEqual(out[0]["id"], "tight")
-        self.assertEqual(ss._findings([], {"bytes": None}, self._disk(89), []), [])
+        self.assertIn("警戒线 85%", out[0]["detail"])
+        risk = ss._findings([], {"bytes": None}, self._disk(96), [], thresholds=lines)
+        self.assertEqual([f["severity"] for f in risk], [ss.SEV_RISK])
+        self.assertEqual(ss._findings([], {"bytes": None}, self._disk(84), [],
+                                      thresholds=lines), [])
 
     def test_disk_unreadable_is_not_called_tight(self):
         self.assertEqual(ss._findings([], {"bytes": None}, {"ok": False, "path": "/x"}, []), [])

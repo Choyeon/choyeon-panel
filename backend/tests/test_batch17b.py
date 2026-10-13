@@ -171,10 +171,19 @@ class TightThresholdSingleSourceTests(unittest.TestCase):
     `audit()`，第一版把键加在 `_collect()` 里，全套用例照绿而线上前端读到 null，
     `tightPct` 退化成 0，「分区已用 95%」在页签上仍是绿灯。夹具因此故意不给 `_collect()`
     塞 tight_pct——阈值必须是出口自己给出的，不是从走盘结果里转手的。
+
+    ⑱A 起这两条线只有一个出处（`alerts_service.disk_thresholds()`，读设置页那条配置），
+    所以这里把它钉成 90/95 来断言行为，而不是再引用一个后端常量。
     """
+
+    LINES = {"warn": 90, "crit": 95}
 
     def setUp(self):
         ss.reset_cache()
+        patcher = mock.patch.object(ss.alerts_service, "disk_thresholds",
+                                    lambda: dict(self.LINES))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.addCleanup(ss.reset_cache)
 
     def _audit(self, used_pct=50):
@@ -192,8 +201,10 @@ class TightThresholdSingleSourceTests(unittest.TestCase):
              mock.patch.object(ss, "_collect", lambda: collected):
             return asyncio.run(ss.audit(refresh=True))
 
-    def test_payload_carries_the_threshold(self):
-        self.assertEqual(self._audit()["tight_pct"], ss.DISK_TIGHT_PCT)
+    def test_payload_carries_both_lines(self):
+        d = self._audit()
+        self.assertEqual(d["tight_pct"], self.LINES["warn"])
+        self.assertEqual(d["crit_pct"], self.LINES["crit"])
 
     def test_cache_hit_still_carries_it(self):
         # cached() 是 dict(_cache["data"]) 的浅拷贝，键在缓存里就得在响应里；
@@ -202,14 +213,15 @@ class TightThresholdSingleSourceTests(unittest.TestCase):
         second = asyncio.run(ss.audit())
         self.assertTrue(second["cached"])
         self.assertEqual(second["tight_pct"], first["tight_pct"])
+        self.assertEqual(second["crit_pct"], first["crit_pct"])
 
     def test_the_page_and_the_finding_share_one_line(self):
-        # 同一条"分区已用 90%"要么在自检里是要紧项、在页签上也得是紧；差一档就都不出声。
-        self.assertEqual(self._audit(ss.DISK_TIGHT_PCT - 1)["counts"]["risk"], 0)
-        d = self._audit(ss.DISK_TIGHT_PCT)
+        # 同一条"分区已用 90%"要么在自检里出声、在页签上也得出声；差一档就都不出声。
+        self.assertEqual(self._audit(self.LINES["warn"] - 1)["counts"]["warn"], 0)
+        d = self._audit(self.LINES["warn"])
         self.assertIn("tight", [f["id"] for f in d["findings"]])
-        self.assertEqual(d["counts"]["risk"], 1)
-        self.assertEqual(d["tight_pct"], ss.DISK_TIGHT_PCT)
+        self.assertEqual(d["counts"]["risk"], 0, "刚到警戒线还不是要紧项")
+        self.assertEqual(d["tight_pct"], self.LINES["warn"])
 
     def test_the_route_returns_this_payload_untouched(self):
         src = (SRC / "backend/app/routers/meta.py").read_text(encoding="utf-8")
@@ -238,13 +250,32 @@ class SharedByteFormatterTests(unittest.TestCase):
 
 
 class StorageThresholdStillUsedTests(unittest.TestCase):
-    """前端换了出处，后端那条判定不能跟着漂：89% 不该被点名，阈值本身要算进去。"""
+    """⑱A 把这条线并给了设置页那条配置，后端不能再留一份自己的常量。
 
-    def test_finding_threshold_is_the_constant(self):
+    ⑰B 当初的守卫是「storage_service 里 DISK_TIGHT_PCT 引用不少于 3 处」，那是在钉一个
+    第二出处：90 和配置线（默认 85）本来就是两个答案，只是没人把线调到 90 以下才没暴露。
+    现在反过来守——那个名字必须彻底消失，判定与载荷都只能引用 disk_thresholds()。
+    """
+
+    def test_storage_service_no_longer_defines_its_own_line(self):
         src = (SRC / "backend/app/services/storage_service.py").read_text(encoding="utf-8")
-        self.assertGreaterEqual(len(re.findall(r"DISK_TIGHT_PCT", src)), 3,
-                                "判定与载荷都只能引用这一个常量")
-        self.assertEqual(ss.DISK_TIGHT_PCT, 90)
+        self.assertNotIn("DISK_TIGHT_PCT", src,
+                         "又一份常量就是又一个出处，配置改了它不会跟着动")
+        self.assertGreaterEqual(len(re.findall(r'dt\["(warn|crit)"\]', src)), 3,
+                                "判定（警戒/要紧两档）与载荷都要引用同一个 dt")
+
+    def test_only_alerts_service_computes_the_lines(self):
+        files = ["backend/app/services/storage_service.py",
+                 "backend/app/routers/meta.py",
+                 "backend/app/routers/system.py"]
+        for rel in files:
+            src = (SRC / rel).read_text(encoding="utf-8")
+            self.assertNotIn('get_setting("alert_disk_pct"', src,
+                             f"{rel} 不该自己读那条配置：读法只有一处，见 disk_thresholds()")
+        # 自检、存储载荷、概览三条出口都得走同一个出处。
+        hits = sum((SRC / rel).read_text(encoding="utf-8").count("disk_thresholds()")
+                   for rel in files)
+        self.assertGreaterEqual(hits, 3, "三条出口少一条就意味着那里又自己算了一份")
 
 
 if __name__ == "__main__":

@@ -231,18 +231,31 @@ const storageRoots = computed<any[]>(() => storageData.value?.roots ?? []);
 const allFindings = computed<any[]>(() => storageData.value?.findings ?? []);
 const bigFiles = computed<any[]>(() => storageData.value?.big_files ?? []);
 const diskInfo = computed<any>(() => storageData.value?.disk ?? {});
-// 阈值只有一个出处：后端 DISK_TIGHT_PCT 随载荷给出。过去这里自己写死 90，后端把阈值
-// 调成 85 的话，同一条"分区已用 87%"在自检里是要紧项、在这一页却是绿灯。
+// 阈值只有一个出处：后端按设置页那条配置算好，随载荷给出（见 alerts_service.disk_thresholds）。
+// 过去这里自己写死 90、inode 那一列又共用同一个数，于是把线调到 85 之后，同一条
+// "分区已用 87%"在自检里是要紧项、在这一页却是绿灯，而 inode 的"紧"和判词用的还不是同一条线。
 const tightPct = computed(() => Number(storageData.value?.tight_pct ?? 0));
-const tightDisk = computed(() => tightPct.value > 0
-  && Number(diskInfo.value?.used_pct ?? 0) >= tightPct.value);
+const critPct = computed(() => Number(storageData.value?.crit_pct ?? 0));
+const inodeWarnPct = computed(() => Number(storageData.value?.inode_warn_pct ?? 0));
+// chip 的红/黄也按同一对线分档（要紧线以上才红），否则「要紧 1 项」是红的而旁边那块盘
+// 只是黄——同一件事在同一个横排里给出两级结论。
+const diskTone = computed(() => {
+  if (!diskInfo.value?.ok || !tightPct.value) return '';
+  const v = Number(diskInfo.value?.used_pct ?? 0);
+  const crit = critPct.value || tightPct.value;
+  return v >= crit ? 'err' : v >= tightPct.value ? 'warn' : '';
+});
+// chip 上补一句"按哪条线判的"，读的人才能确认这个数字和设置页那条配置对得上。
+const diskLine = computed(() => (diskTone.value === 'err'
+  ? `要紧线 ${critPct.value || tightPct.value}%`
+  : `警戒线 ${tightPct.value}%`));
 // 挂载点这一张表回答的是「别的盘呢」：chip 上的分区余量说的是数据目录所在的那块盘，
 // 而写满的可能是一个和数据目录毫无关系的挂载点，或者它的 inode 先耗尽。
 const mountData = computed<any>(() => storageData.value?.mounts ?? {});
 const mountRows = computed<any[]>(() => mountData.value?.items ?? []);
 const tightMounts = computed(() => mountRows.value.filter(
-  (m: any) => tightPct.value > 0
-    && (Number(m.used_pct ?? 0) >= tightPct.value || Number(m.inode_pct ?? 0) >= tightPct.value),
+  (m: any) => (tightPct.value > 0 && Number(m.used_pct ?? 0) >= tightPct.value)
+    || (inodeWarnPct.value > 0 && Number(m.inode_pct ?? 0) >= inodeWarnPct.value),
 ));
 // 「知道就好」那几档（没扫完、点名几个大文件）默认收着：一进来先看见一堆无关痛痒的行，
 // 真正的风险反而被埋在下面。
@@ -285,7 +298,7 @@ const storageAlert = computed(() => {
   const disk = d.disk || {};
   return {
     type: 'success' as const,
-    text: `盘点了 ${c.roots} 个目录、合计 ${c.bytes_total_human}，没有异常占用${disk.ok ? `，${disk.path || '数据目录'} 所在分区已用 ${disk.used_pct}%` : '（数据目录所在分区读不到）'}。`,
+    text: `盘点了 ${c.roots} 个目录、合计 ${c.bytes_total_human}，没有异常占用${disk.ok ? `，${disk.path || '数据目录'} 所在分区已用 ${disk.used_pct}%（警戒线 ${d.tight_pct ?? 0}%）` : '（数据目录所在分区读不到）'}。`,
   };
 });
 
@@ -391,7 +404,11 @@ function pager(count: number, cfg: { pageSize: number }) {
 }
 const storagePaging = { pageSize: 10, showSizePicker: false, showQuickJumper: false };
 
-const hotPct = (v: any) => typeof v === 'number' && v >= 90;
+// 条形染色的线也来自载荷：这里过去自己写死 90，等于在判词之外又留了一把尺——
+// 配置调到 70 之后，表里那一行的条形仍是冷的，而上面的判词已经在说它紧。
+const hotAt = (v: any, line: number) => typeof v === 'number' && line > 0 && v >= line;
+const hotCap = (v: any) => hotAt(v, tightPct.value);
+const hotInode = (v: any) => hotAt(v, inodeWarnPct.value);
 const barStyle = (v: any) => `width:${Math.min(100, Math.max(0, Number(v) || 0))}%`;
 const mountColumns: any[] = [
   {
@@ -407,7 +424,7 @@ const mountColumns: any[] = [
     title: '容量', key: 'used_pct', width: 150,
     render: (r: any) => h('div', { class: 'cell-txt' }, [
       h('span', { class: 'cell-name mono' }, typeof r.used_pct === 'number' ? `已用 ${r.used_pct}%` : '—'),
-      h('div', { class: 'st-bar' }, [h('i', { class: hotPct(r.used_pct) ? 'hot' : '', style: barStyle(r.used_pct) })]),
+      h('div', { class: 'st-bar' }, [h('i', { class: hotCap(r.used_pct) ? 'hot' : '', style: barStyle(r.used_pct) })]),
       h('div', { class: 'cell-sub' }, r.unknown ? '挂着却读不到' : `剩 ${r.free_human} / 共 ${r.total_human}`),
     ]),
   },
@@ -422,8 +439,8 @@ const mountColumns: any[] = [
       ])
       : h('div', { class: 'cell-txt' }, [
         h('span', { class: 'cell-name mono' }, `${r.inode_pct}%`),
-        h('div', { class: 'st-bar' }, [h('i', { class: hotPct(r.inode_pct) ? 'hot' : '', style: barStyle(r.inode_pct) })]),
-        ...(hotPct(r.inode_pct)
+        h('div', { class: 'st-bar' }, [h('i', { class: hotInode(r.inode_pct) ? 'hot' : '', style: barStyle(r.inode_pct) })]),
+        ...(hotInode(r.inode_pct)
           ? [h('div', { class: 'cell-sub ls-wrap' }, '容量看着还够，新文件已经建不出来')]
           : []),
       ])),
@@ -2054,8 +2071,8 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </NAlert>
 
       <div v-if="storageData" class="st-chips">
-        <span class="st-chip" :class="{ err: tightDisk }">
-          <i>分区已用</i>{{ diskInfo.ok ? `${diskInfo.used_pct}%（剩 ${diskInfo.free_human}）` : '读不到' }}
+        <span class="st-chip" :class="diskTone">
+          <i>分区已用</i>{{ diskInfo.ok ? `${diskInfo.used_pct}%（剩 ${diskInfo.free_human}）` : '读不到' }}<template v-if="diskTone">，{{ diskLine }}（设置页可改）</template>
         </span>
         <span class="st-chip"><i>分区总量</i>{{ diskInfo.total_human || '—' }}</span>
         <span class="st-chip" :class="{ err: tightMounts.length > 0 }">

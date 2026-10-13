@@ -20,6 +20,7 @@ from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
 from ..services import (
+    alerts_service,
     cert_ops,
     exposure_service,
     load_service,
@@ -183,15 +184,20 @@ async def _check_disk() -> dict:
     pct = disk_usage_pct(config.DATA_DIR)
     if pct is None:
         return {"status": "warn", "detail": f"无法读取 {config.DATA_DIR} 所在分区", "fix": ""}
-    if pct >= 90:
+    # 两条线都取自设置页那条配置（alert_disk_pct）：曾经这里写着 90/75 两个字面量，
+    # 管理员把线调到 70 之后，告警在响、网页仪表是红的，而 `choyeonctl doctor` 这里
+    # 仍报 pass——同一块盘三个答案。
+    dt = alerts_service.disk_thresholds()
+    if pct >= dt["crit"]:
         return {
             "status": "fail",
-            "detail": f"磁盘已用 {pct}%，数据库写入可能失败",
+            "detail": f"磁盘已用 {pct}%（要紧线 {dt['crit']}%），数据库写入可能失败",
             "fix": "清理旧备份与 journalctl --vacuum-size=200M",
         }
-    if pct >= 75:
-        return {"status": "warn", "detail": f"磁盘已用 {pct}%", "fix": "关注增长趋势，必要时清理备份"}
-    return {"status": "pass", "detail": f"磁盘已用 {pct}%", "fix": ""}
+    if pct >= dt["warn"]:
+        return {"status": "warn", "detail": f"磁盘已用 {pct}%（警戒线 {dt['warn']}%）",
+                "fix": "关注增长趋势，必要时清理备份"}
+    return {"status": "pass", "detail": f"磁盘已用 {pct}%（警戒线 {dt['warn']}%）", "fix": ""}
 
 
 async def _check_frontend() -> dict:

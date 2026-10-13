@@ -31,6 +31,7 @@ from pathlib import Path
 
 from .. import config
 from ..util import run
+from . import alerts_service
 
 CACHE_TTL = 300.0
 ROOT_BUDGET_SEC = 2.0
@@ -42,7 +43,9 @@ JOURNAL_TIMEOUT = 15
 JOURNAL_WARN = 2 * 1024**3
 BACKUP_WARN = 4 * 1024**3
 BIG_FILE_WARN = 2 * 1024**3
-DISK_TIGHT_PCT = 90
+# 分区「要满了」这条线不在这里定义：出处是设置页的 alert_disk_pct，读
+# alerts_service.disk_thresholds()。过去这里另写一份 90，管理员调到 70 之后告警在响、
+# 这一页却写「没有异常占用」。
 INODE_WARN_PCT = 90
 INODE_RISK_PCT = 97
 TOP_MOUNTS = 24
@@ -415,9 +418,17 @@ def _mounts(raw: str | None = None) -> dict:
 
 
 def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict],
-              mounts: list[dict] | None = None) -> list[dict]:
-    """把数字折成判词。每条都带一句"为什么"和一个能复制的动作，不写"建议关注"这种空话。"""
+              mounts: list[dict] | None = None,
+              thresholds: dict | None = None) -> list[dict]:
+    """把数字折成判词。每条都带一句"为什么"和一个能复制的动作，不写"建议关注"这种空话。
+
+    thresholds 由调用方给（一轮只读一次配置），留空时现读——判"这块盘要满了"的线
+    不在这里定义，出处是 alerts_service.disk_thresholds()。曾经这里写着 90、自检写着
+    75/90、告警写着 alert_disk_pct，管理员把配置调到 70，于是告警在响而这一页写
+    「没有异常占用」。
+    """
     out: list[dict] = []
+    dt = thresholds or alerts_service.disk_thresholds()
     jb = journal.get("bytes")
     if isinstance(jb, int) and jb >= JOURNAL_WARN:
         out.append({
@@ -442,13 +453,14 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
             "fix": "choyeonctl backup list",
         })
 
-    if disk.get("ok") and isinstance(disk.get("used_pct"), int) and disk["used_pct"] >= DISK_TIGHT_PCT:
+    if disk.get("ok") and isinstance(disk.get("used_pct"), int) and disk["used_pct"] >= dt["warn"]:
         out.append({
             "id": "tight",
-            "severity": SEV_RISK,
+            "severity": SEV_RISK if disk["used_pct"] >= dt["crit"] else SEV_WARN,
             "title": f"分区已用 {disk['used_pct']}%，只剩 {_human(int(disk['free']))}",
             "detail": "备份、数据库写入和构建缓存都落在这一块的盘上。接近满的时候最先出事的"
-                      "往往是备份，而备份失败不会有任何提示音。",
+                      "往往是备份，而备份失败不会有任何提示音。这条线取自设置页的磁盘阈值"
+                      f"（警戒线 {dt['warn']}%，要紧线 {dt['crit']}%），改一次各处一起跟着变。",
             "fix": "choyeonctl storage",
         })
 
@@ -480,15 +492,17 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
                 "fix": f"find '{path}' -xdev -printf '%h\\n' | sort | uniq -c | sort -rn | head -20",
             })
         pct = m.get("used_pct")
-        if (isinstance(pct, int) and pct >= DISK_TIGHT_PCT
+        if (isinstance(pct, int) and pct >= dt["warn"]
                 and not m.get("panel") and not m.get("snapshot")):
             out.append({
                 "id": "mount:" + path,
-                "severity": SEV_RISK,
+                "severity": SEV_RISK if pct >= dt["crit"] else SEV_WARN,
                 "title": f"{path}（{dev}）已用 {pct}%，剩 {m['free_human']}",
                 "detail": "这一块的紧张不会惊动面板自己的余量自检——那一项看的是数据目录所在的那块盘。"
                           "先出事的是落在这上面的东西：上传临时文件、数据库 WAL、构建产物，"
-                          "而且备份失败是不响的。别照数据目录的榜单来清这块盘。",
+                          "而且备份失败是不响的。判它紧用的是和数据目录同一把尺"
+                          f"（警戒线 {dt['warn']}%，要紧线 {dt['crit']}%）。"
+                          "别照数据目录的榜单来清这块盘。",
                 "fix": f"du -xh --max-depth=1 '{path}' 2>/dev/null | sort -h | tail -10",
             })
         if m.get("ro") and not m.get("snapshot") and ftype not in RAM_FSTYPES:
@@ -604,12 +618,15 @@ async def audit(refresh: bool = False) -> dict:
         jb, jraw = await _journal_bytes()
         picked = await asyncio.to_thread(_collect)
         roots, disk = picked["roots"], picked["disk"]
+        # 一轮扫描只读一次配置线，判词和载荷用的是同一个值。
+        dt = alerts_service.disk_thresholds()
         journal = {
             "bytes": jb,
             "bytes_human": _human(jb) if isinstance(jb, int) else None,
             "raw": jraw[:200],
         }
-        findings = _findings(roots, journal, disk, picked["big_files"], picked["mounts"]["items"])
+        findings = _findings(roots, journal, disk, picked["big_files"],
+                             picked["mounts"]["items"], thresholds=dt)
         total = sum(int(r.get("bytes") or 0) for r in roots if not r.get("nested_in"))
         counts = {
             "risk": sum(1 for f in findings if f["severity"] == SEV_RISK),
@@ -631,10 +648,15 @@ async def audit(refresh: bool = False) -> dict:
             "findings": findings,
             "counts": counts,
             "notes": list(NOTES),
-            # 阈值只有一个出处：前端过去自己写死 90，这里改成 85 的话页面仍按 90 判紧，
-            # 于是同一条"分区已用 87%"在自检里是要紧项、在页签上是绿灯。
+            # 阈值只有一个出处：要紧线取自设置页那条配置（见 alerts_service.disk_thresholds），
+            # 这里只是把它随载荷带出去。过去前端自己写死 90、inode 又写死 90，后端把配置
+            # 调到 85 的话，同一条"分区已用 87%"在自检里是要紧项、在页签上是绿灯，
+            # 而 inode 那一列的"紧"和判词用的还不是同一条线。
             # 注意要放在这个函数上——/api/storage 返回的是 audit()，放在 _collect() 里前端读不到。
-            "tight_pct": DISK_TIGHT_PCT,
+            "tight_pct": dt["warn"],
+            "crit_pct": dt["crit"],
+            "inode_warn_pct": INODE_WARN_PCT,
+            "inode_risk_pct": INODE_RISK_PCT,
         }
         _cache["at"] = time.monotonic()
         _cache["data"] = data

@@ -50,6 +50,11 @@ LEVELS = ("ok", "warn", "crit")
 # 一轮确认。连不上/单元 failed/证书过期是明确故障，不在这个缓冲之列。
 RESOURCE_NOTIFY_ROUNDS = 2
 
+# 要紧线只有一条配置线之上的这一档：管理员配的是"该发通知了"，页面上的红/自检的 fail
+# 要再高一档才有意义，否则把线设到 60% 的机器会天天红。差的这 10 个点写在这里一次，
+# 前端与自检都读 `disk_thresholds()`，不许再各写一份。
+DISK_CRIT_STEP = 10
+
 
 def _today() -> str:
     return datetime.date.today().isoformat()
@@ -86,6 +91,20 @@ def _int_setting(key: str, default: int, lo: int, hi: int) -> int:
     if not lo <= n <= hi:
         warn(f"{key}={n} 超出 {lo}-{hi}，已钳制")
     return max(lo, min(n, hi))
+
+
+def disk_thresholds() -> dict:
+    """「这块盘要满了」只有一条线，出处是管理员在设置页配的 `alert_disk_pct`。
+
+    同一个百分比过去写着四处：自检项的 75/90 字面量、巡检里的 `alert_disk_pct`（默认 85、
+    可配 50-99）、存储对账的 `DISK_TIGHT_PCT = 90`，前端还各自抄了一份 80/90 与 90。
+    后果是一台把线调到 70 的机器上，告警在响、概览的磁盘仪表仍是品牌色、存储页签写着
+    「没有异常占用」——最该被看见的那块盘给出了三个互相矛盾的答案。
+    现在 warn 就是那条生效配置，crit 比它高 10 档（封顶 99）用于「要紧/红」这一格，
+    两处都不再另设常量；要改线只在设置页改一次。
+    """
+    line = _int_setting("alert_disk_pct", 85, 50, 99)
+    return {"warn": line, "crit": min(99, line + DISK_CRIT_STEP)}
 
 
 def _post(url: str, payload: dict):
@@ -287,16 +306,20 @@ def parse_certbot(output: str) -> list[dict]:
 
 async def run_checks():
     pct = disk_usage_pct(config.DATA_DIR)
-    disk_pct = _int_setting("alert_disk_pct", 85, 50, 99)
+    dth = disk_thresholds()
+    disk_pct = dth["warn"]
     if pct is None:
         warn("无法读取磁盘使用率，跳过磁盘告警")
     else:
+        # 越过要紧线就升成 crit：通知渠道（Telegram / webhook）按 level 区分对待，
+        # 而"还能写"和"快写不下了"是两件事，都发 warn 就只能靠人读数字。
         await _check(f"disk-{pct // 5}", pct >= disk_pct,
-                     f"磁盘使用率 {pct}%（阈值 {disk_pct}%）于 {os.uname().nodename}，路径 {config.DATA_DIR}",
-                     code="disk", level="warn",
+                     f"磁盘使用率 {pct}%（警戒线 {disk_pct}%，要紧线 {dth['crit']}%）"
+                     f"于 {os.uname().nodename}，路径 {config.DATA_DIR}",
+                     code="disk", level="crit" if pct >= dth["crit"] else "warn",
                      log_message=f"磁盘使用率超过阈值（阈值 {disk_pct}%）",
                      ok_message=f"磁盘使用率正常（阈值 {disk_pct}%）",
-                     meta=_meta(pct=pct, threshold=disk_pct))
+                     meta=_meta(pct=pct, threshold=disk_pct, crit=dth["crit"]))
 
     failed = await run("systemctl", ["list-units", "--state=failed", "--no-legend", "--plain"])
     if failed["code"] == 0:

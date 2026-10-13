@@ -12,7 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from .. import aio_db, config, security
 from ..deps import need_admin
 from ..errors import BadInput, err_json, public_message
-from ..services import firewall_service, system_metrics, systemd_ops
+from ..services import alerts_service, firewall_service, system_metrics, systemd_ops
 from ..util import is_unit, parse_lines, redact_creds, run
 
 router = APIRouter()
@@ -28,7 +28,12 @@ async def sys_info():
 
 @router.get("/api/system/stats")
 async def sys_stats():
-    return await system_metrics.snapshot()
+    data = await system_metrics.snapshot()
+    # 概览那块盘的配色跟着设置页的线走：仪表/自检/告警/存储页过去各写一份 80、90、75、90，
+    # 把线调到 70 之后告警在响，概览的磁盘仪表仍是品牌色。
+    dt = alerts_service.disk_thresholds()
+    data["diskWarnPct"], data["diskCritPct"] = dt["warn"], dt["crit"]
+    return data
 
 
 @router.get("/api/system/overview")
