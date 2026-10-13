@@ -115,18 +115,22 @@ const loadWord = computed(() => {
 const gauges = computed(() => [
   {
     key: 'cpu', label: 'CPU', percent: cpuVal.value, text: cpuVal.value == null ? '-' : String(cpuVal.value),
-    unit: '%', detail: `${cores.value || '?'} 核`, color: band(cpuVal.value, 70, 85),
+    unit: '%', detail: `${cores.value || '?'} 核`,
+    color: band(cpuVal.value, num(stat.value.cpuWarnPct) ?? 0, num(stat.value.cpuCritPct) ?? 0),
   },
   {
     key: 'mem', label: '内存', percent: memVal.value, text: memVal.value == null ? '-' : String(memVal.value),
     unit: '%', detail: `${fmtBytes(stat.value.memUsed || 0)} / ${fmtBytes(stat.value.memTotal || 0)}`,
-    color: band(memVal.value, 80, 90),
+    color: band(memVal.value, num(stat.value.memWarnPct) ?? 0, num(stat.value.memCritPct) ?? 0),
   },
   {
     key: 'load', label: '负载', percent: loadVal.value, text: loadWord.value, unit: '',
     // 首轮采样还没到货时 text 是"采集中"，detail 不能同时写 "1min 0.00"——
     // 同一格里两个互相矛盾的读数，用户会以为负载真的是 0。
     detail: stat.value.load?.length ? `1min ${Number(stat.value.load[0]).toFixed(2)}` : '1min —',
+    // 这一格的两档是物理口径（相对核数：70% 已排队、100% 每核一个），不是设置页那条线：
+    // alert_load1_x 存的是饱和之上的倍数（默认 ×2 → 环要冲到 200% 才出声），
+    // 拿它当变色档位等于让负载环永远不会红。详见 alerts_service.resource_thresholds()。
     color: band(loadVal.value, 70, 100),
   },
   {

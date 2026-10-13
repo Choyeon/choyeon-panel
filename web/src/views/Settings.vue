@@ -23,22 +23,37 @@ const renewLog = ref('');
 const renewSummary = ref('');
 // 阈值类配置在库里可能根本没写过（值为空串），巡检侧用的是代码默认值。
 // 这里把空值显示成那个默认值，界面和真实生效的阈值才是一致的；保存后就是显式值。
-const ALERT_DEFAULTS: Record<string, string> = {
-  alert_disk_pct: '85', alert_ssl_days: '14', alert_cpu_pct: '80', alert_mem_pct: '90',
-  alert_load1_x: '2', alert_keep_days: '30', alert_keep_rows: '2000', alert_probe: '1',
-};
-const NUM_ALERT_KEYS = ['alert_disk_pct', 'alert_ssl_days', 'alert_cpu_pct', 'alert_mem_pct',
-                        'alert_load1_x', 'alert_keep_days', 'alert_keep_rows'];
+// 默认值和可填区间都不在这个文件里：它们跟着 /api/settings/alerts 的 `limits` 一起给出，
+// 出处是 alerts_service.ALERT_LIMITS（巡检读取时用的就是那一份）。
+// 过去这里抄了八个默认值、模板里又抄了八对 :min/:max，后端改任何一个数都不会带动它们，
+// 于是页面显示 80、告警按 85 响；管理员按页面填的数被保存校验拒绝，或反过来存进去后被
+// 读取侧悄悄钳掉。`critStep` 同理——要紧档比配置线高多少只在服务层算一次。
+type AlertLimit = { default: number; min: number; max: number };
+const alertLimits = ref<Record<string, AlertLimit>>({});
+const critStep = ref(0);
 
 function normalizeAlerts(v: any) {
   const out = { ...v };
-  Object.entries(ALERT_DEFAULTS).forEach(([k, def]) => {
-    if (out[k] === undefined || out[k] === null || out[k] === '') out[k] = def;
+  const limits = (v?.limits ?? {}) as Record<string, AlertLimit>;
+  alertLimits.value = limits;
+  critStep.value = Number(v?.crit_step ?? 0);
+  Object.entries(limits).forEach(([k, lim]) => {
+    if (out[k] === undefined || out[k] === null || out[k] === '') out[k] = lim.default;
+    // NInputNumber 只认 number；库里存的是字符串，直接绑会渲染成空框，用户以为没配置。
+    out[k] = Number(out[k]);
   });
-  // NInputNumber 只认 number；库里存的是字符串，直接绑会渲染成空框，用户以为没配置。
-  NUM_ALERT_KEYS.forEach((k) => { out[k] = Number(out[k]); });
   return out;
 }
+
+const lim = (k: string): AlertLimit => alertLimits.value[k] ?? { default: 0, min: 0, max: 0 };
+// 三档「要紧档」提示：配置线是「该发通知了」，页面上的红要再高一档才有意义。
+// 数字来自后端，不在这儿写死，否则这条说明会变成第四份出处。
+const critHint = (k: string) => {
+  const line = Number(alerts.value?.[k] ?? 0);
+  if (!line || !critStep.value) return '';
+  return `警戒线就是这条配置（当前 ${line}%），要紧档在它上面 ${critStep.value} 个点`
+    + '——自检的红档、概览仪表的变色按要紧档，通知按警戒线。';
+};
 
 const alerts = ref<any>(normalizeAlerts({}));
 const fw = ref<any>(null);
@@ -239,29 +254,29 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <CpSettingRow label="Telegram Bot Token" :value="mask(alerts.alert_telegram_bot)" @edit="openChan('alert_telegram_bot')" />
           <CpSettingRow label="Telegram Chat ID" :value="mask(alerts.alert_telegram_chat)" @edit="openChan('alert_telegram_chat')" />
           <CpSettingRow label="通用 Webhook URL" :value="mask(alerts.alert_webhook_url)" @edit="openChan('alert_webhook_url')" />
-          <CpSettingRow label="磁盘阈值 %">
+          <CpSettingRow label="磁盘阈值 %" :help="critHint('alert_disk_pct')">
             <template #control>
-              <NInputNumber :value="alerts.alert_disk_pct" :min="50" :max="99" style="width: 118px" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
+              <NInputNumber :value="alerts.alert_disk_pct" :min="lim('alert_disk_pct').min" :max="lim('alert_disk_pct').max" style="width: 118px" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="SSL 剩余天数">
             <template #control>
-              <NInputNumber :value="alerts.alert_ssl_days" :min="0" :max="60" style="width: 118px" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" @update:value="commitNum('alert_ssl_days', $event)" />
+              <NInputNumber :value="alerts.alert_ssl_days" :min="lim('alert_ssl_days').min" :max="lim('alert_ssl_days').max" style="width: 118px" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" @update:value="commitNum('alert_ssl_days', $event)" />
             </template>
           </CpSettingRow>
-          <CpSettingRow label="CPU 阈值 %">
+          <CpSettingRow label="CPU 阈值 %" :help="critHint('alert_cpu_pct')">
             <template #control>
-              <NInputNumber :value="alerts.alert_cpu_pct" :min="1" :max="99" style="width: 118px" :input-props="{ 'aria-label': 'CPU 使用率阈值百分比' }" @update:value="commitNum('alert_cpu_pct', $event)" />
+              <NInputNumber :value="alerts.alert_cpu_pct" :min="lim('alert_cpu_pct').min" :max="lim('alert_cpu_pct').max" style="width: 118px" :input-props="{ 'aria-label': 'CPU 使用率阈值百分比' }" @update:value="commitNum('alert_cpu_pct', $event)" />
             </template>
           </CpSettingRow>
-          <CpSettingRow label="内存阈值 %">
+          <CpSettingRow label="内存阈值 %" :help="critHint('alert_mem_pct')">
             <template #control>
-              <NInputNumber :value="alerts.alert_mem_pct" :min="1" :max="99" style="width: 118px" :input-props="{ 'aria-label': '内存使用率阈值百分比' }" @update:value="commitNum('alert_mem_pct', $event)" />
+              <NInputNumber :value="alerts.alert_mem_pct" :min="lim('alert_mem_pct').min" :max="lim('alert_mem_pct').max" style="width: 118px" :input-props="{ 'aria-label': '内存使用率阈值百分比' }" @update:value="commitNum('alert_mem_pct', $event)" />
             </template>
           </CpSettingRow>
-          <CpSettingRow label="load1 ×核数">
+          <CpSettingRow label="load1 ×核数" help="这一条只决定告警。概览的负载环按物理饱和度变色（满一格是每核一个排队任务），不会跟着这个倍数走。">
             <template #control>
-              <NInputNumber :value="alerts.alert_load1_x" :min="1" :max="32" style="width: 118px" :input-props="{ 'aria-label': '一分钟负载阈值倍数' }" @update:value="commitNum('alert_load1_x', $event)" />
+              <NInputNumber :value="alerts.alert_load1_x" :min="lim('alert_load1_x').min" :max="lim('alert_load1_x').max" style="width: 118px" :input-props="{ 'aria-label': '一分钟负载阈值倍数' }" @update:value="commitNum('alert_load1_x', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="应用探活">
@@ -276,12 +291,12 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           </CpSettingRow>
           <CpSettingRow label="历史保留天数">
             <template #control>
-              <NInputNumber :value="alerts.alert_keep_days" :min="1" :max="365" style="width: 118px" :input-props="{ 'aria-label': '告警历史保留天数' }" @update:value="commitNum('alert_keep_days', $event)" />
+              <NInputNumber :value="alerts.alert_keep_days" :min="lim('alert_keep_days').min" :max="lim('alert_keep_days').max" style="width: 118px" :input-props="{ 'aria-label': '告警历史保留天数' }" @update:value="commitNum('alert_keep_days', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="历史上限行">
             <template #control>
-              <NInputNumber :value="alerts.alert_keep_rows" :min="100" :max="20000" :step="100" style="width: 118px" :input-props="{ 'aria-label': '告警历史最多保留行数' }" @update:value="commitNum('alert_keep_rows', $event)" />
+              <NInputNumber :value="alerts.alert_keep_rows" :min="lim('alert_keep_rows').min" :max="lim('alert_keep_rows').max" :step="100" style="width: 118px" :input-props="{ 'aria-label': '告警历史最多保留行数' }" @update:value="commitNum('alert_keep_rows', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="按应用覆写期望状态码" help="探活只看端口是否应答：连不上或超时才算 crit，4xx/5xx 说明进程还在。覆写值留空即回落到上面的全局期望。">

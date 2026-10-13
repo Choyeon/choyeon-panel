@@ -50,10 +50,28 @@ LEVELS = ("ok", "warn", "crit")
 # 一轮确认。连不上/单元 failed/证书过期是明确故障，不在这个缓冲之列。
 RESOURCE_NOTIFY_ROUNDS = 2
 
-# 要紧线只有一条配置线之上的这一档：管理员配的是"该发通知了"，页面上的红/自检的 fail
+# 要紧档只有一条配置线之上的这一档：管理员配的是"该发通知了"，页面上的红/自检的 fail
 # 要再高一档才有意义，否则把线设到 60% 的机器会天天红。差的这 10 个点写在这里一次，
-# 前端与自检都读 `disk_thresholds()`，不许再各写一份。
-DISK_CRIT_STEP = 10
+# 前端与自检都读 `disk_thresholds()` / `resource_thresholds()`，不许再各写一份。
+CRIT_STEP = 10
+
+# 数值型告警配置的「默认值 + 可填区间」只写这一处，(默认, 下限, 上限)。
+# 同一件事原来写着四遍：巡检侧 `_int_setting(key, 默认, lo, hi)` 的三个实参、
+# `extras.ALERT_INT_RANGE` 的 (lo, hi)、设置页 `ALERT_DEFAULTS` 的默认值、模板里
+# `NInputNumber` 的 `:min/:max` 字面量。四份之间没有任何机制保证一起改，于是
+# 库里没写过这个键时页面显示 80 而巡检用的是别的数；管理员照页面提示填的数，
+# 保存时被 A 那份区间拦下、或者通过 B 那份校验却被读取侧悄悄钳掉。
+# 现在默认值和区间都由这里给出：`setting_int()` 用它读，`alert_limits()` 用它显示。
+ALERT_LIMITS: dict[str, tuple[int, int, int]] = {
+    "alert_disk_pct": (85, 50, 99),
+    "alert_ssl_days": (14, 0, 60),
+    "alert_cpu_pct": (80, 1, 99),
+    "alert_mem_pct": (90, 1, 99),
+    "alert_load1_x": (2, 1, 32),
+    "alert_probe": (1, 0, 1),
+    "alert_keep_days": (30, 1, 365),
+    "alert_keep_rows": (2000, 100, 20000),
+}
 
 
 def _today() -> str:
@@ -93,6 +111,28 @@ def _int_setting(key: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(n, hi))
 
 
+def setting_int(key: str) -> int:
+    """按 `ALERT_LIMITS` 读一条数值配置：默认值与钳制区间都取自那份登记表。
+
+    调用方不再自带 `(默认, lo, hi)` 三个实参——那三个数就是配置的另一份出处，
+    改了登记表不改实参（或反之）就会得到"页面显示一个数、巡检按另一个数办事"。
+    登记表里没有的键（例如 `streak:` 这类内部计数器）请继续直接用 `_int_setting`。
+    """
+    default, lo, hi = ALERT_LIMITS[key]
+    return _int_setting(key, default, lo, hi)
+
+
+def alert_limits() -> dict:
+    """给设置页的默认值与可填区间：就是 `setting_int()` 读取时使用的那一份。
+
+    页面上「空值显示成默认值」必须和后端「空值按默认值办」是同一个默认，
+    否则管理员看到 80、告警按 85 响，还以为是告警错了。区间同理：能保存的
+    区间和会被悄悄钳掉的区间不能是两个。
+    """
+    return {k: {"default": d, "min": lo, "max": hi}
+            for k, (d, lo, hi) in ALERT_LIMITS.items()}
+
+
 def disk_thresholds() -> dict:
     """「这块盘要满了」只有一条线，出处是管理员在设置页配的 `alert_disk_pct`。
 
@@ -103,8 +143,25 @@ def disk_thresholds() -> dict:
     现在 warn 就是那条生效配置，crit 比它高 10 档（封顶 99）用于「要紧/红」这一格，
     两处都不再另设常量；要改线只在设置页改一次。
     """
-    line = _int_setting("alert_disk_pct", 85, 50, 99)
-    return {"warn": line, "crit": min(99, line + DISK_CRIT_STEP)}
+    line = setting_int("alert_disk_pct")
+    return {"warn": line, "crit": min(99, line + CRIT_STEP)}
+
+
+def resource_thresholds() -> dict:
+    """CPU 与内存的两档线，口径与 `disk_thresholds()` 一致。
+
+    概览的圆环原先自己写着 70/85 与 80/90 当配色档位，和设置页那两条配置（默认 80、90）
+    没有半点关系：把 CPU 线调到 60 的机器，告警早就在响，仪表却还是品牌蓝——
+    同一台机器上「CPU 65%」既是告警又是"一切正常"。现在 warn 就是配置线、
+    crit 是它上面 10 个点，仪表的变色和巡检的判定读同一对数。
+    负载不在这张表里：负载环画的是「相对核数」（load1 = 核数即 100%），
+    那一格的黄/红说的是物理饱和（排队），而 `alert_load1_x` 是饱和之上的倍数，
+    两者口径不同，硬并成一个出处反而会把仪表钉在永远不会变红的 200%。
+    """
+    cpu = setting_int("alert_cpu_pct")
+    mem = setting_int("alert_mem_pct")
+    return {"cpu_warn": cpu, "cpu_crit": min(99, cpu + CRIT_STEP),
+            "mem_warn": mem, "mem_crit": min(99, mem + CRIT_STEP)}
 
 
 def _post(url: str, payload: dict):
@@ -330,7 +387,7 @@ async def run_checks():
     else:
         warn("systemctl 不可用，跳过 failed 单元巡检:", failed["out"][:120])
 
-    ssl_days = _int_setting("alert_ssl_days", 14, 0, 60)  # 0 = 关闭证书巡检
+    ssl_days = setting_int("alert_ssl_days")  # 0 = 关闭证书巡检
     if ssl_days > 0:
         certs = await run("certbot", ["certificates"])
         if certs["code"] != 0:
@@ -354,7 +411,7 @@ async def run_checks():
                                  meta=_meta(cert=c["name"], days=c["days"]))
 
     await _check_resources()
-    if _int_setting("alert_probe", 1, 0, 1) == 1:
+    if setting_int("alert_probe") == 1:
         await run_probes()
 
 
@@ -365,9 +422,9 @@ async def _check_resources() -> None:
     仪表盘开着时这里读到的是几秒的瞬时值，没人看时是整段均值。同一个指标两种
     口径，所以这三项都走 RESOURCE_NOTIFY_ROUNDS 去抖，别把瞬时尖峰当故障。
     """
-    cpu_pct = _int_setting("alert_cpu_pct", 80, 1, 99)
-    mem_pct = _int_setting("alert_mem_pct", 90, 1, 99)
-    load_x = _int_setting("alert_load1_x", 2, 1, 32)
+    rt = resource_thresholds()
+    cpu_pct, mem_pct = rt["cpu_warn"], rt["mem_warn"]
+    load_x = setting_int("alert_load1_x")
     try:
         snap = await system_metrics.snapshot()
     except Exception as e:  # noqa: BLE001
@@ -388,16 +445,20 @@ async def _check_resources() -> None:
     cores = int(snap.get("cpuCores") or os.cpu_count() or 1)
     load_limit = round(cores * load_x, 2)
 
-    await _check("cpu", cpu >= cpu_pct, f"CPU 使用率 {cpu}%（阈值 {cpu_pct}%）",
+    await _check("cpu", cpu >= cpu_pct,
+                 f"CPU 使用率 {cpu}%（阈值 {cpu_pct}%，要紧档 {rt['cpu_crit']}%）",
                  code="cpu", level="warn",
                  log_message=f"CPU 使用率超过阈值（阈值 {cpu_pct}%）",
                  ok_message=f"CPU 使用率正常（阈值 {cpu_pct}%）",
-                 meta=_meta(value=cpu, threshold=cpu_pct), debounce=RESOURCE_NOTIFY_ROUNDS)
-    await _check("mem", mem >= mem_pct, f"内存使用率 {mem}%（阈值 {mem_pct}%）",
+                 meta=_meta(value=cpu, threshold=cpu_pct, crit=rt["cpu_crit"]),
+                 debounce=RESOURCE_NOTIFY_ROUNDS)
+    await _check("mem", mem >= mem_pct,
+                 f"内存使用率 {mem}%（阈值 {mem_pct}%，要紧档 {rt['mem_crit']}%）",
                  code="mem", level="warn",
                  log_message=f"内存使用率超过阈值（阈值 {mem_pct}%）",
                  ok_message=f"内存使用率正常（阈值 {mem_pct}%）",
-                 meta=_meta(value=mem, threshold=mem_pct), debounce=RESOURCE_NOTIFY_ROUNDS)
+                 meta=_meta(value=mem, threshold=mem_pct, crit=rt["mem_crit"]),
+                 debounce=RESOURCE_NOTIFY_ROUNDS)
     # load1 阈值按核数算：单核机器 load 1.5 已经很挤，8 核机器 load 8 才算满载
     await _check("load1", load1 >= load_limit,
                  f"1 分钟负载 {load1}（阈值 {load_limit}，{cores} 核 ×{load_x}）",
@@ -569,8 +630,8 @@ async def _checker_loop():
             warn("alert check failed:", type(e).__name__, e)
         try:
             # 历史表只有这里会瘦身；不裁剪的话去重也挡不住几个月的 crit 抖动
-            days = _int_setting("alert_keep_days", 30, 1, 365)
-            keep = _int_setting("alert_keep_rows", 2000, 100, 20000)
+            days = setting_int("alert_keep_days")
+            keep = setting_int("alert_keep_rows")
             await asyncio.to_thread(dbm.prune_alerts, days, keep)
         except Exception as e:  # noqa: BLE001
             warn("alert history prune failed:", type(e).__name__, e)

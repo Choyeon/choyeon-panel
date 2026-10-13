@@ -302,13 +302,49 @@
   新落一行历史，告警列表看得见「从该处理变成要出事」），`/api/system/stats` 随采样带出
   `diskWarnPct` / `diskCritPct`，概览磁盘仪表的配色与存储页的 chip、条形热档、挂载点筛选全部读载荷；
   载荷里的线是 0 或缺字段时一律不染色，宁可中性也不要一个平白的红仪表。+10 这一步只在
-  `alerts_service` 里算一次，别处再出现 `DISK_CRIT_STEP` 或自己读那条配置都会被用例拦住。
+  `alerts_service` 里算一次（⑱B 起这个常量叫 `CRIT_STEP`，磁盘与 CPU/内存共用），别处再自己算
+  一遍或自己读那条配置都会被用例拦住。
 - 新增 `backend/tests/test_batch18a.py`（27 条）：配置线驱动 `disk_thresholds()`（默认 85/95、配 70→70/80、
   配 99 封顶、脏值回落、越界钳制）、存储判词两档与 inode 仍用它自己的线、`/api/storage` 载荷四键、
   `doctor` 磁盘项三档且文案带线、`sys_stats` 附两键且不破坏采样结果、巡检 warn→crit 升档必落一行历史而
   同档两轮不重复落。反证：把四只产品文件退回上一版，本批连同 ⑰B、⑫B 的 107 条里 27 条红。
   ⑰B 那两条阈值守卫随之反转——「`storage_service` 里 `DISK_TIGHT_PCT` 引用不少于 3 处」钉的本来就是一个
   第二出处，现在改为断言那个名字必须消失、判定与载荷只能引用同一个 `dt`。
+- 上一条把「线是多少」收成一个出处之后，「这条配置默认是多少、能填多少」还是四份账：巡检里
+  `_int_setting(key, 默认, 下限, 上限)` 的实参、`/api/settings/alerts` 保存校验用的 `extras.ALERT_INT_RANGE`、
+  设置页 `ALERT_DEFAULTS` 的前端副本、模板里逐个写死的 `:min="50" :max="99"`。四份会各自漂移，
+  而线上已经在漂移：`alert_mem_pct` 生产机根本没存过（读空），设置页靠前端副本把它显示成 90，
+  接口回来的却是空串；哪天后端把默认改成 85，页面还画 90，保存一次才被发现。现在八条告警配置的
+  `(默认, 下限, 上限)` 只写在 `alerts_service.ALERT_LIMITS` 一张表里，巡检读它（新增 `setting_int(key)`，
+  按下限上限钳制、脏值回落默认；底层 `_int_setting` 只剩它和内部 `streak:` 计数在用），`extras` 的区间表
+  由这张表派生（不再是第二处字面量），GET `/api/settings/alerts` 额外带出 `limits`（逐项默认/下限/上限）与
+  `crit_step`，设置页拿到什么就显示什么：空值键用 `limits` 的默认补齐、`NInputNumber` 的 `:min/:max`
+  直接取登记表、磁盘与 CPU/内存三行下面多出一句「警戒线就是这条配置（当前 N%），要紧档在它上面 10 个点」
+  ——这句话以前只能靠人自己把两个数相加。
+- CPU 与内存的告警线此前也只到「通知」为止：概览仪表的 CPU 环写死 70/85、内存环写死 80/90，
+  于是把 `alert_cpu_pct` 调到 60 以后，同一台机器上巡检已经在 60% 发通知，页面上那只环却要等到 70%
+  才黄、85% 才红。现在 `/api/system/stats` 随采样带出 `cpuWarnPct` / `cpuCritPct` / `memWarnPct` /
+  `memCritPct`（同样出自 `alerts_service.resource_thresholds()`，与磁盘那两个键同一批口径），两只环的
+  配色读载荷；载荷缺字段或线为 0 时不染红。负载环刻意不并入配置：`alert_load1_x` 决定的是「什么时候
+  该给人发一条消息」，而环上那格要表达的是「机器此刻排没排满」，后者的分母是核数、跟配置无关——
+  这条理由写在 Dashboard 的注释里，用例同时钉住「`resource_thresholds()` 的返回里不许出现负载」。
+- 新增 `backend/tests/test_batch18b.py`（20 条）：登记表就是唯一出处（默认/钳制/脏值回落、
+  `alert_limits()` 形状、`extras.ALERT_INT_RANGE` 必须由它派生且源码里不许再留区间字面量）、
+  两档算术只在 `alerts_service`（`CRIT_STEP` 出现四次：定义加磁盘/CPU/内存三处引用，其它文件出现即红；
+  99 封顶；extras 只许引用 `alerts_service.CRIT_STEP`、不许自己写 `crit_step = 10`）、`/api/system/stats`
+  四键且不改动采样值、GET `/api/settings/alerts` 带出八键 limits 且越界值（`alert_load1_x=999`）判 400 不落库、
+  巡检推送文案带「阈值 60%、要紧档 70%」两个数而历史行仍只写警戒线、meta 里存 crit、改配置后下一轮文案
+  跟着变。另有两条源码级守卫盯着前端：设置页不许再留 `ALERT_DEFAULTS` 与 `:min="50"` 这类字面量、
+  概览不许再留 `band(cpuVal.value, 70, 85)`。⑱A 那条「`CRIT_STEP` 不许出现在别处」的名单随之去掉
+  `extras.py`——从这批起转交合法、自己算不合法，改由本批的正向断言守住。反证：把五只产品文件退回
+  上一版，`test_batch18b.py` 20 条里 20 条红；还绿的那一条是「越界值判 400」，旧的区间表本来就拦得住它，
+  它守的是别把校验改松，不是这批的收敛。
+- 线上实测（生产机 3210，跑的是这批代码）：默认态 `/api/system/stats` 给 disk 80/90、cpu 80/90、
+  mem 90/99；把 `alert_cpu_pct` 存成 66，同一个接口的两条线立刻跟着变 66/76，清空后回落 80/90；
+  `alert_load1_x=999` 判 400，报错句子里带的「1-32」就是登记表那一条，库里也没落下这个值。
+  浏览器端把 `/api/system/stats` 的载荷改写后按仪表顺序取环色：CPU 75% 配要紧档 70 时环是红、
+  内存 95% 配警戒 90 时是黄、CPU 65%（两线之间）也是黄，把载荷改回 30%/10% 两只环回品牌色；
+  设置页那三句说明在 375px 宽下换行不撑破容器（`scrollWidth == 375`），console 无报错。
 - 补丁自检的假绿：`apt list --upgradable` 因为 dpkg 锁、超时（退出码 124）或命令不存在（127）而
   失败时，旧代码只往 notes 里塞一句话，然后照旧 `security_known = True`——清单是空的，
   `pending_total=0` 于是顺流走到自检项，输出「没有待装安全更新」。这台机器最怕的就是没打的安全更新，

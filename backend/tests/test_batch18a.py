@@ -69,10 +69,12 @@ class ThresholdSourceTests(unittest.TestCase):
 
     def test_the_step_is_not_reimplemented_anywhere_else(self):
         # 别处再写一次 +10 / min(99, ...) 就是又开一个出处。
+        # ⑱B 起 extras 不在名单里：它把 `alerts_service.CRIT_STEP` 原样转交给设置页，
+        # 引用允许、自己算不允许，那一条由 test_batch18b 守。
         for rel in ("app/services/storage_service.py", "app/routers/meta.py",
-                    "app/routers/system.py", "app/routers/extras.py"):
+                    "app/routers/system.py"):
             src = (SRC / "backend" / rel).read_text(encoding="utf-8")
-            self.assertNotIn("DISK_CRIT_STEP", src, rel)
+            self.assertNotIn("CRIT_STEP", src, rel)
 
 
 class StorageFindingsTests(unittest.TestCase):

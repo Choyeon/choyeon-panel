@@ -29,10 +29,14 @@ async def sys_info():
 @router.get("/api/system/stats")
 async def sys_stats():
     data = await system_metrics.snapshot()
-    # 概览那块盘的配色跟着设置页的线走：仪表/自检/告警/存储页过去各写一份 80、90、75、90，
-    # 把线调到 70 之后告警在响，概览的磁盘仪表仍是品牌色。
+    # 概览那四块仪表的配色跟着设置页的线走：仪表/自检/告警/存储页过去各写一份 80、90、75、90，
+    # 把线调到 70 之后告警在响，概览的磁盘仪表仍是品牌色。CPU 与内存同理——
+    # 仪表上写着 70/85、80/90 两档，而设置页配的是另外两个数，改了配置仪表不动。
     dt = alerts_service.disk_thresholds()
     data["diskWarnPct"], data["diskCritPct"] = dt["warn"], dt["crit"]
+    rt = alerts_service.resource_thresholds()
+    data["cpuWarnPct"], data["cpuCritPct"] = rt["cpu_warn"], rt["cpu_crit"]
+    data["memWarnPct"], data["memCritPct"] = rt["mem_warn"], rt["mem_crit"]
     return data
 
 

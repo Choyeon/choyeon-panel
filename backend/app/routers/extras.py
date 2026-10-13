@@ -25,10 +25,10 @@ PROBE_OVERRIDE_KEY = re.compile(r"^probe_expect:([\w.@-]{1,64})$")
 # 必须在保存时就校验——`int(dbm.get_setting("alert_disk_pct") or 85)` 在巡检里，
 # 存进 "abc" 之后每次巡检都抛 ValueError，被循环吞掉，表现为「告警从此不再触发」，
 # 而网页端一切正常，最难查的那种坏法。
-ALERT_INT_RANGE = {"alert_disk_pct": (50, 99), "alert_ssl_days": (0, 60),
-                   "alert_cpu_pct": (1, 99), "alert_mem_pct": (1, 99),
-                   "alert_load1_x": (1, 32), "alert_probe": (0, 1),
-                   "alert_keep_days": (1, 365), "alert_keep_rows": (100, 20000)}
+# 区间不在这里定义：`alerts_service.ALERT_LIMITS` 是巡检读取时用的那一份登记表，
+# 保存校验和 GET /api/settings/alerts 显示的默认值都从它来。这里再抄一份 (lo, hi)
+# 的话，两边一旦不同步就会出现「这个数页面让你存、巡检却按钳制后的值办事」。
+ALERT_INT_RANGE = {k: (lo, hi) for k, (_, lo, hi) in alerts_service.ALERT_LIMITS.items()}
 ALERT_MAX_LEN = {"alert_telegram_bot": 128, "alert_telegram_chat": 64, "alert_webhook_url": 512,
                  "alert_probe_expect": 32}
 
@@ -194,6 +194,13 @@ async def alerts_get(req: Request):
     # 按应用覆写的期望状态码：值里没有秘密，两种角色都可以看到当前覆写了哪些应用。
     out["probe_overrides"] = {key[len("probe_expect:"):]: val
                               for key, val in stored.items() if key.startswith("probe_expect:")}
+    # 默认值与可填区间随载荷一起给出（出处是 alerts_service.ALERT_LIMITS）：
+    # 库里没写过某个键时，页面要显示的那个「默认」必须就是巡检实际使用的那个默认，
+    # 输入框要拦的那条区间必须就是保存校验用的那条区间。
+    out["limits"] = alerts_service.alert_limits()
+    # 「要紧档」比配置线高的那 10 个点只在服务层算一次，这里把它当事实告诉页面，
+    # 页面才能解释为什么自己配了 80 却在 90 才看见红仪表。
+    out["crit_step"] = alerts_service.CRIT_STEP
     return out
 
 
