@@ -727,10 +727,16 @@ async def cmd_updates(a: argparse.Namespace) -> dict:
 def _updates_text(d: dict) -> str:
     lines = [f"{d.get('distro') or '未知发行版'} · {d.get('family')}"]
     sec = d.get("security_count")
+    err = d.get("probe_error")
     total = int(d.get("pending_total") or 0)
-    head = f"待装 {total} 个" + (
-        f"，其中安全更新 {sec} 个" if sec is not None else "（该发行版判不出安全更新子集）"
-    )
+    if err:
+        # 读不到就说读不到。旧写法把 pending_total=0 排进 head，等于对着失败的探测
+        # 打印「待装 0 个」——自检与终端一起绿，机器却可能带着洞。
+        head = f"待装更新读不到（{err}），这一条不等于「没有安全更新」"
+    else:
+        head = f"待装 {total} 个" + (
+            f"，其中安全更新 {sec} 个" if sec is not None else "（该发行版判不出安全更新子集）"
+        )
     auto = d.get("auto_updates") or {}
     if auto.get("state") == "enabled":
         head += f" · 自动安全更新已开启（{auto.get('unit')}）"
@@ -739,8 +745,17 @@ def _updates_text(d: dict) -> str:
     lines.append(head)
     if d.get("reboot_required"):
         lines.append("上次更新要求重启才生效")
+    elif d.get("family") == "debian" and d.get("reboot_required") is None:
+        lines.append(f"要不要重启判不出：{d.get('reboot_reason') or '读不到已装内核列表'}")
     for n in d.get("notes") or []:
         lines.append(f"[note] {n}")
+    age = d.get("index_age_hours")
+    if age is not None and not err and age > updates_service.STALE_TRUST_HOURS:
+        # 索引旧到什么程度就不能当结论用了：判据在服务层，终端和自检项说同一句话。
+        lines.append(
+            f"清单读的是 {age:.0f} 小时前的本地索引，超过 "
+            f"{updates_service.STALE_TRUST_HOURS:.0f} 小时，「没有安全更新」这句话不可信"
+        )
     pkgs = d.get("packages") or []
     shown = pkgs[:20]
     for p in shown:
@@ -749,6 +764,8 @@ def _updates_text(d: dict) -> str:
     if len(pkgs) > len(shown):
         lines.append(f"  ...共 {len(pkgs)} 个，完整清单用 --json")
     cmds = d.get("commands") or {}
+    if cmds.get("refresh_index") and (err or (age is not None and age > updates_service.STALE_TRUST_HOURS)):
+        lines.append(f"刷新索引：  {cmds['refresh_index']}")
     if sec and cmds.get("apply_security"):
         lines.append(f"只装安全更新：{cmds['apply_security']}")
     if total and cmds.get("apply_all"):

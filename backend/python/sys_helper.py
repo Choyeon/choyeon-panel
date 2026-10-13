@@ -27,14 +27,20 @@ def read_file(path: str) -> str:
 
 
 def parse_stat(text: str) -> dict:
-    """Parse the first `cpu` line of /proc/stat into idle/total jiffies."""
+    """Parse the first `cpu` line of /proc/stat into idle/total jiffies.
+
+    字段序是 user nice system idle iowait irq softirq steal [guest [guest_nice]]。
+    guest / guest_nice 已经计在 user / nice 里（内核 Documentation 写明），整行求和会把
+    它们加两遍：跑嵌套虚拟化的机器上 total 偏大，占用率 = 1 - idle/total 就系统性偏低。
+    面板进程内的采样（app/services/load_service.py）早就只取前八项，这里跟着同一口径。
+    """
     for line in text.splitlines():
         if line.startswith("cpu "):
             parts = [int(x) for x in line.split()[1:]]
             while len(parts) < 5:
                 parts.append(0)
             idle = parts[3] + parts[4]  # idle + iowait
-            return {"idle": idle, "total": sum(parts)}
+            return {"idle": idle, "total": sum(parts[:8])}
     raise ValueError("no cpu line in /proc/stat")
 
 

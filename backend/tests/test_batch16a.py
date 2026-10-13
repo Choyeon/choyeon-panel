@@ -89,6 +89,27 @@ def fake_files(files: dict):
         yield
 
 
+class _FakeClock:
+    """给 `load_service` 换一个会走表的单调时钟：`advance()` 一次走 `scan_sec`。
+
+    ctxt/forks 的速率分母从标称 1 秒改成实测跨度之后（批次⑰A），夹具必须自己给出跨度，
+    否则同一份 /proc 文本在快机器和慢机器上会算出两个不同的速率。
+    """
+
+    def __init__(self, scan_sec=1.0, start=1000.0):
+        self.now = start
+        self.scan_sec = scan_sec
+
+    def monotonic(self):
+        return self.now
+
+    def time(self):
+        return self.now
+
+    def advance(self):
+        self.now += self.scan_sec
+
+
 def _schema() -> dict:
     """cmd_schema 会把契约打到 stdout，这里只要它的返回值，噪声收掉。"""
     with contextlib.redirect_stdout(io.StringIO()):
@@ -912,12 +933,21 @@ class CollectTests(unittest.TestCase):
                 f"{CG_PANEL}/cpu.max": CPU_MAX_PANEL, f"{CG_PANEL}/cpu.stat": CPU_STAT_PANEL,
                 f"{CG_PANEL}/cpu.weight": "100\n"}
 
-    def _collect(self, files, scan=None, dirs=None):
+    def _collect(self, files, scan=None, dirs=None, scan_sec=1.0):
         stub = scan or {"ok": True, "reason": None, "scanned": 141, "budget_hit": False,
                         "states": {"S": 94}, "busy": [], "busy_total": 0, "blocked": [],
                         "blocked_total": 0, "window_sec": 1.0}
-        with mock.patch.object(ls, "_cgroup_dirs", lambda: list(dirs if dirs is not None else [CG_PANEL])), \
-             mock.patch.object(ls, "_scan_procs", lambda hz, deadline: stub), \
+        # ⑰A 起 ctxt/forks 的分母是 stat1→stat2 的实测跨度，不再是标称 1 秒。时钟换成可控
+        # 的一份（扫描那一步走 scan_sec），速率断言才是确定的。
+        clock = _FakeClock(scan_sec)
+
+        def fake_scan(hz, deadline):
+            clock.advance()
+            return stub
+
+        with mock.patch.object(ls, "time", clock), \
+             mock.patch.object(ls, "_cgroup_dirs", lambda: list(dirs if dirs is not None else [CG_PANEL])), \
+             mock.patch.object(ls, "_scan_procs", fake_scan), \
              mock.patch.object(ls.os, "cpu_count", lambda: 2), \
              mock.patch.object(ls.os, "sysconf", lambda n: 100), \
              fake_files(files):
@@ -945,6 +975,14 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(out["cpu"]["pct"]["idle"], 90.0)
         self.assertEqual(out["cpu"]["pct"]["user"], 3.0)
         self.assertEqual(out["cpu"]["ctxt_per_sec"], 510, "ctxt 要相减再除窗口，别把累计值当速率")
+        self.assertEqual(out["window_sec"], 1.0, "速率的分母就是这里报出来的窗口，两处必须同源")
+
+    def test_rates_divide_by_the_measured_span_not_the_nominal_second(self):
+        """扫描走 2.5 秒时速率必须跟着降下来：⑰A 之前它恒按 1 秒算，页面写 2500/秒。"""
+        out = self._collect(self._files(), scan_sec=2.5)
+        self.assertEqual(out["window_sec"], 2.5)
+        self.assertEqual(out["cpu"]["ctxt_per_sec"], 204, "510 次切换摊在 2.5 秒上是 204/秒")
+        self.assertEqual(out["procs"]["window_sec"], 1.0, "进程表自己的窗口不受总跨度影响")
 
     def test_timestamp_is_iso_and_readable_by_the_frontend(self):
         out = self._collect(self._files())

@@ -172,16 +172,19 @@ def _verdict(row: dict, reachable: bool, why: str, expected: dict[int, str], app
     who = "、".join(names) if names else "未知进程"
     if not row["external"]:
         return INTERNAL, "只监听本机地址，外部碰不到", ""
-    if port in LINK_LOCAL_PORTS:
-        return INTERNAL, "链路本地协议（mDNS/LLMNR），报文出不了这一条网段", ""
     app = app_by_port.get(port)
     if app is not None and app.get("domain"):
         # 有域名走反代还绑全网 = 任何人都能绕开 TLS 和限速直连源站。
+        # 这条必须排在链路本地端口白名单前面：端口号 5353/5355 属于 mDNS/LLMNR 是因为
+        # avahi 在那儿监听，而面板既然把一个配了域名的应用登记在这个端口上，那就是真的
+        # 源站暴露——拿协议白名单把它盖成「报文出不了这条网段」等于替管理员把红灯涂绿。
         return (
             EXPOSED,
             f"面板应用「{app['name']}」配了域名反代，却监听在 {row['addrs'][0]}：可绕过 nginx 直连源站",
             f"把 {app['name']} 的绑定改成 127.0.0.1（改它的启动参数/环境变量），流量只走域名",
         )
+    if port in LINK_LOCAL_PORTS:
+        return INTERNAL, "链路本地协议（mDNS/LLMNR），报文出不了这一条网段", ""
     if port in expected:
         return EXPECTED, f"{expected[port]}，对外监听符合预期", ""
     if any(n in PUBLIC_DAEMONS for n in names) and port in WEB_PORTS:

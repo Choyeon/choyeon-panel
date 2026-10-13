@@ -362,6 +362,16 @@ def _kernel_state(btime: int) -> dict:
     return out
 
 
+def kernel_reboot_verdict() -> dict:
+    """给别的页签借用的最小重启判定：只跑一次 dpkg-query，不扫 /proc。
+
+    「系统补丁」页签过去自己只看 `/run/reboot-required`，而服务器镜像默认不装写这个标记的
+    update-notifier-common，于是它在这类机器上恒为「不用重启」，与本页签的内核包比对互相打脸。
+    两处共用这一个来源就不可能再分歧；调用方拿 `needs_reboot`（True/False/None=判不出）。
+    """
+    return _kernel_state(_boot_epoch())
+
+
 def _dpkg_gt(a: str, b: str) -> bool:
     """版本比较交给 dpkg 自己：Debian 的版本号规则（epoch、~、dfsg 后缀）自己写会错。"""
     try:

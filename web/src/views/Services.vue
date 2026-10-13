@@ -1437,7 +1437,17 @@ const secCount = computed<number | null>(() => {
   const v = patches.value?.security_count;
   return typeof v === 'number' ? v : null;
 });
-const totalPending = computed(() => Number(patches.value?.pending_total) || 0);
+// 探测失败时后端给的是 null，不是 0：折成 0 就写得出「待装 0 个」，那正是自检项里
+// 被粉饰成绿灯的同一个假绿，页签和 doctor 必须一起说「读不到」。
+const totalPending = computed<number | null>(() => {
+  const v = patches.value?.pending_total;
+  return typeof v === 'number' ? v : null;
+});
+const pendingText = computed(() => (totalPending.value === null ? '读不到' : `${totalPending.value} 个`));
+const indexAgeText = computed(() => {
+  const v = patches.value?.index_age_hours;
+  return typeof v === 'number' ? `${v.toFixed(0)} 小时前刷新` : '索引年龄未知';
+});
 const autoState = computed(() => patches.value?.auto_updates?.state || 'unknown');
 const patchBusy = computed(() => patchLoading.value || patchRefreshing.value || probing.value);
 // 判不出安全子集时不能说"没有安全更新"——那正是管理员最容易被劝走的一步。
@@ -1445,14 +1455,21 @@ const patchAlert = computed(() => {
   const p = patches.value;
   if (!p || patchError.value) return null;
   if (!p.supported) return { type: 'warning' as const, text: '未能识别这台机器的发行版或包管理器，面板不猜待装更新的数量。' };
+  if (p.probe_error) {
+    return { type: 'warning' as const, text: `这一轮读不到待装清单（${p.probe_error}），下面的数量是「未知」而不是 0。${p.commands?.refresh_index ? `刷新索引后再看：${p.commands.refresh_index}` : ''}` };
+  }
   if (secCount.value === null) {
-    return { type: totalPending.value ? 'warning' as const : 'info' as const, text: `${p.family} 判不出安全更新子集，只报待装总数 ${totalPending.value} 个。` };
+    return { type: totalPending.value ? 'warning' as const : 'info' as const, text: `${p.family} 判不出安全更新子集，只报待装总数 ${pendingText.value}。` };
   }
   if (secCount.value > 0) {
-    return { type: 'warning' as const, text: `${secCount.value} 个待装安全更新（共 ${totalPending.value} 个待装）。安全更新是最常见的横向跳板，建议尽快到 SSH 里执行下方命令。` };
+    return { type: 'warning' as const, text: `${secCount.value} 个待装安全更新（共 ${pendingText.value}待装）。安全更新是最常见的横向跳板，建议尽快到 SSH 里执行下方命令。` };
   }
   if (totalPending.value) return { type: 'info' as const, text: `没有待装安全更新，另有 ${totalPending.value} 个功能更新。` };
-  return { type: 'success' as const, text: '补丁已全部装上（按本地包索引判断，索引过旧时结论会偏旧）。' };
+  // 绿灯的条件比"数出来是 0"更严：本地索引超过一周，这个 0 说的是上周的世界。
+  if (p.index_stale) {
+    return { type: 'warning' as const, text: `没有待装安全更新，但清单读的是 ${indexAgeText.value}的本地索引，超过一周的「已经打全」不能当结论用。面板不代跑 apt update，刷新后重探一次。` };
+  }
+  return { type: 'success' as const, text: `补丁已全部装上（按本地包索引判断，${indexAgeText.value}）。` };
 });
 
 const { copy } = useCopy();
@@ -1482,7 +1499,8 @@ const filtered = computed(() => {
 const tabs = computed(() => [
   { key: 'services', label: '系统服务' },
   // 有待装安全更新时页签上点一颗红点：这一页平时没人看，而它恰恰是最需要被看见的。
-  { key: 'patches', label: '系统补丁', badge: (secCount.value ?? 0) > 0 },
+  // 读不到清单和索引过期同样点亮：这一页此刻给不出「干净」的证明，别让它安静地待着。
+  { key: 'patches', label: '系统补丁', badge: (secCount.value ?? 0) > 0 || !!patches.value?.probe_error || !!patches.value?.index_stale },
   // 端口同理，且门槛更高：只有"外部可达且不在预期内"才点亮，被防火墙挡住的用告警说话。
   { key: 'ports', label: '端口暴露面', badge: exposedCount.value > 0 },
   // 登录这道的红点门槛和端口一致：只有"要紧"才点，加固建议用页内告警说话。
@@ -1776,11 +1794,15 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 
       <div v-if="patches" class="pt-chips">
         <span class="pt-chip"><i>发行版</i>{{ patches.distro || patches.family || '—' }}</span>
-        <span class="pt-chip"><i>待装</i>{{ totalPending }} 个</span>
+        <span class="pt-chip" :class="{ warn: patches.probe_error }"><i>待装</i>{{ pendingText }}</span>
         <span class="pt-chip">
           <i>安全更新</i>
-          <template v-if="secCount === null">判不出</template>
+          <template v-if="patches.probe_error">读不到</template>
+          <template v-else-if="secCount === null">判不出</template>
           <template v-else>{{ secCount }} 个</template>
+        </span>
+        <span v-if="typeof patches.index_age_hours === 'number'" class="pt-chip" :class="{ warn: patches.index_stale }">
+          <i>本地索引</i>{{ indexAgeText }}
         </span>
         <span class="pt-chip">
           <i>自动安全更新</i>
@@ -1789,6 +1811,9 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
           <template v-else>该发行版不适用</template>
         </span>
         <span v-if="patches.reboot_required" class="pt-chip warn"><i>重启</i>上次更新需重启生效</span>
+        <span v-else-if="patches.reboot_required === null" class="pt-chip">
+          <i>重启</i>{{ patches.reboot_reason || '判不出' }}
+        </span>
       </div>
 
       <div v-if="patches && (patches.notes || []).length" class="pt-notes">
@@ -1796,7 +1821,12 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NText v-if="advisoryLine" depth="3" class="pt-advisories">安全通告：{{ advisoryLine }}</NText>
 
-      <div v-if="patches && (totalPending || secCount)" class="pt-cmds">
+      <div v-if="patches && (totalPending || secCount || patches.probe_error || patches.index_stale)" class="pt-cmds">
+        <div v-if="patches.commands?.refresh_index && (patches.probe_error || patches.index_stale)" class="pt-cmd">
+          <NText depth="3" class="pt-cmd-label">刷新包索引</NText>
+          <code class="mono pt-cmd-text">{{ patches.commands.refresh_index }}</code>
+          <NButton size="tiny" quaternary :icon="icon('CopyOutline', 13)" @click="copy(patches.commands.refresh_index, '已复制，请到 SSH 会话里执行')">复制</NButton>
+        </div>
         <div v-if="patches.commands?.apply_security" class="pt-cmd">
           <NText depth="3" class="pt-cmd-label">只装安全更新</NText>
           <code class="mono pt-cmd-text">{{ patches.commands.apply_security }}</code>
@@ -1817,7 +1847,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         :row-key="(r: any) => r.name" class="cp-tbl tbl-patches"
       >
         <template #empty>
-          <EmptyBox :text="patchError && !patches ? '补丁清单获取失败，点上方「重新探测」重试' : '按本地包索引，没有待装更新'" />
+          <EmptyBox :text="patchError && !patches ? '补丁清单获取失败，点上方「重新探测」重试' : (patches?.probe_error ? '这一轮读不到待装清单，空表不代表没有更新' : '按本地包索引，没有待装更新')" />
         </template>
       </NDataTable>
     </CpToolbarCard>
@@ -2379,6 +2409,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         <div class="mm-toolbar">
           <NText v-if="ldData" depth="3" class="mm-time">
             采样于 {{ fmtDateTime(ldData.as_of) }}<template v-if="ldData.cached">（缓存）</template>
+            · 采样 {{ ldData.window_sec }} 秒
           </NText>
           <NButton size="small" tertiary :loading="ldBusy" :icon="icon('RefreshOutline', 14)" @click="refreshLoad">刷新</NButton>
           <NButton size="small" :loading="reprofiling" :icon="icon('SyncOutline', 14)" @click="reprofile">重新采样</NButton>
@@ -2409,7 +2440,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         <span v-if="psiCpuStop || psiIoStop" class="mm-chip"><i>累计停顿</i>CPU {{ psiCpuStop || '—' }} · IO {{ psiIoStop || '—' }}</span>
         <span class="mm-chip"><i>上下文切换</i>{{ ldNum(statInfo.ctxt_per_sec, ' 次/秒') }}</span>
         <span class="mm-chip"><i>新建进程</i>{{ ldNum(statInfo.forks_per_sec, ' 个/秒') }}</span>
-        <span class="mm-chip"><i>这一轮扫了</i>{{ procInfo.ok ? `${procInfo.scanned} 个任务，窗口 ${ldData.window_sec} 秒${procInfo.budget_hit ? ' · 预算用完，没扫满' : ''}` : (procInfo.reason || '读不到 /proc') }}</span>
+        <span class="mm-chip"><i>这一轮扫了</i>{{ procInfo.ok ? `${procInfo.scanned} 个任务，窗口 ${procInfo.window_sec} 秒${procInfo.budget_hit ? ' · 预算用完，没扫满' : ''}` : (procInfo.reason || '读不到 /proc') }}</span>
         <span class="mm-chip" :class="throttleChipTone">
           <i>配额与限流</i>{{ quotaInfo.ok ? `共查 ${quotaInfo.dirs} 个 cgroup，${quotaInfo.capped_total} 个设了限额，这一轮 ${quotaInfo.throttled_total} 个正被压住` : (quotaInfo.reason || '读不到 /sys/fs/cgroup') }}
         </span>
@@ -2471,7 +2502,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         <NText depth="3" class="mm-src">
           <template v-if="procInfo.ok === false">{{ procInfo.reason || '读不到 /proc' }}</template>
           <template v-else>
-            每个数字都是这 {{ ldData.window_sec }} 秒里的增量，不是全生命周期平均。{{ procInfo.scanned }} 个任务里只列增量大于 0 的
+            每个数字都是这 {{ procInfo.window_sec }} 秒里的增量，不是全生命周期平均。{{ procInfo.scanned }} 个任务里只列增量大于 0 的
             <template v-if="(procInfo.busy_total ?? 0) > busyRows.length">{{ busyRows.length }} 个，其余 {{ (procInfo.busy_total ?? 0) - busyRows.length }} 个不比这些用得多</template>。<template v-if="procInfo.budget_hit">预算用完，榜外可能还有。</template>
           </template>
         </NText>

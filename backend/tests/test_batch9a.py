@@ -161,7 +161,8 @@ class ParseTests(unittest.TestCase):
     def test_commands_per_family(self):
         self.assertIn("unattended-upgrade", up.commands_for(up.DEBIAN)["apply_security"])
         self.assertEqual(up.commands_for(up.RHEL)["apply_security"], "dnf upgrade --security -y")
-        self.assertEqual(up.commands_for(up.UNKNOWN), {"apply_all": "", "apply_security": ""})
+        # refresh_index 是探测失败/索引过旧时唯一能给管理员的那条命令，未知族回空串而不是 None。
+        self.assertEqual(up.commands_for(up.UNKNOWN), {"apply_all": "", "apply_security": "", "refresh_index": ""})
 
 
 def _meta(text):
@@ -173,13 +174,17 @@ class DetectTests(unittest.TestCase):
         up._cache["data"] = None
         up._cache["at"] = 0.0
 
-    def _patch(self, *, os_text, table, which=("apt",), reboot=False):
+    def _patch(self, *, os_text, table, which=("apt",), reboot=False, kernel=(False, None)):
         return (
             mock.patch.object(up, "OS_RELEASE", _Path(os_text)),
             mock.patch.object(up, "REBOOT_FLAG", _Path("", reboot)),
             mock.patch.object(up, "shutil", types.SimpleNamespace(which=lambda c: c in which)),
             mock.patch.object(up, "run", _fake_run(table)),
             mock.patch.object(up, "_apt_cache_age", lambda: None),
+            # ⑰A 起 Debian 的重启判定改走 pending_service 的内核包比对。不把它钉住，用例
+            # 断言的就是"跑测试这台机器装了什么内核"，而不是被测逻辑。
+            mock.patch.object(up.pending_service, "kernel_reboot_verdict",
+                              lambda: {"needs_reboot": kernel[0], "reason": kernel[1]}),
         )
 
     def _detect(self, os_text, table, **kw):
@@ -188,7 +193,7 @@ class DetectTests(unittest.TestCase):
         up._cache["data"] = None
         up._cache["at"] = 0.0
         patches = self._patch(os_text=os_text, table=table, **kw)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             return asyncio.run(up.detect()), patches[3].new
 
     def test_debian_counts_pending_and_security(self):
@@ -212,7 +217,7 @@ class DetectTests(unittest.TestCase):
     def test_result_is_cached_until_refresh(self):
         table = {"apt list": (0, APT_OUT)}
         patches = self._patch(os_text=_os_release("debian"), table=table)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             first = asyncio.run(up.detect())
             second = asyncio.run(up.detect())
             third = asyncio.run(up.detect(refresh=True))
@@ -224,9 +229,12 @@ class DetectTests(unittest.TestCase):
     def test_stale_index_is_reported_not_hidden(self):
         table = {"apt list": (0, APT_OUT)}
         patches = self._patch(os_text=_os_release("debian"), table=table)
-        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(up, "_apt_cache_age", lambda: 72.0):
+        with patches[0], patches[1], patches[2], patches[3], patches[5], \
+             mock.patch.object(up, "_apt_cache_age", lambda: 72.0):
             data = asyncio.run(up.detect())
         self.assertTrue(any("索引" in n for n in data["notes"]), data["notes"])
+        self.assertEqual(data["index_age_hours"], 72.0)
+        self.assertFalse(data["index_stale"], "3 天的索引还当得了结论")
 
     def test_unknown_security_subset_is_none_not_zero(self):
         """RHEL 两边都给不出安全子集时报 None：报 0 等于劝管理员别管这行。"""
@@ -256,13 +264,23 @@ class DetectTests(unittest.TestCase):
         self.assertFalse(data["supported"])
         self.assertEqual(run.calls[:1], [], "判不出发行版就不该去猜包管理器")
 
-    def test_reboot_flag_only_for_apt_and_dnf_families(self):
-        table = {"apt list": (0, APT_OUT)}
-        data, _ = self._detect(_os_release("debian"), table, reboot=True)
-        self.assertTrue(data["reboot_required"])
-        table2 = {"pacman -Qu": (0, PACMAN_OUT)}
-        data2, _ = self._detect(_os_release("arch", pretty="Arch"), table2, which=("pacman",))
-        self.assertIsNone(data2["reboot_required"])
+    def test_reboot_verdict_source_per_family(self):
+        """⑰A：Debian 跟内核包走，RHEL 跟它自己的标记走，其它族不判。
+
+        旧代码在 Debian 上只读 /run/reboot-required，而那个标记由 update-notifier-common
+        在 apt 事件里写、服务器镜像默认不装它——补丁页签因此恒报「不用重启」，同一屏的
+        `pending` 自检项却说「装了新内核，进程还踩着旧映射」。现在两处共用一个来源。
+        """
+        data, _ = self._detect(_os_release("debian"), {"apt list": (0, APT_OUT)},
+                               reboot=False, kernel=(True, None))
+        self.assertTrue(data["reboot_required"], "标记缺席也要跟着内核包说「要重启」")
+        dnf_table = {"dnf -q check-update": (100, "kernel.x86_64  0:5.14.0-1.el9  baseos\n"),
+                     "dnf -q updateinfo": (0, UPDATEINFO_OUT)}
+        data2, _ = self._detect(_os_release("rocky", "rhel fedora"), dnf_table, which=("dnf",), reboot=True)
+        self.assertTrue(data2["reboot_required"], "RHEL 仍按它自己的标记判")
+        table3 = {"pacman -Qu": (0, PACMAN_OUT)}
+        data3, _ = self._detect(_os_release("arch", pretty="Arch"), table3, which=("pacman",))
+        self.assertIsNone(data3["reboot_required"], "Arch 不在这套标记的适用面上，不猜")
 
     def test_families_without_a_known_unit_say_unknown(self):
         """Arch/Alpine 上根本没有 unattended-upgrades，报"未开启"是假警报。

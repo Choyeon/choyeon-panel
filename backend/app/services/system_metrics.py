@@ -25,6 +25,10 @@ _proc_objs: dict[int, object] = {}
 _top_cache: tuple[float, list] = (0.0, [])
 _TOP_TTL = 3.0
 
+# psutil 的 cpu_times() 里这两项是「跑嵌套虚拟机花的时间」，内核已经把它计进 user/nice，
+# 求总账时必须跳过（见 _cpu_total）。
+GUEST_FIELDS = ("guest", "guest_nice")
+
 # 实时采样的墙钟节奏（秒）。旧实现是"每个请求自己 diff 一次全局快照"，而读取者不止一个：
 # Dashboard 每 3s 轮询，metrics_store 的后台采样器每 30s 也要调 snapshot()，多开一个标签页
 # 就多一个写入者。它们抢同一个 _prev，落在别人之后那一刻 elapsed 只有几毫秒——
@@ -67,12 +71,23 @@ def _is_whole_disk(name: str) -> bool:
     return not name[-1].isdigit()
 
 
+def _cpu_total(times) -> float:
+    """cpu_times 的总账：guest / guest_nice 已经计在 user / nice 里，整行求和会加两遍。
+
+    多算的那两项让分母偏大，占用率（1 - idle/total）在跑嵌套虚拟化的机器上系统性偏低；
+    而 `choyeonctl load` 与「负载与 CPU」页签走的是 load_service 的口径（只取前八项），
+    同一台机器两块地方会给出两个不同的 CPU%。这里统一到 load_service 那一套。
+    """
+    return sum(getattr(times, k) for k in times._fields if k not in GUEST_FIELDS)
+
+
 def _proc_raw() -> dict:
     """无 psutil 时的 /proc 兜底（仍在线程里跑，不碰事件循环）。"""
     stat_lines = [ln for ln in _read("/proc/stat").split("\n") if ln]
     nums = [int(x) for x in stat_lines[0].split()[1:]]
     idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
-    total = sum(nums)
+    # 只取前八项：guest/guest_nice（第 9/10 项）已计在 user/nice 里，加上就重复了。
+    total = sum(nums[:8])
     per_core = []
     for ln in stat_lines[1:]:
         if not ln.startswith("cpu"):
@@ -80,7 +95,7 @@ def _proc_raw() -> dict:
         n = [int(x) for x in ln.split()[1:]]
         if not n:
             continue
-        per_core.append((n[3] + (n[4] if len(n) > 4 else 0), sum(n)))
+        per_core.append((n[3] + (n[4] if len(n) > 4 else 0), sum(n[:8])))
     mem = {}
     for line in _read("/proc/meminfo").split("\n"):
         if ":" in line:
@@ -145,9 +160,9 @@ def _proc_nic_up(names) -> dict[str, bool]:
 def _psutil_raw() -> dict:
     ct = psutil.cpu_times()
     idle = ct.idle + getattr(ct, "iowait", 0.0)
-    total = sum(getattr(ct, k) for k in ct._fields)
+    total = _cpu_total(ct)
     per_core = [
-        (c.idle + getattr(c, "iowait", 0.0), sum(getattr(c, k) for k in c._fields))
+        (c.idle + getattr(c, "iowait", 0.0), _cpu_total(c))
         for c in psutil.cpu_times(percpu=True)
     ]
     vm = psutil.virtual_memory()

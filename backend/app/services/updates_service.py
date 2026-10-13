@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..util import run
+from . import pending_service
 
 CACHE_TTL = 1800.0
 MAX_PKGS = 300
@@ -51,6 +52,30 @@ ARCH = "arch"
 SUSE = "suse"
 ALPINE = "alpine"
 UNKNOWN = "unknown"
+
+# 按约定「有待装也这样退出」的族：`dnf -q check-update` 与 `zypper lp` 在有更新时回 100。
+# 其余族的非零退出码都当成探测失败——但真正的判据见 `_probe_error`。
+CODES_WITH_PENDING = (RHEL, SUSE)
+
+# 本地索引超过这个小时数，「没有待装安全更新」就不再能当结论用（见 `_clean_verdict`）。
+STALE_TRUST_HOURS = 168.0
+
+
+def _probe_error(family: str, code: int, rows: list) -> str | None:
+    """包管理器这一次到底读到了没有。读不到就不能报「0 个待装」。
+
+    这里守的是一条很具体的假绿：`apt list --upgradable` 因为索引锁、超时（124）、
+    命令不存在（127）而失败时，输出是空的，旧代码照旧 `security_known = True`，于是
+    自检项输出「没有待装安全更新」——把探测失败粉饰成一台干净的机器，正好是
+    「未打的安全更新当跳板」这条路最需要的伪装。
+
+    规则只看一件事：**非零退出码 + 一行都没解析出来** = 读不到。非零但解析出了行，
+    数量就是真的（此时不可能假绿），退出码留在 notes 里说明。
+    """
+    allowed = (0, 100) if family in CODES_WITH_PENDING else (0,)
+    if code in allowed or rows:
+        return None
+    return f"退出码 {code}"
 
 # 自动安全更新的单元名按族给：Debian 系是 unattended-upgrades.service，RHEL 系是
 # dnf-automatic 的 timer，SUSE 系是 zypp-update，命中第一个 enabled 的就算开启。
@@ -255,21 +280,26 @@ def parse_apk_version(text: str) -> list[dict]:
 
 
 def commands_for(family: str) -> dict:
-    """给管理员复制的那两行命令。面板自己不执行它们，理由见模块 docstring。"""
+    """给管理员复制的那几行命令。面板自己不执行它们，理由见模块 docstring。"""
     table = {
         DEBIAN: {
             "apply_all": "apt update && apt upgrade -y",
             "apply_security": "apt update && unattended-upgrade -d",
+            "refresh_index": "apt update",
         },
-        RHEL: {"apply_all": "dnf upgrade -y", "apply_security": "dnf upgrade --security -y"},
-        ARCH: {"apply_all": "pacman -Syu", "apply_security": "pacman -Syu"},
+        RHEL: {"apply_all": "dnf upgrade -y", "apply_security": "dnf upgrade --security -y",
+               "refresh_index": "dnf makecache"},
+        ARCH: {"apply_all": "pacman -Syu", "apply_security": "pacman -Syu",
+               "refresh_index": "pacman -Syy"},
         SUSE: {
             "apply_all": "zypper update -y",
             "apply_security": "zypper patch --category security -y",
+            "refresh_index": "zypper refresh",
         },
-        ALPINE: {"apply_all": "apk update && apk upgrade", "apply_security": "apk update && apk upgrade"},
+        ALPINE: {"apply_all": "apk update && apk upgrade", "apply_security": "apk update && apk upgrade",
+                 "refresh_index": "apk update"},
     }
-    return dict(table.get(family) or {"apply_all": "", "apply_security": ""})
+    return dict(table.get(family) or {"apply_all": "", "apply_security": "", "refresh_index": ""})
 
 
 async def _auto_updates(family: str) -> dict:
@@ -296,6 +326,46 @@ def _apt_cache_age() -> float | None:
     return round((time.time() - newest) / 3600.0, 1)
 
 
+def _clean_verdict(data: dict, detail: str, auto_note: str) -> dict:
+    """「看起来是干净的」这一支的统一出口：本地索引太旧时不许给 pass。
+
+    `apt list --upgradable` 读的是 /var/lib/apt/lists 里的本地索引，面板自己不跑
+    `apt update`（那会写盘并和 dpkg 抢锁）。索引是 30 天前的，这句话说的就是 30 天前
+    那个世界——CVE 每天在进，绿灯却照常亮。这与 `_probe_error` 守的是同一类假绿，
+    所以判据放在一起，页签、CLI 和自检项不会再各写一套阈值。
+    """
+    cmds = data.get("commands") or {}
+    age = data.get("index_age_hours")
+    if age is None:
+        return {"status": "pass", "detail": detail + auto_note, "fix": ""}
+    if age > STALE_TRUST_HOURS:
+        return {"status": "warn",
+                "detail": f"{detail}，但清单读的是 {age:.0f} 小时前的本地索引，"
+                          f"超过 {STALE_TRUST_HOURS:.0f} 小时就不能当结论用" + auto_note,
+                "fix": cmds.get("refresh_index") or ""}
+    return {"status": "pass",
+            "detail": f"{detail}（索引 {age:.0f} 小时前刷新）" + auto_note, "fix": ""}
+
+
+async def _reboot_verdict(family: str) -> tuple[bool | None, str | None]:
+    """「上次更新要不要重启」。Debian 上不能只认 /run/reboot-required。
+
+    那个标记由 update-notifier-common 在 apt 事件里写，服务器镜像默认不装它。旧代码写的是
+    `REBOOT_FLAG.exists()`，在这类机器上恒为 False：本页签报「不用重启」，而自检项 `pending`
+    同时报「装了新内核，进程还踩着旧映射」——同一台机器两个页签互相打脸。现在两个页签读
+    同一个来源（pending_service 的内核包比对），不可能再分歧。判不出就返回 None，不假称 False。
+    """
+    if family == DEBIAN:
+        k = await asyncio.to_thread(pending_service.kernel_reboot_verdict)
+        req = k.get("needs_reboot")
+        if req is None:
+            return None, k.get("reason") or "读不到已装内核列表，重启与否判不出"
+        return bool(req), k.get("reason")
+    if family == RHEL:
+        return REBOOT_FLAG.exists(), None
+    return None, "该发行版的重启判定不由面板负责"
+
+
 async def _collect() -> dict:
     meta = parse_os_release(OS_RELEASE.read_text(encoding="utf-8", errors="ignore")) if OS_RELEASE.exists() else {}
     available = {c for c in PKG_CMDS if shutil.which(c)}
@@ -304,40 +374,52 @@ async def _collect() -> dict:
     pkgs: list[dict] = []
     advisories: list[dict] = []
     security_known = False
+    probe_error: str | None = None
+    index_age: float | None = None
 
     if family == DEBIAN:
         r = await run("apt", ["list", "--upgradable"], timeout=APT_TIMEOUT)
+        pkgs = parse_apt_list(r["out"] or "")
         if r["code"] != 0:
             notes.append(f"apt list 失败（退出码 {r['code']}）：{(r['out'] or '').strip()[:160]}")
-        pkgs = parse_apt_list(r["out"] or "")
-        security_known = True
-        age = _apt_cache_age()
-        if age is not None and age > 24:
-            notes.append(f"apt 索引已 {int(age)} 小时未刷新，结论可能偏旧（面板不代跑 apt update）")
+        probe_error = _probe_error(family, r["code"], pkgs)
+        # 探测失败时连「安全更新有几个」都不能假称知道——旧代码在这里照旧置 True，
+        # 于是 doctor 拿着 security_count=0 输出「没有待装安全更新」。
+        security_known = probe_error is None
+        index_age = _apt_cache_age()
+        if index_age is not None and index_age > 24:
+            notes.append(f"apt 索引已 {int(index_age)} 小时未刷新，结论可能偏旧（面板不代跑 apt update）")
     elif family == RHEL:
         cmd = "dnf" if "dnf" in available else "yum"
         r = await run(cmd, ["-q", "check-update"], timeout=DNF_TIMEOUT)
         # check-update 有待装更新时退出码就是 100，这是约定不是失败。
+        pkgs = parse_dnf_check_update(r["out"] or "")
         if r["code"] not in (0, 100):
             notes.append(f"{cmd} check-update 失败（退出码 {r['code']}）：{(r['out'] or '').strip()[:160]}")
-        pkgs = parse_dnf_check_update(r["out"] or "")
+        probe_error = _probe_error(family, r["code"], pkgs)
         adv = await run(cmd, ["-q", "updateinfo", "list", "security"], timeout=DNF_TIMEOUT)
         advisories = parse_dnf_updateinfo(adv["out"] or "")[:MAX_ADVISORIES]
-        security_known = bool(advisories) or any(p["security"] for p in pkgs)
-        if not security_known:
+        security_known = probe_error is None and (bool(advisories) or any(p["security"] for p in pkgs))
+        if probe_error is None and not security_known:
             notes.append(f"{cmd} 没给出安全更新子集，只报待装总数")
     elif family == ARCH:
         r = await run("pacman", ["-Qu"], timeout=DNF_TIMEOUT)
         pkgs = parse_pacman_qu(r["out"] or "")
+        probe_error = _probe_error(family, r["code"], pkgs)
     elif family == SUSE:
         r = await run("zypper", ["-q", "lp"], timeout=DNF_TIMEOUT)
         pkgs = parse_zypper_lp(r["out"] or "")
+        probe_error = _probe_error(family, r["code"], pkgs)
         security_known = any(p["security"] for p in pkgs)
     elif family == ALPINE:
         r = await run("apk", ["version", "-l", "<"], timeout=DNF_TIMEOUT)
         pkgs = parse_apk_version(r["out"] or "")
+        probe_error = _probe_error(family, r["code"], pkgs)
     else:
         notes.append("未识别的发行版或没有受支持的包管理器，不猜更新数量")
+
+    if probe_error:
+        notes.append(f"{probe_error}：这一轮读不到待装清单，页面上的数量按「读不到」处理，不是 0")
 
     security_pkgs = [p for p in pkgs if p["security"]]
     if not security_known:
@@ -347,17 +429,26 @@ async def _collect() -> dict:
     else:
         security_count = len(security_pkgs)
 
+    reboot, reboot_reason = await _reboot_verdict(family)
+
     return {
         "ok": True,
         "family": family,
         "distro": meta.get("PRETTY_NAME") or "",
         "supported": family != UNKNOWN,
-        "pending_total": len(pkgs),
+        # 读不到时是 None 而不是 0：0 会被 CLI 与网页渲染成「待装 0 个」，那就是假绿。
+        "pending_total": None if probe_error else len(pkgs),
+        "probe_error": probe_error,
+        # 只有 Debian 走 apt 索引，其余族给 None：自检项不会拿一个不存在的年龄去判新旧。
+        "index_age_hours": index_age,
+        # 阈值只在这里算一次：网页拿布尔值着色，不许自己抄一份 168。
+        "index_stale": index_age is not None and index_age > STALE_TRUST_HOURS,
         "security_count": security_count,
         "security_known": security_known,
         "packages": pkgs[:MAX_PKGS],
         "advisories": advisories,
-        "reboot_required": REBOOT_FLAG.exists() if family in (DEBIAN, RHEL) else None,
+        "reboot_required": reboot,
+        "reboot_reason": reboot_reason,
         "auto_updates": await _auto_updates(family),
         "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "commands": commands_for(family),
@@ -382,16 +473,28 @@ def doctor_item(data: dict) -> dict:
     """把探测结果折成自检项。判据放服务层，CLI 与网页才不会各说一套。"""
     if not data.get("supported"):
         return {"status": "warn", "detail": "未能识别发行版/包管理器，无法判断待装更新", "fix": ""}
+    cmds = data.get("commands") or {}
+    err = data.get("probe_error")
+    if err:
+        # 探测失败绝不能走到下面的 pass：那是把「我不知道」打印成「这台机器是干净的」。
+        auto = (data.get("auto_updates") or {}).get("state")
+        auto_note = "，且自动安全更新未开启" if auto == "disabled" else ""
+        return {"status": "warn",
+                "detail": f"待装更新读不到（{err}），这一条不等于「没有安全更新」"
+                          + ("；刷新索引后面板就能给出数量" if cmds.get("refresh_index") else "")
+                          + auto_note,
+                "fix": cmds.get("refresh_index") or ""}
     sec = data.get("security_count")
     total = int(data.get("pending_total") or 0)
     auto = (data.get("auto_updates") or {}).get("state")
     auto_note = "，且自动安全更新未开启" if auto == "disabled" else ""
-    fix = (data.get("commands") or {}).get("apply_security") or ""
+    fix = cmds.get("apply_security") or ""
     if sec is None:
-        status = "pass" if not total else "warn"
-        return {"status": status,
-                "detail": f"待装更新 {total} 个（该发行版判不出安全更新子集）" + auto_note,
-                "fix": fix}
+        if total:
+            return {"status": "warn",
+                    "detail": f"待装更新 {total} 个（该发行版判不出安全更新子集）" + auto_note,
+                    "fix": fix}
+        return _clean_verdict(data, "没有待装更新（该发行版判不出安全更新子集）", auto_note)
     if sec:
         return {"status": "warn", "detail": f"{sec} 个待装安全更新（共 {total} 个待装）" + auto_note, "fix": fix}
     detail = "没有待装安全更新"
@@ -399,4 +502,4 @@ def doctor_item(data: dict) -> dict:
         detail += f"（另有 {total} 个功能更新）"
     if data.get("reboot_required"):
         return {"status": "warn", "detail": detail + "，但上次更新要求重启才生效", "fix": "systemctl reboot"}
-    return {"status": "pass", "detail": detail + auto_note, "fix": ""}
+    return _clean_verdict(data, detail, auto_note)

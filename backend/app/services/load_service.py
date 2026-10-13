@@ -541,6 +541,7 @@ def _collect() -> dict:
     hz = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 250
     cores = os.cpu_count() or 0
     deadline = time.monotonic() + SCAN_BUDGET_SEC
+    stat_t1 = time.monotonic()
     stat1 = _stat_cpu()
     load = _loadavg()
     psi = _psi()
@@ -548,6 +549,7 @@ def _collect() -> dict:
     q1 = _quota_scan(self_unit, deadline)
     procs = _scan_procs(hz, deadline)
     stat2 = _stat_cpu()
+    stat_span = max(0.01, time.monotonic() - stat_t1)
     all_units = _quota_second_pass(q1.get("first") or {}, self_unit)
     units = all_units[:MAX_QUOTA_UNITS]
 
@@ -555,7 +557,10 @@ def _collect() -> dict:
     if stat1.get("ok") and stat2.get("ok"):
         ticks = {k: max(0, stat2["ticks"][k] - stat1["ticks"][k]) for k in CPU_FIELDS}
     split = _split_pct(ticks)
-    elapsed = max(0.01, procs.get("window_sec") or SAMPLE_WINDOW_SEC)
+    # ctxt / forks 的增量是 stat1→stat2 之间攒下来的，而这一段不只有 1 秒采样窗：中间还夹着
+    # 配额扫描和整轮 /proc 扫描。分母必须用真实跨度，拿标称的 1 秒去除会把每秒速率抬高
+    # 两三倍（页面还会同时写着「窗口 1 秒」）。进程表自己的窗口是 procs.window_sec，另算。
+    elapsed = stat_span
     ctxt_rate = None
     fork_rate = None
     if stat1.get("ctxt") is not None and stat2.get("ctxt") is not None:
@@ -582,7 +587,7 @@ def _collect() -> dict:
         "cached": False,
         "cores": cores,
         "hz": hz,
-        "window_sec": elapsed,
+        "window_sec": round(elapsed, 2),
         "uptime_sec": int(float(upt[0])) if upt else None,
         "load": load,
         "cpu": cpu,
