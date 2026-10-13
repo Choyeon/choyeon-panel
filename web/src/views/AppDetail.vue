@@ -9,6 +9,7 @@ import { NButton } from '../ui';
 import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
+import { fmtBytes } from '../composables/useFormat';
 import LogStream from '../components/LogStream.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import PageTabBar from '../components/PageTabBar.vue';
@@ -92,7 +93,7 @@ const resItems = computed(() => {
   if (!p) return [];
   return [
     { label: '进程 PID', value: p.running && p.pid ? String(p.pid) : '未运行', mono: true },
-    { label: '内存', value: fmtMem(p.memoryBytes), mono: true },
+    { label: '内存', value: fmtBytes(p.memoryBytes), mono: true },
     { label: 'CPU 累计', value: p.cpuSeconds != null ? `${p.cpuSeconds}s` : '', mono: true },
     { label: '重启次数', value: p.restarts != null ? String(p.restarts) : '' },
     { label: '自启动时间', value: p.execStartAt || p.activeSince || '', mono: true },
@@ -146,13 +147,6 @@ async function loadProc() {
     proc.value = await api.appProc(id);
   } catch {}
 }
-function fmtMem(n: number | null) {
-  if (n == null) return '—';
-  if (n > 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
-  if (n > 1048576) return Math.round(n / 1048576) + ' MB';
-  return Math.round(n / 1024) + ' KB';
-}
-
 async function loadNginx() {
   try {
     ngx.value = await api.appNginx(id);

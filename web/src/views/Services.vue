@@ -231,13 +231,18 @@ const storageRoots = computed<any[]>(() => storageData.value?.roots ?? []);
 const allFindings = computed<any[]>(() => storageData.value?.findings ?? []);
 const bigFiles = computed<any[]>(() => storageData.value?.big_files ?? []);
 const diskInfo = computed<any>(() => storageData.value?.disk ?? {});
-const tightDisk = computed(() => Number(diskInfo.value?.used_pct ?? 0) >= 90);
+// 阈值只有一个出处：后端 DISK_TIGHT_PCT 随载荷给出。过去这里自己写死 90，后端把阈值
+// 调成 85 的话，同一条"分区已用 87%"在自检里是要紧项、在这一页却是绿灯。
+const tightPct = computed(() => Number(storageData.value?.tight_pct ?? 0));
+const tightDisk = computed(() => tightPct.value > 0
+  && Number(diskInfo.value?.used_pct ?? 0) >= tightPct.value);
 // 挂载点这一张表回答的是「别的盘呢」：chip 上的分区余量说的是数据目录所在的那块盘，
 // 而写满的可能是一个和数据目录毫无关系的挂载点，或者它的 inode 先耗尽。
 const mountData = computed<any>(() => storageData.value?.mounts ?? {});
 const mountRows = computed<any[]>(() => mountData.value?.items ?? []);
 const tightMounts = computed(() => mountRows.value.filter(
-  (m: any) => Number(m.used_pct ?? 0) >= 90 || Number(m.inode_pct ?? 0) >= 90,
+  (m: any) => tightPct.value > 0
+    && (Number(m.used_pct ?? 0) >= tightPct.value || Number(m.inode_pct ?? 0) >= tightPct.value),
 ));
 // 「知道就好」那几档（没扫完、点名几个大文件）默认收着：一进来先看见一堆无关痛痒的行，
 // 真正的风险反而被埋在下面。
@@ -280,7 +285,7 @@ const storageAlert = computed(() => {
   const disk = d.disk || {};
   return {
     type: 'success' as const,
-    text: `盘点了 ${c.roots} 个目录、合计 ${c.bytes_total_human}，没有异常占用${disk.ok ? `，分区已用 ${disk.used_pct}%` : '（分区总量读不到）'}。`,
+    text: `盘点了 ${c.roots} 个目录、合计 ${c.bytes_total_human}，没有异常占用${disk.ok ? `，${disk.path || '数据目录'} 所在分区已用 ${disk.used_pct}%` : '（数据目录所在分区读不到）'}。`,
   };
 });
 

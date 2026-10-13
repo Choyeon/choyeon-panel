@@ -127,7 +127,7 @@ const gauges = computed(() => [
     color: band(loadVal.value, 70, 100),
   },
   {
-    key: 'disk', label: '磁盘 /', percent: diskVal.value, text: diskVal.value == null ? '-' : String(diskVal.value),
+    key: 'disk', label: `磁盘 ${stat.value.diskPath || '/'}`, percent: diskVal.value, text: diskVal.value == null ? '-' : String(diskVal.value),
     unit: '%', detail: `${fmtBytes(stat.value.diskUsed || 0)} / ${fmtBytes(stat.value.diskTotal || 0)}`,
     color: band(diskVal.value, 80, 90),
   },

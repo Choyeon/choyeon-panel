@@ -14,6 +14,8 @@ import time
 import weakref
 from collections import deque
 
+from app import config
+
 try:  # 缺 psutil 也不能让监控整页挂掉，兜底走 /proc
     import psutil
 except ImportError:  # pragma: no cover
@@ -23,6 +25,18 @@ _history: deque = deque(maxlen=60)
 _prev: dict | None = None  # 上一次**采样**的累计量，用于算差值（占用率/网速/IO 速率）
 _proc_objs: dict[int, object] = {}
 _top_cache: tuple[float, list] = (0.0, [])
+
+
+def _disk_sample() -> tuple[object, str]:
+    """磁盘容量按**数据目录所在的那块盘**算，而不是写死根分区。
+
+    面板真正会写满的是 data/（SQLite、备份暂存、上传）。它可能落在独立挂载的盘上，
+    那时概览画的 "/" 与「存储占用」页签（storage_service 用 config.DATA_DIR）说的就是两块盘：
+    数据盘 100%、根盘 20%，一处报要紧一处报正常。数据目录还没建（新装、被移走）时退回根分区，
+    并把**实际读到的那条路径**一起返回，前端显示的就是它——不能换了盘还谎称是同一块。
+    """
+    path = config.DATA_DIR if os.path.isdir(config.DATA_DIR) else "/"
+    return shutil.disk_usage(path), path
 _TOP_TTL = 3.0
 
 # psutil 的 cpu_times() 里这两项是「跑嵌套虚拟机花的时间」，内核已经把它计进 user/nice，
@@ -114,7 +128,7 @@ def _proc_raw() -> dict:
         nics[name] = (f[0], f[8])
         rx += f[0]
         tx += f[8]
-    du = shutil.disk_usage("/")
+    du, disk_path = _disk_sample()
     io_r = io_w = 0
     for line in _read("/proc/diskstats").split("\n"):
         p = line.split()
@@ -139,7 +153,7 @@ def _proc_raw() -> dict:
         "idle": idle, "total": total, "perCore": per_core,
         "memTotal": mem.get("MemTotal", 0), "memAvailable": mem.get("MemAvailable", 0),
         "rx": rx, "tx": tx, "nics": nics, "nicUp": _proc_nic_up(nics),
-        "diskTotal": du.total, "diskUsed": du.used,
+        "diskTotal": du.total, "diskUsed": du.used, "diskPath": disk_path,
         "ioRead": io_r, "ioWrite": io_w,
         "load": load, "uptime": _uptime(), "procs": procs, "source": "proc",
     }
@@ -174,7 +188,7 @@ def _psutil_raw() -> dict:
         nics[name] = (st.bytes_recv, st.bytes_sent)
         rx += st.bytes_recv
         tx += st.bytes_sent
-    du = shutil.disk_usage("/")
+    du, disk_path = _disk_sample()
     dio = psutil.disk_io_counters()
     try:
         load = [round(x, 2) for x in psutil.getloadavg()]
@@ -188,7 +202,7 @@ def _psutil_raw() -> dict:
         "idle": idle, "total": total, "perCore": per_core,
         "memTotal": vm.total, "memAvailable": vm.available,
         "rx": rx, "tx": tx, "nics": nics, "nicUp": nic_up,
-        "diskTotal": du.total, "diskUsed": du.used,
+        "diskTotal": du.total, "diskUsed": du.used, "diskPath": disk_path,
         "ioRead": getattr(dio, "read_bytes", 0) if dio else 0,
         "ioWrite": getattr(dio, "write_bytes", 0) if dio else 0,
         "load": load, "uptime": time.time() - psutil.boot_time(),
@@ -276,6 +290,7 @@ async def _sample() -> dict:
         "memTotal": raw["memTotal"],
         "diskUsed": raw["diskUsed"],
         "diskTotal": raw["diskTotal"],
+        "diskPath": raw.get("diskPath"),
         "netRx": net_rx,
         "netTx": net_tx,
         "netTotalRx": raw["rx"],

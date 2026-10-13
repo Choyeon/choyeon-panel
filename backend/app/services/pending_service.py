@@ -306,6 +306,7 @@ def _kernel_state(btime: int) -> dict:
     """
     running = os.uname().release
     out = {"ok": False, "reason": None, "running": running, "installed": [], "newer": [],
+           "partial": [],
            "marker": {"present": False, "path": REBOOT_MARKER, "files": []},
            "needs_reboot": None, "boot_epoch": btime or None, "boot_iso": _epoch_iso(btime)}
     try:
@@ -320,14 +321,21 @@ def _kernel_state(btime: int) -> dict:
         out["reason"] = (r.stderr or "").strip()[:120] or "读不到 linux-image 包"
         return out
     rows = []
+    broken: list[dict] = []
     for line in (r.stdout or "").splitlines():
         parts = line.split("|")
         if len(parts) < 3:
             continue
         name, ver, status = parts[0].strip(), parts[1].strip(), parts[2].strip()
-        if status != "ii" or not ver:
+        if not ver:
             continue
-        rows.append({"pkg": name, "version": ver})
+        if status == "ii":
+            rows.append({"pkg": name, "version": ver})
+        elif status != "rc":
+            # rc 是「已卸载、只剩配置文件」，盘上没有可启动的内核，跳过它是对的。其余状态
+            # （iU 已解包未配置、iF 配置失败）意味着新内核的文件已经在盘上：把它当不存在，
+            # 就等于在 apt 停在 configure 阶段时告诉管理员「不需要重启」。
+            broken.append({"pkg": name, "version": ver, "status": status})
     out["installed"] = rows
     out["ok"] = True  # 「读到包列表」与「能不能判定要不要重启」是两件事，后者判不了走 needs_reboot=None + reason
     running_pkg = next((x for x in rows if x["pkg"] == f"linux-image-{running}"), None)
@@ -340,6 +348,14 @@ def _kernel_state(btime: int) -> dict:
         out["marker"]["files"] = _read_marker_pkgs()
         out["needs_reboot"] = True
         out["reason"] = None
+        return out
+    if broken:
+        # 半装的内核既不能判成「需要重启」（也许它装坏了、还得先回滚），也不能判成「不用管」。
+        out["partial"] = broken
+        out["needs_reboot"] = None
+        out["reason"] = (f"{len(broken)} 个 linux-image 包不是「已安装」状态"
+                         f"（{'、'.join(x['status'] for x in broken[:3])}），"
+                         "半装的内核文件已经在盘上，先修 dpkg 再回来看这一项")
         return out
     if running_pkg is None and kernels:
         # running 内核没有对应的已装包：可能是自定义内核，也可能是旧包被 autoremove 掉了。

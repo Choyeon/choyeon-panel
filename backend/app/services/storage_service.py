@@ -631,6 +631,10 @@ async def audit(refresh: bool = False) -> dict:
             "findings": findings,
             "counts": counts,
             "notes": list(NOTES),
+            # 阈值只有一个出处：前端过去自己写死 90，这里改成 85 的话页面仍按 90 判紧，
+            # 于是同一条"分区已用 87%"在自检里是要紧项、在页签上是绿灯。
+            # 注意要放在这个函数上——/api/storage 返回的是 audit()，放在 _collect() 里前端读不到。
+            "tight_pct": DISK_TIGHT_PCT,
         }
         _cache["at"] = time.monotonic()
         _cache["data"] = data
