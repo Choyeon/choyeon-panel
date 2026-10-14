@@ -182,7 +182,9 @@ export const api = {
   appUnit: (id: number) => req(`/apps/${id}/unit`),
   saveUnit: (id: number, content: string) => req(`/apps/${id}/unit`, { method: 'PUT', body: { content } }),
   appProc: (id: number) => req(`/apps/${id}/proc`),
-  audit: (limit = 100) => req(`/audit?limit=${limit}`),
+  // 不传 limit 就让服务端按它自己的默认取：默认值与上限只在 backend/app/util.py 写一次，
+  // 这里过去另写过一个 100（第三份抄本），改一处另外两处不会跟着动。
+  audit: (limit?: number) => req(limit ? `/audit?limit=${limit}` : '/audit'),
   users: () => req('/users'),
   createUser: (username: string, password: string, role: string) => req('/users', { body: { username, password, role } }),
   updateUser: (id: number, body: any) => req(`/users/${id}`, { method: 'PATCH', body }),

@@ -267,6 +267,40 @@ def log_ladder() -> list[int]:
     return sorted(v for v in steps if 1 <= v <= HTTP_LOG_LINES_MAX)
 
 
+# 「列表一次取多少条」也是同一份性质，之前却有六处抄本：
+# alerts.py 的默认 100 / 上限 500，extras.py /api/audit 里另一个默认 100 / 上限 500，
+# Alerts.vue 与 Audit.vue 各写 ref(200) 加一份 [100,200,500] 档位，api.ts 的 audit(limit = 100)
+# 是第七个。其中三条互相矛盾：UI 默认 200、接口默认 100——同一个 GET /api/audit，
+# 从页面进是 200 条、从 curl 进是 100 条，两边都不算错，但对不上。
+LIST_DEFAULT = 200
+LIST_CAP = 500
+
+
+def parse_limit(raw, default: int = LIST_DEFAULT, maximum: int = LIST_CAP) -> int:
+    """把查询串里的 limit 解析成 1..maximum。
+
+    下界必须夹住：SQLite 里 LIMIT 负数表示「不限制」，只写 `min(limit, CAP)` 的话
+    `?limit=-1` 会把整张审计表吐出来（实测 601 条全返回）。
+    `limit=0` 与非数字一样回落到默认值而不是 1——这一档只是「看多少条」，不值得失败，
+    但也不值得为它返回一个空列表。
+    """
+    try:
+        n = int(raw or "")
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(n or default, maximum))
+
+
+def list_ladder() -> list[int]:
+    """条数下拉的档位，由上面那两个数派生：{默认的一半, 默认, 上限}。
+
+    上限那一档必须在列里，否则改了上限，下拉还能选到旧档而服务端已经在截断；
+    低档取默认值的一半，保留原来「快速看一眼最近 100 条」这一档。
+    """
+    steps = {LIST_DEFAULT // 2, LIST_DEFAULT, LIST_CAP}
+    return sorted(v for v in steps if 1 <= v <= LIST_CAP)
+
+
 def disk_usage_pct(path: str) -> int | None:
     """返回 path 所在分区的已用百分比（按非 root 可用空间算），取不到返回 None。
 

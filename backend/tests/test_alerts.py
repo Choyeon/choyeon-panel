@@ -33,6 +33,7 @@ from app import config, main, security
 from app import database as dbm
 from app.routers import alerts as alerts_router
 from app.services import alerts_service
+from app.util import LIST_CAP, LIST_DEFAULT, list_ladder
 
 ALERT_KEYS = ("alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url",
               "alert_disk_pct", "alert_ssl_days")
@@ -785,10 +786,13 @@ class TestAlertHistoryEndpoints(_HistoryCase):
         r = self.get(f"/api/alerts/history?code={self.code}&level=crit")
         self.assertEqual(len(r.json()["rows"]), 3)
         r = self.get("/api/alerts/history?limit=99999")
-        self.assertLessEqual(len(r.json()["rows"]), 500)
-        self.assertEqual(r.json()["limit"], 500)
+        self.assertLessEqual(len(r.json()["rows"]), LIST_CAP)
+        self.assertEqual(r.json()["limit"], LIST_CAP, "越界夹到上限，而不是原样进 SQL")
         r = self.get("/api/alerts/history?limit=abc")
-        self.assertEqual(r.json()["limit"], 100, "非数字回落默认值而不是 500")
+        self.assertEqual(r.json()["limit"], LIST_DEFAULT, "非数字回落默认值而不是上限")
+        r = self.get("/api/alerts/history")
+        self.assertEqual(r.json()["limit"], LIST_DEFAULT, "不传 limit 也必须是同一个默认值")
+        self.assertEqual(r.json()["ladder"], list_ladder(), "档位随响应下发，页面不再自己抄")
         r = self.get("/api/alerts/history?level=bogus")
         self.assertEqual(r.status_code, 400, r.text)
 

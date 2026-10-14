@@ -358,7 +358,9 @@ class TestPgServiceWithClient(PgAgainstFake):
                                      lambda: pg_service.redis_key("k"))
         # 值末尾的换行是旧实现被 strip 吃掉过的：客户端按协议长度取，不碰内容
         self.assertEqual(out, {"key": "k", "type": "string", "ttl": 120, "mem": None,
-                               "value": "line1\nline2\n\n", "truncated": False})
+                               "value": "line1\nline2\n\n", "truncated": False,
+                               "read_limits": {"value_bytes": pg_service.REDIS_VALUE_BYTES,
+                                               "range_items": pg_service.REDIS_RANGE_ITEMS}})
         self.assertEqual(len(fake.commands), 13, "详情页应当一条流水线发完，不是逐条往返")
 
     async def test_hash_detail_uses_hscan_pairs(self):

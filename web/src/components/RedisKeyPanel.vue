@@ -52,6 +52,24 @@ const LOSSY = "\uFFFD";
 const hasLossy = (v: any) => typeof v === "string" && v.includes(LOSSY);
 const lossy = computed(() => type.value === "string" && hasLossy(props.detail?.value));
 
+// 截断说明按类型成句，数字取自详情里的 read_limits（与服务端发命令用的是同一对常数）。
+// 过去这一句不分类型都写「仅读取前 64KB」，而 hash/list/set/zset 是按条目数截断的，
+// 后半句「截断状态下不开放编辑」也只对 string 成立——集合类型没有"整值覆盖"这条路，
+// 条目该增删仍然可用。数字缺失（旧响应）时降级成不带数字的说法，不写 undefined。
+const truncNote = computed(() => {
+  if (!props.detail?.truncated) return '';
+  const lim = props.detail?.read_limits || {};
+  const bytes = Number(lim.value_bytes) || 0;
+  const items = Number(lim.range_items) || 0;
+  if (type.value === 'string') {
+    const size = bytes > 0 ? (bytes >= 1024 ? `${Math.round(bytes / 1024)}KB` : `${bytes}B`) : '';
+    const head = size ? `值较大，仅读取前 ${size}` : '值较大，只读取了其中一部分';
+    return `${head}；未读取的字节不在页面上，此时保存会把这份截断文本覆盖成整个值，因此截断状态下不开放编辑`;
+  }
+  const head = items > 0 ? `条目较多，仅读取前 ${items} 条` : '条目较多，只读取了其中一部分';
+  return `${head}；未列出的条目仍然在 Redis 里，新增与按条目删除都只作用于列出的这些，需要全貌请回 CLI`;
+});
+
 const memberData = computed<any[]>(() => {
   const v = props.detail?.value;
   if (!Array.isArray(v)) return [];
@@ -189,7 +207,7 @@ async function saveTtl() {
     </template>
 
     <NSpace vertical :size="10">
-      <NText v-if="detail.truncated" depth="3" style="font-size: var(--fs-xs)">内容过长，仅读取前 64KB（截断）；截断状态下不开放编辑，保存会把值覆盖成截断后的内容</NText>
+      <NText v-if="truncNote" depth="3" style="font-size: var(--fs-xs)">{{ truncNote }}</NText>
       <NText v-else-if="lossy" depth="3" style="font-size: var(--fs-xs)">该值是二进制/非 UTF-8 内容，页面显示的文本已含替换符、不等于原值，因此不开放编辑：保存会把这份文本当成新值写回，原数据不可恢复</NText>
 
       <template v-if="type === 'string'">

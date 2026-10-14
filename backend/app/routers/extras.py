@@ -10,7 +10,7 @@ from .. import database as dbm
 from ..deps import need_admin as _need_admin
 from ..errors import err_json
 from ..services import alerts_service, nginx_ops
-from ..util import is_http_url, redact_creds
+from ..util import is_http_url, list_ladder, parse_limit, redact_creds
 
 router = APIRouter()
 
@@ -287,20 +287,18 @@ async def alerts_run_checks(req: Request):
 async def audit_list(req: Request):
     if r := _need_admin(req):
         return r
-    try:
-        limit = int(req.query_params.get("limit") or 100)
-    except ValueError:
-        limit = 100
-    # 必须 clamp 下界：SQLite 里 LIMIT 负数表示"不限制"，
-    # 只写 min(limit, 500) 的话 ?limit=-1 会把整张审计表吐出来（实测 601 条全返回）。
     # LEFT JOIN 取昵称：audit.username 存的是登录名，而用户改完昵称后希望审计里看到的是昵称；
     # 用户被删掉后审计仍需保留（登录名查不到人），LEFT JOIN 而不是 JOIN 就是为了这个。
-    return dbm.query(
+    limit = parse_limit(req.query_params.get("limit"))
+    rows = dbm.query(
         "SELECT a.id,a.username,a.action,a.detail,a.created_at,u.nickname,u.avatar"
         " FROM audit a LEFT JOIN users u ON u.username=a.username"
         " ORDER BY a.id DESC LIMIT ?",
-        (max(1, min(limit, 500)),),
+        (limit,),
     )
+    # 原来是裸数组：一个会截断你的接口连「截断到多少」都没地方说，
+    # 页面只好自己抄一份 limit 与档位（[100,200,500]）。现在跟 /api/alerts/history 同一形状。
+    return {"rows": rows, "limit": limit, "ladder": list_ladder()}
 
 
 @router.post("/api/system/certbot-renew")

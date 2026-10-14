@@ -12,22 +12,26 @@ import { fmtDateTime } from '../composables/useFormat';
 
 const msg = useMessage();
 const kw = ref('');
-const limit = ref(200);
+// null = 不传 limit，用服务端自己的默认值。默认 200、档位 [100,200,500] 过去都是这一页
+// 抄的，接口那边按 100 截断（api.ts 里还有第三个 100）；现在由响应带回来。
+const limit = ref<number | null>(null);
 
 // 审计只由面板写操作追加，20s 内再次进这一页直接画上一次的结果，
 // 不再出现「整表空白 + 转圈」；点刷新才是强制回源。
-const { data, error, loading, busy, refresh } = useCachedFetch<any[]>({
-  key: () => `audit:${limit.value}`,
-  loader: () => api.audit(limit.value),
+const { data, error, loading, busy, refresh } = useCachedFetch<{ rows: any[]; limit: number; ladder: number[] }>({
+  key: () => `audit:${limit.value ?? ''}`,
+  loader: () => api.audit(limit.value ?? undefined),
   maxAge: 20000,
 });
 
 // 原实现是 onMounted(load) 里 msg.error(e.message)；错误经 error ref 出来，提示口径不变
 watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
-// 接口只认 limit（没有 offset/page），服务端还把它 clamp 在 500，
-// 所以做不了真分页；500 行改用虚拟滚动，DOM 里只保留可见范围的行。
-const rows = computed<any[]>(() => data.value ?? []);
+// 接口只认 limit（没有 offset/page），服务端还把它夹在自己的上限，
+// 所以做不了真分页；上限那一档改用虚拟滚动，DOM 里只保留可见范围的行。
+const rows = computed<any[]>(() => data.value?.rows ?? []);
+const limitOpts = computed(() => (data.value?.ladder || []).map((n) => ({ label: `最近 ${n} 条`, value: n })));
+const shownLimit = computed(() => limit.value ?? data.value?.limit ?? null);
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
 
 function reload() {
@@ -77,8 +81,8 @@ const cols: any[] = [
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
         <NSelect
-          :value="limit" size="small" style="width: 126px" aria-label="加载条数"
-          :options="[{ label: '最近 100 条', value: 100 }, { label: '最近 200 条', value: 200 }, { label: '最近 500 条', value: 500 }]"
+          :value="shownLimit" size="small" style="width: 126px" aria-label="加载条数"
+          :options="limitOpts" :loading="!limitOpts.length"
           @update:value="(v: number) => { limit = v; }"
         />
         <NButton size="small" tertiary :loading="busy" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>

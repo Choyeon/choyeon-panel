@@ -713,17 +713,33 @@ async def _r(cmd: list, kind: str = "value"):
     return (await _rp([list(cmd)], [kind]))[0]
 
 
+# 一次读 key 详情的两个边界，只有这一处。GETRANGE 的闭区间上界、HSCAN/SSCAN 的 COUNT、
+# LRANGE/ZRANGE 的末位下标，以及两条实现路线（RESP 流水线与 redis-cli 回退）里所有的
+# `> 边界` 判断，都由这两个数派生；详情响应再把它们原样下发给页面，文案用的也是同一个数。
+# 之前它们各写各的：三处命令写 65535/65536/200/199，页面另写一句「仅读取前 64KB」，
+# 而那句话对 hash/list/set/zset 根本不成立（它们是按条目数截断，不是按字节）。
+REDIS_VALUE_BYTES = 64 * 1024  # string 值一次最多读这么多字节
+REDIS_RANGE_ITEMS = 200        # 集合类型一次最多读这么多条目
+
+
+def _read_limits() -> dict:
+    """随详情下发的生效边界；页面按类型挑一句来说，不再自己抄数字。"""
+    return {"value_bytes": REDIS_VALUE_BYTES, "range_items": REDIS_RANGE_ITEMS}
+
+
 # key 详情的一条流水线：前 3 条是页面头部信息，中间 5 条算长度（判断 truncated），
-# 后 5 条取值。取值命令全部有界——GETRANGE 只读 64KB、*_RANGE/HSCAN/SSCAN 只读 200 条，
-# 所以对着百万元素的 key 也不会像 GET/SMEMBERS 那样把整个值搬回面板。
+# 后 5 条取值。取值命令全部有界（见上面那两个常数），所以对着百万元素的 key
+# 也不会像 GET/SMEMBERS 那样把整个值搬回面板。
 # 类型不匹配的探测命令返回 WRONGTYPE，正好用同一次往返把 key 的真实类型判出来。
 def _detail_commands(k: str) -> tuple[list, list]:
     cmds = [
         ["TYPE", k], ["TTL", k], ["MEMORY", "USAGE", k],
         ["STRLEN", k], ["HLEN", k], ["LLEN", k], ["SCARD", k], ["ZCARD", k],
-        ["GETRANGE", k, "0", "65535"], ["HSCAN", k, "0", "COUNT", "200"],
-        ["LRANGE", k, "0", "199"], ["SSCAN", k, "0", "COUNT", "200"],
-        ["ZRANGE", k, "0", "199", "WITHSCORES"],
+        ["GETRANGE", k, "0", str(REDIS_VALUE_BYTES - 1)],
+        ["HSCAN", k, "0", "COUNT", str(REDIS_RANGE_ITEMS)],
+        ["LRANGE", k, "0", str(REDIS_RANGE_ITEMS - 1)],
+        ["SSCAN", k, "0", "COUNT", str(REDIS_RANGE_ITEMS)],
+        ["ZRANGE", k, "0", str(REDIS_RANGE_ITEMS - 1), "WITHSCORES"],
     ]
     kinds = ["text", "int", "int",
              "int", "int", "int", "int", "int",
@@ -749,45 +765,46 @@ def _pairs(flat: list) -> list:
 async def _redis_key_cli(k: str) -> dict:
     """redis-cli 子进程路线的 key 详情：连不上 TCP（只开 unix socket、强制 TLS、
     bind 到别的地址）时用，行为与引入客户端之前逐字一致——包括按类型只发必要命令、
-    string 走 _rcli_exact 保住值末尾的换行。"""
+    string 走 _rcli_exact 保住值末尾的换行。两个读取边界与流水线路线共用同一份常数。"""
     ktype = (await _rcli(["TYPE", k])).strip()
     ttl = (await _rcli(["TTL", k])).strip()
     mem = (await _rcli(["MEMORY", "USAGE", k])).strip()
     truncated = False
     if ktype == "string":
         slen = int(await _rcli(["STRLEN", k]) or 0)
-        truncated = slen > 65536
-        data: object = await _rcli(["GETRANGE", k, "0", "65535"]) if truncated else await _rcli_exact(["GET", k])
+        truncated = slen > REDIS_VALUE_BYTES
+        data: object = await _rcli(["GETRANGE", k, "0", str(REDIS_VALUE_BYTES - 1)]) if truncated \
+            else await _rcli_exact(["GET", k])
     elif ktype == "hash":
         n = int(await _rcli(["HLEN", k]) or 0)
-        truncated = n > 200
+        truncated = n > REDIS_RANGE_ITEMS
         if truncated:
-            data = _pairs(_lines(await _rcli(["HSCAN", k, "0", "COUNT", "200"]))[1:])
+            data = _pairs(_lines(await _rcli(["HSCAN", k, "0", "COUNT", str(REDIS_RANGE_ITEMS)]))[1:])
         else:
             data = _pairs(_lines(await _rcli(["HGETALL", k])))
     elif ktype == "list":
         n = int(await _rcli(["LLEN", k]) or 0)
-        truncated = n > 200
-        data = _lines(await _rcli(["LRANGE", k, "0", "199"]))
+        truncated = n > REDIS_RANGE_ITEMS
+        data = _lines(await _rcli(["LRANGE", k, "0", str(REDIS_RANGE_ITEMS - 1)]))
     elif ktype == "set":
         n = int(await _rcli(["SCARD", k]) or 0)
-        truncated = n > 200
+        truncated = n > REDIS_RANGE_ITEMS
         data = (
-            _lines(await _rcli(["SSCAN", k, "0", "COUNT", "200"]))[1:]
+            _lines(await _rcli(["SSCAN", k, "0", "COUNT", str(REDIS_RANGE_ITEMS)]))[1:]
             if truncated
             else _lines(await _rcli(["SMEMBERS", k]))
         )
     elif ktype == "zset":
         n = int(await _rcli(["ZCARD", k]) or 0)
-        truncated = n > 200
-        data = _pairs(_lines(await _rcli(["ZRANGE", k, "0", "199", "WITHSCORES"])))
+        truncated = n > REDIS_RANGE_ITEMS
+        data = _pairs(_lines(await _rcli(["ZRANGE", k, "0", str(REDIS_RANGE_ITEMS - 1), "WITHSCORES"])))
     else:
         data = None
     return {
         "key": k, "type": ktype,
         "ttl": int(ttl) if ttl.lstrip("-").isdigit() else None,
         "mem": int(mem) if mem.isdigit() else None,
-        "value": data, "truncated": truncated,
+        "value": data, "truncated": truncated, "read_limits": _read_limits(),
     }
 
 
@@ -816,25 +833,25 @@ async def redis_key(k: str) -> dict:
     truncated = False
     if ktype == "string":
         slen = int(pick(3) or 0)
-        truncated = slen > 65536
-        # GETRANGE 的 0..65535 在长度 ≤64KB 时就是全值，且客户端按协议长度取字节、
-        # 不经任何 strip，因此不再需要旧实现里 GET（保原样）/GETRANGE（会被 strip）两套取法。
+        truncated = slen > REDIS_VALUE_BYTES
+        # GETRANGE 的 0..(REDIS_VALUE_BYTES-1) 在长度不超过边界时就是全值，且客户端按协议
+        # 长度取字节、不经任何 strip，因此不再需要旧实现里 GET（保原样）/GETRANGE（会被 strip）两套取法。
         data: object = _text(pick(8))
     elif ktype == "hash":
         n = int(pick(4) or 0)
-        truncated = n > 200
+        truncated = n > REDIS_RANGE_ITEMS
         data = _pairs(pick(9) or [])
     elif ktype == "list":
         n = int(pick(5) or 0)
-        truncated = n > 200
+        truncated = n > REDIS_RANGE_ITEMS
         data = pick(10) or []
     elif ktype == "set":
         n = int(pick(6) or 0)
-        truncated = n > 200
+        truncated = n > REDIS_RANGE_ITEMS
         data = pick(11) or []
     elif ktype == "zset":
         n = int(pick(7) or 0)
-        truncated = n > 200
+        truncated = n > REDIS_RANGE_ITEMS
         data = _pairs(pick(12) or [])
     else:
         data = None
@@ -842,7 +859,7 @@ async def redis_key(k: str) -> dict:
         "key": k, "type": ktype,
         "ttl": ttl if isinstance(ttl, int) else None,
         "mem": mem if isinstance(mem, int) else None,
-        "value": data, "truncated": truncated,
+        "value": data, "truncated": truncated, "read_limits": _read_limits(),
     }
 
 

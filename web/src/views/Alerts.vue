@@ -13,28 +13,36 @@ import { useTableHeight } from '../composables/useTableHeight';
 import { fmtDateTime } from '../composables/useFormat';
 
 type AlertRow = { id: number; ts: string; level: string; code: string; message: string; meta: string; acked: number };
+type HistoryResp = { rows: AlertRow[]; limit: number; ladder: number[] };
 type OpenReport = { rows: AlertRow[]; counts: Record<string, number>; total: number };
 
 const msg = useMessage();
 const isAdmin = computed(() => getRole() === 'admin');
 const level = ref('');
-const limit = ref(200);
+// null = "不传 limit，按服务端的默认来"。默认值和档位都是这一页过去自己抄的
+// （ref(200) + [100,200,500]），接口那边其实按 100 截断——同一件事两份数，
+// 从页面进看到 200 条、从 curl 进只有 100 条。现在由响应把生效值与档位带回来。
+const limit = ref<number | null>(null);
 const kw = ref('');
 const acking = ref<number | null>(null);
 const running = ref('');
 
-const { data, loading, error, refresh } = useCachedFetch<{ rows: AlertRow[] }>({
-  key: () => `alerts:history:${level.value}:${limit.value}`,
-  loader: () => req(`/alerts/history?limit=${limit.value}${level.value ? `&level=${level.value}` : ''}`),
+const { data, loading, error, refresh } = useCachedFetch<HistoryResp>({
+  key: () => `alerts:history:${level.value}:${limit.value ?? ''}`,
+  loader: () => req(`/alerts/history?${limit.value ? `limit=${limit.value}&` : ''}${level.value ? `level=${level.value}` : ''}`),
   maxAge: 15000,
 });
 const { data: openData, error: openError, load: loadOpen } = useCachedFetch<OpenReport>({
   key: () => 'alerts:open',
-  loader: () => req('/alerts/open?limit=500'),
+  loader: () => req('/alerts/open'),
   maxAge: 15000,
 });
 watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 watch(openError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+
+const limitOpts = computed(() => (data.value?.ladder || []).map((n) => ({ label: `最近 ${n} 条`, value: n })));
+// 用户没碰过选择器时回显服务端实际用掉的那一档，而不是本页猜一个默认值
+const shownLimit = computed(() => limit.value ?? data.value?.limit ?? null);
 
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
 
@@ -218,12 +226,8 @@ async function runRound(kind: 'run' | 'probe') {
           @update:value="(v: string) => { level = v; }"
         />
         <NSelect
-          :value="limit" size="small" style="width: 110px" aria-label="加载条数"
-          :options="[
-            { label: '最近 100 条', value: 100 },
-            { label: '最近 200 条', value: 200 },
-            { label: '最近 500 条', value: 500 },
-          ]"
+          :value="shownLimit" size="small" style="width: 110px" aria-label="加载条数"
+          :options="limitOpts" :loading="!limitOpts.length"
           @update:value="(v: number) => { limit = v; }"
         />
         <NButton size="small" tertiary :loading="loading" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>

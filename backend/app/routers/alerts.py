@@ -7,12 +7,11 @@ from .. import aio_db
 from ..deps import need_admin
 from ..log import warn
 from ..services import alerts_service
+from ..util import LIST_CAP, list_ladder, parse_limit
 
 router = APIRouter()
 
 LEVEL_RE = re.compile(r"^(ok|warn|crit)$")
-HISTORY_DEFAULT = 100
-HISTORY_CAP = 500
 
 
 async def _fail(detail: str, msg: str = "操作失败，详见面板日志", status: int = 400) -> JSONResponse:
@@ -21,20 +20,11 @@ async def _fail(detail: str, msg: str = "操作失败，详见面板日志", sta
     return JSONResponse(status_code=status, content={"error": msg})
 
 
-def _limit(raw: str | None) -> int:
-    """翻页条数：非数字/越界一律回落，不报错——这只是"看多少条"，不值得让请求失败。"""
-    try:
-        n = int(raw or "")
-    except (TypeError, ValueError):
-        return HISTORY_DEFAULT
-    return max(1, min(n or HISTORY_DEFAULT, HISTORY_CAP))
-
-
 @router.get("/api/alerts/history")
 async def alerts_history(req: Request):
     level = (req.query_params.get("level") or "").strip()
     code = (req.query_params.get("code") or "").strip()[:64]
-    limit = _limit(req.query_params.get("limit"))
+    limit = parse_limit(req.query_params.get("limit"))
     if level and not LEVEL_RE.match(level):
         return JSONResponse(status_code=400, content={"error": "level 只能是 ok / warn / crit"})
     where, params = [], []
@@ -53,7 +43,9 @@ async def alerts_history(req: Request):
         rows = await aio_db.query(sql, tuple(params))
     except Exception as e:  # noqa: BLE001
         return await _fail(f"alerts history 查询失败: {type(e).__name__}: {e}", "告警历史读取失败")
-    return {"rows": rows, "limit": limit}
+    # limit / ladder 随结果一起下发：下拉档位过去由页面自己抄（[100,200,500]），
+    # 上限一改，页面还能选到服务端已经给不出的那一档。
+    return {"rows": rows, "limit": limit, "ladder": list_ladder()}
 
 
 @router.get("/api/alerts/open")
@@ -62,8 +54,12 @@ async def alerts_open(req: Request):
 
     计数走一次 GROUP BY 而不是把全表读进内存：ok 级恢复记录也会长期留着，
     未确认行数能到 prune 上限（默认 2000），逐行统计没意义。
+
+    不传 limit 时读到上限为止。过去默认 100，而告警页自己带 `?limit=500` 绕过它：
+    同一个「一次能取多少条」在后端和页面各有一份抄本。概览页仍按自己的需要传 limit=6，
+    并用 total 与行数之差如实写出「另有 N 条未确认」。
     """
-    limit = _limit(req.query_params.get("limit"))
+    limit = parse_limit(req.query_params.get("limit"), default=LIST_CAP)
     try:
         rows = await aio_db.query(
             "SELECT id,ts,level,code,message,meta,acked FROM alerts_log WHERE acked=0 ORDER BY id DESC LIMIT ?",
