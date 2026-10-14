@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, nextTick, h, computed } from 'vue';
+import { onBeforeUnmount, onMounted, ref, nextTick, h, computed, watch } from 'vue';
 import { NSpace, NInputNumber, NSwitch, NText, NIcon, NTooltip, useMessage } from 'naive-ui';
 import { NButton } from '../ui';
-import { logUrl } from '../api';
+import { logUrl, req } from '../api';
 import { icon } from '../icons';
+import { useCachedFetch } from '../composables/useCachedFetch';
 
 const ico = (name: string, size = 13) => icon(name, size);
 
@@ -11,7 +12,20 @@ const props = defineProps<{ urlPath: string; height?: number }>();
 
 const msg = useMessage();
 const lines = ref<string[]>([]);
-const linesCount = ref(200);
+// 「一开始拉多少行」这两个数字都归服务端：默认值决定初值，上限决定输入框能填到几。
+// null 表示"不传 lines，按服务端自己的默认来"。过去 200 与 2000 在这里各抄了一份，
+// 服务端把上限一改，输入框还允许填到旧数字，请求被静悄悄截断，画面看着像日志少了。
+const linesCount = ref<number | null>(null);
+const { data: logOpts } = useCachedFetch<{ lines_default: number; lines_max: number }>({
+  key: () => 'system:logopts',
+  loader: () => req('/system/log-options'),
+  maxAge: 300000,
+});
+const maxLines = computed(() => Number(logOpts.value?.lines_max) || undefined);
+watch(() => Number(logOpts.value?.lines_default), (v) => {
+  // 只回填用户还没碰过的那个初值；已经在读的流不因为"清单到了"重连一次。
+  if (v && linesCount.value === null) linesCount.value = v;
+}, { immediate: true });
 const following = ref(true);
 const autoScroll = ref(true);
 const box = ref<HTMLElement | null>(null);
@@ -31,7 +45,7 @@ async function copyAll() {
 
 function open() {
   close();
-  es = new EventSource(logUrl(props.urlPath, linesCount.value));
+  es = new EventSource(logUrl(props.urlPath, linesCount.value ?? undefined));
   // 服务端每次连接都是 `journalctl -n <lines> -f`：先把整段尾部重打一遍再跟随。
   // 浏览器在断线（网络闪断、面板重启）后会自动重连，而旧画面还留着上一段的
   // 同样内容，onmessage 只会往后追加 —— 于是日志框里出现整段重复，反复断连就反复叠加。
@@ -117,7 +131,8 @@ onBeforeUnmount(() => {
         复制全部日志
       </NTooltip>
       <NText depth="3" style="font-size: var(--fs-xs)">初始行数</NText>
-      <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="2000" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="onCountChange" />
+      <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="maxLines"
+                    placeholder="默认" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="onCountChange" />
       <NText depth="3" id="ls-autoscroll-label" style="font-size: var(--fs-xs)">自动滚动</NText>
       <NSwitch v-model:value="autoScroll" size="small" aria-labelledby="ls-autoscroll-label" />
       <span class="st" style="font-size: var(--fs-xs)" :class="streamState === 'live' ? 'ok' : streamState === 'retry' ? 'warn' : 'err'">

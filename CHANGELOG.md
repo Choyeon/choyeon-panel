@@ -266,6 +266,29 @@
 
 
 ### 修复
+- 「一开始看多少行」接着上一批再收四处：日志中心的档位还写死 `[200,500,1000,2000]`、默认值另写一份 500，
+  nginx 页签那句说明写死「末尾 512KB」，实时日志组件抄了 200 与 2000，`api.ts` 里还有第三份 200，服务端
+  SSE 的兜底写着第二个 `min(lines, 2000)`。坏法与上一批同族，只是这回是静默的那种：把 `HTTP_LOG_LINES_MAX`
+  改小，前端输入框照样允许填到旧上限，请求发出去后被服务端悄悄截断，画面看着像"日志少了"而不是"你填超了"。
+  现在档位由 `app/util.py` 的 `log_ladder()` 从 `LOG_LINES_DEFAULT` 与 `HTTP_LOG_LINES_MAX` 派生，经
+  `/api/system/log-options`（仅管理员）下发；日志中心用它填两个下拉与那句 KB 说明，实时日志组件把初值留空
+  （`null` = 不传 `lines`，按服务端自己的默认来）、上限交给输入框的 `:max`，`logUrl()` 不再自带默认行数，
+  SSE 兜底改引用同一个常量。清单拿不到的 viewer 只是看不见上限，不报错也不崩。
+- 下拉在没有可选项时会画一个孤零零的 `0`。naive-ui 对"`:value` 有值但选项里没有这一项"是直接把值当文本画出来，
+  不会回落到 placeholder，于是行数清单还没到、候选文件还没取时框里是一个数字而不是提示语。改 `|| null` 之后
+  文件那个框要另判：序号 `0` 本身就是合法的"第一个候选"，只能按"有没有候选"判，不能按真假判。
+- 应用详情页环境变量编辑态的两颗图标按钮此前只有图标没有名字，读屏用户听到的是两个"按钮"。改由
+  `NDynamicInput` 的 `#action` 插槽显式挂出删除/新增，各带 `aria-label`；实测 3 行配置就是 3×2 颗带名字的按钮。
+- 上一批的提交（`d6ae079`）把 `### 修复` 里 ⑲B 与 ⑲A 两段整块覆盖掉了：写 CHANGELOG 时按行号替换，没比对被
+  替换区间里是否还住着别人的条目。已按行级三方合并找回，两批条目重新在文件里，措辞未改。
+- `backend/tests/test_batch21.py`（20 条）锁两件事：数字同源，与副本不许复活。源码断言在剥掉注释的文本上做
+  （`code_of()`），否则"这份副本已经不在了"这句叙述本身就会被自己的注释命中。含反证：把 `LOG_LINES_DEFAULT`
+  与 `HTTP_LOG_LINES_MAX` 打成 300/1200，档位必须跟着变成 `[300,600,1200]`；默认值落在上限之外时要被剔除而不是
+  留在档位里。端点侧钉 `nginx_tail_bytes == system.TAIL_BYTES`、`log_ladder` 被委托、viewer 403、匿名 401。
+- 两处在本机没法端到端看到的，如实记下：nginx 尾读那句"最多读末尾 512KB"只在有候选文件时才出现，而这台机器的
+  `CP_FILE_ROOTS` 不含 `/var/log/nginx`，接口回的是白名单提示，所以那句说明目前只有接口值与单测为证；`NSelect`
+  的下拉菜单在这台嵌入浏览器里（`visibilityState=hidden`）从不挂载 DOM，能证的是已选项 label（"200 行"）确实
+  来自接口，而不是整张下拉清单。
 - 资源告警原先不论越过多远都记 `warn`，注释写的是「crit 留给连不上 / 单元 failed /
   证书过期」。同一件事磁盘早就按两档走了，于是「CPU 82%」和「CPU 98%」在告警列表里
   长得一模一样：按 level 过滤的 Telegram / webhook 渠道要么两条都推、要么把要紧的那条
@@ -294,6 +317,65 @@
   `test_alerts`（85% 是 warn、95% 是 crit、负载跟着自检那个数走）与 `test_hardening`
   （两档互不引用）钉住。
 
+- 由外部 unit 纳管的应用现在真的能改环境变量。此前详情页里「环境变量」照样能编辑，PATCH 照样回 200、
+  界面照样弹「已保存」，附一句「外部 unit：unit 与环境变量文件不由面板写入，本次只改了记录」——然后
+  什么都没写。生产机上的 choyeon-video 就是这句话的现场：记录里 ADMIN_PASSWORD 早已换过新值，
+  `/root/www/choyeon-video/.panel.env` 这个文件从来不存在，外部 unit 里也没有 EnvironmentFile 那行，
+  进程读到的还是老配置，「改了没反应」于是变成玄学。unit 归外部管是真的，`.panel.env` 在应用目录里、
+  面板写它是自己分内的事，两件事被一句早退捆在一起放弃了。现在写文件、并在 systemd 的
+  `<unit>.d/panel-env.conf` 补一份 drop-in 引用它（不改别人的 unit 本体，删掉这个文件就恢复原样；
+  drop-in 里的 EnvironmentFile 排在 unit 本体 `Environment=` 之后，面板的值优先），服务在跑且内容
+  确实变了才重启一次，内容没变就一句「环境变量没有变化，服务未重启」，不再每次点保存抖一遍线上进程。
+  确实活在 unit 本体的那三样（启动命令、端口、安装目录）照旧如实说明「要在 unit 里同步后重启才生效」。
+- 同一个洞还有第二个入口：自定义 `unit_template` 漏写 EnvironmentFile 时，面板报「已生效」而 systemd
+  读的是另一份配置。现在部署和编辑都会先问一句「这个 unit 到底读不读 `.panel.env`」——查 unit 本体和
+  drop-in 两处，按整条路径比对（换过安装目录后，指向旧目录的引用不算生效），不读就用 drop-in 补上并在
+  note 里写清楚补了什么。删除应用连带清掉面板自己那份 drop-in（目录空了才删，别人放的 `vendor.conf`
+  不动）；托管与纳管互切时残留的 unit / drop-in 都有对应提示，不再只改记录就宣称生效。
+- 新增回归测试：`backend/tests/test_batch20.py`（24 条）。含 unit 本体与 drop-in 两种引用都被认出、
+  注释行与别的 app 的同名文件不算数、非法 unit 名（`../../etc/evil.service`）拒绝挂载、只有内容真变了
+  才 daemon-reload、停止态不擅自启动、外部 unit 下改 start_cmd 仍要说「只改了记录」、应用目录还没建时
+  提示下次部署写入、`.panel.env` 文件名只有一个出处（unit 模板、写入路径、drop-in 内容三处必须指同一个
+  文件）。反证过不是空转：把 `apps_service.py` 退回上一版，24 条全红。线上实测：在 choyeon-video 的
+  环境变量页加一个键保存，`.panel.env` 与 drop-in 落地、`systemctl show -p EnvironmentFiles` 读到该文件、
+  跑着的 node 进程 `/proc/<pid>/environ` 里有这个键（外部 unit 自带的 `Environment=PORT` 一个没丢）、
+  站点仍 200；删掉该键再保存，进程里跟着消失；内容不变再点一次保存，PID 不变并报「服务未重启」。
+- 「还剩几天算快到期」原先有两个出处：`cert_ops.EXPIRING_DAYS = 21`（证书页标"即将到期"用它）与告警配置
+  `alert_ssl_days`（默认 14，巡检决定发不发通知用它）。两份数字没有任何机制一起改，坏法是镜像的两侧都觉得自己对：
+  把配置调到 30，第 30 天通知已经响了、证书页上还是"正常"，人以为面板没当回事；调到 7，证书页满屏"即将到期"
+  却一条通知都不发，红牌变成装饰；调成 0（关掉证书提醒），页面照样按 21 天标黄，看起来像提醒还在生效。
+  现在 `status_of(days_left, threshold, invalid)` 只认入参，线由调用方给：`cert_ops` 里那份常量已经删掉，
+  certbot 与 openssl 两条来源都从 `setting_int("alert_ssl_days")` 拿线，`list_certs()` 随载荷带出
+  `expiring_days`，站点页把这条线直接写给人看（「剩余 ≤ N 天算即将到期」），前端不再自己抄数字；
+  `/api/ssl/certs` 也删掉了路由自己重拼的那份 `"expiring_days"`（⑰B 的老毛病：服务层算好了、路由再拼一遍，
+  两份数字在响应里打架）。配置为 0 时页面只判有没有过期，巡检整段跳过、连 certbot 都不查。
+- 第二个缺陷更隐蔽：天数读不到被说成"没事"，而且是被推送说成没事。certbot 的输出里少数证书读不到剩余天数
+  （旧版格式、异常行），`parse_certbot` 老实地给 `days=None`，而巡检的分支只有 `invalid / days<=线 / else`，
+  None 一路落进 else，于是往历史里写一行「证书 X 有效期正常」；上一轮这张证书真报过警的话，还会补推一条
+  「已恢复：证书 X 有效期正常」——同一张证书在站点页显示的是"未知"。读不到就只记一条 warn 日志、不动档位、
+  不发恢复，同时把 `notified` 标记留着（不留的话这张证书下次真恢复时也不发了）；天数能读出来且回到线上时
+  照旧落 ok 并补「已恢复」，恢复通知没被一起掐死。
+- 新增 `backend/tests/test_batch19a.py`（24 条）：档位只随入参走（21 天配 25 是 expiring、配 20 是 ok、
+  负数优先 expired、None 是 unknown 而不是 ok、0 只关 expiring 不关 expired）、四条源码级守卫
+  （`cert_ops` 里不许再出现 `EXPIRING_DAYS`；每个 `status_of(` 调用必须带线；sites 路由不许重拼
+  `expiring_days` 且必须由 `**data` 带出；巡检段不许有 `low =` 这类第二跳板）、None 不落 ok 历史也不发恢复且留标记、
+  后续可读轮仍补恢复并清标记、阈值同时进正文与 meta、线调到 7 就不发、invalid 恒 crit、一张读不到不带崩整轮
+  （防止 continue 写成 return）、0 时不查 certbot，以及"同一条配置同时决定页面档位与巡检通知"的三档对照
+  （25→页面 expiring + 1 条通知；7→ok + 0 条；0→ok + 0 条）。`test_sites.py` 里原来那条
+  `test_expiring_boundary_is_21_days` 换成四条边界用例。反证：把四只产品文件（`cert_ops` / `alerts_service` /
+  sites 路由 / `Sites.vue`）退回上一版，本批 24 条里 17 条红；仍绿的 7 条是
+  `test_the_negative_days_still_wins_over_the_line`、`test_a_cert_above_the_line_is_not_alerted`、
+  `test_breach_uses_the_configured_line_in_the_message`、`test_invalid_cert_is_crit_regardless_of_days`、
+  `test_the_round_still_finishes_when_a_cert_is_unreadable`、`test_zero_skips_the_certificate_check`、
+  `test_sites_page_has_no_hardcoded_day_count`——它们守的是旧代码本来就对的行为（负数、invalid、整轮不中断、
+  前端没有硬编码天数），不是这批的收敛。
+- 线上实测（生产机 3210，跑的是这批代码）：`alert_ssl_days` 原值 20，certbot 三张证书剩 76/77 天，
+  `/api/ssl/certs` 带出 `expiring_days: 20`、页面文案「剩余 ≤ 20 天算即将到期」、徽章全"正常"；把它存成 45、
+  再存成 60，同一个接口的线跟着变、页面数字跟着变，复位 20 后文案回到「≤ 20 天」；配成 0 时页面切到
+  「该提醒已关闭（配 0），这里只判有没有过期」；999 判 400，报错句子里带的区间就是登记表那条，库里也没落这个值。
+  浏览器端把 `/api/ssl/certs` 的载荷改写（线改成 80、其中一张的 `status` 改成 expiring）后重挂载站点页：
+  说明行跟着写「≤ 80 天」、那张徽章变成"即将到期"，证明徽章取的是后端 `status` 而不是前端拿 `days_left` 再算一遍。
+  新说明行在 375px 宽下换行不撑破容器（`scrollWidth == 375`），console 无报错。
 - 概览的「磁盘」原先写死读根分区，而「存储占用」页签读的是数据目录所在的那块盘。数据目录放到独立
   挂载盘上之后，两处会同时给出相反的判断（数据盘 100%、根盘 20%：一处是要紧项，一处是"占用健康"），
   而面板真正会写满的是数据盘。现在两条采样路径都走同一个 `_disk_sample()`，按数据目录取盘，并把

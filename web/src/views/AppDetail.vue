@@ -491,6 +491,12 @@ watch(
                 <NInput v-model:value="value.k" placeholder="KEY" style="width: 220px; margin-right: var(--space-2)" :input-props="{ class: 'mono', 'aria-label': '环境变量名' }" />
                 <NInput v-model:value="value.v" placeholder="value" style="flex: 1" :input-props="{ class: 'mono', 'aria-label': '环境变量值' }" />
               </template>
+              <!-- 默认的行内按钮是两块无名的圆形图标按钮：读屏只念得出「按钮」，
+                   键盘用户更分不清哪个是删掉这一行、哪个是再加一行。自己接管这一格。 -->
+              <template #action="{ index, create, remove }">
+                <NButton size="tiny" circle :icon="ico('TrashOutline', 12)" aria-label="删除这一项环境变量" @click="remove(index)" />
+                <NButton size="tiny" circle :icon="ico('AddOutline', 12)" aria-label="新增一项环境变量" style="margin-left: var(--space-1)" @click="create()" />
+              </template>
             </NDynamicInput>
             <NButton size="small" type="primary" round :loading="saving" :disabled="saving" :icon="ico('SaveOutline')" style="align-self: flex-start" @click="save">保存环境变量</NButton>
           </template>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref } from 'vue';
+import { computed, h, ref, watch } from 'vue';
 import {
   NAlert, NDataTable, NInput, NSelect, NSpace, NTabPane, NTabs, NSwitch, NTag, NText,
 } from 'naive-ui';
@@ -15,6 +15,7 @@ import { useVisiblePoll } from '../composables/useVisiblePoll';
 type JItem = { ts: string; unit: string; prio: number; text: string };
 type JResp = { items: JItem[]; count: number; truncated: boolean };
 type NResp = { items: string[]; count: number; source: string; files: { i: number; label: string }[]; truncated: boolean; hint?: string };
+type LogOpts = { lines_default: number; lines_max: number; ladder: number[]; nginx_tail_bytes: number };
 
 const err = ref('');
 const tab = ref<'journal' | 'nginx'>('journal');
@@ -24,8 +25,10 @@ const PRIO_CN: Record<string, string> = {
   emerg: '紧急', alert: '警戒', crit: '关键', err: '错误', warning: '注意', notice: '通知', info: '信息', debug: '调试',
 };
 
-const jf = ref({ unit: '', since: '30min', until: '', level: '', grep: '', limit: 500 });
-const nf = ref({ file: 0, lines: 500, filter: '' });
+// limit/lines 先留 0：档位和默认行数是服务端的事（见 /system/log-options），
+// 页面拿到清单再回填，避免这里抄一份和后端各说各话的数字。
+const jf = ref({ unit: '', since: '30min', until: '', level: '', grep: '', limit: 0 });
+const nf = ref({ file: 0, lines: 0, filter: '' });
 const jResult = ref<JResp | null>(null);
 const nResult = ref<NResp | null>(null);
 const jLoading = ref(false);
@@ -63,6 +66,33 @@ function applyPreset(p: { patch: Record<string, string> }) {
 const nginxFileOpts = computed(() =>
   (nResult.value?.files || []).map((f) => ({ label: f.label, value: f.i }))
 );
+
+// 「一次看多少行」由服务端给：档位、默认值、nginx 尾读的字节上限同出一个出处
+// （backend/app/util.py 的 LOG_LINES_DEFAULT / HTTP_LOG_LINES_MAX 与 system.py 的 TAIL_BYTES）。
+// 页面此前抄的是 200/500/1000/2000 + 默认 500 + 「512KB」，三个数字没有一个是自己算的，
+// 上限一改就整体失真，而且失真很安静：下拉里那一档还在，服务端已经截断了。
+const { data: logOpts } = useCachedFetch<LogOpts>({
+  key: () => 'system:logopts',
+  loader: () => req('/system/log-options'),
+  maxAge: 300000,
+});
+const ladder = computed(() => (logOpts.value?.ladder || []).filter((n) => Number.isInteger(n) && n >= 1));
+const lineOpts = computed(() => ladder.value.map((n) => ({ label: `${n} 行`, value: n })));
+const defaultLines = computed(() => {
+  const d = Number(logOpts.value?.lines_default) || 0;
+  if (ladder.value.includes(d)) return d;
+  return ladder.value[0] || 0;
+});
+const tailKb = computed(() => Math.round(Number(logOpts.value?.nginx_tail_bytes) / 1024) || 0);
+const tailNote = computed(() => {
+  const only = '只允许文件管理白名单目录下的 access.log / error.log。';
+  return tailKb.value ? `服务端最多读末尾 ${tailKb.value}KB，且${only}` : only;
+});
+watch(defaultLines, (v) => {
+  if (!v) return;
+  if (!jf.value.limit) jf.value.limit = v;
+  if (!nf.value.lines) nf.value.lines = v;
+}, { immediate: true });
 
 async function searchJournal(opts: { silent?: boolean } = {}) {
   // silent：跟随模式下的定时刷新。这时候不能盖 loading 遮罩，
@@ -197,8 +227,8 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
           />
           <NInput :value="jf.grep" size="small" style="width: 220px" placeholder="关键词（PCRE 正则）" aria-label="关键词" @update:value="(v: string) => { jf.grep = v; }" @keyup.enter="searchJournal()" />
           <NSelect
-            :value="jf.limit" size="small" style="width: 122px" aria-label="返回行数"
-            :options="[{ label: '200 行', value: 200 }, { label: '500 行', value: 500 }, { label: '1000 行', value: 1000 }, { label: '2000 行', value: 2000 }]"
+            :value="jf.limit || null" size="small" style="width: 122px" aria-label="返回行数"
+            :options="lineOpts" placeholder="行数"
             @update:value="(v: number) => { jf.limit = v; }"
           />
           <NButton size="small" type="primary" :loading="jLoading || jRefreshing" :icon="icon('SearchOutline', 14)" @click="searchJournal()">检索</NButton>
@@ -227,15 +257,18 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
 
       <NTabPane name="nginx" tab="访问/错误日志">
         <NSpace :size="8" wrap align="end" style="margin-bottom: var(--space-3)">
+          <!-- 两个下拉的初值都是 0，而 0 在没有对应选项时会被 naive 直接画成"0"：
+               候选文件还没取、行数清单还没回来时，框里是一个孤零零的数字而不是提示语。
+               文件那个 0 是合法序号（第一个候选），所以要按"有没有候选"判，不能按真假判。 -->
           <NSelect
-            :value="nf.file" size="small" style="width: 260px" :options="nginxFileOpts" :disabled="!nginxFileOpts.length"
+            :value="nginxFileOpts.length ? nf.file : null" size="small" style="width: 260px" :options="nginxFileOpts" :disabled="!nginxFileOpts.length"
             filterable placeholder="先取一次候选文件" aria-label="日志文件"
             @update:value="(v: number) => { nf.file = v; }"
           />
           <NInput :value="nf.filter" size="small" style="width: 220px" placeholder="过滤词（子串，不区分大小写）" aria-label="过滤词" @update:value="(v: string) => { nf.filter = v; }" @keyup.enter="tailNginx" />
           <NSelect
-            :value="nf.lines" size="small" style="width: 122px" aria-label="尾读行数"
-            :options="[{ label: '200 行', value: 200 }, { label: '500 行', value: 500 }, { label: '1000 行', value: 1000 }, { label: '2000 行', value: 2000 }]"
+            :value="nf.lines || null" size="small" style="width: 122px" aria-label="尾读行数"
+            :options="lineOpts" placeholder="行数"
             @update:value="(v: number) => { nf.lines = v; }"
           />
           <NButton size="small" type="primary" :loading="nLoading" :icon="icon('SearchOutline', 14)" @click="tailNginx">读取末尾</NButton>
@@ -243,7 +276,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
         <NAlert v-if="nResult?.hint" type="info" :bordered="false" size="small">{{ nResult.hint }}</NAlert>
         <NText v-else-if="nResult" class="cell-sub" style="display: block; margin-bottom: var(--space-2); font-size: var(--fs-xs)">
           {{ nResult.source }} · 返回 {{ nResult.count }} 行{{ nResult.truncated ? '（已到上限）' : '' }}；
-          服务端最多读末尾 512KB，且只允许文件管理白名单目录下的 access.log / error.log。
+          {{ tailNote }}
         </NText>
         <NDataTable
           :columns="nCols" :data="nRows" size="small" :bordered="false" :loading="nLoading"

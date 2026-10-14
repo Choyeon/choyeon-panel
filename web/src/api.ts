@@ -275,6 +275,9 @@ export function saveLoginData(r: { token: string; role: string; username?: strin
   localStorage.setItem(AVA_KEY, r.avatar || '');
 }
 
-export function logUrl(path: string, lines = 200) {
-  return `${base}${path}?token=${encodeURIComponent(getToken())}&lines=${lines}`;
+export function logUrl(path: string, lines?: number) {
+  // 省略 lines 就走服务端自己的默认行数（app/util.py 的 LOG_LINES_DEFAULT）。
+  // 这个默认值过去在 api.ts、实时日志组件、日志中心各抄了一份，改一处其余两处失真。
+  const tail = lines ? `&lines=${lines}` : '';
+  return `${base}${path}?token=${encodeURIComponent(getToken())}${tail}`;
 }

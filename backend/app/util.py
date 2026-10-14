@@ -256,6 +256,17 @@ def parse_lines(raw: str | None, default: int = LOG_LINES_DEFAULT,
     return max(1, min(n if n else default, maximum))
 
 
+def log_ladder() -> list[int]:
+    """网页「看多少行」的档位，由上面那两个数派生，不再由前端抄一份。
+
+    日志中心过去同时写着 200/500/1000/2000 与默认 500：默认值和 `LOG_LINES_DEFAULT`
+    对不上，最大档和 `HTTP_LOG_LINES_MAX` 也只是恰好相等。上限一改，页面就整体失真，
+    而且失真是安静的——下拉里那档还在，服务端已经按自己的上限截断了。
+    """
+    steps = {LOG_LINES_DEFAULT, HTTP_LOG_LINES_MAX // 4, HTTP_LOG_LINES_MAX // 2, HTTP_LOG_LINES_MAX}
+    return sorted(v for v in steps if 1 <= v <= HTTP_LOG_LINES_MAX)
+
+
 def disk_usage_pct(path: str) -> int | None:
     """返回 path 所在分区的已用百分比（按非 root 可用空间算），取不到返回 None。
 

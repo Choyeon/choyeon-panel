@@ -13,7 +13,7 @@ from .. import aio_db, config, security
 from ..deps import need_admin
 from ..errors import BadInput, err_json, public_message
 from ..services import alerts_service, firewall_service, system_metrics, systemd_ops
-from ..util import is_unit, parse_lines, redact_creds, run
+from ..util import HTTP_LOG_LINES_MAX, LOG_LINES_DEFAULT, is_unit, log_ladder, parse_lines, redact_creds, run
 
 router = APIRouter()
 
@@ -176,8 +176,10 @@ async def _sse_journal(unit: str, lines: int, user: str = "", exp: float = 0.0):
 
 
 def log_stream_response(unit: str, lines: int, user: str, exp: float) -> StreamingResponse:
+    # 兜底的是"调用方忘了 parse_lines"，数字仍是接口那一档的上限（⑲B 收进 util；
+    # 这里过去写着第二个 2000，上限一改就是两条不同的线）。
     return StreamingResponse(
-        _sse_journal(unit, min(lines, 2000), user, exp),
+        _sse_journal(unit, min(lines, HTTP_LOG_LINES_MAX), user, exp),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
@@ -339,6 +341,24 @@ def _journal_items(raw: str) -> list:
             "text": redact_creds(str(text))[:MAX_ITEM_CHARS],
         })
     return items
+
+
+@router.get("/api/system/log-options")
+async def log_options(request: Request):
+    """日志中心那份"看多少行"的清单：数字只有 `app/util.py` 一个出处。
+
+    页面此前自己抄了 200/500/1000/2000 与默认 500，还把 nginx 尾读的字节上限写成
+    "512KB" 抄进文案。三处数字各抄一遍，改一处就整体失真，而且失真很安静——
+    下拉里那一档还在，服务端已经按自己的上限截断了。
+    """
+    if r := need_admin(request):
+        return r
+    return {
+        "lines_default": LOG_LINES_DEFAULT,
+        "lines_max": HTTP_LOG_LINES_MAX,
+        "ladder": log_ladder(),
+        "nginx_tail_bytes": TAIL_BYTES,
+    }
 
 
 @router.get("/api/system/logs")
