@@ -318,12 +318,13 @@ class TestPageShowsTheWholeVerdict(unittest.TestCase):
     """判词还得在页面上看得全：手机上没有 hover，一行的省略号等于没写。"""
 
     def test_detail_is_allowed_to_wrap(self):
+        """折行的出处在批次㉕ 并进了 `.cp-prose`（全站一份），这里改认那一份。"""
         css = (ROOT.parent / "web" / "src" / "style.css").read_text(encoding="utf-8")
-        rule = re.search(r"\.cell-sub\.wrap\s*\{([^}]*)\}", css)
+        rule = re.search(r"\.cp-prose\.cp-prose\s*\{([^}]*)\}", css)
         self.assertIsNotNone(rule, "判词的折行规则没了——整句话又会折回一行的省略号")
         self.assertIn("white-space: normal", rule.group(1))
         vue = (ROOT.parent / "web" / "src" / "views" / "Doctor.vue").read_text(encoding="utf-8")
-        self.assertIn("'cell-sub wrap'", vue, "自检列表的判词行没挂上折行的类")
+        self.assertIn("'cell-sub cp-prose'", vue, "自检列表的判词行没挂上折行的类")
 
 
 if __name__ == "__main__":

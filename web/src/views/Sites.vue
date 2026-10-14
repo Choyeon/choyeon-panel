@@ -177,7 +177,7 @@ const siteColumns: any[] = [
           href
             ? h('a', { class: 'site-link', href, target: '_blank', rel: 'noopener noreferrer', title: `在新标签页打开 ${href}` }, r.domain)
             : h('span', { class: 'cell-name', title: r.domain }, r.domain),
-          h('div', { class: 'cell-sub', title: r.app || 'nginx 手工配置，未纳管为面板应用' },
+          h('div', { class: 'cell-sub cp-prose', title: r.app || 'nginx 手工配置，未纳管为面板应用' },
             r.app || '未纳管的手工配置'),
         ]),
       ]);
@@ -198,8 +198,8 @@ const siteColumns: any[] = [
     title: '配置文件',
     key: 'file',
     width: 180,
-    ellipsis: { tooltip: true },
-    render: (r: any) => h('span', { class: 'mono-dim' }, r.file || '—'),
+    // 路径也是要在手机上看得全的东西：折行（三行封顶）而不是等 hover。
+    render: (r: any) => h('span', { class: 'mono-dim cp-prose', title: r.file || '' }, r.file || '—'),
   },
   {
     title: '操作',
@@ -245,7 +245,7 @@ const certColumns: any[] = [
         ]),
         h('div', { class: 'cell-txt' }, [
           h('span', { class: 'cell-name', title: c.certbot_id || c.name }, c.name),
-          h('div', { class: 'cell-sub', title: c.issuer || '签发者未知' }, c.issuer || '签发者未知'),
+          h('div', { class: 'cell-sub cp-prose', title: c.issuer || '签发者未知' }, c.issuer || '签发者未知'),
         ]),
       ]),
   },
@@ -267,7 +267,7 @@ const certColumns: any[] = [
         // 原来这里自己 slice(0, 16)：把秒和 +00:00 一起砍掉，列头又没写时区，
         // 于是"到期时间"读起来像本地时间（本机 +8 就少看 8 小时）。
         // 现在走全站同一套 fmtDateTime（到秒），时区在列头写明，完整原值放 tooltip。
-        h('div', { class: 'cell-sub', title: c.expiry || '到期时间未知' }, c.expiry ? `${fmtDateTime(c.expiry)} UTC` : '到期时间未知'),
+        h('div', { class: 'cell-sub cp-prose', title: c.expiry || '到期时间未知' }, c.expiry ? `${fmtDateTime(c.expiry)} UTC` : '到期时间未知'),
       ]);
     },
   },

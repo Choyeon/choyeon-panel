@@ -137,8 +137,8 @@ function appCell(r: any) {
           ...(kids.length ? [h(NTag, { size: 'tiny', bordered: false, type: 'info' }, { default: () => `组合 ${kids.length + 1} 件` })] : []),
           repoLink(r.repo_url),
         ]),
-        // 名称与描述都会被 ellipsis 裁掉，title 是唯一还能看到全文的地方
-        h('div', { class: 'cell-sub', title: r.domain || r.unit || r.path || '—' }, r.domain || r.unit || r.path || '—'),
+        // 名称与描述都会被裁：描述折行（手机上摸不到 hover），title 只作桌面端补充
+        h('div', { class: 'cell-sub cp-prose', title: r.domain || r.unit || r.path || '—' }, r.domain || r.unit || r.path || '—'),
       ]),
     ]),
   ];

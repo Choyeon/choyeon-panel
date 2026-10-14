@@ -59,7 +59,7 @@ const dbCols: any[] = [
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.CubeOutline, size: 17, color: 'var(--cp-brand-soft)' })]),
-        h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub', title: `owner: ${r.owner}` }, `owner: ${r.owner}`)]),
+        h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub cp-prose', title: `owner: ${r.owner}` }, `owner: ${r.owner}`)]),
       ]),
   },
   { title: '大小', key: 'size', width: 96, render: (r: any) => h('span', { class: 'mono-dim' }, r.size) },
@@ -200,7 +200,7 @@ const sqlOptions = computed(() => {
   return o.some((x: any) => x.value === 'postgres') ? o : [{ label: 'postgres', value: 'postgres' }, ...o];
 });
 const browseCols: any[] = [
-  { title: '表', key: 'name', render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub', title: r.schema }, r.schema)])]) },
+  { title: '表', key: 'name', render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub cp-prose', title: r.schema }, r.schema)])]) },
   { title: '行数（估）', key: 'row_estimate', width: 110, render: (r: any) => h('span', { class: 'mono-dim' }, String(r.row_estimate ?? '—')) },
   { title: '大小', key: 'size', width: 100, render: (r: any) => h('span', { class: 'vchip' }, r.size ?? '—') },
   { title: '操作', key: 'go', width: 80, align: 'center', render: (r: any) => h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => pickTable(r) }, () => '查看数据') },
@@ -211,7 +211,8 @@ const dataCols = computed<any[]>(() => [
     render: (r: any) => h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => openRow(r, false) }, () => '查看'),
   },
   ...tCols.value.map((c: string) => ({
-    // tooltip:false 时超出 180px 的内容就永久看不见（没有 title 也没有浮层）
+    // 这里的 hover tooltip 是桌面端的补充，不是唯一入口：整行点击（:row-props="rowProps"）
+    // 打开的行详情抽屉里有完整值 + 编辑，触屏靠它。测试锁的就是这条通道还在。
     title: c, key: c, ellipsis: { tooltip: true }, width: 180,
     render: (r: any) => fmtCell(r[c], c, r),
   })),

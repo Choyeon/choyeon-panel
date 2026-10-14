@@ -100,7 +100,7 @@ const cols: any[] = [
         ]),
         h('div', { class: 'cell-txt' }, [
           h('span', { class: 'cell-name', title: u.nickname || u.username }, u.nickname || u.username),
-          h('div', { class: 'cell-sub', title: sub }, sub),
+          h('div', { class: 'cell-sub cp-prose', title: sub }, sub),
         ]),
       ]);
     },
@@ -117,11 +117,12 @@ const cols: any[] = [
       h(NTag, { size: 'small', bordered: false, type: u.totp ? 'success' : 'default' }, () => (u.totp ? '已开启' : '仅口令')),
   },
   {
-    title: '权限说明', key: 'perm', width: 320, ellipsis: { tooltip: true },
-    render: (u: any) =>
-      h(NText, { depth: 3, style: 'font-size:var(--fs-xs)' }, () =>
-        u.role === 'admin' ? '可执行全部操作：启停、部署、终端、文件、用户管理' : '只读：可查看全部监控/日志/数据，不能执行任何写操作',
-      ),
+    // 整句话的说明：折行看得全，比「hover 才浮出来」诚实——窄屏上这一列本来就只有百来 px。
+    title: '权限说明', key: 'perm', width: 320,
+    render: (u: any) => {
+      const t = u.role === 'admin' ? '可执行全部操作：启停、部署、终端、文件、用户管理' : '只读：可查看全部监控/日志/数据，不能执行任何写操作';
+      return h(NText, { depth: 3, class: 'cp-prose', style: 'font-size:var(--fs-xs)', title: t }, () => t);
+    },
   },
   {
     title: '操作', key: 'ops', width: 190, align: 'center', fixed: 'right' as const,

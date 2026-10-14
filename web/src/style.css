@@ -277,11 +277,36 @@ a:focus-visible,
   white-space: nowrap;
 }
 
-/* 长等宽串（哈希、URL、JSON、SQL）换行而不是裁掉：nowrap 会撑破 td，
-   不给 break-all 就只能看到一个截半截的字符串。 */
-.cp-break {
+/* 长等宽串（哈希、URL、cron 表达式、命令行）换行而不是裁掉：nowrap 会撑破 td，
+   不给 break-all 就只能看到一个截半截的字符串。
+   两个类名是刻意的，不是笔误：`.mono-dim`、`.cell-sub`、`.mono-1l` 都写着
+   `white-space: nowrap`，同权重的规则靠先后顺序决胜——`.cp-break` 原本写在它们前面，
+   于是线上实测五处「声明了要换行、其实一个字都没换」的格子（cron 的命令与表达式、
+   日志页的 unit 名、设置页的单元名、告警页的来源码）。写在后面也一样会死：下一次有人
+   挪动样式块就又是五处。0-2-0 的权重与顺序无关，谁和它并用都必然打赢。
+   `pre-wrap` 而不是 `normal`：cron 表达式与命令行里的空格是有意义的，不能合并。 */
+.cp-break.cp-break {
   word-break: break-all;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* 整句话的格子（自检判词、告警内容、配置文件路径）：一行 ellipsis 等于把结论丢掉，
+   而 title/tooltip 只在桌面 hover 或点一下才出得来，手机上没有 hover。
+   这一类放开到三行封顶——再长就是滚动区里的事，一屏要看得见几项。
+   与 .cp-break 同一个打法（双类名压过 .cell-sub/.mono-dim 的 nowrap），
+   自检页原先那份 `.cell-sub.wrap` 副本并到这里，折行这件事只剩一个出处。 */
+.cp-prose.cp-prose {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-word;
+  overflow: hidden;
+  text-overflow: clip;
+  line-height: 1.6;
 }
 
 /* 状态点 */
@@ -349,10 +374,6 @@ button.cell-name > .n-button__content {
   white-space: nowrap;
 }
 .cell-sub { font-size: var(--fs-2xs); color: var(--cp-text-mute); min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* 副标题位置放的是「整句话」时（自检判词就是这种），一行截断等于把结论丢掉：
-   title 只在桌面 hover 出得来，手机上没有 hover，摸不到那一行看不全的字。
-   放开到三行封顶，再长仍然是滚动区里的事——行高不能无限撑，一屏要看得见几项。 */
-.cell-sub.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .vchip {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px var(--space-2); border-radius: var(--radius-pill); font-size: var(--fs-xs); line-height: 18px;

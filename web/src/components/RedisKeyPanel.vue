@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, ref, watch } from 'vue';
 import { NCard, NSpace, NTag, NInput, NPopconfirm, NText, NDataTable, useMessage } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, tapEllipsis } from '../ui';
 import { api, getRole } from '../api';
 import { icon } from '../icons';
 import JsonView from './JsonView.vue';
@@ -84,9 +84,9 @@ const memberCols = computed<any[]>(() => {
   const ops = (render: (r: any) => any) => ({ title: '操作', key: 'ops', width: 116, className: 'row-ops', render, fixed: 'right' as const });
   const cols: any[] = [];
   if (type.value === 'hash') {
-    cols.push({ title: 'field', key: 'field', width: 140, ellipsis: { tooltip: true }, render: (r: any) => hText(r.field) });
+    cols.push({ title: 'field', key: 'field', width: 140, ellipsis: tapEllipsis, render: (r: any) => hText(r.field) });
     cols.push({
-      title: 'value', key: 'value', minWidth: 240, ellipsis: { tooltip: true },
+      title: 'value', key: 'value', minWidth: 240, ellipsis: tapEllipsis,
       render: (r: any) =>
         editField.value === r.field
           ? h(NInput, {
@@ -113,7 +113,7 @@ const memberCols = computed<any[]>(() => {
   }
   if (type.value === 'list') cols.push({ title: '#', key: 'i', width: 56 });
   cols.push({
-    title: type.value === 'zset' ? 'member' : 'value', key: 'v', ellipsis: { tooltip: true },
+    title: type.value === 'zset' ? 'member' : 'value', key: 'v', ellipsis: tapEllipsis,
     render: (r: any) => hText(String(r.v ?? '')),
   });
   if (type.value === 'zset') cols.push({ title: 'score', key: 'field', width: 90 });
@@ -126,7 +126,8 @@ const memberCols = computed<any[]>(() => {
 });
 
 function hText(s: string) {
-  // 单元格里是 nowrap + ellipsis（列宽所限），全文靠 ellipsis:{tooltip:true} 的浮层看
+  // 单元格里是 nowrap + ellipsis（列宽所限），全文靠 tapEllipsis 的点按浮层看：
+  // 只读账号在这张表里没有别的入口，而 hover 在手机上不存在。
   return h('span', { class: 'mono-dim', title: s.slice(0, 500) }, s.slice(0, 500));
 }
 

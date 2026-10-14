@@ -21,3 +21,14 @@ export const NButton = defineComponent({
       } as any);
   },
 });
+
+/**
+ * 表格列的「被裁掉的全文怎么看见」。
+ *
+ * 触屏没有 hover，而 naive 的 `ellipsis: { tooltip: true }` 只在 hover 时浮出浮层，
+ * 被裁的那半句就再也没有第二个入口（375px 实测：`.n-ellipsis` 连 `title` 都不带，
+ * 最长一条告警内容被裁掉 155px）。这里把触发方式改成 click：桌面点一下、手机按一下就看得见。
+ * 能折行的格子优先用 `.cp-prose` 折行（结论不该等人点一下才露脸），
+ * 只有必须保持单行的表格才用它——审计那张开了 `virtual-scroll`，行高必须齐。
+ */
+export const tapEllipsis = { tooltip: { trigger: 'click' } } as const;

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, h } from 'vue';
 import { NCard, NDataTable, NInput, NSelect, NIcon, NTag, NText, useMessage } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, tapEllipsis } from '../ui';
 import { api } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
@@ -69,7 +69,8 @@ const cols: any[] = [
   },
   // action 最长的是 `terminal.exec`/`app.deploy.rollback` 这类点分名，190px 会截断，给它一个 title。
   { title: '操作', key: 'action', width: 190, render: (r: any) => h(NTag, { size: 'tiny', bordered: false, type: actionType(r.action), title: r.action }, () => r.action) },
-  { title: '详情', key: 'detail', minWidth: 220, ellipsis: { tooltip: true }, render: (r: any) => h('span', { class: 'mono-dim' }, r.detail || '—') },
+  // 这张表开着 virtual-scroll，行高必须齐，详情不能折行；那就把全文的入口从 hover 换成点按。
+  { title: '详情', key: 'detail', minWidth: 220, ellipsis: tapEllipsis, render: (r: any) => h('span', { class: 'mono-dim', title: r.detail || '' }, r.detail || '—') },
 ];
 </script>
 

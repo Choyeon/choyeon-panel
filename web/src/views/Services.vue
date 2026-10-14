@@ -1630,7 +1630,7 @@ const columns: any[] = [
           isAdmin
             ? h(NButton, { text: true, type: 'primary', class: 'cell-name', title: r.unit, onClick: () => openLog(r.unit) }, () => r.unit)
             : h('span', { class: 'cell-name', title: r.unit }, r.unit),
-          h('div', { class: 'cell-sub', title: r.desc || '—' }, r.desc || '—'),
+          h('div', { class: 'cell-sub cp-prose', title: r.desc || '—' }, r.desc || '—'),
         ]),
       ]),
   },
@@ -1679,7 +1679,7 @@ const patchColumns: any[] = [
         ]),
         h('div', { class: 'cell-txt' }, [
           h('span', { class: 'cell-name', title: r.name }, r.name),
-          h('div', { class: 'cell-sub', title: r.suite || '—' }, r.suite || '—'),
+          h('div', { class: 'cell-sub cp-prose', title: r.suite || '—' }, r.suite || '—'),
         ]),
       ]),
   },

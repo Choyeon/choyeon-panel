@@ -279,7 +279,7 @@ const columns: any[] = [
           // 备份文件名是长等宽串（库名+时间戳），必须走 .cell-name 的 ellipsis，
           // 只用 .mono 的话在窄列里被 td 裁成半截、还看不到全名
           h('span', { class: 'cell-name mono', title: f.name }, f.name),
-          h('div', { class: 'cell-sub', title: jobLabel(f) }, jobLabel(f)),
+          h('div', { class: 'cell-sub cp-prose', title: jobLabel(f) }, jobLabel(f)),
         ]),
       ]),
   },
@@ -287,7 +287,7 @@ const columns: any[] = [
     title: '类型', key: 'kind', width: 110,
     render: (f: any) => h(NTag, { size: 'small', bordered: false, type: f.job_missing ? 'warning' : 'default' }, () => KIND_LABEL[f.kind] || '未知'),
   },
-  { title: '生成时间 (UTC)', key: 'mtime', width: 180, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim', title: f.mtime }, fmtDateTime(f.mtime)) },
+  { title: '生成时间 (UTC)', key: 'mtime', width: 180, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim cp-prose', title: f.mtime }, fmtDateTime(f.mtime)) },
   { title: '大小', key: 'size', width: 100, sorter: 'default', render: (f: any) => h('span', { class: 'mono-dim' }, fmtBytes(f.size)) },
   {
     title: '状态', key: 'state', width: 130,

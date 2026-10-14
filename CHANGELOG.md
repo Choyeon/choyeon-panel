@@ -331,6 +331,32 @@
 
 ### 修复
 
+- 全站被裁掉的全文只剩一个入口（hover），而五处「声明了要换行」的格子其实一个字都没换。
+  375px 登录态同源离屏实测（2026-10-14）：告警内容最长的一条在 192px 的列里被裁掉 155px，
+  承载它的 `.n-ellipsis` 节点连 `title` 都没有；同一形状分布在告警、审计、网站、用户、
+  Redis 数据浏览器五处，手机上没有 hover，那半句结论就永久看不见。
+  `PopoverTrigger` 是单值（不接受数组），hover 与 click 挂不到同一个 ellipsis 上，所以触屏入口另开一档：
+  `ui.ts` 导出共享的 `tapEllipsis = { tooltip: { trigger: 'click' } }`，审计详情与 Redis 数据格改用它；
+  整句话的格子换成新的 `.cp-prose`（三行封顶，折行本身看得见，`title` 退成桌面端补充）——自检判词、
+  告警内容、证书发行方与到期时间、nginx 配置文件路径、权限说明、应用副标题、备份任务标签与生成时间、
+  服务描述与套件、库表的 owner/schema、定时任务的上次执行；数据浏览的 PG 行不加浮层，
+  点整行本来就打开行详情，全文和编辑都在那里。线上复验（有数据挂载的七个页面）：告警页 43 行里
+  7 条判词折成两行，自检页最长的一条实测要 8 行、收到 3 行，两处都做到 `scrollWidth-clientWidth == 0`，
+  而被裁的 `.n-ellipsis` 从 155px 归零。
+- `.cp-break` 与 `.mono-dim`/`.cell-sub` 权重相同、靠样式块先后顺序决胜，而它写在前面：
+  `white-space: nowrap` 赢——cron 的命令行与表达式、日志页的 unit 名、设置页的单元名、告警页的来源码，
+  注释里都写着「这里必须换行」，实测一行都没换。告警页的来源码还多一种死法：内联
+  `wordBreak: 'break-all'` 只赢 word-break 这一条属性，nowrap 仍由类提供。两条规则都改成双类名选择器
+  （`.cp-break.cp-break`、`.cp-prose.cp-prose`，0-2-0 与顺序无关），`.cp-break` 把 `white-space`
+  定成 `pre-wrap`（cron 表达式与命令行里的空格有意义，不能合并）；内联那份 break-all 删掉，
+  告警的展开区改用全局类；批次㉔留在自检页的 `.cell-sub.wrap` 副本并进来，折行只剩一个出处。
+  构建产物形状未变（`index-*.css` 仍是两条双类名）。
+- `backend/tests/test_batch25.py`（18 条）把这些钉成源码级不变量：打赢 nowrap 的写法只有一个出处、
+  内联 `wordBreak: 'break-all'` 不许再冒充换行声明、hover-only 的 `tooltip: true` 只允许出现在真的写了
+  `:row-props=` 的那张表（豁免与整行点击通道绑在同一条断言上，通道一旦被删立刻变红）、`tapEllipsis`
+  全站一份不许就地重抄、`virtual-scroll` 的表里不许出现三行封顶的格子。禁的是 `.cp-prose` 而不是折行，
+  出处在库里：naive-ui 的 `Body.mjs` 传的是 `itemResizable: !virtualScrollX`，纵向虚拟列表会实测每行真实
+  高度，长 unit 名偶发折一行裁不到字，但同一列混着 1 行和三行的句子会让行高成倍抖动。
 - 自检项判词里「数了几项」和「点名了哪几条」原先是两套口径，三条分支漏了后半句：`load` 的 fail、
   `pending` 的 fail 和 `login` 的合并判词都写着「N 项要紧的…」，却只把第一条名字拼进 detail，
   第二条以后既没列也没说还剩几条。本机实测被吞掉的那条正是 `postgresql@17-main.service`——它排在

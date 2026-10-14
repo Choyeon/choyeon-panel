@@ -322,7 +322,7 @@ function lastRunCell(r: Task) {
   const text = r.running ? '执行中…' : r.last_run ? fmtDateTime(r.last_run) + src : '—';
   return h('div', { class: 'cell-lastrun' }, [
     h(NIcon, { component: icons[icoName], size: 14, color }),
-    h('span', { class: 'mono-dim', title: r.last_run ? `${r.last_run} (本地)${src}` : '' }, text),
+    h('span', { class: 'mono-dim cp-prose', title: r.last_run ? `${r.last_run} (本地)${src}` : '' }, text),
   ]);
 }
 

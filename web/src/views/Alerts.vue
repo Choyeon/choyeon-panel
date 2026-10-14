@@ -82,15 +82,17 @@ function reload() {
 const cols: any[] = [
   {
     type: 'expand', width: 34,
-    // 展开区由 columns.render 创建，scoped 样式落不到它身上（同 style.css 里的 .json-tip 注释），
-    // 所以这里写内联样式；meta 是巡检写进来的 JSON，格式化失败就原样显示。
+    // 展开区由 columns.render 创建，本组件的 scoped 样式落不到它身上（同 style.css 里的 .json-tip 注释），
+    // 所以尺寸与配色写内联；折行用全局 .cp-break（它是全局样式，够得着）。
+    // meta 是巡检写进来的 JSON，格式化失败就原样显示。
     renderExpand: (r: AlertRow) =>
       h('pre', {
+        class: 'cp-break',
         style: {
           margin: '0', padding: 'var(--space-3)', background: 'var(--cp-code-bg)',
           color: 'var(--cp-code-text)', border: '1px solid var(--cp-border)', borderRadius: '8px',
           fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-2xs)', lineHeight: '1.6',
-          whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '320px', overflow: 'auto',
+          maxHeight: '320px', overflow: 'auto',
         },
       }, metaText(r.meta) || '（无附加信息）'),
   },
@@ -105,16 +107,24 @@ const cols: any[] = [
     },
   },
   {
-    // 1Panel 列表不用相对时间：绝对时间 + width 180（对齐 alert log createdAt 列）
-    title: '时间', key: 'ts', width: 180,
-    render: (r: AlertRow) => h('span', { class: 'mono-dim', title: `${fmtDateTime(r.ts)} (UTC)` }, fmtDateTime(r.ts)),
+    // 1Panel 列表不用相对时间：绝对时间 + width 180（对齐 alert log createdAt 列）。
+    // (UTC) 写在表头而不是每格 title 里：表头不需要 hover 就一直在。
+    title: '时间 (UTC)', key: 'ts', width: 180,
+    render: (r: AlertRow) => h('span', { class: 'mono-dim' }, fmtDateTime(r.ts)),
   },
   {
     title: '来源', key: 'code', width: 200,
+    // 内联 wordBreak 只赢 word-break 这一条：white-space:nowrap 仍由 .mono-dim 提供，
+    // 于是这条「打算换行」的声明一个字都没换过。类名交给 .cp-break（它自带打赢 nowrap 的权重）。
     render: (r: AlertRow) =>
-      h('span', { class: 'mono-dim', style: { wordBreak: 'break-all' } }, r.code),
+      h('span', { class: 'mono-dim cp-break' }, r.code),
   },
-  { title: '内容', key: 'message', minWidth: 260, ellipsis: { tooltip: true } },
+  {
+    // 告警内容就是这一行的结论。手机上没有 hover，tooltip 与 title 都摸不到，
+    // 所以让它折行（三行封顶），tooltip 退成桌面端的补充。
+    title: '内容', key: 'message', minWidth: 260,
+    render: (r: AlertRow) => h('span', { class: 'cp-prose', title: r.message }, r.message),
+  },
   {
     title: '状态', key: 'acked', width: 92,
     render: (r: AlertRow) =>
