@@ -129,7 +129,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `deploy` | `--prefix --port --branch --skip-nginx --no-deps` | 一键部署（依赖→venv→前端构建→systemd→健康检查）；非交互，不会询问 nginx 反代 |
 | `upgrade` | `--no-pull` | 拉代码→备份→重建→重启，健康检查失败自动回滚；`--no-pull` 只重建并重新渲染 unit |
 | `status` | — | 版本/监听/服务/健康/自检汇总 |
-| `doctor` | — | 只读安全与健康自检（当前 19 项，以 JSON 的 `items` 为准），每项带修复命令 |
+| `doctor` | — | 只读安全与健康自检（当前 20 项，以 JSON 的 `items` 为准），每项带修复命令 |
 | `user list\|create\|reset\|revoke\|delete` | `<name> --password --password-stdin --role --yes` | 账号管理；create/reset 用 `--password-stdin` 传口令。改密与 `revoke` 都会吊销旧 token：`revoke <name>` 只踢这个账号，`revoke all` 踢全部（`delete` 必须加 `--yes`） |
 | `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --type --repo --branch --path --port --domain --start-cmd --install-cmd --lines` | 应用全生命周期；`create` 需 `--template` 或 `--start-cmd` 之一 |
 | `backup run\|list` | — | 面板数据备份（SQLite 在线备份 API） |
@@ -177,6 +177,9 @@ choyeonctl status --json              # dataDir / port 应与 .env 一致，heal
 
 `.env` 与 unit 的 `Environment=` 现在是同一套值（`upgrade --no-pull` 会双向对齐），优先级为
 `进程环境变量 > .env > 内置默认`，与 `backend/app/config.py` 的文档一致。
+`.env` 不存在时 `deploy` / `upgrade --no-pull` 会先按 `.env.example` 生成一份（0600）再对齐部署参数，
+所以上面那个编辑入口在任何机器上都存在；两边不一致由 `doctor` 的「配置来源」项报出来（fail，
+fix 就是 `upgrade --no-pull`）。
 
 手动回滚：
 
@@ -194,7 +197,7 @@ choyeonctl status --json
 | 症状 | 诊断 | 处置 |
 | --- | --- | --- |
 | `deploy` 返回 `healthy:false` | `journalctl -u choyeon-panel -n 50` | 多为端口占用或依赖缺失；改端口或 `./scripts/install.sh` 重跑 |
-| `deploy` 报 unhealthy 但服务确实在跑 | 看返回 JSON 的 `url` / `prefix`，`ss -ltnp \| grep <端口>` | CLI 探测的端口/数据目录来自 `.env`，与 unit 不一致时先 `choyeonctl upgrade --no-pull` 把两边对齐再判失败 |
+| `deploy` 报 unhealthy 但服务确实在跑 | `choyeonctl doctor --json` 的「配置来源」项，或 `ss -ltnp \| grep <端口>` | CLI 探测的端口/数据目录来自 `.env`，与 unit 不一致时那一项是 fail；先 `choyeonctl upgrade --no-pull` 把两边对齐再判失败 |
 | `Address already in use` | `ss -ltnp \| grep :3210` | `kill <pid>` 或换 `--port` |
 | 页面 404 | `ls web/dist/index.html` | 前端未构建：`cd web && npm run build` |
 | `user create` 报「已存在」 | `choyeonctl user list` | 改走 `printf '%s' "$PW" \| choyeonctl user reset <name> --password-stdin` |

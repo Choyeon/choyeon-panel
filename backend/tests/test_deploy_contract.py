@@ -134,10 +134,37 @@ class TestEnvSync(unittest.TestCase):
         self.assertIn("CP_BACKUP_DIR=/nas/bk", body)
         self.assertIn("CP_FILE_ROOTS=", body)
 
-    def test_no_dotenv_is_a_noop(self):
-        r = _bash('env_sync_all; echo DONE', {"CP_PREFIX": self.prefix})
-        self.assertIn("DONE", r.stdout)
-        self.assertFalse((Path(self.prefix) / ".env").exists())
+    def test_missing_dotenv_is_seeded_and_aligned(self):
+        """缺 .env 时 env_sync_all 必须建一份，并把六个部署参数写进去。
+
+        旧契约是"没有 .env 就什么都不做"，代价是 AGENTS.md §5 的正规入口（编辑 .env
+        → upgrade --no-pull）在一个不存在的文件上悬空，而面板照常健康——配置真正的出处
+        变成内置默认 + unit 里那几行。夹具目录里没有 .env.example，走的正是"建空文件"
+        这条支路：common.sh 是 set -euo pipefail，sync_env 读不到 .env 会让整条部署在
+        第一次回写时就退出，所以这里同时钉 returncode。
+        """
+        r = _bash('env_sync_all', {"CP_PREFIX": self.prefix, "CP_PORT": "3300"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        p = Path(self.prefix) / ".env"
+        self.assertTrue(p.exists(), "缺 .env 时没有生成，§5 的入口仍然悬空")
+        body = p.read_text(encoding="utf-8")
+        for key in ("CP_HOST", "CP_PORT", "CP_DATA_DIR", "CP_BACKUP_DIR",
+                    "CP_APP_ROOT", "CP_FILE_ROOTS"):
+            self.assertIn(f"{key}=", body)
+        self.assertIn("CP_PORT=3300", body)
+        # .env 里带密钥位（CP_JWT_SECRET、数据库口令），权限必须与 install.sh 一致
+        self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+
+    def test_seeding_copies_the_whole_example_then_overwrites_deploy_keys(self):
+        """播种的是整份示例：其余键（开关、限额、密钥占位）不能在这次生成里丢掉。"""
+        (Path(self.prefix) / ".env.example").write_text(
+            "CP_PORT=3210\nCP_JWT_SECRET=from-example\n# 说明行\n", encoding="utf-8")
+        r = _bash('env_sync_all', {"CP_PREFIX": self.prefix, "CP_PORT": "3300"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = (Path(self.prefix) / ".env").read_text(encoding="utf-8")
+        self.assertIn("CP_JWT_SECRET=from-example", body)
+        self.assertIn("CP_PORT=3300", body, "示例里的端口盖住了本次生效值")
+        self.assertIn("# 说明行", body)
 
 
 class TestBranchNotSilentlyIgnored(unittest.TestCase):

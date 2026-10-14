@@ -264,8 +264,49 @@
   也喂网页，CLI 里反引号只是怪，网页里会**原样画出来**——线上实测那一条就写成了带反引号的一句话。
   改完补了两条用例：NOTES 与负载页模板里不许再出现反引号。
 
+- 自检加了第 20 项「配置来源」：`.env` 在不在，以及它和 unit 里那六行 `Environment=` 是不是同一套部署参数。
+  这一项管的是"改配置的正规入口"本身——`.env` 不存在时 AGENTS.md §5 让人去编辑一个根本没有的文件，
+  面板却全绿；两边不一致时健康检查探的是 `.env` 那份、服务听的是 unit 那份，一次成功的部署在文档推荐的
+  验收命令上看起来像失败。两种情况现在都会被说出来：缺文件是 warn（fix 就是 `choyeonctl upgrade --no-pull`，
+  它会把文件补齐），漂移是 fail 并逐键列出 `.env=… unit=…`；读不到 unit（无 systemd 的机器）也如实 warn，
+  不冒充 pass。对账只看那六个会同时写进两边的键，`CP_TOKEN_TTL_HOURS` 之类各管各的不参与，免得假阳性。
+  这一项不进 `FIXABLE`：它是只读对账，修复是给人复制走的那条命令。文档三处项数（AGENTS.md §4、README、
+  SECURITY.md）与 `len(_CHECKS)` 由用例对齐，改代码忘了改文档会红。
+
 
 ### 修复
+- `.env` 有两个写入者，键集还不一样：install.sh 里另住着一份 `render_env`（逐行替换
+  `CP_DATA_DIR` / `CP_PORT` / `CP_HOST` 三个键），common.sh 的 `env_sync_all` 同步的是六个键
+  （外加 `CP_BACKUP_DIR` / `CP_APP_ROOT` / `CP_FILE_ROOTS`）。一次 `choyeonctl deploy` 先生成再对齐，
+  看上去"配置写回来了"，实际是两份不同口径叠出来的——备份目录、应用根目录、文件白名单这三项只在其中
+  一份里，而它们正是 `doctor` 与状态页要读的那几项。现在生成与对齐只剩 common.sh 一个出处：
+  `ensure_env`（缺文件时按 `.env.example` 播种，0600）→ `sync_env` → `env_sync_all`，
+  install.sh 既不再自己复制也不再自己 chmod。
+- 播种整份示例必须行为中性，这条不靠人说：`test_batch22a` 把 `.env.example` 里每个未注释的键与
+  `config.py` 的默认逐键比对。第一版只扫 `_int` / `_path` / `os.environ.get` 三种写法，
+  `CP_TRUST_PROXY`（示例写 1、`_bool` 默认 0）正好从缝里滑过去；补上 `_bool` 之后它成了唯一豁免项，
+  而豁免的前提——unit 模板把那一行写死、systemd 的 `Environment=` 压过 `.env`——本身也是一条用例。
+  模板那行哪天被删掉，`.env` 里那份就真能决定"要不要采信 X-Real-IP"，测试会红而不是静默。
+- 没有 `.env.example` 的机器（不完整检出）原先停在"warn 一句、什么都不写"，可紧接着 `sync_env` 就要读
+  `.env`：common.sh 是 `set -euo pipefail`，读一个不存在的文件会让部署在第一次回写时当场断掉。
+  现在 `ensure_env` 两条支路都以"文件存在且 0600"收尾，写不进去一律 `die` 说清是哪个目录不可写，
+  不再留半截状态。
+- 生产机自己就是这个洞的现场：`/root/www/choyeon-panel` 已经跑了两个多星期，`.env` 从来不存在，配置只住在 unit
+  里，而 AGENTS.md §5 写着"改配置请编辑 `<安装目录>/.env`"。这批上线后跑 `choyeonctl upgrade --no-pull`，
+  `.env` 按示例生成、六个部署参数与 unit 逐项相同，自检「配置来源」给出
+  `.env 与 unit 的 6 项部署参数一致（监听 127.0.0.1:3210）`——此前这一项会因为文件不存在而 warn。
+- `backend/tests/test_batch22a.py`（18 条）：脚本里 `render_env` 不许复活（断言做在剥掉注释的源码上，
+  否则"这句话已经不在了"的注释自己会命中）、`ensure_env` 必须排在第一次 `sync_env` 之前、install.sh
+  不许再 chmod、播种中性逐键比对、豁免键必须真被模板写死，以及「配置来源」的九种判词（无 unit、无 `.env`、
+  一致、端口漂移、unit 缺键不比、`.env` 缺键、引号、无关键漂移、已注册且不在 `FIXABLE`）。
+  文档项数一处对齐：AGENTS.md 写的项数必须等于 `len(_CHECKS)`。
+- `test_deploy_contract.py` 里"没有 `.env` 时 `env_sync_all` 必须什么都不做"那条旧用例锁的正是这个 bug
+  ——契约写错了，不是实现走偏。换成两条：缺 `.env` 要播种并把六个部署参数写成生效值（顺带钉 0600 与
+  `set -e` 下的退出码），有示例时整份复制但 `CP_PORT` 仍按本次覆盖。
+- `test_metrics_store.py` 的采样循环用例从"睡 60ms 再数轮次"改成等条件（上限 2s）：`loop()` 起来先要
+  `await` 一次真实的后补采样（`asyncio.to_thread(_backfill_sync)`），这台 2 核机器上同机有构建在跑时它
+  自己就吃掉几十毫秒，于是一次成功运行的第二轮落在 60ms 之外——断言量的是机器不是代码，与上一批
+  `test_review_fixes` 那条同族，这次连根一起去掉。
 - 「一开始看多少行」接着上一批再收四处：日志中心的档位还写死 `[200,500,1000,2000]`、默认值另写一份 500，
   nginx 页签那句说明写死「末尾 512KB」，实时日志组件抄了 200 与 2000，`api.ts` 里还有第三份 200，服务端
   SSE 的兜底写着第二个 `min(lines, 2000)`。坏法与上一批同族，只是这回是静默的那种：把 `HTTP_LOG_LINES_MAX`

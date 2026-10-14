@@ -44,29 +44,15 @@ clone_or_die
 cd "$PREFIX"
 
 # ---------- 3. 配置文件 ----------
-# 同 render_unit：用 bash 字符串替换而非 sed，避免 $DATA_DIR 里的 sed 元字符改坏内容
-render_env() {
-  local line
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      CP_DATA_DIR=*) line="CP_DATA_DIR=$DATA_DIR" ;;
-      CP_PORT=*) line="CP_PORT=$PORT" ;;
-      CP_HOST=*) line="CP_HOST=$HOST" ;;
-    esac
-    printf '%s\n' "$line"
-  done < "$PREFIX/.env.example"
-}
-
-# sync_env / env_sync_all 见 common.sh：把这次生效的部署参数写回 .env。
-if [ ! -f "$PREFIX/.env" ]; then
-  step "生成 .env（从 .env.example）"
-  render_env > "$PREFIX/.env"
-  ok "已生成 $PREFIX/.env"
-else
+# 生成与对齐只留一个写入者：ensure_env / sync_env / env_sync_all 都在 common.sh。
+# 这里过去另有一个 render_env，从 .env.example 复制并把 CP_DATA_DIR / CP_PORT / CP_HOST 三个键
+# 换成本次的值——和 sync_env 干的是同一件事，键集却少三个（CP_BACKUP_DIR / CP_APP_ROOT /
+# CP_FILE_ROOTS），两个写入者迟早给出两个答案。chmod 也归 sync_env 自己管（它每次都重写文件）。
+step "对齐 .env（缺失则从 .env.example 生成）"
+if [ -f "$PREFIX/.env" ]; then
   log ".env 已存在：保留其它配置，只同步本次生效的部署参数"
 fi
 env_sync_all
-chmod 0600 "$PREFIX/.env"
 
 mkdir -p "$DATA_DIR" "$BACKUP_DIR"
 chmod 0700 "$DATA_DIR"

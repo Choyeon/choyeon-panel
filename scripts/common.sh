@@ -480,6 +480,29 @@ sync_env() {
   chmod 0600 "$PREFIX/.env"
 }
 
+# ensure_env：没有 .env 就先建一份，让 AGENTS.md §5 的正规入口（编辑 .env → upgrade --no-pull）
+# 总是指向一个真实存在的文件。此前 .env 只有 install.sh 会生成：手工克隆、或从旧版本一路升级上来
+# 的机器上它压根不存在，面板却照常健康——配置的真正出处变成"内置默认 + unit 里那几行"，
+# 而文档说改配置去编辑 .env。
+# 有示例就整份复制：示例里每个键的值都等于 config.py 的默认（test_batch22a 逐键比对 _int/_path/
+# os.environ.get/_bool 四种写法，改了默认忘了改示例就会红），唯一豁免是 unit 模板写死的
+# CP_TRUST_PROXY——systemd 的 Environment= 压过 .env，所以它落在 .env 里也只是给人看的。
+# 紧跟的 env_sync_all 再把六个部署参数覆盖成本次实际值。
+# 没有示例（不完整检出）也要建空文件，不能留给 sync_env 一个读不到的路径：common.sh 是
+# set -euo pipefail，`while … done < 不存在的 .env` 会让部署在第一次回写时就退出，
+# 于是"缺 .env"这个本来无害的状态变成 install.sh 当场断掉。
+ensure_env() {
+  [ -f "$PREFIX/.env" ] && return 0
+  if [ -f "$PREFIX/.env.example" ]; then
+    cp "$PREFIX/.env.example" "$PREFIX/.env" || die "生成 $PREFIX/.env 失败：$PREFIX 不可写？"
+    ok "已生成 $PREFIX/.env（取自 .env.example，部署参数随后由 env_sync_all 对齐）"
+  else
+    warn "没有 .env.example：新建空 .env，其余配置沿用内置默认"
+    : > "$PREFIX/.env" || die "生成 $PREFIX/.env 失败：$PREFIX 不可写？"
+  fi
+  chmod 0600 "$PREFIX/.env"
+}
+
 # 把"这次真正渲染进 unit 的那几个值"写回 .env。两个方向都会出错，所以必须成对出现：
 # - .env 落后于 unit：`choyeonctl deploy --port 3211` 之后服务在 3211，.env 仍写 3210，
 #   而紧接着按 AGENTS.md 跑的 `choyeonctl status` 读 .env 探 3210 → healthy:false，
@@ -488,7 +511,7 @@ sync_env() {
 # install.sh 与 update.sh 都要调用：CP_PORT=3300 bash scripts/update.sh 同样会渲染 unit，
 # 只同步 .env 的那半边等于留下下一次升级把它改回去的隐患。
 env_sync_all() {
-  [ -f "$PREFIX/.env" ] || return 0
+  ensure_env
   sync_env CP_HOST "$HOST"
   sync_env CP_PORT "$PORT"
   sync_env CP_DATA_DIR "$DATA_DIR"

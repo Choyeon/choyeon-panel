@@ -37,6 +37,18 @@ def _counters(rx, tx, rd, wr):
     return lambda: {"rx": rx, "tx": tx, "ioRead": rd, "ioWrite": wr}
 
 
+async def _wait_until(pred, timeout: float = 2.0) -> None:
+    """等到 pred 成立，或超时后交给断言说话。
+
+    loop 起来先要 await 一次真实的后补采样（`asyncio.to_thread(_backfill_sync)`），
+    在这台 2 核机器上它自己就吃掉几十毫秒。按固定 sleep 判"跑了几轮"等于把调度时长
+    写进断言，同机有构建在跑时就红——所以这里等条件，不等墙钟。
+    """
+    deadline = time.monotonic() + timeout
+    while not pred() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+
+
 def _clear_metrics(gran: str | None = None) -> None:
     sql = "DELETE FROM metrics" + (" WHERE gran=?" if gran else "")
     with dbm._lock:
@@ -202,7 +214,7 @@ class TestSamplerLoop(unittest.IsolatedAsyncioTestCase):
         metrics_store._beat = 0.0
         with mock.patch.object(metrics_store, "sample", fake_sample):
             task = asyncio.create_task(metrics_store.loop(interval=0.01))
-            await asyncio.sleep(0.06)
+            await _wait_until(lambda: calls, 2.0)
             self.assertFalse(task.done())
             self.assertGreater(len(calls), 0)
             task.cancel()
@@ -221,7 +233,7 @@ class TestSamplerLoop(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(metrics_store, "sample", flaky_sample):
             task = asyncio.create_task(metrics_store.loop(interval=0.01))
-            await asyncio.sleep(0.06)
+            await _wait_until(lambda: state["n"] >= 2)
             self.assertFalse(task.done(), "一轮异常不能终止后台任务")
             self.assertGreaterEqual(state["n"], 2, "异常后必须继续下一轮")
             self.assertEqual(metrics_store._beat, 0.0, "没有成功轮次就不能有心跳")

@@ -426,6 +426,71 @@ async def _check_load() -> dict:
     return load_service.doctor_item(await load_service.audit())
 
 
+# 同一套值会写进两个地方：systemd unit 的 Environment=（服务真正听着的）与 .env
+# （`choyeonctl status` 与健康检查读的那份）。这两个出处只要不一致，一次成功的部署就会在
+# 文档推荐的验收命令上显示 healthy:false，所以逐项对账。
+ENV_DEPLOY_KEYS = ("CP_HOST", "CP_PORT", "CP_DATA_DIR", "CP_BACKUP_DIR", "CP_APP_ROOT", "CP_FILE_ROOTS")
+
+
+def _unit_environment(path: Path) -> dict[str, str]:
+    """解析 unit 里的 `Environment=KEY=VALUE`；读不到就回空表，由调用方决定怎么说。"""
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("Environment="):
+            continue
+        key, sep, value = line[len("Environment="):].partition("=")
+        if sep:
+            out[key.strip()] = value.strip().strip("\"'")
+    return out
+
+
+async def _check_env_file() -> dict:
+    """`.env` 在不在，以及它和 unit 里那几行 Environment= 是不是同一套部署参数。
+
+    AGENTS.md §5 把「编辑 <安装目录>/.env 再 upgrade --no-pull」写成改配置的正规入口，§6 又留了
+    一行「deploy 返回 unhealthy 但服务确实在跑——先 upgrade --no-pull 把两边对齐再判失败」。两句说的
+    是同一件事：`.env` 与 unit 各说一个值时面板自己发现不了。而 `.env` 过去只有 install.sh 会生成，
+    手工克隆或旧版本升上来的机器上它根本不存在——正规入口指向一个不存在的文件，配置实际住在内置默认里，
+    自检却一片绿。这一项把两种情况都摆到台面上。
+    """
+    unit = Path(config.UNIT_DIR) / f"{SERVICE_NAME}.service"
+    if not unit.exists():
+        return {
+            "status": "warn",
+            "detail": f"读不到 {unit}，无法与 .env 对账（无 systemd 的机器上属正常）",
+            "fix": "choyeonctl status --json",
+        }
+    env = config._parse_env_file(Path(config.ENV_FILE))
+    if not env:
+        return {
+            "status": "warn",
+            "detail": f"{config.ENV_FILE} 不存在或一行配置都没有：面板跑在内置默认与 unit 的 "
+                      f"Environment= 上，AGENTS.md 说的 .env 编辑入口还没落地",
+            "fix": "choyeonctl upgrade --no-pull   # 从 .env.example 生成并按 unit 对齐部署参数",
+        }
+    unit_env = _unit_environment(unit)
+    drift = [(k, env.get(k), unit_env[k]) for k in ENV_DEPLOY_KEYS
+             if k in unit_env and env.get(k) != unit_env[k]]
+    if drift:
+        return {
+            "status": "fail",
+            "detail": "；".join(f"{k}：.env={a or '（没有这一行）'}，unit={b}" for k, a, b in drift)
+                      + "——健康检查探的是 .env 那份，服务听的是 unit 那份",
+            "fix": "choyeonctl upgrade --no-pull   # 以本次渲染进 unit 的值回写 .env",
+        }
+    return {
+        "status": "pass",
+        "detail": f".env 与 unit 的 {len(ENV_DEPLOY_KEYS)} 项部署参数一致"
+                  f"（监听 {env.get('CP_HOST', '?')}:{env.get('CP_PORT', '?')}）",
+        "fix": "",
+    }
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -436,6 +501,7 @@ _CHECKS = [
     ("backup", "备份状态", _check_backup),
     ("disk", "磁盘余量", _check_disk),
     ("permissions", "文件权限", _check_permissions),
+    ("env", "配置来源", _check_env_file),
     ("cli", "全局 CLI", _check_cli),
     ("cert-renew", "证书续期", _check_cert_renewal),
     ("timer-units", "定时器对账", _check_timer_units),
