@@ -279,6 +279,7 @@ async function loadQuiet() {
   }
 }
 async function rollback(r: any) {
+  if (rowBusy(r.id)) return;
   busy.value = { id: r.id, verb: 'rollback' };
   try {
     const res = await api.appAction(r.id, 'rollback');
@@ -291,6 +292,7 @@ async function rollback(r: any) {
   }
 }
 async function sync(r: any) {
+  if (rowBusy(r.id)) return;
   busy.value = { id: r.id, verb: 'sync' };
   try {
     const res = await api.appSync(r.id);
@@ -303,6 +305,7 @@ async function sync(r: any) {
   }
 }
 async function act(id: number, verb: string) {
+  if (rowBusy(id)) return;
   busy.value = { id, verb };
   try {
     if (verb === 'deploy') await api.deploy(id);
@@ -363,6 +366,7 @@ function resetCreate() {
   fe.value = singleFields({ type: 'node', start_cmd: 'npm run start', port: 3100 });
 }
 async function create() {
+  if (creating.value) return;
   if (!form.value.name) return msg.error('请填写应用名称');
   if (mode.value === 'split') {
     if (!be.value.start_cmd || !fe.value.start_cmd) return msg.error('请填写前后端的启动命令');
@@ -574,7 +578,7 @@ onMounted(() => {
                 </div>
               </NCollapseItem>
             </NCollapse>
-            <NButton type="primary" block :loading="creating" @click="create">创建应用</NButton>
+            <NButton type="primary" block :loading="creating" :disabled="creating" @click="create">创建应用</NButton>
           </NSpace>
         </NForm>
       </NSpace>

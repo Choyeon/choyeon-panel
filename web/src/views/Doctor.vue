@@ -152,6 +152,9 @@ function watchReady() {
 }
 
 async function fix(it: Item) {
+  // 有一条修复是重启面板自身：重启窗口里的第二次请求根本到不了后端，只会以一句网络错误
+  // 收场，而同一条修复跑两遍也没有意义。
+  if (fixing.value !== '') return;
   fixing.value = it.id;
   try {
     const r = await api.doctorFix(it.id);

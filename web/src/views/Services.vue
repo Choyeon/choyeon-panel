@@ -70,6 +70,7 @@ const probing = ref(false);
 watch(patchError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 async function repost() {
+  if (probing.value) return;
   forceProbe.value = true;
   probing.value = true;
   try {
@@ -96,6 +97,7 @@ const auditing = ref(false);
 watch(portError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 async function reaudit() {
+  if (auditing.value) return;
   forceAudit.value = true;
   auditing.value = true;
   try {
@@ -123,6 +125,7 @@ const {
 watch(loginError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 async function recheckLogin() {
+  if (probingLogin.value) return;
   forceLogin.value = true;
   probingLogin.value = true;
   try {
@@ -212,6 +215,7 @@ const {
 watch(storageError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 async function rescan() {
+  if (scanning.value) return;
   forceScan.value = true;
   scanning.value = true;
   try {
@@ -567,6 +571,7 @@ const {
 watch(memError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 async function resample() {
+  if (sampling.value) return;
   forceSample.value = true;
   sampling.value = true;
   try {
@@ -899,6 +904,7 @@ const {
 watch(pendError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 async function rescanPending() {
+  if (rescanning.value) return;
   pendForce.value = true;
   rescanning.value = true;
   try {
@@ -1111,6 +1117,7 @@ const {
 watch(ldError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 async function reprofile() {
+  if (reprofiling.value) return;
   ldForce.value = true;
   reprofiling.value = true;
   try {
@@ -1557,6 +1564,9 @@ const statusOptions = computed(() =>
 );
 
 async function act(unit: string, verb: string, ok?: string) {
+  // 确认弹窗的「确认」和行内按钮都走到这里：一次 systemctl 在飞时不再下发第二次，
+  // 否则连点停止会排进两次 systemctl，第二次对着已停的服务报 "not active"。
+  if (busy.value) return;
   busy.value = { unit, verb };
   try {
     const res: any = await api.serviceAction(unit, verb);
@@ -1803,7 +1813,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
             检查于 {{ fmtDateTime(patches.checked_at) }}<template v-if="patches.cached">（缓存）</template>
           </NText>
           <NButton size="small" tertiary :loading="patchBusy" :icon="icon('RefreshOutline', 14)" @click="refreshPatches">刷新</NButton>
-          <NButton size="small" :loading="probing" :icon="icon('SyncOutline', 14)" @click="repost">重新探测</NButton>
+          <NButton size="small" :loading="probing" :disabled="probing" :icon="icon('SyncOutline', 14)" @click="repost">重新探测</NButton>
         </div>
       </template>
 
@@ -1888,7 +1898,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
             对账于 {{ fmtDateTime(portData.checked_at) }}<template v-if="portData.cached">（缓存）</template>
           </NText>
           <NButton size="small" tertiary :loading="portBusy" :icon="icon('RefreshOutline', 14)" @click="refreshPorts">刷新</NButton>
-          <NButton size="small" :loading="auditing" :icon="icon('SyncOutline', 14)" @click="reaudit">重新对账</NButton>
+          <NButton size="small" :loading="auditing" :disabled="auditing" :icon="icon('SyncOutline', 14)" @click="reaudit">重新对账</NButton>
         </div>
       </template>
 
@@ -1944,7 +1954,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
             对账于 {{ fmtDateTime(loginData.checked_at) }}<template v-if="loginData.cached">（缓存）</template>
           </NText>
           <NButton size="small" tertiary :loading="loginBusy" :icon="icon('RefreshOutline', 14)" @click="refreshLogin">刷新</NButton>
-          <NButton size="small" :loading="probingLogin" :icon="icon('SyncOutline', 14)" @click="recheckLogin">重新对账</NButton>
+          <NButton size="small" :loading="probingLogin" :disabled="probingLogin" :icon="icon('SyncOutline', 14)" @click="recheckLogin">重新对账</NButton>
         </div>
       </template>
 
@@ -2059,7 +2069,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
             扫描于 {{ fmtDateTime(storageData.as_of) }}<template v-if="storageData.cached">（缓存）</template>
           </NText>
           <NButton size="small" tertiary :loading="storageBusy" :icon="icon('RefreshOutline', 14)" @click="refreshStorage">刷新</NButton>
-          <NButton size="small" :loading="scanning" :icon="icon('SyncOutline', 14)" @click="rescan">重新扫描</NButton>
+          <NButton size="small" :loading="scanning" :disabled="scanning" :icon="icon('SyncOutline', 14)" @click="rescan">重新扫描</NButton>
         </div>
       </template>
 
@@ -2162,7 +2172,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
             采样于 {{ fmtDateTime(memData.as_of) }}<template v-if="memData.cached">（缓存）</template>
           </NText>
           <NButton size="small" tertiary :loading="memBusy" :icon="icon('RefreshOutline', 14)" @click="refreshMemory">刷新</NButton>
-          <NButton size="small" :loading="sampling" :icon="icon('SyncOutline', 14)" @click="resample">重新采样</NButton>
+          <NButton size="small" :loading="sampling" :disabled="sampling" :icon="icon('SyncOutline', 14)" @click="resample">重新采样</NButton>
         </div>
       </template>
 
@@ -2313,7 +2323,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
             扫描于 {{ fmtDateTime(pendData.as_of) }}<template v-if="pendData.cached">（缓存）</template>
           </NText>
           <NButton size="small" tertiary :loading="pendBusy" :icon="icon('RefreshOutline', 14)" @click="refreshPending">刷新</NButton>
-          <NButton size="small" :loading="rescanning" :icon="icon('SyncOutline', 14)" @click="rescanPending">重新扫描</NButton>
+          <NButton size="small" :loading="rescanning" :disabled="rescanning" :icon="icon('SyncOutline', 14)" @click="rescanPending">重新扫描</NButton>
         </div>
       </template>
 
@@ -2434,7 +2444,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
             · 采样 {{ ldData.window_sec }} 秒
           </NText>
           <NButton size="small" tertiary :loading="ldBusy" :icon="icon('RefreshOutline', 14)" @click="refreshLoad">刷新</NButton>
-          <NButton size="small" :loading="reprofiling" :icon="icon('SyncOutline', 14)" @click="reprofile">重新采样</NButton>
+          <NButton size="small" :loading="reprofiling" :disabled="reprofiling" :icon="icon('SyncOutline', 14)" @click="reprofile">重新采样</NButton>
         </div>
       </template>
 

@@ -128,6 +128,9 @@ async function loadUnit() {
   }
 }
 async function saveUnitFile() {
+  // 保存 unit 是「写文件 + systemd-analyze verify」两段：连点的第二次会在第一次还没校验完时
+  // 把文件换掉，报出来的语法错误对应的是另一份内容。
+  if (unitSaving.value) return;
   unitSaving.value = true;
   try {
     await api.saveUnit(id, unitContent.value);
@@ -224,6 +227,9 @@ async function load() {
 }
 
 async function save() {
+  // 后端会把这份配置渲染进 unit / .panel.env / nginx 并顺带重启：第二次 PUT 带的是第一次
+  // 还没应用完的旧字段，等于把刚保存的改动盖回去。
+  if (saving.value) return;
   saving.value = true;
   try {
     const r: any = await api.updateApp(id, {
@@ -256,6 +262,9 @@ async function save() {
 }
 
 async function deploy() {
+  // 部署没有服务端互斥（它自己就是那条 running 记录的写入者）：连点会同时跑两轮
+  // git/依赖安装，两个进程在同一份 working tree 上互相踩。
+  if (acting.value) return;
   acting.value = 'deploy';
   try {
     await api.deploy(id);
@@ -268,6 +277,9 @@ async function deploy() {
   }
 }
 async function sync() {
+  // 同步在服务端有 _ensure_no_deployment 拦着，第二次请求只会撞回那句「部署进行中，不能同步」，
+  // 把第一次的结果提示盖掉。
+  if (acting.value) return;
   acting.value = 'sync';
   try {
     const r = await api.appSync(id);
@@ -306,6 +318,9 @@ async function viewDep(depId: number) {
   }
 }
 async function act(verb: string) {
+  // 早退兜底：unit 页签里「保存后重启服务」这颗按钮离顶部动作组很远，
+  // 只靠 :disabled 传播到它，一旦以后再有别的入口调 act 就没人拦着了。
+  if (acting.value) return;
   acting.value = verb;
   try {
     await api.appAction(id, verb);
@@ -318,6 +333,7 @@ async function act(verb: string) {
 }
 async function ssl() {
   // certbot 是分钟级外部命令，连点会并发跑两个签发进程互相抢同一张证书锁
+  if (acting.value) return;
   acting.value = 'ssl';
   try {
     await api.appSsl(id, sslEmail.value || undefined);
@@ -592,7 +608,7 @@ watch(
               <NSpace size="small">
                 <NButton size="small" tertiary round :icon="ico('RefreshOutline')" @click="loadUnit">重新读取</NButton>
                 <NButton v-if="unitInfo?.managed" size="small" tertiary round @click="restoreDefaultTpl">恢复面板默认模板</NButton>
-                <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
+                <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :loading="acting === 'restart'" :disabled="!!acting" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
               </NSpace>
               <NButton type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed || unitSaving" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
             </NSpace>

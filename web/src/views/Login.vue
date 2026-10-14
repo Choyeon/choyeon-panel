@@ -73,6 +73,9 @@ function acceptTotpError(e: any): boolean {
 }
 
 async function submit() {
+  // 回车走的是 form 的 submit，不受按钮 disabled 约束：连按两次回车会打两次 /login，
+  // 第二次带着同样的凭据撞进登录限速，把一次成功的登录判成"尝试过多"。
+  if (loading.value) return;
   err.value = validate();
   if (err.value) return;
   loading.value = true;

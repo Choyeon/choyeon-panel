@@ -141,6 +141,10 @@ watch(() => props.detail?.key, () => {
 const msg = useMessage();
 
 async function act(fn: () => Promise<any>, ok: string | ((r: any) => string)) {
+  // 六个写入口（改值 / 改字段 / 删成员 / 加成员 / 改 TTL）全走这里，互斥就只在这一处做：
+  // 连点「新增条目」会往 list 里塞两条相同值，而 Redis 的 list 没有"撤销上一条"，
+  // 用户只能看见多出来的一行不知道是谁写的。
+  if (busy.value) return false;
   busy.value = true;
   try {
     const r = await fn();
@@ -203,7 +207,7 @@ async function saveTtl() {
         <NTag size="tiny" :bordered="false" type="warning">{{ detail.type }}</NTag>
         <NTag size="tiny" :bordered="false">{{ detail.ttl === -1 ? '永不过期' : (detail.ttl === -2 || detail.ttl == null ? '—' : `${detail.ttl}s 剩余`) }}</NTag>
         <NTag size="tiny" :bordered="false">{{ detail.mem == null ? '—' : `${detail.mem} B` }}</NTag>
-        <NButton size="tiny" text :loading="busy" title="重新读取该 key" aria-label="重新读取该 key" :icon="refreshIco" @click="emit('refresh')" />
+        <NButton size="tiny" text :loading="busy" :disabled="busy" title="重新读取该 key" aria-label="重新读取该 key" :icon="refreshIco" @click="emit('refresh')" />
       </NSpace>
     </template>
 
@@ -221,7 +225,7 @@ async function saveTtl() {
         <NSpace v-if="isAdmin" justify="end" :size="8">
           <template v-if="editing">
             <NButton size="tiny" tertiary :disabled="busy" @click="editing = false">取消</NButton>
-            <NButton size="tiny" type="primary" class="cp-press" :loading="busy" :icon="saveIco" @click="saveString">保存值</NButton>
+            <NButton size="tiny" type="primary" class="cp-press" :loading="busy" :disabled="busy" :icon="saveIco" @click="saveString">保存值</NButton>
           </template>
           <NButton v-else-if="!detail.truncated && !lossy" size="tiny" tertiary :icon="editIco" @click="startEdit">编辑值</NButton>
         </NSpace>
@@ -248,7 +252,7 @@ async function saveTtl() {
             v-if="type === 'zset'" v-model:value="addForm.score" size="tiny" placeholder="score"
             style="width: 90px; max-width: 100%" :input-props="{ class: 'mono', 'aria-label': 'sorted set 的 score' }"
           />
-          <NButton size="tiny" tertiary type="primary" :loading="busy" :icon="addIco" @click="addMember">新增条目</NButton>
+          <NButton size="tiny" tertiary type="primary" :loading="busy" :disabled="busy" :icon="addIco" @click="addMember">新增条目</NButton>
         </NSpace>
       </template>
 

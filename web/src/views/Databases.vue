@@ -31,6 +31,7 @@ const showRole = ref(false);
 const dbForm = ref({ name: '', owner: '' });
 const roleForm = ref({ name: '', password: '' });
 const redisPass = ref('');
+const redisSaving = ref(false);
 const showPwd = ref(false);
 const pwdTarget = ref('');
 const pwdValue = ref('');
@@ -91,16 +92,28 @@ const roleCols: any[] = [
     title: '操作', key: 'ops', width: 110, align: 'center', fixed: 'right' as const,
     render: (r: any) =>
       h('div', { class: 'cp-ops' }, [
-        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => openPwd(r.name) }, () => '改密'),
+        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', disabled: pgBusy.value !== null, onClick: () => openPwd(r.name) }, () => '改密'),
         h(NPopconfirm, { onPositiveClick: () => manage('dropRole', r.name) }, {
-          trigger: () => h(NButton, { text: true, size: 'small', type: 'error', class: 'cp-op', title: `删除角色 ${r.name}` }, { default: () => '删除' }),
+          trigger: () => h(NButton, {
+            text: true, size: 'small', type: 'error', class: 'cp-op',
+            loading: pgBusy.value === `dropRole:${r.name}`, disabled: pgBusy.value !== null,
+            title: `删除角色 ${r.name}`,
+          }, { default: () => '删除' }),
           default: () => `删除角色 ${r.name} 及其拥有的所有对象？`,
         }),
       ]),
   },
 ];
 
+// PG 的 DDL 一次只让跑一个：DROP ROLE 要连带删它拥有的对象，慢的时候十几秒，
+// 连点「删除」会并发两条同样针对该角色的 DDL（第二条报 role does not exist），
+// 而 createDb/createRole 的连点会拿到 "already exists"——两条红字盖住已经成功的第一条。
+// 弹窗的确定按钮靠 :disabled="pgBusy" 置灰，行内按钮靠同一个标志转圈；
+// 早退兜底是给 @keyup.enter 这类不走按钮的入口留的。
+const pgBusy = ref<string | null>(null);
 async function manage(action: string, name: string, extra: any = {}): Promise<boolean> {
+  if (pgBusy.value !== null) return false;
+  pgBusy.value = `${action}:${name}`;
   try {
     await api.pgManage({ action, name, ...extra });
     msg.success('完成');
@@ -109,6 +122,8 @@ async function manage(action: string, name: string, extra: any = {}): Promise<bo
   } catch (e: any) {
     msg.error(e.message);
     return false;
+  } finally {
+    pgBusy.value = null;
   }
 }
 async function createDb() {
@@ -137,6 +152,7 @@ async function confirmPwd() {
   if (await manage('setPassword', pwdTarget.value, { password: pwdValue.value })) showPwd.value = false;
 }
 async function runSql() {
+  if (sqlBusy.value) return;
   if (!sql.value.trim()) return;
   sqlBusy.value = true;
   try {
@@ -149,7 +165,9 @@ async function runSql() {
   }
 }
 async function saveRedisPass() {
+  if (redisSaving.value) return;
   const cleared = !redisPass.value.trim();
+  redisSaving.value = true;
   try {
     await api.redisPassword(redisPass.value);
     // 空值现在是"清除"（服务端以前静默忽略空值，界面却照样提示"已保存"，
@@ -159,6 +177,8 @@ async function saveRedisPass() {
     load();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    redisSaving.value = false;
   }
 }
 
@@ -281,7 +301,11 @@ function openRow(r: any, insert: boolean, focus: string | null = null) {
   showRow.value = true;
 }
 
+// 快速切库时同样要认序号：先发的 pgTables 后到就会把 A 库的表名画在 B 库下面，
+// 用户点进去的是「B 库里的 A 表」，报的错看起来像权限问题。和 loadTableData 一个口径。
+let tablesSeq = 0;
 async function loadTables() {
+  const seq = ++tablesSeq;
   curTable.value = null;
   tRows.value = [];
   tCols.value = [];
@@ -290,12 +314,15 @@ async function loadTables() {
   if (!brDb.value) return;
   tablesBusy.value = true;
   try {
-    tables.value = await api.pgTables(brDb.value);
+    const r = await api.pgTables(brDb.value);
+    if (seq !== tablesSeq) return;
+    tables.value = r;
   } catch (e: any) {
+    if (seq !== tablesSeq) return;
     tables.value = [];
     msg.error(e.message);
   } finally {
-    tablesBusy.value = false;
+    if (seq === tablesSeq) tablesBusy.value = false;
   }
 }
 async function pickTable(t: any) {
@@ -346,8 +373,12 @@ const rBusy = ref(false);
 const rDetail = ref<any>(null);
 const rSel = ref<string[]>([]);
 const rDetailBusy = ref(false);
+const deletingKeys = ref(false);
 
 async function scanKeys(more = false) {
+  // 「加载更多」连点会拿同一个 cursor 要两页，两份同样的键名都 append 进列表：
+  // 键重复显示一遍，条数也对不上 r.dbsize。
+  if (rBusy.value) return;
   rBusy.value = true;
   try {
     const r = await api.redisKeys(more ? rCursor.value : '0', rPattern.value || '*');
@@ -381,14 +412,20 @@ function refreshDetail() {
   if (rDetail.value?.key) void inspectKey(rDetail.value.key);
 }
 async function delKeys(keys: string[]) {
+  // 批量删 key 是唯一不可撤销的操作：连点会发两次 DEL，第二次报「已删除 0 个 key」，
+  // 让人怀疑第一次是不是也没删掉。用 rBusy 之外的独立标志——删除进行中时扫描按钮也该置灰。
+  if (deletingKeys.value || rBusy.value) return;
+  deletingKeys.value = true;
   try {
     const r = await api.redisDel(keys);
     msg.success(`已删除 ${r.deleted} 个 key`);
     rSel.value = [];
     if (rDetail.value && keys.includes(rDetail.value.key)) rDetail.value = null;
-    scanKeys(false);
+    await scanKeys(false);
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    deletingKeys.value = false;
   }
 }
 </script>
@@ -442,7 +479,7 @@ async function delKeys(keys: string[]) {
               @keydown.ctrl.enter="runSql"
             />
             <NSpace align="center">
-              <NButton type="primary" class="cp-press" :loading="sqlBusy" :icon="ico('PlayOutline')" @click="runSql">执行</NButton>
+              <NButton type="primary" class="cp-press" :loading="sqlBusy" :disabled="sqlBusy" :icon="ico('PlayOutline')" @click="runSql">执行</NButton>
               <NText depth="3" style="font-size: var(--fs-xs)">Ctrl+Enter 快速执行 · 以 postgres 超级用户连接 {{ sqlDb || 'postgres' }}，请谨慎操作</NText>
             </NSpace>
             <div class="log-view" style="max-height: 380px" role="region" aria-live="polite" aria-label="SQL 执行结果">{{ sqlOut || '结果将显示在这里…' }}</div>
@@ -479,12 +516,12 @@ async function delKeys(keys: string[]) {
           <NSpace vertical :size="12">
             <NSpace align="center" :size="8" wrap>
               <NInput v-model:value="rPattern" size="small" placeholder="匹配模式，如 session:*" style="width: 220px; max-width: 100%" :input-props="{ 'aria-label': 'Redis key 匹配模式', class: 'mono' }" @keyup.enter="scanKeys(false)" />
-              <NButton size="small" type="primary" :loading="rBusy" :icon="ico('SearchOutline')" @click="scanKeys(false)">扫描</NButton>
-              <NButton v-if="rCursor !== '0'" size="small" tertiary :loading="rBusy" :icon="ico('RefreshCircleOutline')" @click="scanKeys(true)">加载更多</NButton>
+              <NButton size="small" type="primary" :loading="rBusy" :disabled="rBusy || deletingKeys" :icon="ico('SearchOutline')" @click="scanKeys(false)">扫描</NButton>
+              <NButton v-if="rCursor !== '0'" size="small" tertiary :loading="rBusy" :disabled="deletingKeys" :icon="ico('RefreshCircleOutline')" @click="scanKeys(true)">加载更多</NButton>
               <NText depth="3" style="font-size: var(--fs-xs)">已加载 {{ rKeys.length }} 个 key</NText>
               <NPopconfirm v-if="isAdmin && rSel.length" @positive-click="delKeys(rSel)">
                 <template #trigger>
-                  <NButton size="small" tertiary type="error" :icon="ico('TrashOutline')">删除选中（{{ rSel.length }}）</NButton>
+                  <NButton size="small" tertiary type="error" :loading="deletingKeys" :disabled="deletingKeys || rBusy" :icon="ico('TrashOutline')">删除选中（{{ rSel.length }}）</NButton>
                 </template>
                 删除这 {{ rSel.length }} 个 key？UNLINK 异步回收，不可恢复。
               </NPopconfirm>
@@ -538,7 +575,7 @@ async function delKeys(keys: string[]) {
               <!-- 输入框里的 placeholder 不滚动也不换行：24 个中文字在 320px 里必然被裁成半截。
                    说明挪到框外用文字写清楚，框内只留能看全的短提示。 -->
               <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码" style="width: 240px; max-width: 100%" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />
-              <NButton size="small" :icon="ico('SaveOutline')" @click="saveRedisPass">保存</NButton>
+              <NButton size="small" :loading="redisSaving" :disabled="redisSaving" :icon="ico('SaveOutline')" @click="saveRedisPass">保存</NButton>
               <NText depth="3" style="font-size: var(--fs-xs)">留空保存＝清除面板密码，改回读取 redis.conf</NText>
             </NSpace>
           </template>
@@ -554,7 +591,7 @@ async function delKeys(keys: string[]) {
         <NSpace vertical :size="12">
           <NFormItem label="名称"><NInput v-model:value="dbForm.name" placeholder="小写/下划线" :input-props="{ 'aria-label': '数据库名称' }" /></NFormItem>
           <NFormItem label="Owner"><NInput v-model:value="dbForm.owner" placeholder="可选，已存在的角色" :input-props="{ 'aria-label': '数据库属主角色' }" /></NFormItem>
-          <NButton type="primary" block class="cp-press" :icon="ico('AddOutline')" @click="createDb">创建</NButton>
+          <NButton type="primary" block class="cp-press" :loading="pgBusy === `createDb:${dbForm.name}`" :disabled="pgBusy !== null" :icon="ico('AddOutline')" @click="createDb">创建</NButton>
         </NSpace>
       </NForm>
     </NModal>
@@ -563,7 +600,7 @@ async function delKeys(keys: string[]) {
         <NSpace vertical :size="12">
           <NFormItem label="用户名"><NInput v-model:value="roleForm.name" :input-props="{ 'aria-label': '数据库用户名' }" /></NFormItem>
           <NFormItem label="密码"><NInput v-model:value="roleForm.password" type="password" show-password-on="click" :input-props="{ 'aria-label': '数据库用户密码' }" /></NFormItem>
-          <NButton type="primary" block class="cp-press" :icon="ico('AddOutline')" @click="createRole">创建</NButton>
+          <NButton type="primary" block class="cp-press" :loading="pgBusy === `createRole:${roleForm.name}`" :disabled="pgBusy !== null" :icon="ico('AddOutline')" @click="createRole">创建</NButton>
         </NSpace>
       </NForm>
     </NModal>
@@ -572,7 +609,7 @@ async function delKeys(keys: string[]) {
         <NInput v-model:value="pwdValue" type="password" show-password-on="click" placeholder="新密码" :input-props="{ 'aria-label': '新密码' }" @keyup.enter="confirmPwd" />
         <NSpace justify="end">
           <NButton tertiary @click="showPwd = false">取消</NButton>
-          <NButton type="primary" class="cp-press" :icon="ico('SaveOutline')" @click="confirmPwd">确认修改</NButton>
+          <NButton type="primary" class="cp-press" :loading="pgBusy === `setPassword:${pwdTarget}`" :disabled="pgBusy !== null" :icon="ico('SaveOutline')" @click="confirmPwd">确认修改</NButton>
         </NSpace>
       </NSpace>
     </NModal>

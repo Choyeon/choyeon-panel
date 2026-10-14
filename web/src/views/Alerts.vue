@@ -148,6 +148,8 @@ const cols: any[] = [
 ];
 
 async function ack(r: AlertRow) {
+  // running 与 acking 互斥：巡检/批量确认进行中时单条确认会打到即将消失的行。
+  if (acking.value !== null || running.value) return;
   acking.value = r.id;
   try {
     await req(`/alerts/${r.id}/ack`, { body: {} });
@@ -161,6 +163,7 @@ async function ack(r: AlertRow) {
 }
 
 async function ackAll() {
+  if (running.value) return;
   running.value = 'ack';
   try {
     const r = await req('/alerts/ack-all', { body: {} });
@@ -177,6 +180,7 @@ async function ackAll() {
 // 最坏情况约等于「应用数 × 探测超时」。前端超时必须明显大于它，
 // 否则本地先 abort 而远端还在跑，用户再点一次就会并发两轮巡检。
 async function runRound(kind: 'run' | 'probe') {
+  if (running.value) return;
   running.value = kind;
   try {
     const r = await req(kind === 'run' ? '/alerts/run' : '/alerts/probe', {
@@ -216,9 +220,9 @@ async function runRound(kind: 'run' | 'probe') {
     <CpToolbarCard title="告警历史" class="cp-card-gap">
       <template #left>
         <template v-if="isAdmin">
-          <NButton size="small" tertiary :loading="running === 'run'" :icon="icon('PlayOutline', 14)" @click="runRound('run')">立即巡检</NButton>
-          <NButton size="small" tertiary :loading="running === 'probe'" :icon="icon('PulseOutline', 14)" @click="runRound('probe')">存活探测</NButton>
-          <NButton size="small" type="primary" :disabled="!openTotal" :loading="running === 'ack'" :icon="icon('CheckmarkCircleOutline', 14)" @click="ackAll">全部确认</NButton>
+          <NButton size="small" tertiary :loading="running === 'run'" :disabled="!!running || acking !== null" :icon="icon('PlayOutline', 14)" @click="runRound('run')">立即巡检</NButton>
+          <NButton size="small" tertiary :loading="running === 'probe'" :disabled="!!running || acking !== null" :icon="icon('PulseOutline', 14)" @click="runRound('probe')">存活探测</NButton>
+          <NButton size="small" type="primary" :disabled="!openTotal || !!running || acking !== null" :loading="running === 'ack'" :icon="icon('CheckmarkCircleOutline', 14)" @click="ackAll">全部确认</NButton>
         </template>
       </template>
       <template #right>

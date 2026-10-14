@@ -40,6 +40,9 @@ const err = ref('');
 // 这些入口就不进 DOM（与 Apps / Services / Backups 同一口径）。
 const isAdmin = getRole() === 'admin';
 const runningId = ref<number | null>(null);
+// 启用/停用是另一条独立的写路径，不能借用 runningId：那会让"正在执行"的行点不动开关，
+// 而真正该互斥的连点开关照样放行。
+const togglingId = ref<number | null>(null);
 const saving = ref(false);
 const preview = ref<Preview | null>(null);
 const options = ref<Options>({ allowed: [], presets: [], units: [], note: '' });
@@ -223,6 +226,7 @@ function clampLines(n: number) {
 }
 
 async function save() {
+  if (saving.value) return;
   saving.value = true;
   err.value = '';
   const body: any = {
@@ -244,6 +248,9 @@ async function save() {
 }
 
 async function runNow(r: Task) {
+  // 手动执行是 POST /cron/{id}/run：连点两次就是同一任务并跑两轮，
+  // 后端的重叠保护会把第二轮判成 skipped，用户看到的是「我点了两次，一次没执行」。
+  if (runningId.value !== null || togglingId.value !== null || saving.value) return;
   runningId.value = r.id;
   err.value = '';
   try {
@@ -280,13 +287,20 @@ async function openLog(r: Task) {
 }
 
 async function toggle(r: Task, val: boolean) {
+  // 这一列的按钮原来只跟着 runningId（执行）走，切换启用态压根没有互斥：
+  // 连点两下就是两条 PATCH，enabled 被翻回原点，而 reload 之后用户看到的是
+  // "我明明点了停用，它还是启用"。systemd 侧 timer 也随之被 enable/disable 两遍。
+  if (togglingId.value !== null) return;
   err.value = '';
+  togglingId.value = r.id;
   try {
     await req(`/cron/${r.id}`, { method: 'PATCH', body: { enabled: val }, timeout: 60000 });
     await reload();
   } catch (e: any) {
     err.value = e.message || String(e);
     await reload();
+  } finally {
+    togglingId.value = null;
   }
 }
 
@@ -356,7 +370,9 @@ const cols: any[] = [
     render: (r: Task) => isAdmin
       ? h(NButton, {
           size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
-          disabled: runningId.value === r.id, onClick: () => toggle(r, !r.enabled),
+          loading: togglingId.value === r.id,
+          disabled: runningId.value === r.id || togglingId.value !== null,
+          onClick: () => toggle(r, !r.enabled),
         }, { default: () => (r.enabled ? '启用' : '停用') })
       // 只读账号：给状态不给按钮
       : h(NTag, { size: 'small', round: true, bordered: false, type: r.enabled ? 'success' : 'default' }, { default: () => (r.enabled ? '启用' : '停用') }),

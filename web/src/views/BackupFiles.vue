@@ -202,6 +202,7 @@ function pickUploadFile() {
   inp.click();
 }
 async function doUpload() {
+  if (uploading.value) return;
   const f = uploadFile.value;
   const job = uploadJob.value;
   if (!f || !job) return;
@@ -245,6 +246,9 @@ function openRestore(f: any) {
 }
 
 async function doRestore() {
+  // 恢复会停服务、覆盖数据目录再启服务；服务端已有同名目标的互斥锁，
+  // 这里不发第二次请求，免得用户看到两条互相覆盖的执行记录。
+  if (restoring.value) return;
   const f = restoreTarget.value;
   if (!f) return;
   restoring.value = true;
@@ -326,7 +330,7 @@ onMounted(() => {
       <template #left>
         <NButton size="small" tertiary :icon="ico('ArrowBackOutline')" @click="router.push('/backups')">返回备份任务</NButton>
         <NButton v-if="isAdmin" size="small" tertiary :icon="ico('CloudUploadOutline')" @click="openUpload">上传产物</NButton>
-        <NButton v-if="isAdmin && checked.length" size="small" tertiary type="error" :loading="deleting" :icon="ico('TrashOutline')" @click="confirmDelChecked">
+        <NButton v-if="isAdmin && checked.length" size="small" tertiary type="error" :loading="deleting" :disabled="deleting" :icon="ico('TrashOutline')" @click="confirmDelChecked">
           删除所选 {{ checked.length }} 个
         </NButton>
       </template>
@@ -425,7 +429,7 @@ onMounted(() => {
         <template #footer>
           <NSpace justify="end" :size="12">
             <NButton size="small" :disabled="uploading" @click="showUpload = false">取消</NButton>
-            <NButton size="small" type="primary" class="cp-press" :loading="uploading" :disabled="!uploadFile || !uploadJob" @click="doUpload">上传</NButton>
+            <NButton size="small" type="primary" class="cp-press" :loading="uploading" :disabled="!uploadFile || !uploadJob || uploading" @click="doUpload">上传</NButton>
           </NSpace>
         </template>
       </NDrawerContent>

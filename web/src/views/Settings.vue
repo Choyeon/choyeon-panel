@@ -105,6 +105,8 @@ async function load() {
   if (isAdmin.value) await grab(() => api.firewall(), (v) => (fw.value = v));
 }
 async function renew() {
+  // 连点会并发拉起两个 certbot，第二个直接被它自己的锁挡下、报一条看不懂的错。
+  if (renewing.value) return;
   renewing.value = true;
   try {
     const r = await api.certbotRenew();
@@ -121,13 +123,41 @@ async function renew() {
   }
 }
 // 保存即生效：单项失败把显示值回滚，不留一个"看起来存上了"的假状态
+// 阈值是"改了就存"的输入框/开关：按住步进器或连点开关会打出多条 PUT，落点却是同一个键。
+// 同值直接丢掉；不同值记成"当前这条写完还要再写一次"，于是既不并发写同一个键，
+// 也不会把用户最后一次改动吞掉（早退在这里是错的，被吞的那一次正好是他想要的值）。
+const alertInflight = new Map<string, string>();
+const alertQueued = new Map<string, string>();
+
 async function saveOne(key: string, value: string, rollback: any) {
+  if (alertInflight.has(key)) {
+    if (alertQueued.get(key) === value || alertInflight.get(key) === value) return;
+    alertQueued.set(key, value);
+    return;
+  }
+  alertInflight.set(key, value);
   try {
-    await api.saveAlerts({ [key]: value });
-    msg.success('已保存');
-  } catch (e: any) {
-    alerts.value[key] = rollback;
-    msg.error(e.message);
+    let v = value;
+    let rb = rollback;
+    for (;;) {
+      alertQueued.delete(key);
+      try {
+        await api.saveAlerts({ [key]: v });
+        msg.success('已保存');
+      } catch (e: any) {
+        alerts.value[key] = rb;
+        msg.error(e.message);
+      }
+      const next = alertQueued.get(key);
+      if (next === undefined) break;
+      // 排队期间显示值又被改了一次，回滚基准取现在显示的这一个
+      rb = alerts.value[key];
+      v = next;
+      alertInflight.set(key, v);
+    }
+  } finally {
+    alertInflight.delete(key);
+    alertQueued.delete(key);
   }
 }
 async function commitNum(key: string, v: number | null) {
@@ -168,6 +198,7 @@ function openChan(key: ChanKey) {
   chanOpen.value = true;
 }
 async function saveChan() {
+  if (chanSaving.value) return;
   const key = chanKey.value;
   chanSaving.value = true;
   try {
@@ -184,25 +215,43 @@ async function saveChan() {
 
 // 探活期望状态码按应用覆写：键名 probe_expect:<应用名>，服务端会核对应用是否存在，
 // 所以这里不做本地白名单，写错了会被 400 挡回来并显示原因。
+// 三个动作各自要认「在哪一行上」：行内保存/删除按 name 记账，新增按整个草稿记账，
+// 否则连点会在同一个键上叠两次写、弹两条「已保存」。
+const probeRowBusy = ref<string | null>(null);
+const probeAdding = ref(false);
+const checking = ref(false);
+const testing = ref(false);
 async function saveProbeRow(entry: { name: string; expect: string }) {
+  if (probeRowBusy.value !== null) return false;
+  probeRowBusy.value = entry.name;
   try {
     await api.saveAlerts({ [`probe_expect:${entry.name}`]: (entry.expect || '').trim() });
     msg.success(`已保存 ${entry.name} 的期望状态码`);
     await load();
+    return true;
   } catch (e: any) {
     msg.error(e.message);
+    return false;
+  } finally {
+    probeRowBusy.value = null;
   }
 }
 
 async function addProbeRow() {
   const name = probeDraft.value.name.trim();
+  if (probeAdding.value) return;
   if (!name) { msg.warning('先填应用名'); return; }
   // 空期望 = 没有覆写，存下去也不会生效，列表又会把它过滤掉：
   // 让用户点了「新增覆写」却看到行凭空消失，比直接提示更糟。
   if (!probeDraft.value.expect.trim()) { msg.warning('先填期望状态码，留空等于不覆写'); return; }
   if (probeList.value.some((r) => r.name === name)) { msg.warning('这个应用已经有覆写了，直接改上面那行'); return; }
-  await saveProbeRow({ name, expect: probeDraft.value.expect });
-  probeDraft.value = { name: '', expect: '' };
+  probeAdding.value = true;
+  try {
+    await saveProbeRow({ name, expect: probeDraft.value.expect });
+    probeDraft.value = { name: '', expect: '' };
+  } finally {
+    probeAdding.value = false;
+  }
 }
 
 async function dropProbeRow(name: string) {
@@ -210,20 +259,29 @@ async function dropProbeRow(name: string) {
   await saveProbeRow({ name, expect: '' });
 }
 async function runChecks() {
+  // 巡检一轮要跑几十次探活，连点等于让同机同时并跑两遍；成功后还会各推一条通知。
+  if (checking.value) return;
+  checking.value = true;
   try {
     await api.alertRunChecks();
     msg.success('巡检已执行，若触发阈值会立即推送');
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    checking.value = false;
   }
 }
 async function testAlert() {
+  if (testing.value) return;
+  testing.value = true;
   try {
     await api.saveAlerts(alerts.value);
     await api.alertTest();
     msg.success('测试通知已发送（若未收到请检查配置/通道）');
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    testing.value = false;
   }
 }
 
@@ -271,6 +329,7 @@ async function renderQr(otpauth: string) {
 }
 
 async function startTwofa() {
+  if (twBusy.value) return;
   if (!twDraft.value.password) return msg.warning('先输入本账号口令');
   twBusy.value = true;
   try {
@@ -286,6 +345,8 @@ async function startTwofa() {
 }
 
 async function commitTwofa() {
+  // enable 连点会打到"该账号已开启"；disable 同理。twBusy 在两个函数里都是同步先置位。
+  if (twBusy.value) return;
   if (!twDraft.value.password) return msg.warning('先输入本账号口令');
   if (!twDraft.value.code) return msg.warning('先填验证器里的动态口令');
   twBusy.value = true;
@@ -370,8 +431,8 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         <div class="sec-head">
           <h2 class="sec-title">告警通知</h2>
           <NSpace :size="8">
-            <NButton round size="small" tertiary :icon="ico('PulseOutline')" @click="runChecks">立即巡检</NButton>
-            <NButton round size="small" tertiary :icon="ico('CloudUploadOutline')" @click="testAlert">发送测试通知</NButton>
+            <NButton round size="small" tertiary :icon="ico('PulseOutline')" :loading="checking" :disabled="checking" @click="runChecks">立即巡检</NButton>
+            <NButton round size="small" tertiary :icon="ico('CloudUploadOutline')" :loading="testing" :disabled="testing" @click="testAlert">发送测试通知</NButton>
           </NSpace>
         </div>
         <span class="cp-help">每 30 分钟自动巡检：磁盘、CPU、内存、负载、服务 failed、SSL 剩余天数，以及逐个应用的 HTTP 探活（只连 127.0.0.1 的端口，看它有没有应答）。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次；资源类阈值要连续两轮超标才推送，历史里当轮就留痕。</span>
@@ -430,14 +491,14 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
                 <NSpace v-for="row in probeList" :key="row.name" align="center" :size="8">
                   <span class="mono-dim cp-break" style="min-width: 148px">{{ row.name }}</span>
                   <NInput :value="row.expect" size="tiny" style="width: 132px; max-width: 100%" placeholder="200 204" :input-props="{ 'aria-label': `${row.name} 的期望状态码` }" @update:value="(v: string) => { row.expect = v; }" />
-                  <NButton size="tiny" tertiary :icon="ico('SaveOutline', 12)" @click="saveProbeRow(row)">保存</NButton>
-                  <NButton size="tiny" tertiary :icon="ico('TrashOutline', 12)" aria-label="删除该覆写" @click="dropProbeRow(row.name)">删除</NButton>
+                  <NButton size="tiny" tertiary :icon="ico('SaveOutline', 12)" :loading="probeRowBusy === row.name" :disabled="probeRowBusy !== null || probeAdding" @click="saveProbeRow(row)">保存</NButton>
+                  <NButton size="tiny" tertiary :icon="ico('TrashOutline', 12)" aria-label="删除该覆写" :loading="probeRowBusy === row.name" :disabled="probeRowBusy !== null || probeAdding" @click="dropProbeRow(row.name)">删除</NButton>
                 </NSpace>
                 <EmptyBox v-if="!probeList.length" text="还没有按应用覆写，默认全部走全局期望状态码" />
                 <NSpace align="center" :size="8">
                   <NInput v-model:value="probeDraft.name" size="tiny" style="width: 148px; max-width: 100%" placeholder="应用名" :input-props="{ 'aria-label': '新增覆写的应用名' }" @keyup.enter="addProbeRow" />
                   <NInput v-model:value="probeDraft.expect" size="tiny" style="width: 132px; max-width: 100%" placeholder="200 204" :input-props="{ 'aria-label': '新增覆写的期望状态码' }" @keyup.enter="addProbeRow" />
-                  <NButton size="tiny" tertiary :icon="ico('AddOutline', 12)" @click="addProbeRow">新增覆写</NButton>
+                  <NButton size="tiny" tertiary :icon="ico('AddOutline', 12)" :loading="probeAdding" :disabled="probeAdding || probeRowBusy !== null" @click="addProbeRow">新增覆写</NButton>
                 </NSpace>
               </NSpace>
             </template>
@@ -462,7 +523,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       <section v-if="isAdmin">
         <div class="sec-head">
           <h2 class="sec-title">证书维护</h2>
-          <NButton round size="small" tertiary type="primary" :loading="renewing" :icon="ico('SyncOutline')" @click="renew">立即续期</NButton>
+          <NButton round size="small" tertiary type="primary" :loading="renewing" :disabled="renewing" :icon="ico('SyncOutline')" @click="renew">立即续期</NButton>
         </div>
         <span class="cp-help">certbot renew 检查所有已安装证书并自动续期。是否真的有人定时跑它，看安全自检页的「证书续期」一项（它会去查 certbot.timer 与 crontab，查不到就如实标 warn）；这里只用于手动触发验证。</span>
         <NSpace vertical :size="12" style="margin-top: var(--space-3)">
@@ -546,9 +607,10 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
               size="small"
               type="primary"
               :loading="twBusy"
+              :disabled="twBusy"
               @click="startTwofa"
             >生成密钥</NButton>
-            <NButton v-else size="small" type="primary" :loading="twBusy" @click="commitTwofa">
+            <NButton v-else size="small" type="primary" :loading="twBusy" :disabled="twBusy" @click="commitTwofa">
               {{ twMode === 'enable' ? '开启' : '确认关闭' }}
             </NButton>
           </NSpace>

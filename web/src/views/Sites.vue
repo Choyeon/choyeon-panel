@@ -96,8 +96,13 @@ async function loadCerts() {
 function onKey(id: number, verb: string) {
   return busy.value?.key === `site-${id}` && busy.value?.verb === verb;
 }
+// 套用/移除/续期共用 busy，但互不排斥地都写 nginx 或 certbot：一次只允许一个在飞。
+// 连点两次「续期」= 两个 certbot renew 并行抢 /etc/letsencrypt 的锁，第二个直接失败，
+// 而用户看到的第一条结果是成功的，以为无事发生。
+const busyAny = () => busy.value !== null;
 
 async function applySite(r: any) {
+  if (busyAny()) return;
   busy.value = { key: `site-${r.app_id}`, verb: 'apply' };
   try {
     await api.apply(r.app_id);
@@ -111,6 +116,7 @@ async function applySite(r: any) {
 }
 
 async function removeSite(r: any) {
+  if (busyAny()) return;
   busy.value = { key: `site-${r.app_id}`, verb: 'remove' };
   try {
     const res = await api.remove(r.app_id);
@@ -138,6 +144,7 @@ async function openConfig(r: any) {
 }
 
 async function renew(c: any) {
+  if (busyAny()) return;
   busy.value = { key: `cert-${c.name}`, verb: 'renew' };
   try {
     const r = await api.renew(c.name);
@@ -219,11 +226,11 @@ const siteColumns: any[] = [
       if (isAdmin.value && r.app_id != null) {
         btns.push(
           h(NPopconfirm, { onPositiveClick: () => applySite(r) }, {
-            trigger: () => h(NButton, { ...txt, type: 'primary', loading: onKey(r.app_id, 'apply'), title: '按应用当前的域名/端口重新渲染 vhost' }, { default: () => '套用' }),
+            trigger: () => h(NButton, { ...txt, type: 'primary', loading: onKey(r.app_id, 'apply'), disabled: busyAny(), title: '按应用当前的域名/端口重新渲染 vhost' }, { default: () => '套用' }),
             default: () => '会重写该域名的 vhost 并 reload nginx；nginx -t 不通过时面板自动回滚。',
           }),
           h(NPopconfirm, { onPositiveClick: () => removeSite(r) }, {
-            trigger: () => h(NButton, { ...txt, type: 'error', loading: onKey(r.app_id, 'remove') }, { default: () => '移除' }),
+            trigger: () => h(NButton, { ...txt, type: 'error', loading: onKey(r.app_id, 'remove'), disabled: busyAny() }, { default: () => '移除' }),
             default: () => '移除此域名的 vhost（应用本身保留），nginx 校验通过后 reload。',
           }),
         );
@@ -295,6 +302,7 @@ const certColumns: any[] = [
             trigger: () => h(NButton, {
               text: true, size: 'small', type: 'primary', class: 'cp-op',
               loading: busy.value?.key === `cert-${c.name}` && busy.value?.verb === 'renew',
+              disabled: busyAny(),
               title: '执行 certbot renew（会检查全部证书，只续该续的）',
             }, { default: () => '续期' }),
             default: () => '调用 certbot renew：逐张检查并在 30 天窗口内续期，可能耗时数十秒到几分钟。',

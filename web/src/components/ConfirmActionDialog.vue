@@ -54,7 +54,7 @@ defineExpose({ acceptParams });
     <template #footer>
       <NSpace justify="end" :size="12">
         <NButton size="small" :disabled="loading" @click="show = false">取消</NButton>
-        <NButton size="small" type="primary" :loading="loading" @click="run">{{ p?.confirmText || '确认' }}</NButton>
+        <NButton size="small" type="primary" :loading="loading" :disabled="loading" @click="run">{{ p?.confirmText || '确认' }}</NButton>
       </NSpace>
     </template>
   </NModal>

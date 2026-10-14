@@ -94,6 +94,10 @@ watch(defaultLines, (v) => {
   if (!nf.value.lines) nf.value.lines = v;
 }, { immediate: true });
 
+// 手动检索/跟随刷新共用 jResult：回车连按两次会并发两个 journalctl（每个都是
+// 全量扫描），而两条响应谁先落地不可控——最后画出来的可能是上一次那条查询的结果。
+// 认序号保证"最新那次请求说了算"，和被取代的旧响应不再写画面、也不再解 loading。
+let journalSeq = 0;
 async function searchJournal(opts: { silent?: boolean } = {}) {
   // silent：跟随模式下的定时刷新。这时候不能盖 loading 遮罩，
   // 否则每 5 秒画面闪一次，而且上一轮还没回来时不能并发再打（会互相覆盖结果）。
@@ -101,19 +105,26 @@ async function searchJournal(opts: { silent?: boolean } = {}) {
     if (jRefreshing.value || jLoading.value) return;
     jRefreshing.value = true;
   } else {
+    if (jLoading.value) return;
     jLoading.value = true;
   }
+  const seq = ++journalSeq;
   err.value = '';
   const q = new URLSearchParams();
   Object.entries(jf.value).forEach(([k, v]) => { if (v !== '' && v !== null) q.set(k, String(v)); });
   try {
-    jResult.value = await req(`/system/logs?${q.toString()}`, { timeout: 60000 });
+    const r = await req(`/system/logs?${q.toString()}`, { timeout: 60000 });
+    if (seq !== journalSeq) return;
+    jResult.value = r;
   } catch (e: any) {
+    if (seq !== journalSeq) return;
     err.value = e.message || String(e);
     if (!opts.silent) jResult.value = null;
   } finally {
-    jLoading.value = false;
-    jRefreshing.value = false;
+    if (seq === journalSeq) {
+      jLoading.value = false;
+      jRefreshing.value = false;
+    }
   }
 }
 
@@ -130,6 +141,7 @@ function toggleFollow(v: boolean) {
 }
 
 async function tailNginx() {
+  if (nLoading.value) return;
   nLoading.value = true;
   err.value = '';
   const q = new URLSearchParams({ file: String(nf.value.file), lines: String(nf.value.lines) });
@@ -231,7 +243,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
             :options="lineOpts" placeholder="行数"
             @update:value="(v: number) => { jf.limit = v; }"
           />
-          <NButton size="small" type="primary" :loading="jLoading || jRefreshing" :icon="icon('SearchOutline', 14)" @click="searchJournal()">检索</NButton>
+          <NButton size="small" type="primary" :loading="jLoading || jRefreshing" :disabled="jLoading" :icon="icon('SearchOutline', 14)" @click="searchJournal()">检索</NButton>
           <span class="lg-follow">
             <NSwitch size="small" :value="follow" aria-label="跟随最新日志" @update:value="toggleFollow" />
             <NText class="cell-sub" style="font-size: var(--fs-xs)">跟随（每 {{ FOLLOW_MS / 1000 }} 秒按同样条件重查）</NText>
@@ -271,7 +283,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
             :options="lineOpts" placeholder="行数"
             @update:value="(v: number) => { nf.lines = v; }"
           />
-          <NButton size="small" type="primary" :loading="nLoading" :icon="icon('SearchOutline', 14)" @click="tailNginx">读取末尾</NButton>
+          <NButton size="small" type="primary" :loading="nLoading" :disabled="nLoading" :icon="icon('SearchOutline', 14)" @click="tailNginx">读取末尾</NButton>
         </NSpace>
         <NAlert v-if="nResult?.hint" type="info" :bordered="false" size="small">{{ nResult.hint }}</NAlert>
         <NText v-else-if="nResult" class="cell-sub" style="display: block; margin-bottom: var(--space-2); font-size: var(--fs-xs)">

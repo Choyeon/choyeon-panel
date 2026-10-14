@@ -30,6 +30,16 @@ watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 const users = computed<any[]>(() => data.value ?? []);
 
+// useCachedFetch 已经占了 `busy`（刷新按钮的转圈），行内动作另起一个名字。
+// 三个弹窗/行内按钮原来都没有 loading：连点「创建」会发两次 POST，第二次拿到
+// 「用户名已存在」，用户看到的是"我明明建成功了怎么报错"；连点「升为管理」会在
+// 请求返回前一直读着同一份旧 `u.role`，两次同样的 PUT 把角色翻回原地还弹两声成功。
+const creating = ref(false);
+const resetting = ref(false);
+const rowOp = ref<{ id: number; verb: string } | null>(null);
+const rowBusy = (id: number) => rowOp.value?.id === id;
+const opBusy = (id: number, verb: string) => rowOp.value?.id === id && rowOp.value?.verb === verb;
+
 function reload() {
   invalidateCache('users');
   // 用户表的每一次写操作都会留一条审计，审计页缓存一起作废
@@ -38,8 +48,10 @@ function reload() {
 }
 
 async function createUser() {
+  if (creating.value) return;
   if (!userForm.value.username || userForm.value.password.length < 8 || userForm.value.password.length > 128)
     return msg.error('用户名必填，密码需 8–128 位');
+  creating.value = true;
   try {
     await api.createUser(userForm.value.username, userForm.value.password, userForm.value.role);
     msg.success('已创建');
@@ -48,15 +60,21 @@ async function createUser() {
     reload();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    creating.value = false;
   }
 }
 async function toggleRole(u: any) {
+  if (rowBusy(u.id)) return;
+  rowOp.value = { id: u.id, verb: 'role' };
   try {
     await api.updateUser(u.id, { role: u.role === 'admin' ? 'viewer' : 'admin' });
     msg.success('角色已更新，该用户旧登录态已吊销');
     reload();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    rowOp.value = null;
   }
 }
 function openReset(u: any) {
@@ -65,22 +83,33 @@ function openReset(u: any) {
   showReset.value = true;
 }
 async function confirmReset() {
+  if (resetting.value) return;
   if (resetPwd.value.length < 8 || resetPwd.value.length > 128) return msg.error('密码需 8–128 位');
+  resetting.value = true;
   try {
     await api.updateUser(resetTarget.value.id, { password: resetPwd.value });
     msg.success('密码已重置，该用户的旧 token 已失效');
     showReset.value = false;
+    // 列表里没有哪一列会因为改口令而变，所以不整表 reload；但审计页缓存 30s，
+    // 不作废就得等过期才看得到这条「重置密码」，看起来像操作没留痕。
+    invalidateCache('audit:');
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    resetting.value = false;
   }
 }
 async function delUser(u: any) {
+  if (rowBusy(u.id)) return;
+  rowOp.value = { id: u.id, verb: 'del' };
   try {
     await api.deleteUser(u.id);
     msg.success('已删除');
     reload();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    rowOp.value = null;
   }
 }
 
@@ -129,10 +158,18 @@ const cols: any[] = [
     // 1Panel 的操作列是纯文字按钮 + 5px gap，不带图标；图标版留给工具栏。
     render: (u: any) =>
       h('div', { class: 'cp-ops' }, [
-        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => toggleRole(u) }, () => (u.role === 'admin' ? '降为只读' : '升为管理')),
-        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => openReset(u) }, () => '重置密码'),
+        h(NButton, {
+          text: true, size: 'small', type: 'primary', class: 'cp-op',
+          loading: opBusy(u.id, 'role'), disabled: rowBusy(u.id),
+          onClick: () => toggleRole(u),
+        }, () => (u.role === 'admin' ? '降为只读' : '升为管理')),
+        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', disabled: rowBusy(u.id), onClick: () => openReset(u) }, () => '重置密码'),
         h(NPopconfirm, { onPositiveClick: () => delUser(u) }, {
-          trigger: () => h(NButton, { text: true, size: 'small', type: 'error', class: 'cp-op', title: `删除用户 ${u.username}` }, { default: () => '删除' }),
+          trigger: () => h(NButton, {
+            text: true, size: 'small', type: 'error', class: 'cp-op',
+            loading: opBusy(u.id, 'del'), disabled: rowBusy(u.id),
+            title: `删除用户 ${u.username}`,
+          }, { default: () => '删除' }),
           default: () => `删除用户 ${u.username}？其已登录会话将立即失效。`,
         }),
       ]),
@@ -157,7 +194,7 @@ const filtered = computed(() => {
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
         <NButton size="small" tertiary :loading="busy" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
-        <NButton size="small" type="primary" :icon="icon('AddOutline', 14)" @click="showUser = true">新建用户</NButton>
+        <NButton size="small" type="primary" :disabled="creating" :icon="icon('AddOutline', 14)" @click="showUser = true">新建用户</NButton>
       </template>
     </PageHeader>
 
@@ -175,7 +212,7 @@ const filtered = computed(() => {
           <NFormItem label="角色">
             <NSelect v-model:value="userForm.role" :options="[{ label: '只读 viewer', value: 'viewer' }, { label: '管理员 admin', value: 'admin' }]" aria-label="用户角色" />
           </NFormItem>
-          <NButton type="primary" block class="cp-press" :icon="icon('AddOutline', 14)" @click="createUser">创建</NButton>
+          <NButton type="primary" block class="cp-press" :loading="creating" :disabled="creating" :icon="icon('AddOutline', 14)" @click="createUser">创建</NButton>
         </NSpace>
       </NForm>
     </NModal>
@@ -186,7 +223,7 @@ const filtered = computed(() => {
         <NInput v-model:value="resetPwd" type="password" show-password-on="click" placeholder="新密码（8–128 位）" maxlength="128" :input-props="{ 'aria-label': '新密码' }" @keyup.enter="confirmReset" />
         <NSpace justify="end">
           <NButton tertiary @click="showReset = false">取消</NButton>
-          <NButton type="primary" class="cp-press" :icon="icon('SaveOutline', 14)" @click="confirmReset">确认重置</NButton>
+          <NButton type="primary" class="cp-press" :loading="resetting" :disabled="resetting" :icon="icon('SaveOutline', 14)" @click="confirmReset">确认重置</NButton>
         </NSpace>
       </NSpace>
     </NModal>

@@ -104,6 +104,7 @@ async function open(e: any) {
   }
 }
 async function saveEdit() {
+  if (savingEdit.value) return;
   savingEdit.value = true;
   try {
     await api.saveFile(editPath.value, editContent.value);
@@ -117,12 +118,16 @@ async function saveEdit() {
   }
 }
 async function del(e: any) {
+  if (busyOp.value) return;
+  busyOp.value = 'delete';
   try {
     await api.fileAction('delete', join(e.name));
     msg.success('已删除');
     reload();
   } catch (err: any) {
     msg.error(err.message);
+  } finally {
+    busyOp.value = '';
   }
 }
 function openRename(e: any) {
@@ -133,6 +138,10 @@ function openRename(e: any) {
 async function confirmRename() {
   const to = renameTo.value.trim();
   if (!to || !renameFrom.value || to === renameFrom.value.name) return (showRename.value = false);
+  // 改名是真实文件系统操作，连点（尤其是输入框回车 + 确定各一次）会让第二次拿到
+  // 已经不存在的源路径，报 "no such file"；弹窗于是既不关也说不清到底改成了什么。
+  if (busyOp.value) return;
+  busyOp.value = 'rename';
   try {
     await api.fileAction('rename', join(renameFrom.value.name), join(to));
     msg.success('已改名');
@@ -140,11 +149,14 @@ async function confirmRename() {
     reload();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    busyOp.value = '';
   }
 }
 async function mkdir() {
   const n = newFolder.value.trim();
-  if (!n) return;
+  if (!n || busyOp.value) return;
+  busyOp.value = 'mkdir';
   try {
     await api.fileAction('mkdir', join(n));
     newFolder.value = '';
@@ -152,6 +164,8 @@ async function mkdir() {
     reload();
   } catch (e: any) {
     msg.error(e.message);
+  } finally {
+    busyOp.value = '';
   }
 }
 /**
@@ -193,6 +207,9 @@ async function send<T>(path: string, init: RequestInit, timeout: number): Promis
 
 async function uploadFiles(files: File[], overwrite = false) {
   if (!files.length) return;
+  // 上传是整段 POST，一次没落定就再来一次会把同名文件写到同一目录的两次临时文件上，
+  // 后一次的成功提示会盖住前一次的失败。
+  if (uploading.value) return;
   // 服务端会拒收超限文件，但那是在浏览器把整个文件传完之后：几百 MB 的误选
   // 白占一轮带宽和磁盘缓存，最后只换来一句"超过 8MB"。额度由列表接口带回来。
   const cap = Number(data.value?.maxUploadBytes || 0);
@@ -344,7 +361,7 @@ const rowSelection = computed(() => ({
         >
           打包选中{{ checkedKeys.length ? `（${checkedKeys.length}）` : '' }}
         </NButton>
-        <NButton size="small" type="primary" :loading="uploading" :icon="icon('CloudUploadOutline', 14)" @click="pickFiles">
+        <NButton size="small" type="primary" :loading="uploading" :disabled="uploading" :icon="icon('CloudUploadOutline', 14)" @click="pickFiles">
           {{ uploadHint || '上传文件' }}
         </NButton>
       </template>
@@ -369,7 +386,7 @@ const rowSelection = computed(() => ({
           <NInput v-model:value="newFolder" placeholder="新文件夹名称" style="width: 220px; max-width: 100%" size="small" @keyup.enter="mkdir">
             <template #prefix><NIcon :component="icons.FolderOutline" /></template>
           </NInput>
-          <NButton size="small" :icon="icon('AddOutline', 14)" @click="mkdir">新建目录</NButton>
+          <NButton size="small" :loading="busyOp === 'mkdir'" :disabled="!!busyOp" :icon="icon('AddOutline', 14)" @click="mkdir">新建目录</NButton>
         </NSpace>
       </NSpace>
     </NCard>
@@ -397,7 +414,7 @@ const rowSelection = computed(() => ({
         <NInput v-model:value="editContent" type="textarea" :autosize="{ minRows: 16, maxRows: 28 }" :input-props="{ class: 'mono', 'aria-label': '文件内容', style: 'font-size: var(--fs-sm)' }" />
         <NSpace justify="end">
           <NButton tertiary @click="editing = false">取消</NButton>
-          <NButton type="primary" class="cp-press" :loading="savingEdit" :icon="icon('SaveOutline', 14)" @click="saveEdit">保存</NButton>
+          <NButton type="primary" class="cp-press" :loading="savingEdit" :disabled="savingEdit" :icon="icon('SaveOutline', 14)" @click="saveEdit">保存</NButton>
         </NSpace>
       </NSpace>
     </NModal>
@@ -407,7 +424,7 @@ const rowSelection = computed(() => ({
         <NInput v-model:value="renameTo" placeholder="新名称" :input-props="{ 'aria-label': '新文件名称' }" @keyup.enter="confirmRename" />
         <NSpace justify="end">
           <NButton tertiary @click="showRename = false">取消</NButton>
-          <NButton type="primary" class="cp-press" :icon="icon('SaveOutline', 14)" @click="confirmRename">确定</NButton>
+          <NButton type="primary" class="cp-press" :loading="busyOp === 'rename'" :disabled="!!busyOp" :icon="icon('SaveOutline', 14)" @click="confirmRename">确定</NButton>
         </NSpace>
       </NSpace>
     </NModal>

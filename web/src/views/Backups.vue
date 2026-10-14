@@ -191,6 +191,7 @@ function sqliteTargetName(target: any) {
 }
 
 async function toggleEnabled(r: any) {
+  if (toggling.value !== null) return;
   toggling.value = r.id;
   try {
     await api.updateBackup(r.id, { enabled: !r.enabled });
@@ -203,6 +204,7 @@ async function toggleEnabled(r: any) {
 }
 
 async function run(id: number) {
+  if (busy.value !== null) return;
   busy.value = id;
   try {
     const r = await api.runBackup(id);
@@ -260,6 +262,7 @@ function openEdit(r: any) {
   show.value = true;
 }
 async function submit() {
+  if (submitting.value) return;
   // 切换类型会把 target 置空（pg 的库名不是应用名），而后端 update 对 target=null
   // 的语义是"沿用旧值"：不选目标就提交，任务会静默继续指向原来那个名字，
   // 列表上还显示着新类型 —— 必须在提交前把空目标拦下来。
@@ -375,7 +378,7 @@ async function submit() {
         <template #footer>
           <NSpace justify="end" :size="12">
             <NButton size="small" :disabled="submitting" @click="show = false">取消</NButton>
-            <NButton size="small" type="primary" class="cp-press" :loading="submitting" :icon="icon(editingId == null ? 'AddOutline' : 'SaveOutline', 14)" @click="submit">确定</NButton>
+            <NButton size="small" type="primary" class="cp-press" :loading="submitting" :disabled="submitting" :icon="icon(editingId == null ? 'AddOutline' : 'SaveOutline', 14)" @click="submit">确定</NButton>
           </NSpace>
         </template>
       </NDrawerContent>

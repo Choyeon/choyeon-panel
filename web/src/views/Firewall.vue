@@ -90,6 +90,9 @@ async function load() {
 }
 
 async function submitAdd() {
+  // busy 同时是这三处写操作的互斥锁：ufw 的一条规则要「改 + reload」两次调用，
+  // 连点第二次会在第一次的 reload 期间下手，留下半套规则。
+  if (busy.value) return;
   busy.value = 'add';
   const f = form.value;
   const body: any = { port: f.port.trim(), action: f.action, proto: f.proto };
@@ -111,6 +114,7 @@ async function submitAdd() {
 }
 
 async function removeRule(r: any) {
+  if (busy.value) return;
   busy.value = `del-${r.num}`;
   try {
     const res = await api.remove(r.num, r.sig);
@@ -132,6 +136,7 @@ async function removeRule(r: any) {
 }
 
 async function toggle(active: boolean) {
+  if (busy.value) return;
   busy.value = 'state';
   try {
     const r = await api.setEnabled(active);
@@ -225,7 +230,7 @@ const rangeHint = computed(() => {
           {{ toolLabel }} · {{ st.active ? '运行中' : '未运行' }}
         </NTag>
         <NButton size="small" tertiary :disabled="!st" @click="showRaw = true">原始输出</NButton>
-        <NButton v-if="isAdmin" size="small" type="primary" :icon="ico('AddOutline')" @click="showAdd = true">新增规则</NButton>
+        <NButton v-if="isAdmin" size="small" type="primary" :icon="ico('AddOutline')" :disabled="!!busy" @click="showAdd = true">新增规则</NButton>
         <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
       </template>
     </PageHeader>
@@ -262,7 +267,7 @@ const rangeHint = computed(() => {
       <div v-if="isAdmin && st && st.tool !== 'none'" style="margin-top: var(--space-4)">
         <NPopconfirm @positive-click="toggle(!st.active)">
           <template #trigger>
-            <NButton size="small" :type="st.active ? 'error' : 'success'" tertiary :loading="busy === 'state'">
+            <NButton size="small" :type="st.active ? 'error' : 'success'" tertiary :loading="busy === 'state'" :disabled="!!busy">
               {{ st.active ? `停用 ${toolLabel}` : `启用 ${toolLabel}` }}
             </NButton>
           </template>
@@ -312,7 +317,7 @@ const rangeHint = computed(() => {
             </NTag>
             <span v-if="r.protected" class="cell-sub">受保护</span>
             <NButton v-else-if="isAdmin" text size="small" type="error" class="cp-op"
-                    :loading="busy === `del-${r.num}`" @click="removeRule(r)">删除</NButton>
+                    :loading="busy === `del-${r.num}`" :disabled="!!busy" @click="removeRule(r)">删除</NButton>
           </div>
         </div>
         <EmptyBox v-if="!rules.length && !loading" text="当前没有入站规则" />
@@ -370,7 +375,7 @@ const rangeHint = computed(() => {
       <template #footer>
         <NSpace justify="end" :size="8">
           <NButton size="small" tertiary @click="showAdd = false">取消</NButton>
-          <NButton size="small" type="primary" :loading="busy === 'add'" @click="submitAdd">添加</NButton>
+          <NButton size="small" type="primary" :loading="busy === 'add'" :disabled="!!busy" @click="submitAdd">添加</NButton>
         </NSpace>
       </template>
     </NModal>

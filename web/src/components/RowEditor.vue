@@ -164,6 +164,9 @@ function collect(): Record<string, any> | null {
 }
 
 async function submit() {
+  // INSERT 没有幂等键：回车 + 点「保存」两下就是两行内容相同的记录，
+  // 而界面只报一次「已新增 1 行」，多出来的那行要到下次翻页才看得见。
+  if (busy.value) return;
   const values = collect();
   if (!values) return;
   busy.value = true;
@@ -189,6 +192,7 @@ async function submit() {
 }
 
 async function delRow() {
+  if (busy.value) return;
   busy.value = true;
   try {
     const r = await api.pgRow(props.db, {
@@ -276,7 +280,7 @@ async function delRow() {
             <template v-if="!editing">
               <NPopconfirm v-if="isAdmin && !insert" @positive-click="delRow">
                 <template #trigger>
-                  <NButton size="small" tertiary type="error" :icon="trashIcon">删除行</NButton>
+                  <NButton size="small" tertiary type="error" :icon="trashIcon" :loading="busy" :disabled="busy">删除行</NButton>
                 </template>
                 删除该行？不可恢复
               </NPopconfirm>
@@ -285,7 +289,7 @@ async function delRow() {
             </template>
             <template v-else>
               <NButton size="small" tertiary :disabled="busy" @click="cancelEdit">取消</NButton>
-              <NButton size="small" type="primary" class="cp-press" :loading="busy" @click="submit">
+              <NButton size="small" type="primary" class="cp-press" :loading="busy" :disabled="busy" @click="submit">
                 {{ insert ? '创建' : '提交更改' }}
               </NButton>
             </template>
