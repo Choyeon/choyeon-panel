@@ -142,6 +142,10 @@ TERMINAL_MAX_SESSIONS = _int("CP_TERMINAL_MAX_SESSIONS", 4, 1, 32)
 # 终端输出缓冲水位：浏览器读得慢时 pty 的输出会在队列里堆积，`yes` 这类命令
 # 几秒就能堆到几百 MB。超过这个水位主动断会话，而不是等 OOM 把面板一起带走。
 TERMINAL_OUT_BUFFER = _int("CP_TERMINAL_OUT_BUFFER_KB", 4096, 256, 65536) * 1024
+# 一次列目录最多回给前端多少条目：node_modules、构建缓存这类目录动辄几十万个 inode，
+# 全量返回就是几十万次 stat 加一份几十 MB 的 JSON——面板自己未必先炸，浏览器一定先炸，
+# 而且这个请求还是同步 I/O 走线程池的，多开几个标签页能把线程占满。
+MAX_DIR_ENTRIES = _int("CP_MAX_DIR_ENTRIES", 5000, 100, 200000)
 
 # 是否发送 HSTS 头（仅在 HTTPS 直接暴露时开启；反代场景由 nginx 负责）
 HSTS = _bool("CP_HSTS")

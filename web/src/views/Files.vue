@@ -44,6 +44,13 @@ watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 const entries = computed<any[]>(() => data.value?.entries ?? []);
 const roots = computed<string[]>(() => data.value?.roots ?? []);
 const path = computed(() => String(data.value?.path ?? reqPath.value));
+// 条目被服务层截断时「当前 N 项」必须是"目录里真有 N 项"，不是"表格里渲染了几行"；
+// 上限也从服务层的回传里取，前端不抄一份，CP_MAX_DIR_ENTRIES 改完文案跟着改。
+const truncated = computed(() => !!data.value?.truncated);
+const dirTotal = computed(() => Number(data.value?.total ?? entries.value.length));
+const entryCount = computed(() =>
+  truncated.value ? `${entries.value.length}/${dirTotal.value}` : `${dirTotal.value}`
+);
 const quick = computed(() => roots.value);
 /** 当前路径所属的白名单根：从快捷入口进第二个根之后，面包屑必须以它为起点，
  *  固定取 roots[0] 会让第一段「标签是 A、点下去跳到 B」，祖先段还会拼出白名单外的路径。 */
@@ -393,7 +400,7 @@ const rowSelection = computed(() => ({
 
     <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">
       可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑；勾选多项可打包成 tar.gz。
-      当前 {{ entries.length }} 项{{ entries.length > 200 ? '（虚拟滚动，只渲染可见行）' : '' }}。
+      当前 {{ entryCount }} 项{{ truncated ? `（条目过多，按名称只列出前 ${data?.maxEntries ?? entries.length} 项，进子目录缩小范围）` : '' }}{{ entries.length > 200 ? '（虚拟滚动，只渲染可见行）' : '' }}。
     </NText>
 
     <NDataTable

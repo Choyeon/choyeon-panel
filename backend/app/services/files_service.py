@@ -76,8 +76,16 @@ def list_dir(p: str) -> dict:
     abs_ = safe_path(p or ROOTS[0])
     if not os.path.isdir(abs_):
         raise RuntimeError("不是目录")
+    names = os.listdir(abs_)
+    total = len(names)
+    cap = config.MAX_DIR_ENTRIES
+    # 截断排在 stat 之前：这个上限要省的就是"为几十万个条目逐项 syscall"那一步，
+    # 先 stat 完再截等于什么都没拦。按名称排序后取前 N 条，刷新两次结果一致。
+    truncated = total > cap
+    if truncated:
+        names = sorted(names, key=lambda s: str(s).lower())[:cap]
     entries = []
-    for name in os.listdir(abs_):
+    for name in names:
         is_dir = False
         size = 0
         mtime = ""
@@ -91,7 +99,16 @@ def list_dir(p: str) -> dict:
         entries.append({"name": name, "isDir": is_dir, "size": size, "mtime": mtime})
     entries.sort(key=lambda e: (0 if e["isDir"] else 1, str(e["name"]).lower()))
     # 顺带回传额度：上传前先在前端拦一道，免得用户看着进度条走完才收到"超过 8MB"。
-    return {"path": abs_, "roots": list(ROOTS), "maxUploadBytes": MAX_FILE_BYTES, "entries": entries}
+    # total/truncated/maxEntries 同理：提示文案由服务层的数拼，前端不自己抄一个上限。
+    return {
+        "path": abs_,
+        "roots": list(ROOTS),
+        "maxUploadBytes": MAX_FILE_BYTES,
+        "total": total,
+        "truncated": truncated,
+        "maxEntries": cap,
+        "entries": entries,
+    }
 
 
 def read_text(p: str) -> dict:
@@ -306,6 +323,34 @@ def extract_archive(p: str, into: str | None = None) -> dict:
     return {"ok": True, "dest": dest, "files": len(names), "names": names[:50]}
 
 
+def _estimate_archive_bytes(paths: list, stop_after: int) -> int:
+    """待打包内容的字节数，给 tar.gz 的落盘量一个上界。
+
+    数到 stop_after 就返：这趟 walk 只回答"装不装得下"，既然已经确定装不下，
+    就没必要把几百万个 inode 数完。不跟随符号链接——tar 存的是链接本身而不是内容。
+    """
+    total = 0
+    for x in paths:
+        try:
+            st = os.lstat(x)
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            for root, _dirs, files in os.walk(x, followlinks=False):
+                for f in files:
+                    try:
+                        total += os.lstat(os.path.join(root, f)).st_size
+                    except OSError:
+                        continue
+                    if total > stop_after:
+                        return total
+        elif stat.S_ISREG(st.st_mode):
+            total += st.st_size
+        if total > stop_after:
+            return total
+    return total
+
+
 def make_archive(paths: list[str], out_name: str = "archive.tar.gz") -> dict:
     """把选中的若干条目打成一个 tar.gz，返回落盘位置供下载。"""
     import tarfile
@@ -316,6 +361,17 @@ def make_archive(paths: list[str], out_name: str = "archive.tar.gz") -> dict:
     common = os.path.commonpath([os.path.dirname(x) for x in picked])
     if not any(common == r or common.startswith(r + "/") for r in ROOTS):
         raise RuntimeError("路径超出允许范围")
+    # 预检不是可选项：临时文件与产物都落在源目录同一个文件系统里，root 进程把盘写满
+    # 的代价是这台机器上所有业务一起停摆，而不是这一次请求失败。gzip 产物不会大于源
+    # 内容，所以源尺寸就是上界；真的算漏了（比如中途别人写满）由下面的 OSError 分支
+    # 兜住——它会删掉临时文件并把 ENOSPC 原样报出来。
+    free = shutil.disk_usage(common).free
+    need = _estimate_archive_bytes(picked, free)
+    if need > free:
+        raise RuntimeError(
+            f"磁盘只剩 {free // 1024 // 1024}MB，打包这些内容最多还要写约 "
+            f"{need // 1024 // 1024}MB：先清理，或者少选一些条目"
+        )
     # 带线程号：打包跑在线程池里，两个并发请求选中同一个目录时只用 pid 会撞在
     # 同一个临时文件上，tar 互相截断，两边都"成功"，产物却都是坏的。
     tmp = os.path.join(common, f".{safe_name(out_name)}.{os.getpid()}.{threading.get_ident()}.tmp")
