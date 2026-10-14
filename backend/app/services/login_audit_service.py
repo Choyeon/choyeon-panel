@@ -28,6 +28,8 @@ import stat
 import time
 from datetime import UTC, datetime
 
+from .. import config, security
+from .. import database as dbm
 from ..util import run
 from . import exposure_service
 
@@ -37,6 +39,9 @@ JOURNAL_TIMEOUT = 25.0
 MAX_KEYS = 60  # 单个 authorized_keys 最多逐条列这么多行，再多只报总数
 MAX_FILES = 64
 JOURNAL_LINES = 50000
+# 面板自己那扇门 24h 内的失败登录到达这个数，就把"没人开两步验证"升成要紧：
+# 有人反复试口令时，第二因子是唯一还能挡住的层；没人在试则只是加固建议。
+PANEL_BRUTE_RISK = 50
 
 NON_LOGIN_SHELLS = (
     "/usr/sbin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false",
@@ -407,6 +412,27 @@ async def _attempts() -> dict:
     }
 
 
+def _panel_2fa() -> dict:
+    """面板自己那扇门的第二因子覆盖面。
+
+    为什么算在这一层：sshd 那侧再紧，面板账号也是同一个 root 的入口——网页终端发的是
+    root shell，口令被猜到就等于这台机器的 root。这里只统计"有几个账号、几个开了"，
+    外加过去 24h 有多少次失败的面板登录（撞门的证据），密钥与口令哈希一律不出库。
+    """
+    try:
+        rows = dbm.query("SELECT username,totp_secret<>'' AS totp FROM users")
+        got = dbm.query_one(
+            "SELECT COUNT(*) AS c FROM audit WHERE action IN ({})"
+            " AND created_at >= datetime('now','-1 day')".format(",".join("?" * len(security.LOGIN_FAILED_ACTIONS))),
+            security.LOGIN_FAILED_ACTIONS,
+        )
+    except Exception as e:  # noqa: BLE001 - 账号表读不到不该把整个 SSH 对账拖没
+        return {"ok": False, "accounts": 0, "with_totp": 0, "recent_failed": 0,
+                "note": f"读不到面板账号/审计表，两步验证覆盖面这一项没核对成：{e}"}
+    return {"ok": True, "accounts": len(rows), "with_totp": sum(1 for r in rows if r["totp"]),
+            "recent_failed": int((got or {}).get("c") or 0), "note": ""}
+
+
 def _ssh_exposure(values: dict, ports_data: dict | None) -> dict:
     """和端口暴露面那一层对个账：sshd 在听的这个端口，外面到底进得来吗。"""
     port = _val(values, "port")
@@ -420,7 +446,8 @@ def _ssh_exposure(values: dict, ports_data: dict | None) -> dict:
     }
 
 
-def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict, exposure: dict) -> list[dict]:
+def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict, exposure: dict,
+              panel: dict | None = None) -> list[dict]:
     out: list[dict] = []
     vals = ssh["values"]
     pw = _yes(vals, "passwordauthentication")
@@ -542,6 +569,29 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
             "detail": "即使配置允许，口令登录成功本身也值得逐条核对是不是本人、是不是已知来源。",
             "fix": "choyeonctl ssh-audit --json 看 accepted 明细，并核对该 IP 与时间",
         })
+    # 面板账号的两步验证覆盖面。panel 为 None 表示调用方没给这一层数据（比如单测只关心
+    # sshd 那几条），此时不判——"没数据"在这里永远不等于"没问题"。
+    if panel and panel.get("ok") and panel["accounts"]:
+        pfailed = panel["recent_failed"]
+        if not panel["with_totp"]:
+            out.append({
+                "id": "panel-2fa",
+                "severity": "risk" if pfailed >= PANEL_BRUTE_RISK else "warn" if pfailed else "note",
+                "title": f"面板 {panel['accounts']} 个账号里没有一个开两步验证",
+                "detail": "面板的网页终端发出去的就是这台机器的 root shell，现在拦在猜口令的人前面的只有口令本身；"
+                          f"限速按 IP 计数（每 {config.LOGIN_WINDOW_SEC} 秒 {config.LOGIN_LIMIT} 次），"
+                          "换来源 IP 的分布式撞库不受它影响。"
+                          + (f"过去 24 小时面板登录已失败 {pfailed} 次。" if pfailed else "过去 24 小时没有失败记录。"),
+                "fix": "设置 → 两步验证，用验证器 App 扫码开启；choyeonctl user list 看每个账号的覆盖情况",
+            })
+        elif panel["with_totp"] < panel["accounts"]:
+            out.append({
+                "id": "panel-2fa-partial", "severity": "note",
+                "title": f"面板账号只有 {panel['with_totp']}/{panel['accounts']} 个开了两步验证",
+                "detail": "第二因子按账号生效，没开的那个账号就是整条链上唯一没有加固的一环——"
+                          "而它往往正是给别人建的那类账号。",
+                "fix": "让未开启的账号本人登录后在设置页开启；只有 root 能用 choyeonctl user 2fa-disable 关闭",
+            })
     order = {"risk": 0, "warn": 1, "note": 2}
     out.sort(key=lambda f: (order[f["severity"]], f["id"]))
     return out
@@ -569,8 +619,9 @@ async def audit(refresh: bool = False) -> dict:
 
 async def _collect() -> dict:
     as_root = os.geteuid() == 0
-    ssh, users, guard, attempts = await asyncio.gather(
+    ssh, users, guard, attempts, panel = await asyncio.gather(
         _sshd_settings(), asyncio.to_thread(_passwd_users), _guard_status(), _attempts(),
+        asyncio.to_thread(_panel_2fa),
     )
     try:
         ports_data = await exposure_service.audit()
@@ -579,10 +630,10 @@ async def _collect() -> dict:
     keys = await asyncio.to_thread(_authorized_keys, users, as_root)
     accounts = _accounts(users)
     exposure = _ssh_exposure(ssh["values"], ports_data)
-    findings = _findings(ssh, keys, accounts, attempts, guard, exposure)
+    findings = _findings(ssh, keys, accounts, attempts, guard, exposure, panel)
 
     notes = list(ssh["notes"]) + list(accounts["notes"])
-    for extra in (guard.get("note"), attempts.get("note")):
+    for extra in (guard.get("note"), attempts.get("note"), panel.get("note")):
         if extra:
             notes.append(extra)
     if not as_root:
@@ -606,6 +657,8 @@ async def _collect() -> dict:
         "keys": keys,
         "accounts": accounts,
         "attempts": attempts,
+        # 面板账号的两步验证覆盖情况：只有计数，没有任何账号的密钥或哈希。
+        "panel": panel,
         "counts": _summary(findings),
         "findings": findings,
         "notes": notes,

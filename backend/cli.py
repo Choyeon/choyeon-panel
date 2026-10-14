@@ -355,8 +355,14 @@ def _password_arg(a: argparse.Namespace) -> str | None:
 
 async def cmd_user(a: argparse.Namespace) -> dict:
     if a.user_cmd == "list":
-        rows = dbm.query("SELECT id,username,role,created_at FROM users ORDER BY id")
-        Out.result(rows, "\n".join(f"{r['id']:>3}  {r['username']:<20} {r['role']}" for r in rows) or "(无用户)")
+        # totp 是"开没开"这个布尔，密钥本身不参与输出也不进 JSON：这个终端会被拍照、
+        # 贴进工单、录进 CI 日志，而拿到 base32 就等于拿到别人的第二因子。
+        rows = dbm.query("SELECT id,username,role,created_at,totp_secret<>'' AS totp FROM users ORDER BY id")
+        Out.result(
+            rows,
+            "\n".join(f"{r['id']:>3}  {r['username']:<20} {r['role']:<7} {'2fa' if r['totp'] else '-'}"
+                      for r in rows) or "(无用户)",
+        )
         return {"users": rows}
 
     if a.user_cmd == "create":
@@ -418,6 +424,34 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         dbm.audit(a.name, "cli:user:revoke")
         Out.result({"ok": True, "username": a.name}, f"已吊销 {a.name} 的全部会话")
         return {"ok": True, "username": a.name}
+
+    if a.user_cmd == "2fa-disable":
+        # 逃生口：验证器丢了（换手机、卸载、账号没备份）时，网页端"关闭两步验证"要求
+        # 再输一枚当前有效的动态口令——那人恰好输不出。这条路径只给 root：它是拿
+        # root 权限换掉一个账号的第二因子，而不是拿口令换。
+        if not a.name:
+            Out.error("2fa-disable 需要 <name>", EXIT_USAGE)
+        if a.name == "all":
+            Out.error("2fa-disable 一次只关一个账号，请给出用户名", EXIT_USAGE)
+        u = dbm.query_one("SELECT * FROM users WHERE username=?", (a.name,))
+        if not u:
+            Out.error(f"用户 {a.name} 不存在", EXIT_FAIL)
+        if not str(u.get("totp_secret") or ""):
+            Out.error(f"{a.name} 本来就没开两步验证，没有可关闭的东西", EXIT_FAIL)
+        if not a.yes:
+            Out.error(
+                f"关闭两步验证会让 {a.name} 退回只有口令保护，确认请加 --yes："
+                f"choyeonctl user 2fa-disable {a.name} --yes",
+                EXIT_USAGE,
+            )
+        dbm.set_totp(a.name, "")
+        # 连带把这个账号的会话全部吊销：会来跑这条命令的原因通常是"手机不在手边"，
+        # 而这种时候并不确定手里有票的是不是本人。留一句提醒，比留一个后门便宜。
+        security.bump_user_epoch(a.name)
+        dbm.audit(a.name, "cli:user:2fa-disable", "该账号两步验证已关闭，会话全部吊销")
+        Out.result({"ok": True, "username": a.name, "enabled": False, "revokedSessions": True},
+                   f"已关闭 {a.name} 的两步验证并吊销其全部会话（请重新登录，并在设置页重新绑定验证器）")
+        return {"ok": True, "username": a.name, "enabled": False}
 
     if a.user_cmd == "delete":
         if not a.name:
@@ -842,6 +876,16 @@ def _ssh_audit_text(d: dict) -> str:
     lines.append(acc_line + (" · /etc/shadow 读不到，空口令这项没核对" if acc.get("shadow_unreadable") else ""))
     for g, members in (acc.get("sudo_groups") or {}).items():
         lines.append(f"  {g} 组：{'、'.join(members) or '（无成员）'}")
+
+    p2 = d.get("panel") or {}
+    if p2:
+        # 这一行说的是面板自己那扇门：它发的是 root shell，第二因子的覆盖面属于登录安全，
+        # 不属于"账号管理"——所以它出现在这里，而不是 choyeonctl user list 的注释里。
+        lines.append(
+            f"面板账号：{p2.get('accounts', 0)} 个 · 开了两步验证 {p2.get('with_totp', 0)} 个 · "
+            f"过去 24 小时面板登录失败 {p2.get('recent_failed', 0)} 次"
+            if p2.get("ok") else f"面板账号：{p2.get('note') or '读不到'}"
+        )
 
     if d.get("guard"):
         parts = []
@@ -1371,7 +1415,8 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
              "desc": "升级到最新代码，失败自动回滚；--no-pull 只重建并重启（改配置后重新渲染 unit）"},
             {"name": "status", "args": [], "desc": "版本/监听/服务/健康/自检汇总"},
             {"name": "ssh-audit", "args": ["--refresh"],
-             "desc": "登录安全只读对账（sshd 有效配置 / 密钥与文件权限 / 空口令与 uid0 / 24h 失败来源）",
+             "desc": "登录安全只读对账（sshd 有效配置 / 密钥与文件权限 / 空口令与 uid0 / "
+                     "24h 失败来源 / 面板账号两步验证覆盖）",
              "notes": ["严格只读：不写 sshd_config、不 reload sshd、不改 authorized_keys——"
                        "SSH 是这台机器的主入口，改错就是把人锁在门外",
                        "配置来源会如实标注：sshd -T 是有效值，回落 sshd_config 时含注释掉的行",
@@ -1379,11 +1424,13 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "公钥只列算法/位数/备注/指纹，不回显公钥正文",
                        "读不到 sshd 配置时退出码 3；报告能产出就回 0，风险与否看 JSON 的 counts"]},
             {"name": "doctor", "args": [], "desc": "安全与健康自检，含每项修复建议"},
-            {"name": "user list|create|reset|revoke|delete",
+            {"name": "user list|create|reset|revoke|2fa-disable|delete",
              "args": ["<name>", "--password", "--password-stdin", "--role", "--yes"],
-             "desc": "账号管理（改密会吊销旧 token；revoke 只吊销会话不改口令）",
+             "desc": "账号管理（改密会吊销旧 token；revoke 只吊销会话不改口令；list 带每个账号的两步验证状态）",
              "notes": ["create/reset 优先 --password-stdin：argv 里的口令同机用户 ps 可见",
-                       "revoke <name> 只踢这个账号；revoke all 抬全局版本号，全员旧票一起失效"]},
+                       "revoke <name> 只踢这个账号；revoke all 抬全局版本号，全员旧票一起失效",
+                       "2fa-disable <name> --yes 是验证器丢失时的逃生口：只有 root 能跑，"
+                       "关闭的同时吊销该账号全部会话；网页端关闭要口令＋一枚有效动态口令，不需要这个"]},
             {"name": "app templates|list|create|deploy|rollback|logs",
              "args": ["--id", "--name", "--template", "--type", "--repo", "--branch", "--path",
                       "--port", "--domain", "--start-cmd", "--install-cmd", "--lines"],
@@ -1510,8 +1557,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="安全与健康自检", parents=[common]).set_defaults(fn=cmd_doctor)
 
     u = sub.add_parser("user", help="账号管理", parents=[common])
-    u.add_argument("user_cmd", choices=["list", "create", "reset", "revoke", "delete"])
-    u.add_argument("name", nargs="?", help="revoke 传 all 表示吊销全部用户")
+    u.add_argument("user_cmd", choices=["list", "create", "reset", "revoke", "2fa-disable", "delete"])
+    u.add_argument("name", nargs="?", help="revoke 传 all 表示吊销全部用户；2fa-disable 是验证器丢失时的逃生口")
     u.add_argument("--password", help="口令走 argv，同机用户可见；脚本请改用 --password-stdin")
     u.add_argument("--password-stdin", action="store_true", help="从标准输入读取一行口令")
     u.add_argument("--role", choices=["admin", "viewer"], default="admin")

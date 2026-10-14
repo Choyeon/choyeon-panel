@@ -341,7 +341,7 @@ class TestViewerSelfService(unittest.TestCase):
         self.assertIn("原密码错误", r.json()["error"])
 
     def test_other_writes_still_denied(self):
-        """放行只针对这三个前缀：其余写操作对 viewer 依旧是 403。"""
+        """放行只对 SELF_SERVICE_PREFIXES 里那几条"改自己"的接口：其余写操作对 viewer 依旧是 403。"""
         for method, url in (("POST", "/api/users"), ("DELETE", "/api/users/999999"),
                             ("POST", "/api/apps"), ("PATCH", "/api/settings/alert_disk_pct")):
             r = self.client.request(method, url, json={}, headers=self.headers)
@@ -350,11 +350,16 @@ class TestViewerSelfService(unittest.TestCase):
                 self.assertIn("只读账号", r.json()["error"])
 
     def test_prefix_list_is_exactly_self_service(self):
+        # 这条断言是"清单只能显式扩张"的锁：往元组里加一项就会在这里红，逼加的人
+        # 当场想清楚"只读账号也能改这个"是不是真的成立，而不是顺手放行。
         self.assertEqual(
             set(deps.SELF_SERVICE_PREFIXES),
             # /auth/logout 是⑤R 加的：它只抬调用者自己的 epoch，动不了别人的会话，
             # 所以和改密/资料一样属于"只读账号也能改自己"的形态。
-            {"/api/auth/password", "/api/auth/profile", "/api/auth/avatar", "/api/auth/logout"},
+            # /auth/2fa 是㉓加的：第二因子是本人的属性，不能因为账号是只读就让他
+            # 开着不了也关不掉——而且开启/关闭都要再核一次本人口令，权限上没有多出东西。
+            {"/api/auth/password", "/api/auth/profile", "/api/auth/avatar", "/api/auth/logout",
+             "/api/auth/2fa"},
         )
 
 

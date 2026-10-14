@@ -201,6 +201,12 @@ def verify_token(token: str) -> dict:
     return payload
 
 
+# 登录失败会写进审计表的 action 名，唯一一份登记在这里：main.py 的每一条失败分支用它自己的
+# 字面量写，而 login_audit_service 统计"过去一天有多少人在撞面板的门"要按同一组名字查。
+# 两处各写一遍的结局是加一条失败分支忘了登记（或多写一个不存在的名字），判词从此少算或多算，
+# 而这个数决定"没人开两步验证"是提示还是要紧——所以它由 test_batch23 拿源码核对，不许漂。
+LOGIN_FAILED_ACTIONS = ("login_failed", "login_totp_missing", "login_totp_failed")
+
 # ---------- 登录限速：每 IP 每分钟最多 LOGIN_LIMIT 次 ----------
 _attempts: dict[str, list] = {}
 

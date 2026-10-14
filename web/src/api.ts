@@ -95,6 +95,21 @@ function authHeaders(extra: Record<string, string> = {}) {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}`, ...extra };
 }
 
+/**
+ * 后端的失败体是 {"error": 给人看的文案, "code": 给分支用的标识}。
+ * 过去只把 error 抛出去，登录页要区分"这一步该要动态口令"和"这一枚不对"就只能拿中文句子做
+ * includes 判断——文案改一个字，分支就静默失效。code 连同原始响应体一起挂在 Error 上，
+ * 调用方按 code 走分支、按 digits 这类参数填输入框，都不自己抄。
+ */
+export type ApiError = Error & { code: string; payload: any };
+
+function toError(message: string, data: any): ApiError {
+  const e = new Error(message) as ApiError;
+  e.code = typeof data?.code === 'string' ? data.code : '';
+  e.payload = data ?? {};
+  return e;
+}
+
 async function parse(res: Response) {
   const data = await res.json().catch(() => ({}) as any);
   // 401 的唯一含义是"这个会话已经不被认了"，必须登出——除了 /auth/login：
@@ -106,10 +121,10 @@ async function parse(res: Response) {
   // /auth/avatar 的响应体只有 {"detail": ...}（FastAPI 默认字段名，不是面板统一的 error），
   // 不加这条特例界面会显示 "HTTP 413" 这种空话。
   if (!res.ok && res.url.includes('/auth/avatar')) {
-    throw new Error((data as any).error || (data as any).detail || `HTTP ${res.status}`);
+    throw toError((data as any).error || (data as any).detail || `HTTP ${res.status}`, data);
   }
-  if (isExpired) throw new Error('登录已过期，请重新登录');
-  if (!res.ok) throw new Error((data as any).error || `HTTP ${res.status}`);
+  if (isExpired) throw toError('登录已过期，请重新登录', data);
+  if (!res.ok) throw toError((data as any).error || `HTTP ${res.status}`, data);
   return data as any;
 }
 
@@ -146,7 +161,16 @@ export const api = {
   doctorFix: (id: string) => req('/doctor/fix', { body: { id }, timeout: 960000 }),
   templates: () => req('/templates'),
   setup: (username: string, password: string) => req('/auth/setup', { body: { username, password } }),
-  login: (username: string, password: string) => req('/auth/login', { body: { username, password } }),
+  // code 为空时干脆不带这个键：后端把"没有 code"和"code 为空串"都当没填，
+  // 但请求体里少一个键，审计与排障时才能看出这一轮确实没提交第二步。
+  login: (username: string, password: string, code = '') =>
+    req('/auth/login', { body: code ? { username, password, code } : { username, password } }),
+  // 两步验证：三个写端点都只作用于 token 里那个账号，本人口令是前置条件，关闭还要一枚有效口令。
+  twofa: () => req('/auth/2fa'),
+  twofaSetup: (password: string) => req('/auth/2fa/setup', { body: { password } }),
+  twofaEnable: (password: string, secret: string, code: string) =>
+    req('/auth/2fa/enable', { body: { password, secret, code } }),
+  twofaDisable: (password: string, code: string) => req('/auth/2fa/disable', { body: { password, code } }),
   changePassword: (oldp: string, newp: string) => req('/auth/password', { body: { old: oldp, new: newp } }),
   // 真登出：让服务端吊销这个账号的 token，而不是只把本地副本删掉
   logout: () => req('/auth/logout', { method: 'POST', body: {} }),

@@ -29,6 +29,10 @@ function depsOf(name: string): string[] {
   return [...seen];
 }
 const NAIVE_PKGS = depsOf('naive-ui');
+// qrcode 只在「开启两步验证」的抽屉里用得到，而且是动态 import 进来的。
+// 但它默认会落到 vendor——而 vendor 里有 @vicons（icons.ts 静态引用），首屏就要下载它。
+// 所以把 qrcode 的依赖树单独成块：不点那个抽屉就不会下载，点开也只多拿这一块。
+const QRCODE_PKGS = depsOf('qrcode');
 
 export default defineConfig({
   plugins: [vue()],
@@ -55,6 +59,7 @@ export default defineConfig({
           if (!id.includes('node_modules')) return;
           if (id.includes('/echarts/') || id.includes('/zrender/')) return 'echarts';
           if (id.includes('/@xterm/')) return 'xterm';
+          if (QRCODE_PKGS.some((p) => id.includes(`/node_modules/${p}/`))) return 'qrcode';
           const inNaiveTree = NAIVE_PKGS.some((p) => id.includes(`/node_modules/${p}/`));
           const inVue = id.includes('/vue/') || id.includes('/vue-router/') || id.includes('/@vue/');
           if (inNaiveTree || inVue) return 'framework';

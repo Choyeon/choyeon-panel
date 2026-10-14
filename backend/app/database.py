@@ -130,6 +130,10 @@ def migrate() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''")
         if "avatar" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''")
+        # 两步验证的密钥。空串＝没开；不另设 enabled 位，因为那位一旦和密钥不同步就会
+        # 出现"显示已开启但登录不索要口令"或反之，判据只能有一个。
+        if "totp_secret" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''")
         acols = _columns("apps")
         if "db_names" not in acols:
             conn.execute("ALTER TABLE apps ADD COLUMN db_names TEXT")
@@ -226,6 +230,31 @@ def create_first_admin(username: str, pw_hash: str) -> str:
             return "name-taken"
         conn.commit()
         return "ok"
+
+
+def totp_state(username: str) -> str:
+    """读一个账号的两步验证密钥；账号不存在返回空串。"""
+    row = query_one("SELECT totp_secret FROM users WHERE username=?", (str(username or ""),))
+    return str((row or {}).get("totp_secret") or "")
+
+
+def set_totp(username: str, secret: str) -> int:
+    """写入（或清空）两步验证密钥的唯一入口，返回真正被改动的行数。
+
+    列名只出现在这里：路由开启/关闭、CLI 逃生口、登录索要口令三处都要动它，抄三次 SQL
+    就会有第四处漏掉。传空串表示关闭——`totp_secret=''` 就是"没开"的唯一判据，没有第二个
+    enabled 位可写。
+
+    不走 `execute()`：它返回的是 `lastrowid`，UPDATE 之后那个数与"改了几行"无关，
+    而这里要拿 rowcount 判"账号还在不在"。
+    """
+    with _lock:
+        cur = conn.execute(
+            "UPDATE users SET totp_secret=? WHERE username=?",
+            (str(secret or ""), str(username or "")),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
 
 
 def _read_setting(key: str) -> str | None:

@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import aio_db, avatars, config, errors, security
+from . import aio_db, avatars, config, errors, security, totp
 from . import database as dbm
 from .deps import AuthMiddleware, BodyCapMiddleware
 from .log import warn
@@ -210,6 +210,32 @@ async def login(req: Request):
             status_code=403,
             content={"error": "该账号的用户名不符合当前规则，请由管理员用 choyeonctl user create 重建账号"},
         )
+    secret = str(user.get("totp_secret") or "")
+    if secret:
+        # 第二因子只在**口令已经对了**之后才开口要：先要口令的话，一个不存在的账号、一个存在的
+        # 账号、一个开了 2FA 的账号会给出三种不同响应，那等于把账号名单念给撞库的人听——
+        # 而 `/api/auth/login` 是全面板唯一免认证的入口。
+        code = totp.normalize_code(body.get("code"))
+        if not code:
+            await aio_db.audit(user["username"], "login_totp_missing", ip)
+            return JSONResponse(
+                status_code=401,
+                # digits/period 一起下发：登录页输入框的位数与"多少秒换一枚"的提示都从这一份读，
+                # 前端抄一个"6"的话，改参数那天就是"输入框只让填 6 位、校验要 8 位"那种坏法。
+                # 这条响应只在口令已经对了之后才出现，多带三个公开参数不构成账号探测面。
+                content={"error": f"请输入验证器里的 {totp.DIGITS} 位动态口令",
+                         "code": "totp_required", **totp.totp_params()},
+            )
+        if not totp.verify(secret, code, username=user["username"]):
+            # 口令错与口令对但动态口令错，都要消耗账号桶的名额：动态口令只有 10^DIGITS 种，
+            # 不限速的话它就是那条"每次失败不花钱"的旁路。
+            security.note_failure(akey)
+            await aio_db.audit(user["username"], "login_totp_failed", ip)
+            return JSONResponse(
+                status_code=401,
+                content={"error": "动态口令不正确或已过期，一枚口令只用一次；对不上表请等下一步再试",
+                         "code": "totp_invalid", **totp.totp_params()},
+            )
     await aio_db.audit(user["username"], "login")
     security.clear_attempts(ip)
     security.clear_attempts(akey)
@@ -229,6 +255,107 @@ async def logout(req: Request):
     security.bump_user_epoch(sub)
     await aio_db.audit(sub, "logout", "该账号全部会话已吊销")
     return {"ok": True, "scope": "all_devices"}
+
+
+# ---------- 两步验证（TOTP）自助管理 ----------
+# 只作用于**自己**这个账号：cp_sub 来自已验签的 token， body 里的用户名一律不看。
+# 开与关都要求再输一次账号口令——手里攥着一枚偷来的 token 的人，不应该顺手把主人的
+# 第二因子关掉（那会让他下次只需口令就能进）；同理开启也要口令，避免"会话被劫持后
+# 攻击者绑上自己的验证器，反过来把真主人锁在门外"。
+# 关闭还要一枚当前有效的动态口令：手机丢了走 `choyeonctl user 2fa-disable`（root 才能跑）。
+
+@app.get("/api/auth/2fa")
+async def twofa_status(req: Request):
+    """当前账号的两步验证状态。只回"开没开"与生效参数，密钥永不出库。"""
+    me = req.state.cp_sub
+    return {"enabled": bool(dbm.totp_state(me)), **totp.totp_params()}
+
+
+@app.post("/api/auth/2fa/setup")
+async def twofa_setup(req: Request):
+    """生成一枚新密钥并给出 otpauth URI；此时还没生效，必须拿 enable 验一次才算开。
+
+    没有"待生效"的服务端状态：密钥由响应带回、enable 时原样送回，同一进程重启也不会让
+    用户卡在"扫了码却没有对应记录"。开启这一步仍然要口令＋正确的一次口令，所以即便响应
+    被第三个人看到，他也没法替主人把 2FA 打开（口令只在他手上）。
+    """
+    ip = client_ip(req)
+    body = await _json_body(req)
+    me = dbm.query_one("SELECT * FROM users WHERE username=?", (req.state.cp_sub,))
+    if not me:
+        return JSONResponse(status_code=404, content={"error": "用户不存在"})
+    if dbm.totp_state(me["username"]):
+        return JSONResponse(status_code=400, content={"error": "该账号已开启两步验证，请先关闭再重新绑定"})
+    if not await _password_ok(me, body.get("password")):
+        await aio_db.audit(me["username"], "twofa_setup_denied", ip)
+        return JSONResponse(status_code=400, content={"error": "口令不正确，未生成密钥"})
+    secret = totp.new_secret()
+    await aio_db.audit(me["username"], "twofa_setup", "生成新密钥（未生效）")
+    return {"secret": secret, "account": me["username"],
+            "otpauth": totp.provisioning_uri(secret, me["username"]), **totp.totp_params()}
+
+
+@app.post("/api/auth/2fa/enable")
+async def twofa_enable(req: Request):
+    """用 setup 给出的密钥换一次正确口令，验过才写库——"能扫上码"不等于"绑定了"。"""
+    ip = client_ip(req)
+    body = await _json_body(req)
+    me = dbm.query_one("SELECT * FROM users WHERE username=?", (req.state.cp_sub,))
+    if not me:
+        return JSONResponse(status_code=404, content={"error": "用户不存在"})
+    if dbm.totp_state(me["username"]):
+        return JSONResponse(status_code=400, content={"error": "该账号已开启两步验证"})
+    if not await _password_ok(me, body.get("password")):
+        await aio_db.audit(me["username"], "twofa_enable_denied", ip)
+        return JSONResponse(status_code=400, content={"error": "口令不正确"})
+    code = totp.normalize_code(body.get("code"))
+    try:
+        secret = totp.normalize_secret(body.get("secret"))
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "密钥不合法，请重新生成后再扫"})
+    if not totp.verify(secret, code, username=me["username"]):
+        # 没验中就不记步数（verify 只在成功时记），也不写库：一枚猜中的口令才能绑定。
+        await aio_db.audit(me["username"], "twofa_enable_failed", ip)
+        return JSONResponse(status_code=400, content={"error": "动态口令不正确或已过期，请重试"})
+    if not dbm.set_totp(me["username"], secret):
+        return JSONResponse(status_code=404, content={"error": "用户不存在"})
+    await aio_db.audit(me["username"], "twofa_enable", "两步验证已开启")
+    return {"ok": True, "enabled": True, **totp.totp_params()}
+
+
+@app.post("/api/auth/2fa/disable")
+async def twofa_disable(req: Request):
+    """关闭本账号的两步验证：口令 + 一枚当前有效的动态口令。"""
+    ip = client_ip(req)
+    body = await _json_body(req)
+    me = dbm.query_one("SELECT * FROM users WHERE username=?", (req.state.cp_sub,))
+    if not me:
+        return JSONResponse(status_code=404, content={"error": "用户不存在"})
+    secret = dbm.totp_state(me["username"])
+    if not secret:
+        return JSONResponse(status_code=400, content={"error": "该账号没有开启两步验证"})
+    if not await _password_ok(me, body.get("password")):
+        await aio_db.audit(me["username"], "twofa_disable_denied", ip)
+        return JSONResponse(status_code=400, content={"error": "口令不正确"})
+    if not totp.verify(secret, body.get("code"), username=me["username"]):
+        await aio_db.audit(me["username"], "twofa_disable_failed", ip)
+        return JSONResponse(
+            status_code=400,
+            content={"error": "动态口令不正确或已过期。手机不在手边请由 root 在服务器上执行 "
+                              "choyeonctl user 2fa-disable 关闭"},
+        )
+    dbm.set_totp(me["username"], "")
+    totp.forget_used(me["username"])
+    await aio_db.audit(me["username"], "twofa_disable", "两步验证已关闭")
+    return {"ok": True, "enabled": False, **totp.totp_params()}
+
+
+async def _password_ok(me: dict, raw: object) -> bool:
+    """核对本人口令。与自助改密同一把尺子（LOGIN_PW_MAX_LEN），长到离谱就当不对，不进 scrypt。"""
+    pw = str(raw or "")
+    if not me or not pw or len(pw) > security.LOGIN_PW_MAX_LEN:
+        return False
+    return await security.check_pass_async(pw, me["pass_hash"])
 
 
 async def _json_body(req: Request) -> dict:
@@ -410,6 +537,8 @@ async def _housekeeping():
         await asyncio.sleep(600)
         try:
             security.cleanup_attempts()
+            # 已用动态口令的步数桶同样会随账号名增长（含已删除的账号），跟着限速桶一起回收。
+            totp.cleanup_used()
             # 先回收孤儿部署，再 prune：两者都是同步 sqlite 调用，必须在别的工作线程里跑
             # （直接在循环上 prune，审计/指标表一大就会把整站冻住几十秒；
             # metrics_store.loop 里的同类清理早已走 to_thread）。

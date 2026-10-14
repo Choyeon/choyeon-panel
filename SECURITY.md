@@ -41,6 +41,7 @@ choyeonctl ssh-audit --json       # 登录方式对账（只读），见下文 S
 - `CP_HSTS` 只在面板直连 HTTPS 时开，走 nginx 时由 nginx 统一发送
 - `.env` 权限 0600；`CP_DATA_DIR` 含 JWT 密钥与 SQLite，纳入备份但**不要**放进任何公开目录
 - 口令一律 `--password-stdin` 传入，避免留在 `ps`、`/proc/<pid>/cmdline` 与 shell 历史
+- 管理员请在设置页绑定验证器（TOTP，RFC 6238）：登录接口是全面板唯一免认证入口，会被持续撞库；口令那一段的响应是逐字相同的，第二因子才拦得住已经拿到口令的人。开没开在 `choyeonctl user list` 末列（`2fa` / `-`）、用户管理页与安全自检「登录方式」判词里都看得到。手机不在手边时由 root 执行 `choyeonctl user 2fa-disable <name> --yes`，它会连带吊销该账号全部会话
 - 依赖更新由 `.github/dependabot.yml` 跟踪（Actions / npm / pip），安全类 bump 请优先合并
 
 ## 支持的版本

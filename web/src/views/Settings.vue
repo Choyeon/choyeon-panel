@@ -2,11 +2,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   NSpace, useMessage, NInput, NForm, NFormItem,
-  NInputNumber, NSwitch, NDrawer, NDrawerContent, NText,
+  NInputNumber, NSwitch, NDrawer, NDrawerContent, NText, NAlert,
 } from 'naive-ui';
 import { useRoute, useRouter } from 'vue-router';
 import { NButton } from '../ui';
-import { api, getRole } from '../api';
+import { api, getRole, getUsername } from '../api';
 import { icon } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import PageTabBar from '../components/PageTabBar.vue';
@@ -97,6 +97,8 @@ async function grab(fn: () => Promise<any>, set: (v: any) => void) {
   }
 }
 async function load() {
+  // 两步验证是每个账号自己的事，只读账号也要能开：这一条不在 isAdmin 里面。
+  await grab(() => api.twofa(), (v) => (twofa.value = v));
   if (isAdmin.value) await grab(() => api.alertSettings(), (v) => (alerts.value = normalizeAlerts(v)));
   // 防火墙规则表（开了哪些端口、来源地址）按 admin 收口，与后端 /api/firewall 同一口径；
   // 少了这个判断，只读账号一进设置页就吃到一条 403 报错。
@@ -223,6 +225,97 @@ async function testAlert() {
   }
 }
 
+// ---------- 两步验证（只管当前登录的这个账号） ----------
+// digits/period/issuer 全部来自 GET /api/auth/2fa，出处是 backend/app/totp.py：
+// 这里抄一个"6"，改参数那天就是"输入框只让填 6 位、校验要 8 位"这种没人看得懂的坏法。
+const twofa = ref<any>(null);
+const twOpen = ref(false);
+const twMode = ref<'enable' | 'disable'>('enable');
+const twStep = ref<'password' | 'scan'>('password');
+const twBusy = ref(false);
+const twDraft = ref({ password: '', code: '' });
+// setup 下发的密钥只活在这个抽屉的内存里：不落 localStorage、不进日志、关掉即清空。
+const twSecret = ref({ secret: '', otpauth: '' });
+const twQr = ref('');
+
+function openTwofa(mode: 'enable' | 'disable') {
+  twMode.value = mode;
+  twStep.value = 'password';
+  twBusy.value = false;
+  twDraft.value = { password: '', code: '' };
+  twSecret.value = { secret: '', otpauth: '' };
+  twQr.value = '';
+  twOpen.value = true;
+}
+watch(twOpen, (v) => {
+  // 抽屉还能被 ESC 和遮罩关掉，所以清空只写在这一处：离开这个流程就把口令、密钥、二维码一起丢掉。
+  if (v) return;
+  twDraft.value = { password: '', code: '' };
+  twSecret.value = { secret: '', otpauth: '' };
+  twQr.value = '';
+  twBusy.value = false;
+});
+
+async function renderQr(otpauth: string) {
+  // 二维码库只在绑定这一步用得上：静态 import 会把它算进首屏 chunk，
+  // 而绝大多数账号一辈子不会打开这个抽屉。动态 import 让它单独一块，点开才下载。
+  try {
+    const { default: QRCode } = await import('qrcode');
+    twQr.value = await QRCode.toDataURL(otpauth, { margin: 1, width: 220 });
+  } catch {
+    // 库没加载成也不挡流程：下面还给了能手工录入的密钥与 otpauth 文本
+    twQr.value = '';
+  }
+}
+
+async function startTwofa() {
+  if (!twDraft.value.password) return msg.warning('先输入本账号口令');
+  twBusy.value = true;
+  try {
+    const r = await api.twofaSetup(twDraft.value.password);
+    twSecret.value = { secret: String(r.secret ?? ''), otpauth: String(r.otpauth ?? '') };
+    twStep.value = 'scan';
+    await renderQr(twSecret.value.otpauth);
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    twBusy.value = false;
+  }
+}
+
+async function commitTwofa() {
+  if (!twDraft.value.password) return msg.warning('先输入本账号口令');
+  if (!twDraft.value.code) return msg.warning('先填验证器里的动态口令');
+  twBusy.value = true;
+  try {
+    if (twMode.value === 'enable') {
+      await api.twofaEnable(twDraft.value.password, twSecret.value.secret, twDraft.value.code);
+      msg.success('两步验证已开启，下次登录起需要动态口令');
+    } else {
+      await api.twofaDisable(twDraft.value.password, twDraft.value.code);
+      msg.success('两步验证已关闭');
+    }
+    twOpen.value = false;
+    twofa.value = await api.twofa();
+  } catch (e: any) {
+    // 失败要重读一次状态：enable 服务端可能已经写库而响应没送到（比如反向代理超时），
+    // 界面停在"未开启"会让人再点一次，而第二次会被告知"该账号已开启"，更看不懂。
+    await grab(() => api.twofa(), (v) => (twofa.value = v));
+    msg.error(e.message);
+  } finally {
+    twBusy.value = false;
+  }
+}
+
+async function copyTw(text: string, label: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    msg.success(`${label}已复制`);
+  } catch {
+    msg.warning(`浏览器不允许直接复制${label}，请手工选中`);
+  }
+}
+
 onMounted(() => {
   mq.addEventListener('change', onMq);
   load();
@@ -232,7 +325,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 
 <template>
   <div>
-    <PageHeader title="系统设置" sub="告警通道、防火墙状态与证书维护；用户与审计已升级为独立页面">
+    <PageHeader title="系统设置" sub="本账号两步验证、告警通道、防火墙状态与证书维护；用户与审计已升级为独立页面">
       <template #actions>
         <NButton size="small" tertiary :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
       </template>
@@ -241,6 +334,36 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
     <PageTabBar :tabs="navTabs" :value="route.path" @update="(k: string) => router.push(k)" />
 
     <CpToolbarCard class="cp-card-gap">
+      <section>
+        <div class="sec-head">
+          <h2 class="sec-title">两步验证</h2>
+          <NButton
+            v-if="!twofa?.enabled"
+            round
+            size="small"
+            type="primary"
+            tertiary
+            :icon="ico('KeyOutline')"
+            @click="openTwofa('enable')"
+          >开启</NButton>
+          <NButton v-else round size="small" tertiary type="warning" :icon="ico('ShieldOutline')" @click="openTwofa('disable')">关闭</NButton>
+        </div>
+        <span class="cp-help">
+          给这个账号加一枚登录动态口令：口令正确之后，还要验证器 App（Google Authenticator、Microsoft Authenticator、FreeOTP 都能扫）里当时那一串。
+          开启与关闭都要再输一次本账号口令，关闭还要一枚当前有效的动态口令——只攥着一枚偷来的令牌的人不该能顺手把主人的第二因子关掉。
+          密钥在服务端只有 totp_secret 这一列，任何页面与审计都不会再回显它；生成一次就要当场扫完，关掉这个抽屉密钥即失效。
+          管理员在「用户管理」页只看得到有没有开、不能替别人关：验证器丢了，请由 root 在服务器上执行
+          <span class="mono-dim">choyeonctl user 2fa-disable &lt;用户名&gt; --yes</span>，它会同时吊销该账号的全部会话。
+        </span>
+        <NSpace vertical :size="8" style="margin-top: var(--space-3)">
+          <NText v-if="twofa?.enabled" depth="3" style="font-size: var(--fs-xs)">
+            已开启：签发方 {{ twofa.issuer }}，每 {{ twofa.period }} 秒换一枚 {{ twofa.digits }} 位口令。
+          </NText>
+          <NText v-else depth="3" style="font-size: var(--fs-xs)">未开启：这个账号目前只要口令正确就能登录。</NText>
+        </NSpace>
+      </section>
+
+      <div v-if="isAdmin" class="cp-divider"></div>
       <section v-if="isAdmin">
         <div class="sec-head">
           <h2 class="sec-title">告警通知</h2>
@@ -363,6 +486,73 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </template>
       </NDrawerContent>
     </NDrawer>
+    <NDrawer v-model:show="twOpen" :width="'32%'">
+      <NDrawerContent :title="twMode === 'enable' ? '开启两步验证' : '关闭两步验证'" closable>
+        <NForm label-placement="top" size="small">
+          <NAlert v-if="twMode === 'disable'" type="warning" :bordered="false" size="small" class="tw-alert">
+            关闭之后这个账号只用口令就能登录。验证器不在手边就别在这里绕：让 root 在服务器上执行
+            choyeonctl user 2fa-disable {{ getUsername() }} --yes，它会同时吊销该账号的全部会话。
+          </NAlert>
+          <NFormItem label="本账号口令">
+            <NInput
+              v-model:value="twDraft.password"
+              type="password"
+              show-password-on="click"
+              placeholder="再核对一次"
+              :input-props="{ 'aria-label': '本账号口令', autocomplete: 'current-password' }"
+            />
+          </NFormItem>
+          <template v-if="twMode === 'enable' && twStep === 'scan'">
+            <div class="tw-qr">
+              <img v-if="twQr" :src="twQr" width="220" height="220" alt="两步验证绑定二维码" />
+              <NText v-else depth="3" style="font-size: var(--fs-xs)">二维码没出来，用验证器的手工录入填下面两行。</NText>
+            </div>
+            <div class="tw-key">
+              <span class="tw-key-label">密钥（手工录入）</span>
+              <code class="mono">{{ twSecret.secret }}</code>
+              <NButton size="tiny" tertiary :icon="ico('CopyOutline', 12)" aria-label="复制密钥" @click="copyTw(twSecret.secret, '密钥')">复制</NButton>
+            </div>
+            <div class="tw-key">
+              <span class="tw-key-label">otpauth 链接</span>
+              <code class="mono">{{ twSecret.otpauth }}</code>
+              <NButton size="tiny" tertiary :icon="ico('CopyOutline', 12)" aria-label="复制 otpauth 链接" @click="copyTw(twSecret.otpauth, '链接')">复制</NButton>
+            </div>
+          </template>
+          <!-- 动态口令只在"能填了"的时候出现：enable 要等密钥生成完（否则框在、验证器里却还没有
+               这个账号，填什么都错），disable 则要立刻填。 -->
+          <NFormItem
+            v-if="twMode === 'disable' || twStep === 'scan'"
+            :label="`动态口令（每 ${twofa?.period || 30} 秒换一枚）`"
+          >
+            <NInput
+              v-model:value="twDraft.code"
+              :maxlength="twofa?.digits"
+              placeholder="验证器里当前那一枚"
+              :input-props="{ 'aria-label': '动态口令', inputmode: 'numeric', autocomplete: 'one-time-code' }"
+              @keyup.enter="commitTwofa"
+            />
+          </NFormItem>
+          <NText v-if="twMode === 'enable' && twStep === 'scan'" depth="3" class="tw-note">
+            这一刻请让验证器和这个页面同时开着：密钥只在本次响应里给一次，没扫完就关掉抽屉只能重新生成。
+          </NText>
+        </NForm>
+        <template #footer>
+          <NSpace justify="end" :size="8">
+            <NButton size="small" @click="twOpen = false">取消</NButton>
+            <NButton
+              v-if="twMode === 'enable' && twStep === 'password'"
+              size="small"
+              type="primary"
+              :loading="twBusy"
+              @click="startTwofa"
+            >生成密钥</NButton>
+            <NButton v-else size="small" type="primary" :loading="twBusy" @click="commitTwofa">
+              {{ twMode === 'enable' ? '开启' : '确认关闭' }}
+            </NButton>
+          </NSpace>
+        </template>
+      </NDrawerContent>
+    </NDrawer>
   </div>
 </template>
 
@@ -370,4 +560,13 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 /* 分区标题行：18px/400 左置，动作按钮右置（1Panel LayoutContent title 行） */
 .sec-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
 .sec-title { margin: 0; font-size: var(--fs-title); font-weight: 400; line-height: var(--lh-title); color: var(--cp-text-strong); }
+.tw-alert { margin-bottom: var(--space-3); }
+/* 二维码要留够边距且别被抽屉挤扁：220px 是验证器在 30cm 外能稳定扫出的下限附近，再小就要凑近镜头 */
+.tw-qr { display: flex; justify-content: center; padding: var(--space-3) 0; }
+.tw-qr img { width: 220px; height: 220px; max-width: 100%; border-radius: var(--radius-md); }
+.tw-key { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin: 0 0 var(--space-3); }
+.tw-key-label { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--cp-text-dim); }
+/* user-select: all 点一下就整段选中：密钥和 otpauth 都是要一次抄走的串，逐字符选反而麻烦 */
+.tw-key code { flex: 1 1 auto; min-width: 0; font-size: var(--fs-xs); line-height: 1.6; color: var(--cp-text-strong); word-break: break-all; user-select: all; }
+.tw-note { display: block; margin-top: var(--space-2); font-size: var(--fs-xs); }
 </style>

@@ -110,6 +110,13 @@ const cols: any[] = [
     render: (u: any) => h(NTag, { size: 'small', bordered: false, type: u.role === 'admin' ? 'primary' : 'default' }, () => (u.role === 'admin' ? '管理员' : '只读')),
   },
   {
+    title: '两步验证', key: 'totp', width: 100, align: 'center',
+    // 只报"有没有开"，不给开关的按钮：能远程关掉别人的第二因子，等于这个账号没有第二因子。
+    // 验证器丢了走 root 才能跑的逃生口（choyeonctl user 2fa-disable <用户名> --yes），它连会话一起吊销。
+    render: (u: any) =>
+      h(NTag, { size: 'small', bordered: false, type: u.totp ? 'success' : 'default' }, () => (u.totp ? '已开启' : '仅口令')),
+  },
+  {
     title: '权限说明', key: 'perm', width: 320, ellipsis: { tooltip: true },
     render: (u: any) =>
       h(NText, { depth: 3, style: 'font-size:var(--fs-xs)' }, () =>
@@ -143,7 +150,7 @@ const filtered = computed(() => {
 
 <template>
   <div>
-    <PageHeader title="用户管理" sub="管理员可执行全部操作；只读账号可看监控/日志/数据，但不能启停、部署、删除或使用终端">
+    <PageHeader title="用户管理" sub="管理员可执行全部操作；只读账号可看监控/日志/数据，但不能启停、部署、删除或使用终端。两步验证由各账号在设置页自行开关，这里只显示状态">
       <template #actions>
         <NInput v-model:value="kw" placeholder="搜索用户名/昵称" size="small" clearable style="width: 180px">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>

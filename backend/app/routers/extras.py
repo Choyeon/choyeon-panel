@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from .. import aio_db, avatars, security
+from .. import aio_db, avatars, security, totp
 from .. import database as dbm
 from ..deps import need_admin as _need_admin
 from ..errors import err_json
@@ -45,7 +45,11 @@ async def _body(req: Request) -> dict:
 async def users_list(req: Request):
     if r := _need_admin(req):
         return r
-    return dbm.query("SELECT id,username,role,nickname,avatar,created_at FROM users ORDER BY id")
+    # totp 只回"开没开"这个布尔（SQLite 的 1/0），密钥本身不出库：用户列表是 admin 日常
+    # 会展开看的表，把 20 字节 base32 放进响应等于把每个账号的第二因子交给任何能读到
+    # 这个接口的人（以及浏览器历史、审计日志里的一次误贴）。
+    return dbm.query("SELECT id,username,role,nickname,avatar,created_at,totp_secret<>'' AS totp"
+                     " FROM users ORDER BY id")
 
 
 @router.post("/api/users")
@@ -170,6 +174,9 @@ async def users_delete(uid: str, req: Request):
     dbm.execute("DELETE FROM users WHERE id=?", (u["id"],))
     await run_in_threadpool(avatars.purge, u["id"])
     security.bump_user_epoch(u["username"])
+    # 已用口令的步数桶是按用户名记的，删号不清就等于把"这个人名下用过哪一步"留给了
+    # 下一个同名账号（⑤L 的同名继承口径）：新建同名用户后，第一枚撞上旧步数的口令会被当重放拒掉。
+    totp.forget_used(u["username"])
     await aio_db.audit(req.state.cp_sub, "user:delete", u["username"])
     return {"ok": True}
 

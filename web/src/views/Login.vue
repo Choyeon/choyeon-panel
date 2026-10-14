@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { nextTick, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { NInput, NSpace, NIcon, NAlert } from 'naive-ui';
 import { NButton } from '../ui';
@@ -14,6 +14,14 @@ const password = ref('');
 const password2 = ref('');
 const err = ref('');
 const loading = ref(false);
+// 两步验证的输入框只在后端**要**的时候才出现：登录页不预先查"这个账号开没开 2FA"，
+// 因为 /auth/login 是唯一免认证入口，任何提前分流的响应都会变成账号名单探测面。
+const code = ref('');
+const codeVisible = ref(false);
+const codeInput = ref<any>(null);
+// 位数与步长来自响应的 digits/period（唯一出处是 backend/app/totp.py），这里不写死数字。
+const digits = ref(0);
+const period = ref(0);
 
 // 用户名由本机记忆提供：/auth/status 不再回显账号名，避免未登录就泄露管理员用户名
 const LAST_USER = 'cp_last_user';
@@ -45,7 +53,23 @@ function validate(): string {
   if (!username.value) return '请输入用户名';
   if (password.value.length < 8) return '密码至少 8 位';
   if (needsSetup.value && password.value !== password2.value) return '两次密码不一致';
+  // 已经要过一次了就别再空着提交：这一轮无论如何都会被拒，白等一个 scrypt 的往返。
+  if (codeVisible.value && !code.value) return '请输入验证器里的动态口令';
   return '';
+}
+
+function acceptTotpError(e: any): boolean {
+  if (e?.code !== 'totp_required' && e?.code !== 'totp_invalid') return false;
+  const p = e.payload || {};
+  if (p.digits) digits.value = Number(p.digits);
+  if (p.period) period.value = Number(p.period);
+  codeVisible.value = true;
+  // 口令错一次就清空：重放同一枚会被服务端按"已用过"拒掉，留着只让人对着同一个框发懵。
+  if (e.code === 'totp_invalid') code.value = '';
+  err.value = e.message || '请输入验证器里的动态口令';
+  // 用户名和口令保持原样（它们已经对了），只把焦点交给新出现的这一格。
+  nextTick(() => codeInput.value?.focus?.());
+  return true;
 }
 
 async function submit() {
@@ -55,7 +79,7 @@ async function submit() {
   try {
     const r = needsSetup.value
       ? await api.setup(username.value, password.value)
-      : await api.login(username.value, password.value);
+      : await api.login(username.value, password.value, code.value);
     saveLoginData(r);
     try {
       localStorage.setItem(LAST_USER, username.value);
@@ -64,7 +88,7 @@ async function submit() {
     }
     router.replace('/dashboard');
   } catch (e: any) {
-    err.value = e.message || '请求失败';
+    if (!acceptTotpError(e)) err.value = e.message || '请求失败';
   } finally {
     loading.value = false;
   }
@@ -135,6 +159,25 @@ async function submit() {
                   autocomplete: needsSetup ? 'new-password' : 'current-password',
                 }"
               />
+            </div>
+            <div v-if="codeVisible" class="field">
+              <label for="cp-code">动态口令<template v-if="period">（{{ period }} 秒换一枚）</template></label>
+              <!-- maxlength 只能挂在 NInput 上：写成 :input-props="{ maxlength }" 时它既没变成 attribute
+                   也没变成 maxLength 属性（线上探针实测 el.maxLength === -1），位数上限会静默失效。 -->
+              <NInput
+                ref="codeInput"
+                v-model:value="code"
+                size="large"
+                :maxlength="digits || undefined"
+                :placeholder="digits ? `验证器里的 ${digits} 位数字` : '验证器里的数字'"
+                :input-props="{
+                  id: 'cp-code',
+                  name: 'otp-code',
+                  autocomplete: 'one-time-code',
+                  inputmode: 'numeric',
+                }"
+              />
+              <p class="hint">这个账号开启了两步验证：口令已经对了，再填验证器 App 里当前那一枚。</p>
             </div>
             <div v-if="needsSetup" class="field">
               <label for="cp-password2">确认密码</label>
@@ -234,6 +277,7 @@ html[data-theme='dark'] .card { background: color-mix(in srgb, var(--cp-elevated
 .err-alert { margin-bottom: var(--space-3); }
 .sub { margin: 0 0 var(--space-5); color: var(--cp-text-mute); font-size: var(--fs-sm); }
 .field label { display: block; font-size: var(--fs-xs); color: var(--cp-text-dim); margin-bottom: var(--space-2); }
+.hint { margin: var(--space-2) 0 0; font-size: var(--fs-xs); color: var(--cp-text-mute); line-height: 1.6; }
 @media (max-width: 900px) {
   .wrap { gap: 0; }
   .left { display: none; }

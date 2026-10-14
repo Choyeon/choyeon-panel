@@ -189,6 +189,7 @@ backend/
     database.py        SQLite 封装：WAL、busy_timeout、审计与部署日志裁剪
     security.py        scrypt 口令、JWT（含按用户吊销版本号）、登录限速
     deps.py            认证中间件 + 统一安全响应头（CSP/HSTS/…）
+    totp.py            RFC 6238 两步验证口令：只用标准库，位数/步长/时钟容差三个数字的唯一出处
     util.py            子进程封装：进程组超时清理，避免僵尸进程
   cli.py               choyeonctl：命令行部署/账号/应用/备份/自检，全命令支持 --json
   backup_runner.py     备份 CLI（systemd timer 调用）
@@ -276,6 +277,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 
 - **令牌吊销**：改密/删号/降权会 bump 按用户的 epoch，旧 token 立即失效（改密接口同步返回新 token，不打断当前会话）
 - **长连接复验**：网页终端（WebSocket）与日志流（SSE）每 60 秒重新对一次身份与到期时间，被降权或票过期时当场收尾；终端另有 180 秒空闲回收与并发会话上限
 - 登录限速双桶：每 IP 每分钟 N 次 + 每个账号每分钟 N 次（代理池轮换 IP 时后一道才管用），失败与吊销都进审计
+- **两步验证（TOTP，RFC 6238）**：账号在设置页绑定验证器。第二因子只在口令已经对了之后才开口要——不存在的账号、存在的账号、开了 2FA 的账号在口令这一关给出逐字相同的响应，登录接口不替人念账号名单。动态口令错一次同样消耗账号限速桶（它只有 10^6 种，不限速就是那条每次失败不花钱的旁路），同一枚口令在有效期内不二次接受。密钥存 `users.totp_secret`（在 0600 的 `panel.db` 里），接口与 CLI 只回“开没开”，不回显密钥。验证器不在手边时由 root 执行 `choyeonctl user 2fa-disable <name> --yes`，关闭同时吊销该账号全部会话
 - viewer 角色全局禁写：写接口在中间件按角色拒绝，只读账号能看不能改
 - 统一安全响应头：`Content-Security-Policy`（`script-src 'self'`，入口 HTML 无内联脚本）、`X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`、`Permissions-Policy`、COOP/CORP、`X-Request-Id`；可选 HSTS
 - 请求体上限：非上传接口统一 413，上传按 `CP_MAX_UPLOAD_MB` 收口；`X-Real-IP`/`XFF` 只在 TCP 对端属于 `CP_TRUSTED_PROXIES` 时才采信

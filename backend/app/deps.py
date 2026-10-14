@@ -25,12 +25,21 @@ PUBLIC_PREFIXES = (
 )
 MUTATIONS = {"POST", "PATCH", "PUT", "DELETE"}
 
-# 只读账号唯一能写的东西是"自己的账号"：改密、改资料、换头像、登出。
+# 只读账号唯一能写的东西是"自己的账号"：改密、改资料、换头像、登出、开关自己的两步验证。
 # 头像必须和 profile 同批放行——上传入口就在资料弹窗里，漏掉它的话 viewer
 # 点"上传头像"得到的是「只读账号不能执行写操作」，而同一个弹窗里改昵称是好的。
 # logout 也在里面：漏掉它的话 viewer 点"退出登录"收到 403，前端却照样把本地会话清了，
 # 用户以为退出成功，那枚 token 在 TTL 内仍然可用。
-SELF_SERVICE_PREFIXES = ("/api/auth/password", "/api/auth/profile", "/api/auth/avatar", "/api/auth/logout")
+# 2fa 同理，而且更严重：只读账号往往就是"日常登录用的那个"，把它挡在外面等于
+# 告诉用户"这个账号不能加第二因子"，而设置页上一个 403 看起来像是功能坏了。
+# 这三个端点都只操作 req.state.cp_sub 自己的记录，不越权。
+SELF_SERVICE_PREFIXES = (
+    "/api/auth/password",
+    "/api/auth/profile",
+    "/api/auth/avatar",
+    "/api/auth/logout",
+    "/api/auth/2fa",
+)
 
 # 面板自身托管静态资源，全部同源加载；禁用 object/frame 嵌入与外域脚本
 CSP = (

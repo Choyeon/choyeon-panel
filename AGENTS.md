@@ -130,7 +130,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `upgrade` | `--no-pull` | 拉代码→备份→重建→重启，健康检查失败自动回滚；`--no-pull` 只重建并重新渲染 unit |
 | `status` | — | 版本/监听/服务/健康/自检汇总 |
 | `doctor` | — | 只读安全与健康自检（当前 20 项，以 JSON 的 `items` 为准），每项带修复命令 |
-| `user list\|create\|reset\|revoke\|delete` | `<name> --password --password-stdin --role --yes` | 账号管理；create/reset 用 `--password-stdin` 传口令。改密与 `revoke` 都会吊销旧 token：`revoke <name>` 只踢这个账号，`revoke all` 踢全部（`delete` 必须加 `--yes`） |
+| `user list\|create\|reset\|revoke\|2fa-disable\|delete` | `<name> --password --password-stdin --role --yes` | 账号管理；create/reset 用 `--password-stdin` 传口令。改密与 `revoke` 都会吊销旧 token：`revoke <name>` 只踢这个账号，`revoke all` 踢全部（`delete` 必须加 `--yes`）。`list` 每行末列显示该账号有没有开两步验证（`2fa` / `-`），不显示密钥。`2fa-disable <name> --yes` 是验证器丢失时的逃生口，只有 root 能跑，关闭同时吊销该账号全部会话 |
 | `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --type --repo --branch --path --port --domain --start-cmd --install-cmd --lines` | 应用全生命周期；`create` 需 `--template` 或 `--start-cmd` 之一 |
 | `backup run\|list` | — | 面板数据备份（SQLite 在线备份 API） |
 | `firewall list\|allow\|deny\|remove\|on\|off` | `--port --port-to --proto --source --comment --rate --num --expect --yes` | 本机 ufw/firewalld 读写；会把自己锁在门外的操作一律拒绝 |
@@ -201,6 +201,7 @@ choyeonctl status --json
 | `Address already in use` | `ss -ltnp \| grep :3210` | `kill <pid>` 或换 `--port` |
 | 页面 404 | `ls web/dist/index.html` | 前端未构建：`cd web && npm run build` |
 | `user create` 报「已存在」 | `choyeonctl user list` | 改走 `printf '%s' "$PW" \| choyeonctl user reset <name> --password-stdin` |
+| 用户登不进面板，页面只要"动态口令" | `choyeonctl user list` 看该账号是不是 `2fa` | 验证器不在手边（换手机/卸载/丢设备）时由 root 执行 `choyeonctl user 2fa-disable <name> --yes`，他会掉线并重登，然后在设置页重新绑定；网页端自己关闭要口令＋一枚有效动态口令，代替不了这一步 |
 | nginx 项 fail | `nginx -t` | 修正配置后再 `systemctl reload nginx`；不要 restart（会断 WebSocket） |
 | `choyeonctl: command not found` | `ls -l /usr/local/bin/choyeonctl` | 补软链接：`ln -sf <仓库目录>/bin/choyeonctl /usr/local/bin/choyeonctl`（只有 install.sh 会建这个链接） |
 | 服务反复重启 | `systemctl status choyeon-panel` | 触发了 `StartLimitBurst=5`：先修根因，再 `systemctl reset-failed choyeon-panel` |
