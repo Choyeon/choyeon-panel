@@ -230,8 +230,20 @@ def run_shell(cmd: str, timeout=None) -> subprocess.CompletedProcess:
     return subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True, timeout=timeout)
 
 
-def parse_lines(raw: str | None, default: int = 200, maximum: int = 2000) -> int:
-    """把查询串里的 lines 安全解析成 1..maximum。
+# 「一次尾读多少行」有两个互不相干的上限，之前却各写各的数、还互相指认对方：
+# - CLI_LOG_LINES_MAX：`choyeonctl logs --lines=N` 到底收多大的 N。同一个旗在终端里手打
+#   和被登记成定时任务由面板代为校验，必须是同一个答案——原先 CLI 夹到 5000，
+#   cron_service 的正则只放行 1..1000，而它的注释写着"与 CLI 的 _tail() 同口径"。
+# - HTTP_LOG_LINES_MAX：一次 GET 最多返回多少行，保护的是响应体与内存。它和命令行那档
+#   没关系，页面也不该照它写死（要给选择器用就得从接口读）。
+CLI_LOG_LINES_MAX = 5000
+HTTP_LOG_LINES_MAX = 2000
+LOG_LINES_DEFAULT = 200
+
+
+def parse_lines(raw: str | None, default: int = LOG_LINES_DEFAULT,
+                maximum: int = HTTP_LOG_LINES_MAX) -> int:
+    """把查询串里的 lines 安全解析成 1..maximum（HTTP 响应体上限，见 `HTTP_LOG_LINES_MAX`）。
 
     直接 `int(request.query_params.get("lines"))` 会让 `?lines=abc` 抛 ValueError
     → 500 + 堆栈；日志接口是 GET，viewer 账号也能打，等于一个免费的报错刷日志入口。

@@ -35,6 +35,7 @@ from .. import database as dbm
 from ..log import warn
 from ..util import disk_usage_pct, is_http_url, is_unit, run
 from . import system_metrics
+from .load_service import LOAD_RISK_PER_CORE
 
 # 存活探测只打本机：面板只监听 127.0.0.1，应用端口也绑回环，
 # 探测目标写死回环地址可以避免"设置里填个外网 URL 就把面板变成端口扫描器"。
@@ -425,6 +426,14 @@ async def _check_resources() -> None:
     snapshot() 的 CPU 是"距上一次调用的差值"，窗口取决于谁在 poll 指标：
     仪表盘开着时这里读到的是几秒的瞬时值，没人看时是整段均值。同一个指标两种
     口径，所以这三项都走 RESOURCE_NOTIFY_ROUNDS 去抖，别把瞬时尖峰当故障。
+
+    越过要紧档的要落成 crit，与磁盘同一口径：都发 warn 的话，「CPU 82%」和
+    「CPU 98%」在告警列表里长得一模一样，按 level 过滤的通知渠道也分不出轻重，
+    而概览仪表早就按同一对数变红了——页面说"要出事"、列表说"值得处理"是两套话。
+    要紧档不另发明数字：CPU/内存读 `resource_thresholds()` 里那条（配置线再加一档），
+    负载读自检用的同一个 `LOAD_RISK_PER_CORE`（每核排队 2 个）。注意 `alert_load1_x`
+    默认就是 2，所以默认配置下负载一告警就是 crit——这不是漏了个中间档，而是
+    「每核排俩」本来就是这台机器给出的要紧判词；要更早提醒该动的是那条配置，不是这里。
     """
     rt = resource_thresholds()
     cpu_pct, mem_pct = rt["cpu_warn"], rt["mem_warn"]
@@ -448,28 +457,33 @@ async def _check_resources() -> None:
     load1 = float((snap.get("load") or [0.0])[0])
     cores = int(snap.get("cpuCores") or os.cpu_count() or 1)
     load_limit = round(cores * load_x, 2)
+    # 要紧档按核数换算一次，好和阈值写在同一句话里；判档用的是每核排队数
+    load_risk = round(cores * LOAD_RISK_PER_CORE, 2)
+    per_core = round(load1 / cores, 2)
 
     await _check("cpu", cpu >= cpu_pct,
                  f"CPU 使用率 {cpu}%（阈值 {cpu_pct}%，要紧档 {rt['cpu_crit']}%）",
-                 code="cpu", level="warn",
+                 code="cpu", level="crit" if cpu >= rt["cpu_crit"] else "warn",
                  log_message=f"CPU 使用率超过阈值（阈值 {cpu_pct}%）",
                  ok_message=f"CPU 使用率正常（阈值 {cpu_pct}%）",
                  meta=_meta(value=cpu, threshold=cpu_pct, crit=rt["cpu_crit"]),
                  debounce=RESOURCE_NOTIFY_ROUNDS)
     await _check("mem", mem >= mem_pct,
                  f"内存使用率 {mem}%（阈值 {mem_pct}%，要紧档 {rt['mem_crit']}%）",
-                 code="mem", level="warn",
+                 code="mem", level="crit" if mem >= rt["mem_crit"] else "warn",
                  log_message=f"内存使用率超过阈值（阈值 {mem_pct}%）",
                  ok_message=f"内存使用率正常（阈值 {mem_pct}%）",
                  meta=_meta(value=mem, threshold=mem_pct, crit=rt["mem_crit"]),
                  debounce=RESOURCE_NOTIFY_ROUNDS)
     # load1 阈值按核数算：单核机器 load 1.5 已经很挤，8 核机器 load 8 才算满载
     await _check("load1", load1 >= load_limit,
-                 f"1 分钟负载 {load1}（阈值 {load_limit}，{cores} 核 ×{load_x}）",
-                 code="load1", level="warn",
+                 f"1 分钟负载 {load1}（阈值 {load_limit}，要紧档 {load_risk}，"
+                 f"{cores} 核 ×{load_x}／每核排队 {per_core}）",
+                 code="load1", level="crit" if per_core >= LOAD_RISK_PER_CORE else "warn",
                  log_message=f"1 分钟负载超过阈值（阈值 {load_limit}，{cores} 核 ×{load_x}）",
                  ok_message=f"1 分钟负载正常（阈值 {load_limit}，{cores} 核 ×{load_x}）",
-                 meta=_meta(value=load1, threshold=load_limit, cores=cores),
+                 meta=_meta(value=load1, threshold=load_limit, cores=cores,
+                            per_core=per_core, crit_per_core=LOAD_RISK_PER_CORE),
                  debounce=RESOURCE_NOTIFY_ROUNDS)
 
 

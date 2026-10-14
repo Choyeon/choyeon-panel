@@ -278,7 +278,6 @@ async def firewall_state(req: Request):
 # 所以按现有口径要求 admin（deps.need_admin），而不是靠 HTTP 方法猜。
 PRIORITIES = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
 MAX_GREP = 200
-MAX_LOG_LINES = 2000
 MAX_ITEM_CHARS = 1500
 _ABS_TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}(:\d{2})?$")
 _REL_TIME_RE = re.compile(r"^(\d{1,6})(min|h|d)$")
@@ -367,7 +366,7 @@ async def logs_search(request: Request):
         return _bad(f"关键词最长 {MAX_GREP} 个字符")
     if any(c in grep for c in ("\n", "\r", "\x00")):
         return _bad("关键词不能包含换行或空字符")
-    limit = parse_lines(qp.get("limit"), default=200, maximum=MAX_LOG_LINES)
+    limit = parse_lines(qp.get("limit"))
 
     argv = ["--no-pager", "-o", "json", "-n", str(limit)]
     if unit:
@@ -457,7 +456,7 @@ async def nginx_log(request: Request):
     if r := need_admin(request):
         return r
     qp = request.query_params
-    lines = parse_lines(qp.get("lines"), default=200, maximum=MAX_LOG_LINES)
+    lines = parse_lines(qp.get("lines"))
     filt = qp.get("filter") or ""
     if len(filt) > MAX_GREP:
         return _bad(f"过滤词最长 {MAX_GREP} 个字符")

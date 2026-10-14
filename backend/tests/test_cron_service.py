@@ -30,6 +30,7 @@ from app import database as dbm  # noqa: E402
 from app.errors import BadInput, NotFound  # noqa: E402
 from app.routers import system as SYS  # noqa: E402
 from app.services import cron_service as C  # noqa: E402
+from app.util import CLI_LOG_LINES_MAX, HTTP_LOG_LINES_MAX, LOG_LINES_DEFAULT  # noqa: E402
 
 _seq = iter(range(1000, 999999))
 
@@ -770,10 +771,13 @@ class TestLogsEndpoints(unittest.TestCase):
     def test_limit_is_capped_and_defaults(self):
         self._get("/api/system/logs", limit="999999")
         argv = self.calls[0]
-        self.assertEqual(argv[argv.index("-n") + 1], str(SYS.MAX_LOG_LINES))
+        # HTTP 侧的档位独立于 CLI 的 `logs --lines`（`CLI_LOG_LINES_MAX`）：
+        # 接口一次能拉的行数受响应体大小约束，命令行的那次是人在终端里看着输出的。
+        self.assertLess(HTTP_LOG_LINES_MAX, CLI_LOG_LINES_MAX)
+        self.assertEqual(argv[argv.index("-n") + 1], str(HTTP_LOG_LINES_MAX))
         self._get("/api/system/logs", limit="abc")
         argv = self.calls[1]
-        self.assertEqual(argv[argv.index("-n") + 1], "200")
+        self.assertEqual(argv[argv.index("-n") + 1], str(LOG_LINES_DEFAULT), "非数字视为未指定")
 
     def test_items_parsed_and_redacted(self):
         body = self._get("/api/system/logs", unit="choyeon-panel").json()

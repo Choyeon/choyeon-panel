@@ -23,7 +23,16 @@ type Task = {
   running: boolean; last_source: string;
 };
 type RunLog = { unit: string; source: string; start: string; status: string; running: boolean; log: string };
-type Options = { allowed: string[]; presets: any[]; units: string[]; note: string };
+type Options = {
+  allowed: string[];
+  presets: any[];
+  units: string[];
+  note: string;
+  lines_min?: number;
+  lines_max?: number;
+  lines_default?: number;
+  output_keep_bytes?: number;
+};
 type Preview = { expr: string; human: string; oncalendar: string | null; error: string | null };
 
 const err = ref('');
@@ -48,11 +57,23 @@ const logStatusText = computed(() => (logData.value?.running ? '执行中…' : 
 // `logs --lines N` 和 `logs --lines=N`，但 logs 后面挂第二个参数就会被拒，
 // 所以这里给行单独一个数字框，而不是放进"附加参数"自由文本。
 const LOGS_HEAD = 'choyeonctl logs';
-const LOG_LINES_DEFAULT = 200;
-const LOG_LINES_MAX = 1000;   // 与后端 _LINES_RE / CLI _tail() 同口径
+// 区间、默认值、输出留存字节数都由 /cron/options 下发，前端不抄第二份常量。
+// 过去这里自己写死了一份区间和默认值，比后端放行的小，于是界面拦掉了终端里能用的值；
+// 帮助文案里那句留存量也是抄的，服务端改了它这里不会跟着变。
+// 兜底值只在 /cron/options 还没回来时用，取后端同款。
+function optNum(key: 'lines_min' | 'lines_max' | 'lines_default' | 'output_keep_bytes', fallback: number) {
+  return computed(() => {
+    const v = Number(options.value[key]);
+    return Number.isInteger(v) && v > 0 ? v : fallback;
+  });
+}
+const linesMin = optNum('lines_min', 1);
+const linesMax = optNum('lines_max', 5000);
+const linesDefault = optNum('lines_default', 200);
+const keepBytes = optNum('output_keep_bytes', 4096);
 
 const form = ref<{ name: string; expr: string; preset: number; unit: string; lines: number; raw: string[] | null; enabled: boolean }>({
-  name: '', expr: '', preset: 0, unit: '', lines: LOG_LINES_DEFAULT, raw: null, enabled: true,
+  name: '', expr: '', preset: 0, unit: '', lines: linesDefault.value, raw: null, enabled: true,
 });
 
 // 列表与白名单都取一次就够（白名单只在打开表单时才用得上），但写操作后必须作废，
@@ -98,7 +119,7 @@ onMounted(autoPoll.start);
 
 async function openCreate() {
   editing.value = null;
-  form.value = { name: '', expr: '0 4 * * *', preset: 0, unit: '', lines: LOG_LINES_DEFAULT, raw: null, enabled: true };
+  form.value = { name: '', expr: '0 4 * * *', preset: 0, unit: '', lines: linesDefault.value, raw: null, enabled: true };
   preview.value = null;
   showForm.value = true;
   err.value = '';
@@ -131,7 +152,7 @@ async function openEdit(r: Task) {
     // `choyeonctl backup run choyeonctl logs --lines 500` 这种必然被白名单拒掉的命令，
     // 用户只是想改一下执行时间。
     form.value = {
-      name: r.name, expr: r.expr, preset: -1, unit: '', lines: LOG_LINES_DEFAULT,
+      name: r.name, expr: r.expr, preset: -1, unit: '', lines: linesDefault.value,
       raw: argv.slice(), enabled: !!r.enabled,
     };
     err.value = '这条任务的命令不在当前白名单预设里，下面原样保留它要执行的内容；保存只会改名称与计划时间。';
@@ -154,10 +175,10 @@ async function openEdit(r: Task) {
 /** 从 argv 里取尾读行数，`--lines N` 与 `--lines=N` 都认；没写就用 CLI 之外的面板默认值。 */
 function linesFromArgv(argv: string[]): number {
   const i = argv.findIndex((a) => a === '--lines' || a.startsWith('--lines='));
-  if (i < 0) return LOG_LINES_DEFAULT;
+  if (i < 0) return linesDefault.value;
   const raw = argv[i].includes('=') ? argv[i].split('=')[1] : argv[i + 1];
   const n = Number(String(raw ?? '').trim());
-  return Number.isInteger(n) && n >= 1 && n <= LOG_LINES_MAX ? n : LOG_LINES_DEFAULT;
+  return Number.isInteger(n) && n >= 1 && n <= linesMax.value ? n : linesDefault.value;
 }
 
 // 表达式回显是人话而不是 OnCalendar：写 cron 的人想确认的是「每周一 4 点」，
@@ -196,8 +217,8 @@ function buildArgv(): string[] {
 
 function clampLines(n: number) {
   const v = Math.floor(Number(n));
-  if (!Number.isFinite(v) || v < 1) return LOG_LINES_DEFAULT;
-  return Math.min(v, LOG_LINES_MAX);
+  if (!Number.isFinite(v) || v < 1) return linesDefault.value;
+  return Math.min(v, linesMax.value);
 }
 
 async function save() {
@@ -461,10 +482,10 @@ const cols: any[] = [
               <NFormItem v-if="isLogs" label="尾读行数">
                 <NSpace vertical :size="2" style="width: 100%">
                   <NInputNumber
-                    :value="form.lines" :min="1" :max="LOG_LINES_MAX" style="width: 140px"
-                    aria-label="尾读行数" @update:value="(v: number | null) => { form.lines = v ?? LOG_LINES_DEFAULT; }"
+                    :value="form.lines" :min="linesMin" :max="linesMax" style="width: 140px"
+                    aria-label="尾读行数" @update:value="(v: number | null) => { form.lines = v ?? linesDefault; }"
                   />
-                  <span class="cp-help">拼成 choyeonctl logs --lines=N，取值 1-{{ LOG_LINES_MAX }}；logs 之后不再接受其它参数，定时任务的输出服务端只保留最后 4KB。</span>
+                  <span class="cp-help">拼成 choyeonctl logs --lines=N，取值 {{ linesMin }}-{{ linesMax }}，区间由服务端白名单下发；logs 之后不再接受其它参数，定时任务的输出服务端只保留最后 {{ keepBytes }} 字节。</span>
                 </NSpace>
               </NFormItem>
             </template>
@@ -492,7 +513,7 @@ const cols: any[] = [
               { label: '来源', value: logData?.source === 'journal' ? 'systemd timer（journald）' : logData?.source === 'stored' ? '面板手动执行记录' : '—' },
             ]"
           />
-          <NAlert type="warning" :bordered="false" size="small">服务端已对口令/连接串做脱敏；面板手动执行的记录只保留最后 4KB，定时器那一轮读的是 journald。</NAlert>
+          <NAlert type="warning" :bordered="false" size="small">服务端已对口令/连接串做脱敏；面板手动执行的记录只保留最后 {{ keepBytes }} 字节，定时器那一轮读的是 journald。</NAlert>
           <pre class="cr-log mono">{{ logLoading ? '读取中…' : (logData?.log || '（无输出）') }}</pre>
         </NSpace>
       </NDrawerContent>

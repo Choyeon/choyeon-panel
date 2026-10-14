@@ -52,6 +52,7 @@ from app.services import (  # noqa: E402
     storage_service,
     updates_service,
 )
+from app.util import CLI_LOG_LINES_MAX  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -450,8 +451,10 @@ def _tail(raw: int) -> int:
 
     0 会让 `splitlines()[-0:]` 返回**整份**日志（本想只看尾巴，结果全量打印，
     部署日志上限是几十万字节）；负数会把 journalctl 直接打挂。
+    上限取 `CLI_LOG_LINES_MAX`，定时任务白名单校验共用同一个常量：
+    终端里能跑通的 `--lines` 不应该登记成定时任务时被拒。
     """
-    return max(1, min(int(raw or 1), 5000))
+    return max(1, min(int(raw or 1), CLI_LOG_LINES_MAX))
 
 
 async def cmd_app(a: argparse.Namespace) -> dict:

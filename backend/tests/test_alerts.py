@@ -16,6 +16,7 @@
 
 import asyncio
 import itertools
+import json
 import os
 import sqlite3
 import tempfile
@@ -649,21 +650,21 @@ class TestRunChecksHistory(_HistoryCase):
         sent: list[str] = []
         self._round(cpu=95.0, sent=sent)
         self.assertEqual(sent, [], "第一轮超标只该记历史，不该推送")
-        self.assertEqual([r["level"] for r in _metric_rows() if r["code"] == "cpu"], ["warn"],
-                         "历史必须当轮就留下 warn")
+        self.assertEqual([r["level"] for r in _metric_rows() if r["code"] == "cpu"], ["crit"],
+                         "历史必须当轮就留下超标记录，且 95% 已越过要紧档（阈值 80 + 10）")
         self._round(cpu=96.0, sent=sent)
         self.assertEqual(len(sent), 1, sent)
         self.assertIn("96", sent[0], "推送带实时数值，历史那条是稳定文案")
-        self.assertEqual([r["level"] for r in _metric_rows() if r["code"] == "cpu"], ["warn"],
+        self.assertEqual([r["level"] for r in _metric_rows() if r["code"] == "cpu"], ["crit"],
                          "推没推送都不影响历史去重")
         # 恢复正常 → 计数归零，再来一轮尖峰要重新数满两轮
         self._round(cpu=5.0, sent=sent)
         self._round(cpu=97.0, sent=sent)
         self.assertEqual(len(sent), 1, "恢复后计数要清零，不能下一轮立刻又发一条")
-        # 历史里要重新出现一行 warn：去重是跟「该 code 最近一行」比，不是「最近一行 warn」。
+        # 历史里要重新出现一行超标记录：去重是跟「该 code 最近一行」比，不是「最近一行 warn」。
         # 否则一次「超标 → 恢复 → 又超标」在网页端只看得到前两次，第三次烧 CPU 无人知晓。
         self.assertEqual([r["level"] for r in _metric_rows() if r["code"] == "cpu"],
-                         ["warn", "ok", "warn"])
+                         ["crit", "ok", "crit"])
 
     def test_clear_faults_are_not_debounced(self):
         """连不上/单元 failed 这类明确故障必须当轮就推，不等第二轮。"""
@@ -702,14 +703,56 @@ class TestRunChecksHistory(_HistoryCase):
         self._round(cpu=91.2)
         self.assertEqual(len(_metric_rows()), after_bad, "持续中的 CPU 告警不得每轮再插一行")
         cpu_rows = [r for r in _metric_rows() if r["code"] == "cpu"]
-        # 资源阈值是"降级"不是"停机"，级别定 warn；crit 留给连不上/单元 failed/证书过期
-        self.assertEqual([r["level"] for r in cpu_rows], ["warn"], cpu_rows)
+        # 95 已越过要紧档（80 + 10），落 crit；91.2/97.4 都在线以上，去重后仍那一行
+        self.assertEqual([r["level"] for r in cpu_rows], ["crit"], cpu_rows)
+
+    def test_between_threshold_and_crit_stays_warn(self):
+        """两档要能分开：85% 只是「值得处理」，不该和 98% 长得一样。"""
+        self._round(cpu=85.0)
+        row = next(r for r in _metric_rows() if r["code"] == "cpu")
+        self.assertEqual(row["level"], "warn", row)
+        self.assertEqual(json.loads(row["meta"])["crit"], 90, "历史要能展开出要紧档是多少")
+        self.assertEqual(json.loads(row["meta"])["value"], 85.0)
+
+    def test_load1_crit_uses_the_same_risk_number_as_doctor(self):
+        """负载要紧档读自检那个「每核排队」出处，不在这里另发明一个数字。
+
+        默认 alert_load1_x 就是 2，等于要紧档本身，所以默认配置下负载一超标即 crit；
+        把配置线调早（这里是 1，即饱和就报）才会在 crit 之前露出 warn 档。
+        """
+        crit_per_core = alerts_service.LOAD_RISK_PER_CORE
+        cores = int(self.SNAP["cpuCores"])
+
+        def run_with(load1: float) -> None:
+            snap = dict(self.SNAP, load=[load1, 0.3, 0.2])
+
+            async def fake_snap():
+                return snap
+
+            with (mock.patch.object(alerts_service, "run", _run_stub),
+                  mock.patch.object(alerts_service, "disk_usage_pct", lambda p: 40),
+                  mock.patch.object(alerts_service, "run_probes", _no_probes),
+                  mock.patch.object(alerts_service, "notify", _no_notify),
+                  mock.patch.object(alerts_service.system_metrics, "snapshot", fake_snap)):
+                asyncio.run(alerts_service.run_checks())
+
+        run_with(cores * crit_per_core)
+        row = next(r for r in _metric_rows() if r["code"] == "load1")
+        self.assertEqual(row["level"], "crit", row)
+        self.assertEqual(json.loads(row["meta"])["crit_per_core"], crit_per_core)
+
+        dbm.set_setting("alert_load1_x", "1")
+        self.addCleanup(dbm.execute, "DELETE FROM settings WHERE key=?", ("alert_load1_x",))
+        run_with(cores * 1.5)
+        rows = [r for r in _metric_rows() if r["code"] == "load1"]
+        self.assertEqual([r["level"] for r in rows], ["crit", "warn"],
+                         "每核排队 1.5 过了配置线 1、没到要紧档 2，应该是 warn")
 
     def test_recovery_after_high_cpu_appends_ok(self):
         self._round(cpu=95.0)
         self._round(cpu=9.0)
         cpu_rows = [(r["level"], r["message"]) for r in _metric_rows() if r["code"] == "cpu"]
-        self.assertEqual([x[0] for x in cpu_rows], ["warn", "ok"], cpu_rows)
+        self.assertEqual([x[0] for x in cpu_rows], ["crit", "ok"], cpu_rows)
         # 再跑一轮仍然正常：ok 也不重复
         self._round(cpu=9.0)
         self.assertEqual(len([r for r in _metric_rows() if r["code"] == "cpu"]), 2)

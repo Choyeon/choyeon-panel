@@ -28,7 +28,16 @@ from pathlib import Path
 from .. import aio_db, config
 from .. import database as dbm
 from ..errors import BadInput, NotFound
-from ..util import kill_group, redact_creds, run, unit_env_value, unit_exec_arg_escape, unit_pct_escape
+from ..util import (
+    CLI_LOG_LINES_MAX,
+    LOG_LINES_DEFAULT,
+    kill_group,
+    redact_creds,
+    run,
+    unit_env_value,
+    unit_exec_arg_escape,
+    unit_pct_escape,
+)
 from .backup_service import _unit_dir, _write_if_changed
 
 PANEL_SERVICE = "choyeon-panel"
@@ -87,7 +96,6 @@ PRESET_CMDS: tuple[dict, ...] = (
 
 _VACUUM_SIZE_RE = re.compile(r"^--vacuum-size=\d{1,6}[MG]$")
 _VACUUM_TIME_RE = re.compile(r"^--vacuum-time=\d{1,6}[hd]$")
-_LINES_RE = re.compile(r"^--lines=([1-9]|[1-9]\d{1,3}|1000)$")
 _DIGIT_RE = re.compile(r"^\d{1,9}$")
 
 
@@ -321,9 +329,17 @@ def _managed_units() -> list[str]:
     return units
 
 
-def _lines_ok(val: str) -> bool:
-    """`--lines N` 的空格写法与 `--lines=N` 共用同一条 1..1000 口径。"""
-    return bool(_LINES_RE.match(f"--lines={val}"))
+def _lines_arg_ok(tok: str) -> bool:
+    """认 `--lines=N` 和跟在 `--lines` 后面的裸数字 N，两种写法共用 CLI 自己那一档上限。
+
+    同一个旗在终端里手打、在这里由面板代为校验，必须给同一个答案。原先 `cli._tail()`
+    把值夹到 5000，这条校验的正则只放行 1..1000，注释却写着"与 CLI 的 _tail() 同口径"：
+    于是 `choyeonctl logs --lines 2000` 在终端里能用，登记成定时任务却被 400 拒掉，
+    而拒它的理由是那句根本不成立的注释。下限 1 不是装饰——0 会让 `_tail()` 里的
+    `splitlines()[-0:]` 返回整份日志。
+    """
+    raw = tok.split("=", 1)[1] if tok.startswith("--lines=") else tok
+    return raw.isdigit() and 1 <= int(raw) <= CLI_LOG_LINES_MAX
 
 
 def _validate_choyeonctl(rest: list[str]) -> None:
@@ -331,18 +347,17 @@ def _validate_choyeonctl(rest: list[str]) -> None:
         raise BadInput("choyeonctl 需要子命令，例如 choyeonctl backup run")
     if tuple(rest) in CHOYEONCTL_FIXED:
         return
-    if rest[0] == "logs" and len(rest) == 2 and _LINES_RE.match(rest[1]):
+    if rest[0] == "logs" and len(rest) == 2 and _lines_arg_ok(rest[1]):
         return
     # `logs --lines 200`（文档里的空格写法）与 `logs --lines=200` 等价，都得认。
-    # 上限 1000 与 CLI 的 _tail() 同口径：0 会让它打印整份日志。
-    if rest[0] == "logs" and len(rest) == 3 and rest[1] == "--lines" and _lines_ok(rest[2]):
+    if rest[0] == "logs" and len(rest) == 3 and rest[1] == "--lines" and _lines_arg_ok(rest[2]):
         return
     if len(rest) == 4 and rest[0] == "app" and rest[1] in ("deploy", "rollback") \
             and rest[2] == "--id" and _DIGIT_RE.match(rest[3]):
         return
     raise BadInput(
         "choyeonctl 只允许：backup run / backup list / doctor / status / app list / "
-        "logs [--lines N] / app deploy|rollback --id N"
+        f"logs [--lines 1-{CLI_LOG_LINES_MAX}] / app deploy|rollback --id N"
     )
 
 
@@ -728,7 +743,7 @@ async def delete_task(tid: int) -> str:
 
 
 async def run_now(tid: int, actor: str = "system") -> dict:
-    """管理员手动执行一次：固定 argv 直接 exec，输出脱敏后只留最后 4KB。"""
+    """管理员手动执行一次：固定 argv 直接 exec，输出脱敏后只留最后 `LOG_TAIL_BYTES` 字节。"""
     row = await aio_db.query_one("SELECT * FROM cron_task WHERE id=?", (tid,))
     if not row:
         raise NotFound("定时任务不存在")
@@ -789,10 +804,19 @@ async def _exec_task(tid: int, row: dict, argv: list[str], actor: str) -> dict:
 
 
 def command_options() -> dict:
-    """给前端的白名单说明：可用命令与可重启的 unit，都由服务端真实配置给出，前端不抄常量。"""
+    """给前端的白名单说明：可用命令与可重启的 unit，都由服务端真实配置给出，前端不抄常量。
+
+    `--lines` 的区间和结果留存的字节数也一并下发：这三个数字过去只写在前端，
+    前端把上限标成 1000、后端校验到 5000，界面里输不进终端里能用的值；
+    帮助文案说的「4KB」同样和 `LOG_TAIL_BYTES` 各写各的。现在前端读这里。
+    """
     return {
         "allowed": list(ALLOWED_CMDS),
         "presets": [dict(p) for p in PRESET_CMDS],
         "units": _managed_units(),
+        "lines_min": 1,
+        "lines_max": CLI_LOG_LINES_MAX,
+        "lines_default": LOG_LINES_DEFAULT,
+        "output_keep_bytes": LOG_TAIL_BYTES,
         "note": "定时任务以 root 直接执行固定参数，不经过 shell；不在白名单内的命令不会被保存",
     }

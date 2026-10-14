@@ -1090,17 +1090,19 @@ class TestScryptOffLoop(unittest.IsolatedAsyncioTestCase):
     """
 
     async def test_capped_concurrency_and_free_loop(self):
+        import statistics
         import time
 
         from app import security as sec
 
+        HASH_SEC = 0.15
         inflight = []
         peak = []
 
         def slow_hash(pw):
             inflight.append(1)
             peak.append(len(inflight))
-            time.sleep(0.15)
+            time.sleep(HASH_SEC)
             inflight.pop()
             return f"fake:{pw}"
 
@@ -1122,10 +1124,13 @@ class TestScryptOffLoop(unittest.IsolatedAsyncioTestCase):
         await tick_task
 
         self.assertLessEqual(max(peak), sec._SCRYPT_CONCURRENCY, "scrypt 并发没压住，内存会被顶飞")
-        # 阈值要同时满足两件事：明显小于一次哈希（跑在循环上时间隔就是 150ms 量级），
-        # 又明显大于调度抖动。旧写法用 20ms 假哈希 + 20ms 阈值，两者相等，全量跑起来
-        # 被同机负载偶发顶到 20ms 以上就红一条（2026-10-11 实测到一次），单独跑又总是绿。
-        self.assertLess(max(ticks), 0.06, "哈希仍在事件循环上跑")
+        # 「最大间隔 < 60ms」这种写法量的是机器不是代码：全量跑起来同机负载能把某一次
+        # 5ms 的 sleep 顶到 62ms（2026-10-14 全量跑到这条红过一次，单独跑永远绿），
+        # 而这跟哈希在不在循环上毫无关系。改成看中位数：哈希若在循环上算，每 150ms
+        # 才轮得到 ticker 一次，中位数直接落在 HASH_SEC 量级，负载怎么抖都翻不回来。
+        median = statistics.median(ticks)
+        self.assertLess(median, HASH_SEC / 4, "哈希仍在事件循环上跑")
+        self.assertGreater(len(ticks), 20, "ticker 没跑起来，这条断言就是空转")
 
     def test_sync_helpers_still_available(self):
         # CLI（choyeonctl user create）是同步进程，走的是 hash_pass/check_pass

@@ -26,7 +26,7 @@ from app import config, main, security, templates  # noqa: E402
 from app import database as dbm
 from app.routers import terminal  # noqa: E402
 from app.services import alerts_service, apps_service, files_service, nginx_ops  # noqa: E402
-from app.util import parse_lines, run, run_shell_async  # noqa: E402
+from app.util import CLI_LOG_LINES_MAX, HTTP_LOG_LINES_MAX, LOG_LINES_DEFAULT, parse_lines, run, run_shell_async  # noqa: E402
 
 
 def _rmtree(path: str) -> None:
@@ -905,13 +905,19 @@ class TestCommandExecution(unittest.IsolatedAsyncioTestCase):
 class TestQueryParamParsing(unittest.TestCase):
     def test_parse_lines_never_raises(self):
         for bad in (None, "", "abc", "1.5", "[]", "1e3"):
-            self.assertEqual(parse_lines(bad), 200, f"{bad!r} 应回落默认值而不是抛错")
+            self.assertEqual(parse_lines(bad), LOG_LINES_DEFAULT, f"{bad!r} 应回落默认值而不是抛错")
 
     def test_parse_lines_clamps_both_ends(self):
         self.assertEqual(parse_lines("-5"), 1, "下界必须 clamp：负数会进 journalctl -n 造成诡异行为")
-        self.assertEqual(parse_lines("999999"), 2000, "上界必须 clamp，否则一条请求拉爆日志")
+        self.assertEqual(parse_lines("999999"), HTTP_LOG_LINES_MAX, "上界必须 clamp，否则一条请求拉爆日志")
         self.assertEqual(parse_lines("50"), 50)
-        self.assertEqual(parse_lines("0"), 200, "0 视为未指定")
+        self.assertEqual(parse_lines("0"), LOG_LINES_DEFAULT, "0 视为未指定")
+
+    def test_http_tier_is_lower_than_cli_tier(self):
+        """两个档位各有出处，别互相引用：命令行是人在终端逐屏看，接口是一次进响应体。"""
+        self.assertLess(HTTP_LOG_LINES_MAX, CLI_LOG_LINES_MAX)
+        self.assertEqual(parse_lines(str(CLI_LOG_LINES_MAX), maximum=CLI_LOG_LINES_MAX), CLI_LOG_LINES_MAX)
+        self.assertEqual(parse_lines(str(CLI_LOG_LINES_MAX)), HTTP_LOG_LINES_MAX)
 
 
 class TestAuditLimitClamp(unittest.TestCase):
