@@ -288,8 +288,9 @@ class TestApplyEdited(unittest.IsolatedAsyncioTestCase):
     OLD = {"id": 7, "name": "before", "type": "node", "path": "/tmp/cp-x", "port": 8124,
            "domain": "a.example.com", "start_cmd": "node x.js", "env": "[]"}
 
-    async def _run(self, changes=None, active=True, fail_on=None):
+    async def _run(self, changes=None, active=True, fail_on=None, old_override=None):
         new = {**self.OLD, **(changes or {})}
+        old = {**self.OLD, "unit_override": old_override} if old_override else self.OLD
         patches = {
             "is_active": mock.patch.object(apps_service, "is_active", lambda *_: asyncio.sleep(0, active)),
             # restart_and_verify 判的是"主进程持续存活"，测试机上没有真进程，给一个固定 pid
@@ -298,6 +299,9 @@ class TestApplyEdited(unittest.IsolatedAsyncioTestCase):
             "remove_unit": mock.patch.object(apps_service, "remove_unit"),
             "ensure_unit": mock.patch.object(apps_service, "ensure_unit"),
             "write_env_file": mock.patch.object(apps_service, "write_env_file"),
+            # 真实实现会去读 /etc/systemd/system，测试里只关心"调用没调用、参数对不对"
+            "ensure_env_link": mock.patch.object(apps_service, "ensure_env_link"),
+            "remove_env_link": mock.patch.object(apps_service, "remove_env_link"),
             "service_action": mock.patch.object(apps_service, "service_action"),
             "remove_vhost": mock.patch.object(apps_service.nginx_ops, "remove_vhost"),
             "apply_vhost": mock.patch.object(apps_service.nginx_ops, "apply_vhost"),
@@ -306,7 +310,7 @@ class TestApplyEdited(unittest.IsolatedAsyncioTestCase):
             m = {k: st.enter_context(p) for k, p in patches.items()}
             if fail_on:
                 m[fail_on].side_effect = RuntimeError("systemd-analyze verify 不通过")
-            out = await apps_service.apply_edited(self.OLD, new)
+            out = await apps_service.apply_edited(old, new)
         return SimpleNamespace(**m, out=out)
 
     async def test_old_unit_and_vhost_removed_on_rename(self):
@@ -356,14 +360,36 @@ class TestApplyEdited(unittest.IsolatedAsyncioTestCase):
         r.apply_vhost.assert_not_called()
         r.remove_vhost.assert_called_once_with("before")
 
-    async def test_unit_override_only_changes_the_record(self):
-        """外部 unit 的 ExecStart 不归面板写，也不该擅自重启别人的服务。"""
-        r = await self._run({"unit_override": "their-app.service"})
+    async def test_unit_override_writes_env_but_not_the_unit(self):
+        """外部 unit：unit 本体与 nginx 不归面板写，但 .panel.env 属于应用目录，必须落地。
+
+        批次⑳之前的写法是直接 return "只改了记录"，连环境变量文件都不写——界面上
+        ADMIN_PASSWORD 显示已经改好，磁盘上没有 .panel.env，进程读的也还是老配置。
+        """
+        r = await self._run({"unit_override": "their-app.service", "env": '[{"k":"A","v":"1"}]'})
         r.ensure_unit.assert_not_called()
-        r.write_env_file.assert_not_called()
-        r.service_action.assert_not_called()
-        self.assertFalse(r.out["applied"])
-        self.assertIn("外部 unit", r.out["note"])
+        r.apply_vhost.assert_not_called()
+        r.remove_vhost.assert_not_called()
+        r.write_env_file.assert_called_once()
+        r.ensure_env_link.assert_called_once()
+        self.assertEqual(r.service_action.call_args.args, ("their-app.service", "restart"))
+        self.assertTrue(r.out["restarted"])
+        self.assertTrue(r.out["applied"])
+
+    async def test_unit_override_reports_unit_scoped_fields_as_record_only(self):
+        """启动命令/端口活在 unit 本体里，这部分对外部 unit 确实只进了记录，要照实说。"""
+        r = await self._run({"unit_override": "their-app.service", "start_cmd": "node z.js"})
+        self.assertIn("启动命令", r.out["note"])
+        self.assertIn("面板不写外部 unit", r.out["note"])
+        # 同一句话里不能把已经生效的环境变量也说成没生效
+        self.assertTrue(r.out["restarted"])
+
+    async def test_external_to_managed_drops_the_old_env_link(self):
+        """切回面板托管后 unit 名换了（panel-*），旧 unit 的 drop-in 不会再有人读。"""
+        r = await self._run({"unit_override": None}, old_override="external-x.service")
+        r.remove_env_link.assert_called_once()
+        self.assertEqual(r.remove_env_link.call_args.args[0]["unit_override"], "external-x.service")
+        r.ensure_unit.assert_called_once()
 
     async def test_sync_failure_is_reported_instead_of_silent_saved(self):
         r = await self._run({"start_cmd": "node y.js"}, fail_on="ensure_unit")

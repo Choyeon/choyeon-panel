@@ -467,7 +467,16 @@ watch(
 
       <div v-else-if="tab === 'env'">
         <NSpace vertical :size="12" style="width: 100%">
-          <div class="cp-help">写入应用目录的 .panel.env 并由 systemd EnvironmentFile 加载。服务正在运行时，保存会自动同步 unit 并重启生效；停止状态则下次启动时生效。</div>
+          <div class="cp-help">
+            <template v-if="app.unit_override">
+              该应用由外部 unit 纳管：面板不改写 unit 本体，环境变量写入安装目录的
+              .panel.env，并由面板在 systemd 的 {{ app.unit_override }}.d/ 下补一份 drop-in 引用它（删掉那个文件就恢复原样）。
+              服务正在运行时保存会重启一次生效；启动命令、端口、域名仍要在外部 unit 里自己维护。
+            </template>
+            <template v-else>
+              写入应用目录的 .panel.env 并由 systemd EnvironmentFile 加载。服务正在运行时，保存会自动同步 unit 并重启生效；停止状态则下次启动时生效。
+            </template>
+          </div>
           <!-- 1Panel 的参数抽屉是「只读详情 / 编辑」互斥切换：默认只读，敏感值先遮罩 -->
           <NButton v-if="isAdmin" size="small" tertiary round :icon="ico(envView === 'edit' ? 'EyeOutline' : 'PencilOutline')" style="align-self: flex-start" @click="envView = envView === 'edit' ? 'detail' : 'edit'">
             {{ envView === 'edit' ? '详情' : '编辑' }}

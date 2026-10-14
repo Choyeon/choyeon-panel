@@ -266,6 +266,29 @@
 
 
 ### 修复
+- 由外部 unit 纳管的应用现在真的能改环境变量。此前详情页里「环境变量」照样能编辑，PATCH 照样回 200、
+  界面照样弹「已保存」，附一句「外部 unit：unit 与环境变量文件不由面板写入，本次只改了记录」——然后
+  什么都没写。生产机上的 choyeon-video 就是这句话的现场：记录里 ADMIN_PASSWORD 早已换过新值，
+  `/root/www/choyeon-video/.panel.env` 这个文件从来不存在，外部 unit 里也没有 EnvironmentFile 那行，
+  进程读到的还是老配置，「改了没反应」于是变成玄学。unit 归外部管是真的，`.panel.env` 在应用目录里、
+  面板写它是自己分内的事，两件事被一句早退捆在一起放弃了。现在写文件、并在 systemd 的
+  `<unit>.d/panel-env.conf` 补一份 drop-in 引用它（不改别人的 unit 本体，删掉这个文件就恢复原样；
+  drop-in 里的 EnvironmentFile 排在 unit 本体 `Environment=` 之后，面板的值优先），服务在跑且内容
+  确实变了才重启一次，内容没变就一句「环境变量没有变化，服务未重启」，不再每次点保存抖一遍线上进程。
+  确实活在 unit 本体的那三样（启动命令、端口、安装目录）照旧如实说明「要在 unit 里同步后重启才生效」。
+- 同一个洞还有第二个入口：自定义 `unit_template` 漏写 EnvironmentFile 时，面板报「已生效」而 systemd
+  读的是另一份配置。现在部署和编辑都会先问一句「这个 unit 到底读不读 `.panel.env`」——查 unit 本体和
+  drop-in 两处，按整条路径比对（换过安装目录后，指向旧目录的引用不算生效），不读就用 drop-in 补上并在
+  note 里写清楚补了什么。删除应用连带清掉面板自己那份 drop-in（目录空了才删，别人放的 `vendor.conf`
+  不动）；托管与纳管互切时残留的 unit / drop-in 都有对应提示，不再只改记录就宣称生效。
+- 新增回归测试：`backend/tests/test_batch20.py`（24 条）。含 unit 本体与 drop-in 两种引用都被认出、
+  注释行与别的 app 的同名文件不算数、非法 unit 名（`../../etc/evil.service`）拒绝挂载、只有内容真变了
+  才 daemon-reload、停止态不擅自启动、外部 unit 下改 start_cmd 仍要说「只改了记录」、应用目录还没建时
+  提示下次部署写入、`.panel.env` 文件名只有一个出处（unit 模板、写入路径、drop-in 内容三处必须指同一个
+  文件）。反证过不是空转：把 `apps_service.py` 退回上一版，24 条全红。线上实测：在 choyeon-video 的
+  环境变量页加一个键保存，`.panel.env` 与 drop-in 落地、`systemctl show -p EnvironmentFiles` 读到该文件、
+  跑着的 node 进程 `/proc/<pid>/environ` 里有这个键（外部 unit 自带的 `Environment=PORT` 一个没丢）、
+  站点仍 200；删掉该键再保存，进程里跟着消失；内容不变再点一次保存，PID 不变并报「服务未重启」。
 - 概览的「磁盘」原先写死读根分区，而「存储占用」页签读的是数据目录所在的那块盘。数据目录放到独立
   挂载盘上之后，两处会同时给出相反的判断（数据盘 100%、根盘 20%：一处是要紧项，一处是"占用健康"），
   而面板真正会写满的是数据盘。现在两条采样路径都走同一个 `_disk_sample()`，按数据目录取盘，并把

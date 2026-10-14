@@ -29,6 +29,13 @@ from .systemd_ops import is_active, service_action
 APP_ROOT = config.APP_ROOT
 UNIT_DIR = config.UNIT_DIR
 
+# 应用环境变量的落盘文件名，以及面板给 unit 补环境变量的 drop-in 名。
+# 写成常量是因为 unit 模板、.panel.env 路径、drop-in 内容三处必须指向同一个文件，
+# 而"面板说写了、systemd 读的是另一个名字"正是本批次要修的这类 bug。
+# drop-in 名不能改：systemd 的 <unit>.d/ 里可能有别人的文件，面板只认自己这个名字。
+ENV_FILE_NAME = ".panel.env"
+ENV_DROP_IN_NAME = "panel-env.conf"
+
 _DEPLOY_TASKS: set = set()
 # 后台任务对应的部署 id：只有进程内还在跑的部署才在这个集合里。
 # 看门狗据此区分"慢"和"孤儿"（见 reap_orphan_deployments）。
@@ -86,7 +93,7 @@ def render_unit(app: dict) -> str:
         f"[Service]\n"
         f"Type=simple\n"
         f"WorkingDirectory={app['path']}\n"
-        f"EnvironmentFile=-{app['path']}/.panel.env\n"
+        f"EnvironmentFile=-{app['path']}/{ENV_FILE_NAME}\n"
         # 实测：ExecStart 整行（引号内也一样）会被 systemd 展开 `%X` 与 `${VAR}`。
         # 启动命令里出现 `%b` 时，`/bin/bash -lc "printf tag=%b"` 真的会执行成
         # `printf tag=/bin/sh`（unit 文本原样落进 /etc/systemd/system 起服务测出）；
@@ -126,27 +133,138 @@ def _env_escape(v) -> str:
     return s.replace(chr(10), " ").replace(chr(13), " ")
 
 
-def write_env_file(app: dict):
+def env_file_path(app: dict) -> Path:
+    return Path(app["path"]) / ENV_FILE_NAME
+
+
+def env_body(app: dict) -> str:
     try:
         vars_ = json.loads(app.get("env") or "[]")
     except (ValueError, TypeError):
         vars_ = []
-    body = "\n".join(
+    return "\n".join(
         f'{x["k"]}="{_env_escape(x.get("v", ""))}"'
         for x in vars_
         if isinstance(x, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", x.get("k") or "")
     )
-    target = Path(app["path"]) / ".panel.env"
+
+
+def write_env_file(app: dict) -> str:
+    """写安装目录下的 .panel.env，返回 written / unchanged / no-dir 三态之一。
+
+    三态是给调用方判断"这次保存到底要不要重启"用的：内容没变还重启一次服务，等于每次
+    点保存都把线上进程抖一下；目录不存在则是"还没落地"，不能说成已生效。
+    """
+    body = env_body(app)
+    target = env_file_path(app)
     if not target.parent.is_dir():
         # 应用还没部署过（目录都不存在）时不要顺手把目录建出来：git clone 拒绝往
         # "已存在且非空"的目录里写，而这里正是那份非空内容，用户会看到"部署失败"却
         # 完全不知道和刚才保存配置有关。目录会由部署自己创建，届时再写这个文件。
-        return
+        return "no-dir"
     try:
+        if target.is_file() and target.read_text(encoding="utf-8", errors="replace") == body + "\n":
+            # 内容一致也要把权限补回 0600：手工 chmod 过、或者从备份恢复回来的文件
+            # 权限未必对，而这里正是唯一一次机会。
+            os.chmod(target, 0o600)
+            return "unchanged"
         target.write_text(body + "\n", encoding="utf-8")
         os.chmod(target, 0o600)  # 环境变量常含密钥，禁止同机其他用户读取
     except OSError as e:
         raise RuntimeError(f"写入 .panel.env 失败：{e}") from e
+    return "written"
+
+
+def _env_drop_in_dir(unit: str) -> Path:
+    return Path(UNIT_DIR) / f"{unit}.d"
+
+
+def _env_drop_in_text(app: dict) -> str:
+    return (
+        "# 由 choyeon-panel 写入：把应用目录下的 .panel.env 挂给这个 unit。\n"
+        "# 面板不改写 unit 本体，删掉本文件（以及空掉的同名目录）就恢复原样。\n"
+        "[Service]\n"
+        f"EnvironmentFile=-{app['path']}/{ENV_FILE_NAME}\n"
+    )
+
+
+def unit_reads_env_file(app: dict) -> bool:
+    """这个 unit 生效的配置里是否已经引用了**这个应用自己的** .panel.env。
+
+    两个都必须匹配：
+    - 只认 EnvironmentFile= 行。以 # 开头的注释写法 systemd 不会加载，判成"已经引用"
+      就等于把环境变量永久地判成已生效。
+    - 认整条路径。安装目录改过之后，unit 里那行指向的还是旧目录，环境变量照样读不到，
+      但按文件名匹配会回"已经引用"，于是这次保存又被判成已生效。
+    """
+    unit = unit_name(app)
+    want = str(env_file_path(app))
+    files = [Path(UNIT_DIR) / unit, *_env_drop_in_dir(unit).glob("*.conf")]
+    for f in files:
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("EnvironmentFile") and want in line:
+                return True
+    return False
+
+
+async def ensure_env_link(app: dict) -> str:
+    """保证面板写的 .panel.env 真的会被这个 unit 读进来，返回本次动作。
+
+    为什么需要这一步：unit 里那行 `EnvironmentFile=` 只存在于面板的**默认模板**。纳管
+    外部 unit（unit_override）时面板不写 unit 文件，自定义 unit_template 也可能整段漏掉
+    这一行——两种情况下环境变量都写进了 .panel.env，进程却一个字节都读不到，而界面照样
+    报"已保存"。这就是"改了没反应"的根因，比不写文件更糟。
+    补 drop-in 而不是改别人的 unit：systemd 的 <unit>.d/ 就是为此准备的，面板自己的
+    默认模板已经引用了该文件，所以正常托管应用一次都不会走到写文件这步。
+    返回值：written / unchanged / no-unit / invalid-unit（后两者由调用方如实上报）。
+    """
+    if unit_reads_env_file(app):
+        return "unchanged"
+    unit = unit_name(app)
+    if not is_unit(unit):
+        return "invalid-unit"
+    if not (Path(UNIT_DIR) / unit).is_file():
+        # 本机根本没有这个 unit 文件：补一个没人读的 drop-in 只会留下一份孤儿配置。
+        return "no-unit"
+    d = _env_drop_in_dir(unit)
+    d.mkdir(parents=True, exist_ok=True)
+    target = d / ENV_DROP_IN_NAME
+    want = _env_drop_in_text(app)
+    try:
+        same = target.is_file() and target.read_text(errors="replace") == want
+        if not same:
+            target.write_text(want, encoding="utf-8")
+            os.chmod(target, 0o600)  # 里面写着 env 文件的绝对路径，同机普通用户不该看到布局
+    except OSError as e:
+        raise RuntimeError(f"写入 systemd drop-in 失败：{e}") from e
+    if same:
+        return "unchanged"
+    r = await run("systemctl", ["daemon-reload"])
+    if r["code"] != 0:
+        raise RuntimeError(r["out"] or "daemon-reload 失败")
+    return "written"
+
+
+async def remove_env_link(app: dict) -> bool:
+    """删掉面板写过的 drop-in（应用删除、或 unit 已经自己引用 .panel.env 时）。"""
+    unit = unit_name(app)
+    if not is_unit(unit):
+        return False
+    d = _env_drop_in_dir(unit)
+    target = d / ENV_DROP_IN_NAME
+    if not target.is_file():
+        return False
+    target.unlink()
+    with suppress(OSError):
+        # 目录里还有别人的 drop-in 时 rmdir 会失败，正是要留着它。
+        d.rmdir()
+    await run("systemctl", ["daemon-reload"])
+    return True
 
 
 async def ensure_unit(app: dict, warn=None):
@@ -520,6 +638,62 @@ def _append_note(out: dict, msg: str) -> None:
     out["note"] = f'{out["note"]}；{msg}' if out.get("note") else msg
 
 
+async def _apply_external_unit(old: dict, new_app: dict, renamed: bool) -> dict:
+    """纳管模式（外部 unit）下的同步：unit 本体一个字都不改，但环境变量必须真的落地。
+
+    以前的写法是一句"unit 与环境变量文件不由面板写入"直接返回，等于把面板自己管辖的
+    那一半也一起放弃了。.panel.env 写在应用目录里，跟 unit 归谁写没有关系。线上实测的
+    后果就是"环境变量改了没反应"：界面上 ADMIN_PASSWORD 已经是新值，磁盘上那个
+    .panel.env 根本不存在（面板从来没写过它），外部 unit 里也没有 EnvironmentFile 那行。
+
+    所以这里做三件事：写 .panel.env、补 systemd drop-in（<unit>.d/panel-env.conf，
+    不改别人的 unit 文件）、在服务本来就在跑时重启一次。仍然不做的：渲染 unit、
+    写 nginx 站点——那是外部 unit 的边界，改动的确只进了记录，就照实说。
+    """
+    out = {"applied": False, "restarted": False, "note": ""}
+    unit = unit_name(new_app)
+    notes = []
+    # 这些字段活在 unit 本体里（ExecStart / WorkingDirectory），面板不写外部 unit，
+    # 所以它们确实"只改了记录"——必须和环境变量区分开说，否则一句"只改了记录"
+    # 会把已经生效的环境变量也说成没生效。
+    unit_scoped = [k for k in ("start_cmd", "port", "path") if old.get(k) != new_app.get(k)]
+    if unit_scoped or renamed:
+        who = "、".join({"start_cmd": "启动命令", "port": "端口", "path": "安装目录"}.get(k, k) for k in unit_scoped)
+        notes.append(
+            f"{who or '名字'}属于 unit 本体，面板不写外部 unit：这部分改动要在 {unit} 里同步后重启才生效"
+        )
+    try:
+        env_state = write_env_file(new_app)
+        link_state = await ensure_env_link(new_app)
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"环境变量没能落地：{str(e)[:160]}")
+        out["note"] = "；".join(notes)
+        return out
+    if env_state == "no-dir":
+        notes.append(f"应用目录 {new_app['path']} 还不存在，环境变量会在下一次部署时写入")
+    elif link_state == "invalid-unit":
+        notes.append(f"{unit} 不是合法的 unit 名，面板没有写环境变量的挂载配置")
+    elif link_state == "no-unit":
+        notes.append(f"本机找不到 {unit}，面板只写了 .panel.env；unit 就位后重启该服务即可读到")
+    elif env_state == "unchanged" and link_state == "unchanged":
+        out["applied"] = True
+        notes.append("环境变量没有变化，服务未重启")
+    elif not await is_active(unit):
+        out["applied"] = True
+        notes.append(f"环境变量已写入并由 {unit} 加载；服务当前没有运行，改动在下一次启动时生效")
+    else:
+        try:
+            await restart_and_verify(
+                unit, new_app["port"], warn=lambda t: notes.append(t.removeprefix("!!> "))
+            )
+            out["applied"] = True
+            out["restarted"] = True
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"环境变量已写入，但 {unit} 没能重启成功：{str(e)[:160]}（值已落盘，下次启动生效）")
+    out["note"] = "；".join(notes)
+    return out
+
+
 async def apply_edited(old: dict, new_app: dict) -> dict:
     """PATCH 之后把改动真正落到 systemd / .panel.env / nginx，服务在跑就顺手重启。
 
@@ -529,8 +703,8 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
     用户既不敢点也等不到，于是"改了没反应"成了常态。
 
     返回 {"applied","restarted","note"}，让路由如实说这次到底生效了没有：外部
-    unit（unit_override）的 ExecStart 不归面板写，也不该擅自重启别人的服务，
-    这种情况只能讲清"本次只改了记录"。
+    unit（unit_override）的 unit 本体与 nginx 不归面板写，那部分照实说"只改了记录"，
+    但环境变量属于应用目录，照样写、照样挂、照样重启（见 _apply_external_unit）。
     """
     out = {"applied": True, "restarted": False, "note": ""}
     if not old:
@@ -554,12 +728,27 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
         if not will_apply_vhost:
             await nginx_ops.remove_vhost(old["name"])
     if new_app.get("unit_override"):
-        out["applied"] = False
-        out["note"] = "外部 unit：unit 与环境变量文件不由面板写入，本次只改了记录"
-        return out
+        r = await _apply_external_unit(old, new_app, renamed)
+        if not old.get("unit_override") and not renamed:
+            # 名字没变就从"面板托管"切到"外部纳管"：panel-<name>.service 还留在 systemd 里
+            # 带着旧 ExecStart 继续跑，而面板已经认为这个应用归外部 unit 了。删它等于停服务，
+            # 不能在一次保存里顺手做，只能把残留态说清楚。
+            _append_note(r, (
+                f"已切为外部 unit 纳管，但面板此前写的 {unit_name(old)} 还在 systemd 里运行"
+                "（确认外部 unit 已接管后，到「systemd 单元」页停用并删除它）"
+            ))
+        return r
+    if old.get("unit_override"):
+        # 从外部 unit 切回面板托管：unit 名换了（panel-<name>.service），旧 unit 的
+        # drop-in 不会有人再读，留着就是指向同一份 .panel.env 的孤儿配置。
+        await remove_env_link(old)
     try:
         write_env_file(new_app)
         await ensure_unit(new_app, warn=lambda t: _append_note(out, t.removeprefix("!!> ")))
+        # 自定义 unit_template 里漏写 EnvironmentFile 时，面板写的 .panel.env 永远读不到，
+        # 而界面照样报"已生效"。补 drop-in 是这一步的兜底，默认模板自带那行时它是空操作。
+        if await ensure_env_link(new_app) == "written":
+            _append_note(out, "该 unit 的配置里没有引用 .panel.env，面板已用 drop-in 补上（不改 unit 本体）")
         if new_app.get("domain") and new_app.get("port"):
             await nginx_ops.apply_vhost(
                 {"name": new_app["name"], "domain": new_app["domain"], "port": new_app["port"]}
@@ -643,6 +832,10 @@ async def delete_app(app_id: int, purge: bool):
     if purge:
         _check_purge_target(app["path"])
     await remove_unit(app)
+    # drop-in 是面板写进 /etc/systemd/system 的唯一"非 unit 本体"文件，必须跟着删：
+    # 外部 unit 的 unit 本体不归面板管、删掉记录后照样在跑，但它那个 <unit>.d 里
+    # 留着的面板配置会在应用目录被 purge 之后继续指向一个不存在的 .panel.env。
+    await remove_env_link(app)
     if app.get("domain"):
         await nginx_ops.remove_vhost(app["name"])
     dbm.execute("DELETE FROM apps WHERE id=?", (app_id,))
@@ -1127,6 +1320,10 @@ async def _run_deployment(app: dict, dep_id: int):
         _append_log(dep_id, "==> 写入环境变量与 systemd unit")
         write_env_file(app)
         await ensure_unit(app, warn=lambda t: _append_log(dep_id, t))
+        # 部署是环境变量的另一个入口：外部 unit / 自定义模板没写 EnvironmentFile 时，
+        # 这里不补 drop-in，写好的 .panel.env 一样没人读，而部署日志显示"完成"。
+        if await ensure_env_link(app) == "written":
+            _append_log(dep_id, "!!> 该 unit 的配置里没有引用 .panel.env，面板已用 drop-in 补上（不改 unit 本体）")
 
         if app["domain"]:
             if app["port"]:
