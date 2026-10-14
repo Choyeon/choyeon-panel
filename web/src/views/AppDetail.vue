@@ -5,7 +5,7 @@ import {
   NCard, NSpace, NText, NTag, NInput, NDynamicInput,
   useMessage, NPopconfirm, NIcon, NForm, NFormItem, NSkeleton, NGrid, NGridItem, NSelect, NAlert,
 } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, unitTag } from '../ui';
 import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
@@ -116,7 +116,10 @@ function onDescSlot(name: string) {
 
 const appStatus = computed(() => {
   if (app.value?.deploying) return { status: 'installing', text: '部署中' };
-  return app.value?.running ? { status: 'running', text: '运行中' } : { status: 'stopped', text: '已停止' };
+  // 与列表页同一份说法（ui.ts 的 unitTag）：详情页以前也是 running 二选一，
+  // 于是"正在启动"的项目在这里同样被写成"已停止"。
+  const t = unitTag(app.value || {});
+  return { status: t.status, text: t.text };
 });
 
 async function loadUnit() {
@@ -410,7 +413,7 @@ watch(
           </template>
           此操作将停止，是否继续？
         </NPopconfirm>
-        <NButton v-else size="small" type="success" round :loading="acting === 'start'" :disabled="!!acting" :icon="ico('PlayOutline')" @click="act('start')">启动</NButton>
+        <NButton v-else size="small" type="success" round :disabled="!!acting || app.unitMissing" :loading="acting === 'start'" :title="app.unitMissing ? '本机没有这个 systemd 单元，启动不会成功，请先立即部署' : ''" :icon="ico('PlayOutline')" @click="act('start')">启动</NButton>
         <NPopconfirm @positive-click="act('restart')">
           <template #trigger>
             <NButton size="small" tertiary round :disabled="!app.running || !!acting" :loading="acting === 'restart'" :icon="ico('SyncOutline')">重启</NButton>
@@ -420,7 +423,10 @@ watch(
         <NButton size="small" tertiary round type="error" :icon="ico('TrashOutline')" title="彻底删除应用与文件" @click="purge">彻底删除</NButton>
       </div>
     </div>
-    <p class="ad-sub">{{ app.unit }}</p>
+    <p class="ad-sub">
+      {{ app.unit }}
+      <span v-if="app.unitMissing" class="ad-missing">本机 systemd 里没有这个单元，服务从未部署成功或已被改名；「启动/重启」都无效，请重新立即部署</span>
+    </p>
 
     <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
       <NGridItem span="1">
@@ -649,6 +655,7 @@ watch(
 }
 .ad-status { margin-left: var(--space-1); flex-shrink: 0; }
 .ad-sub { margin: var(--space-1) 0 var(--space-4); font-size: var(--fs-xs); color: var(--cp-text-mute); overflow-wrap: anywhere; }
+.ad-missing { color: var(--cp-warn); }
 .res-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-width: 0; }
 .split-view { display: flex; align-items: flex-start; gap: var(--space-3); }
 .dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }

@@ -113,7 +113,10 @@ async def service_action(unit: str, req: Request):
     try:
         await systemd_ops.service_action(unit, verb)
         await aio_db.audit(req.state.cp_sub, f"service:{verb}", unit)
-        out: dict = {"ok": True, "active": await systemd_ops.is_active(unit)}
+        st = await systemd_ops.unit_state(unit)
+        # active 之外再带上 systemd 自己的 ActiveState：restart 成功不等于起来了，
+        # "activating" 与 "failed" 对用户是两句话，前端 reload 之前至少能原样转述。
+        out: dict = {"ok": True, "active": st["active"], "state": st["state"], "unitMissing": st["missing"]}
         if verb in ("enable", "disable"):
             # 前端「自启」按钮点完要当场变状态，不能等 30s 缓存过期
             out["enabled"] = (await systemd_ops.unit_files(force=True)).get(unit, "")

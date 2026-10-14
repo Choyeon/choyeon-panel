@@ -109,19 +109,34 @@ async def _check_admin() -> dict:
 
 
 async def _check_service() -> dict:
-    if not (shutil.which("systemctl") and os.path.isdir("/run/systemd/system")):
+    if not systemd_ops.has_systemd():
         return {
             "status": "warn",
             "detail": "未检测到 systemd（容器/WSL），需手动启动",
             "fix": "backend/.venv/bin/python -m app.main",
         }
-    active = await systemd_ops.is_active(f"{SERVICE_NAME}.service")
-    if not active:
-        # 带上 reset-failed：进入 failed（StartLimitBurst=5）后光 restart 会被拒，
-        # 照着这条 fix 敲的人会遇到第二个错误，以为修好了其实还没。
-        return {"status": "fail", "detail": f"{SERVICE_NAME} 未在运行",
-                "fix": f"systemctl reset-failed {SERVICE_NAME} && systemctl restart {SERVICE_NAME}"}
-    return {"status": "pass", "detail": f"{SERVICE_NAME} 运行中", "fix": ""}
+    st = await systemd_ops.unit_state(f"{SERVICE_NAME}.service")
+    if st["active"]:
+        return {"status": "pass", "detail": f"{SERVICE_NAME} 运行中", "fix": ""}
+    if st["missing"]:
+        # 面板自己正在回答这个问题，systemd 里却没有这个 unit：这是"没按部署脚本来装"，
+        # 不是"服务停了"。写成 restart 会让人敲一条必然返回 "not loaded" 的命令。
+        return {
+            "status": "warn",
+            "detail": f"{SERVICE_NAME}.service 没有注册进 systemd（面板正在以其他方式运行）",
+            "fix": "bash scripts/install.sh 渲染并启用 unit；临时前台运行：backend/.venv/bin/python -m app.main",
+        }
+    if st["state"] == "unknown":
+        return {"status": "warn", "detail": f"查不到 {SERVICE_NAME} 的状态（systemctl 没有回话）",
+                "fix": f"systemctl status {SERVICE_NAME}.service"}
+    if st["state"] in ("activating", "deactivating"):
+        # 正在起/正在收：不能报"运行中"，也不该按停掉处理——此刻 restart 会打断它自己
+        return {"status": "warn", "detail": f"{SERVICE_NAME} 状态切换中（{st['state']}）",
+                "fix": f"systemctl status {SERVICE_NAME}.service"}
+    # 带上 reset-failed：进入 failed（StartLimitBurst=5）后光 restart 会被拒，
+    # 照着这条 fix 敲的人会遇到第二个错误，以为修好了其实还没。
+    return {"status": "fail", "detail": f"{SERVICE_NAME} 未在运行（{st['state'] or '未知'}）",
+            "fix": f"systemctl reset-failed {SERVICE_NAME} && systemctl restart {SERVICE_NAME}"}
 
 
 async def _check_nginx() -> dict:

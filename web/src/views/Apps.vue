@@ -6,7 +6,7 @@ import {
   NRadioGroup, NRadioButton, NIcon, NAlert, NTag, NCollapse, NCollapseItem,
   useMessage,
 } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, unitTag } from '../ui';
 import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
@@ -143,6 +143,7 @@ function appCell(r: any) {
     ]),
   ];
   for (const c of kids) {
+    const ct = unitTag(c);
     parts.push(
       h('div', { class: 'cell-main cell-child' }, [
         h('span', { class: 'cell-ico' }, [
@@ -152,7 +153,9 @@ function appCell(r: any) {
           h(NSpace, { size: 6, align: 'center', wrap: false }, () => [
             h(NButton, { text: true, type: 'primary', class: 'cell-name', style: 'font-size:var(--fs-sm)', title: c.name, onClick: () => router.push(`/apps/${c.id}`) }, () => c.name),
             h(NTag, { size: 'tiny', bordered: false, type: c.component_role === 'frontend' ? 'success' : 'warning' }, { default: () => roleLabel(c) }),
-            ...(!c.running && !c.deploying ? [h('span', { class: 'st idle' }, [h('span', { class: 'dot idle' }), '已停止'])] : []),
+            ...(!c.deploying && ct.status !== 'running'
+              ? [h('span', { class: `st ${ct.tone}` }, [h('span', { class: `dot ${ct.tone}` }), ct.text])]
+              : []),
             // 组合项目的每个组件是独立仓库/独立服务，同步得分别触发
             syncBtn(c),
             repoLink(c.repo_url, 12),
@@ -169,12 +172,15 @@ function appCell(r: any) {
 function rowActions(r: any) {
   if (!isAdmin.value) return [];
   const stop = !!r.running;
+  // 单元在本机 systemd 里不存在时，"启动/重启"只会换来一句 not loaded；部署与删除仍然留着，
+  // 否则这条记录在界面上就再也处理不掉了（部署会把 unit 写回去）。
+  const gone = !!r.unitMissing;
   const list: { label: string; run: () => void; danger?: boolean; disabled?: boolean }[] = [
     { label: '部署', run: () => act(r.id, 'deploy'), disabled: rowBusy(r.id) },
   ];
   if (r.repo_url) list.push({ label: '同步', run: () => sync(r), disabled: rowBusy(r.id) || !!r.deploying });
-  list.push({ label: stop ? '停止' : '启动', run: () => act(r.id, stop ? 'stop' : 'start'), disabled: rowBusy(r.id) });
-  list.push({ label: '重启', run: () => act(r.id, 'restart'), disabled: !stop || rowBusy(r.id) });
+  list.push({ label: stop ? '停止' : '启动', run: () => act(r.id, stop ? 'stop' : 'start'), disabled: rowBusy(r.id) || (!stop && gone) });
+  list.push({ label: '重启', run: () => act(r.id, 'restart'), disabled: !stop || rowBusy(r.id) || gone });
   list.push({ label: '回滚', run: () => rollback(r), disabled: rowBusy(r.id) });
   list.push({ label: '删除', run: () => askDel(r), danger: true, disabled: rowBusy(r.id) });
   return list;
@@ -222,12 +228,11 @@ const columns: any[] = [
   },
   {
     title: '状态', key: 'status', width: 110,
-    render: (r: any) =>
-      r.deploying
-        ? h(CpStatusTag, { status: 'deploying', text: '部署中' })
-        : r.running
-          ? h(CpStatusTag, { status: 'running', text: '运行中' })
-          : h(CpStatusTag, { status: 'stopped', text: '已停止' }),
+    render: (r: any) => {
+      if (r.deploying) return h(CpStatusTag, { status: 'deploying', text: '部署中' });
+      const t = unitTag(r);
+      return h(CpStatusTag, { status: t.status, text: t.text });
+    },
   },
   {
     title: '操作', key: 'ops', width: 209, align: 'center', fixed: 'right' as const,

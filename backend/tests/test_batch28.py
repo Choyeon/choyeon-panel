@@ -272,7 +272,9 @@ class TestSymlinkGate(Case):
 
     def test_gate_runs_before_the_service_is_stopped(self):
         fn = _window(B, "async def _restore_app", "async def _restore_pg")
-        self.assertLess(fn.index("_reject_symlink_ancestors"), fn.index("is_active(unit)"))
+        # 批次㉜ 之后停服务收进了 _stop_for_overwrite：符号链接闸必须仍然排在它前面，
+        # 否则校验不过时已经把服务停下来了（现网表现为"点了恢复，应用莫名断了几分钟"）。
+        self.assertLess(fn.index("_reject_symlink_ancestors"), fn.index("_stop_for_overwrite(unit, log)"))
 
 
 class TestIdentifiersUseFullmatch(Case):

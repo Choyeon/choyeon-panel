@@ -426,18 +426,23 @@ class TestUnitStatesParsing(unittest.IsolatedAsyncioTestCase):
             return await systemd_ops.unit_states(units)
 
     async def test_properties_before_id_are_kept(self):
+        """只钉住这条回归本来的判据（MainPID 不能丢）；状态字典的完整形状由批次㉜ 守。"""
         got = await self._call(self.REAL, ["choyeon-panel.service", "nginx.service", "gone.service"])
-        self.assertEqual(got["choyeon-panel.service"], {"active": True, "mainPid": 571180})
-        self.assertEqual(got["nginx.service"], {"active": True, "mainPid": 6507})
-        self.assertEqual(got["gone.service"], {"active": False, "mainPid": 0})
+        for unit, want in (("choyeon-panel.service", (True, 571180)),
+                           ("nginx.service", (True, 6507)),
+                           ("gone.service", (False, 0))):
+            with self.subTest(unit=unit):
+                self.assertEqual((got[unit]["active"], got[unit]["mainPid"]), want)
 
     async def test_missing_unit_gets_not_running_default(self):
         got = await self._call("MainPID=1\nId=a.service\nActiveState=active", ["a.service", "b.service"])
-        self.assertEqual(got["b.service"], {"active": False, "mainPid": 0})
+        self.assertEqual(got["a.service"]["mainPid"], 1)
+        # 批次㉜ 之后是"未知"而不是"已停止"：systemctl 没回话时不能说这台机器上服务停了
+        self.assertEqual(got["b.service"], systemd_ops.UNKNOWN_STATE)
 
     async def test_single_block_without_separators(self):
         got = await self._call("MainPID=42\nId=x.service\nActiveState=active", ["x.service"])
-        self.assertEqual(got["x.service"], {"active": True, "mainPid": 42})
+        self.assertEqual((got["x.service"]["active"], got["x.service"]["mainPid"]), (True, 42))
 
 
 class TestCredentialRedaction(unittest.IsolatedAsyncioTestCase):

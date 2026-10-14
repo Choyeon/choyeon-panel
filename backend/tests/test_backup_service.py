@@ -32,6 +32,7 @@ from app import backup_runner as R  # noqa: E402
 from app import config, security  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.services import backup_service as B  # noqa: E402
+from app.services import systemd_ops as SYS  # noqa: E402
 
 _seq = itertools.count()
 
@@ -373,8 +374,6 @@ class TestRestoreOffEventLoop(unittest.TestCase):
     """
 
     def setUp(self):
-        from app.services import systemd_ops as SYS
-
         self.dir = tempfile.mkdtemp(prefix="cp_rs_bk_")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.app = tempfile.mkdtemp(prefix="cp_rs_app_")
@@ -388,14 +387,23 @@ class TestRestoreOffEventLoop(unittest.TestCase):
         self.bk = {"id": self.aid, "target": name}
         self.calls = []
         self.active = False
-        for attr, fn in (("is_active", self._is_active), ("service_action", self._service_action)):
+        # 批次㉜：恢复路径问的是 systemd_ops.unit_state（"此刻有没有进程活着/正要起来"），
+        # 不再是 is_active 的退出码；has_systemd 也得钉住，否则测试机有没有 systemd
+        # 会直接改变这条路径走哪一支。
+        for attr, fn in (("has_systemd", lambda: True),
+                         ("unit_state", self._unit_state),
+                         ("service_action", self._service_action)):
             p = mock.patch.object(SYS, attr, fn)
             self.addCleanup(p.stop)
             p.start()
         self.main_ident = threading.get_ident()
 
-    async def _is_active(self, unit):
-        return self.active
+    async def _unit_state(self, unit):
+        st = dict(SYS.UNKNOWN_STATE)
+        state = "active" if self.active else "inactive"
+        st.update(state=state, active=self.active, busy=self.active,
+                  mainPid=4242 if self.active else 0)
+        return st
 
     async def _service_action(self, unit, verb):
         self.calls.append(verb)
@@ -567,8 +575,6 @@ class TestRestoreOffEventLoop(unittest.TestCase):
 
     def test_sqlite_restore_does_not_start_when_stop_fails(self):
         """stop 自己失败 = 服务从未被我们动过，这时补 start 等于偷偷拉起特意停着的服务。"""
-        from app.services import systemd_ops as SYS
-
         self.active = True
         cur = os.path.join(self.app, "app.db")
         con = sqlite3.connect(cur)

@@ -18,6 +18,7 @@ from .. import backup_runner, config
 from .. import database as dbm
 from ..log import warn
 from ..util import is_name, redact_creds, run, sh_escape, unit_env_value, unit_pct_escape, write_secret_atomic
+from . import systemd_ops
 from .files_service import iso_ms
 from .pg_service import is_ident, psql
 
@@ -585,8 +586,55 @@ def _sqlite_stats(path: str) -> tuple[bool, int | None]:
         con.close()
 
 
+async def _stop_for_overwrite(unit: str, log: list) -> tuple[bool, bool]:
+    """覆盖文件/数据库之前把服务停干净，返回 (本次停过, 恢复完要不要拉起)。
+
+    这里问的是"此刻有没有进程活着或正要起来"（systemd_ops.BUSY_STATES），不是列表页
+    那个"健康运行中"：Type=simple 起立的那几秒、Type=oneshot 正在执行的那一轮，
+    ActiveState 都是 activating，按老口径判成"没在跑"就跳过停止——备份是直接盖在一个
+    正要 exec 的进程上的，SQLite 那侧还会把旧连接的 -wal/-shm 当成残留删掉。
+    - 查不到状态（systemctl 报错/超时）不能当成"没在跑"：照发 stop，真没在跑它是空操作，
+      systemctl 本身坏了就在这里抛错，恢复在动手之前就停下，而不是盖完再补一句"我其实不知道"。
+    - failed（上次启动失败/崩溃循环）不属于"运维特意停着"，而恢复数据库/目录正是冲它来的，
+      所以结束后要拉起；特意 stop 着的（inactive）保持停止，尊重现状。
+    返回的两个旗标供调用方决定收尾，任何一条路都不能"什么都不说"。
+    """
+    if not systemd_ops.has_systemd():
+        log.append(f"==> 本机没有 systemd（容器/WSL），{unit} 不由面板管理，只写文件")
+        return False, False
+    st = await systemd_ops.unit_state(unit)
+    if st["busy"]:
+        await systemd_ops.service_action(unit, "stop")
+        log.append(f"==> 已停止 {unit}")
+        return True, True
+    if st["state"] == "unknown":
+        await systemd_ops.service_action(unit, "stop")
+        log.append(f"==> {unit} 状态查不到（systemctl 没有回话），按最坏情况处理：已发出停止")
+        return True, True
+    if st["missing"]:
+        log.append(f"!! 本机没有 {unit} 这个 unit（未安装或已改名），只写文件，不会尝试启动")
+        return False, False
+    if st["state"] == "failed":
+        log.append(f"==> {unit} 处于 failed（上一次启动失败），本次恢复后会重新拉起")
+        return False, True
+    log.append(f"==> {unit} 未在运行（{st['state'] or '未知'}），跳过停止")
+    return False, False
+
+
+async def _start_after_restore(unit: str, log: list, *, from_failed: bool = False) -> None:
+    if from_failed:
+        # failed 的 unit 攒着启动失败计数，不清就直接 start 会被 systemd 拒掉，
+        # 用户看到的只有"服务启动失败"，猜不到还差这一步。
+        await systemd_ops.reset_failed(unit)
+    try:
+        await systemd_ops.service_action(unit, "start")
+        log.append(f"==> 已启动 {unit}")
+    except Exception as e:  # noqa: BLE001
+        log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
+
+
 async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
-    from . import apps_service, systemd_ops
+    from . import apps_service
 
     app = _sqlite_app(bk["target"])
     # 恢复流程会停掉再启动这个 unit，部署也在同一时刻按自己的快照启停同一个 unit，
@@ -679,14 +727,8 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
     else:
         log.append(f"==> 产物预检通过：快照 {shown_snap} 张表 / 当前库 {shown_now} 张")
 
-    stopped = False
+    stopped, restart = await _stop_for_overwrite(unit, log)
     try:
-        if await systemd_ops.is_active(unit):
-            await systemd_ops.service_action(unit, "stop")
-            stopped = True
-            log.append(f"==> 已停止 {unit}")
-        else:
-            log.append(f"==> {unit} 未在运行，跳过停止")
         # 残留的 WAL/SHM 属于旧库：留着它们，服务一打开就会把旧帧套到刚写回的库上
         for ext in ("-wal", "-shm", "-journal"):
             if os.path.exists(dst + ext):
@@ -701,16 +743,13 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
                     os.unlink(p)
         raise
     finally:
-        # 只有真的停过才去启动：service_action("stop") 自己失败时服务从未被我们动过，
-        # 这时补一个 start 等于把运维特意停着的服务悄悄拉起来（与 _restore_app 保持一致）。
-        if stopped:
-            try:
-                await systemd_ops.service_action(unit, "start")
-                log.append(f"==> 已启动 {unit}")
-            except Exception as e:  # noqa: BLE001
-                log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
+        # 只有真的停过、或恢复前就是崩掉的 failed 才去启动：service_action("stop") 自己
+        # 失败时服务从未被我们动过，这时补一个 start 等于把运维特意停着的服务悄悄拉起来
+        # （与 _restore_app 保持一致）。
+        if stopped or restart:
+            await _start_after_restore(unit, log, from_failed=restart and not stopped)
         else:
-            log.append(f"==> {unit} 恢复前未在运行，保持停止")
+            log.append(f"==> {unit} 未被面板停止，保持原状态")
 
 
 def _tar_checked(tf: tarfile.TarFile) -> list:
@@ -787,7 +826,7 @@ def _strip_setuid(dest: str, members: list) -> int:
 
 
 async def _restore_app(bk: dict, src_file: str, log: list) -> None:
-    from . import apps_service, systemd_ops
+    from . import apps_service
 
     app = dbm.query_one("SELECT * FROM apps WHERE name=?", (bk["target"],))
     if not app:
@@ -829,15 +868,10 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
             )
         # 落点检查必须在停服务之前：拒绝一份穿越软链的归档不该顺带把线上服务停掉。
         await run_in_threadpool(_reject_symlink_ancestors, dest, members)
-        stopped = False
+        stopped = restart = False
         restored = False
         try:
-            if await systemd_ops.is_active(unit):
-                await systemd_ops.service_action(unit, "stop")
-                stopped = True
-                log.append(f"==> 已停止 {unit}")
-            else:
-                log.append(f"==> {unit} 未在运行，跳过停止")
+            stopped, restart = await _stop_for_overwrite(unit, log)
             # filter="tar" 是把当前行为钉住，不是放行风险：不安全条目（绝对路径、..、
             # 链接型）已由 _tar_checked 逐条拒掉，这里要的正是"按归档里的属主/权限原样落盘"。
             # 不写出来的话 Python 3.14 会默认改用 data filter，恢复出来的文件属主当场变掉。
@@ -867,13 +901,9 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
                         f"!! 当前 .panel.env 回写失败，归档里那份（备份当时的值）已生效："
                         f"启动前请核对 {env} 里的口令与端口"
                     )
-            if stopped and restored:
-                try:
-                    await systemd_ops.service_action(unit, "start")
-                    log.append(f"==> 已启动 {unit}")
-                except Exception as e:  # noqa: BLE001
-                    log.append(f"!! 服务启动失败，请手工启动 {unit}：{e}")
-            elif stopped:
+            if restored and (stopped or restart):
+                await _start_after_restore(unit, log, from_failed=restart and not stopped)
+            elif stopped or restart:
                 # 半恢复的目录里可能缺几百个文件，把它启动起来等于让服务在残骸上
                 # 写数据、跑迁移。宁可停在停止态并说清楚，也不要"看起来恢复了"。
                 log.append(f"!! 解包中断：{dest} 可能处于半恢复状态，服务保持停止；请重跑恢复或改用更早的备份")

@@ -336,13 +336,17 @@ class TestSystemctlEndOfOptions(unittest.IsolatedAsyncioTestCase):
             await systemd_ops.service_action("nginx.service", "restart")
             await systemd_ops.is_active("nginx.service")
             await systemd_ops.unit_states(["nginx.service"])
+            await systemd_ops.reset_failed("nginx.service")
 
         self.assertEqual(calls[0], ("systemctl", ["restart", "--", "nginx.service"]))
-        self.assertEqual(calls[1], ("systemctl", ["is-active", "--", "nginx.service"]))
-        self.assertEqual(
-            calls[2],
-            ("systemctl", ["show", "-p", "Id", "-p", "ActiveState", "-p", "MainPID", "--", "nginx.service"]),
-        )
+        for cmd, args in calls:
+            self.assertEqual(cmd, "systemctl")
+            self.assertIn("--", args, "少了这道标记，以 - 开头的 unit 名会被当选项解析")
+            self.assertEqual(args[-1], "nginx.service", "`--` 之后只许跟 unit 名")
+        # 批次㉜ 之后 is_active 走的是属性表（退出码会把 activating/not-found 压成同一个答案）
+        self.assertEqual(calls[1][1][0], "show")
+        for prop in ("Id", "LoadState", "ActiveState", "MainPID"):
+            self.assertIn(prop, calls[1][1], "少了 Id 整批解析会认不出块，少了 LoadState 就分不清 not-found")
 
 
 class TestServiceLogsNeedAdmin(unittest.IsolatedAsyncioTestCase):

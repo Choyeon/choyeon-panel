@@ -382,7 +382,7 @@ async def list_apps() -> list:
     busy = {r["app_id"] for r in deploying}
 
     async def _one(a: dict):
-        st = states.get(unit_name(a)) or {"active": False, "mainPid": 0}
+        st = states.get(unit_name(a)) or dict(systemd_ops.UNKNOWN_STATE)
         running = st["active"]
         detected = None
         if a["port"] is None and running and st["mainPid"] > 0:
@@ -393,6 +393,10 @@ async def list_apps() -> list:
         out.update(
             running=running,
             unit=unit_name(a),
+            # running 只是"健康运行中"这一个事实。前端原来只能二选一显示"运行中/已停止"，
+            # 于是正在启动、上次启动失败、这台机器上根本没有这个 unit，全都被说成"已停止"。
+            unitState=st["state"],
+            unitMissing=st["missing"],
             port=port,
             portAuto=a["port"] is None and detected is not None,
             domains=domains,
@@ -1469,6 +1473,7 @@ async def save_unit(app_id: int, content: str) -> dict:
 
 
 PROC_FIELDS = [
+    "Id",
     "MainPID",
     "MemoryCurrent",
     "NRestarts",
@@ -1476,6 +1481,10 @@ PROC_FIELDS = [
     "CPUUsageNSec",
     "ExecMainStartTimestamp",
     "SubState",
+    # 判词要一起取：只看 MainPID 会把"崩过一次、pid 还没清"说成"在运行"，
+    # 而 failed / not-found / systemctl 查失败这三种情况对用户说的话完全不同。
+    "ActiveState",
+    "LoadState",
 ]
 
 
@@ -1484,13 +1493,11 @@ async def app_proc(app_id: int) -> dict:
     if not app:
         raise RuntimeError("应用不存在")
     unit = unit_name(app)
-    args = ["show", unit] + [f"-p{f}" for f in PROC_FIELDS]
+    args = ["show", "--", unit] + [f"-p{f}" for f in PROC_FIELDS]
     r = await run("systemctl", args, timeout=8)
-    got: dict[str, str] = {}
-    for line in r["out"].split("\n"):
-        i = line.find("=")
-        if i > 0:
-            got[line[:i]] = line[i + 1:].strip()
+    # 用批量解析的同一条路：逐行 find("=") 会让排在 Id 之前的属性串到上一个块里
+    blocks = [b for b in systemd_ops.parse_show(r["out"]) if b.get("Id") == unit]
+    got: dict[str, str] = blocks[0] if blocks else {}
 
     def _int(key):
         try:
@@ -1505,11 +1512,16 @@ async def app_proc(app_id: int) -> dict:
     pid = _int("MainPID") or 0
     mem = _int("MemoryCurrent")
     cpu_ns = _int("CPUUsageNSec")
+    # 判词走 systemd_ops 那一份：MainPID>0 不代表在运行（failed 的 unit 会把死 pid 挂在上面
+    # 等清理），而"这个 unit 本机没有"和"systemctl 查失败"都不是"进程没起来"。
+    st = systemd_ops.derive_state(got) if got else dict(systemd_ops.UNKNOWN_STATE)
     return {
         "unit": unit,
         "subState": got.get("SubState") or "unknown",
-        "running": pid > 0,
-        "pid": pid or None,
+        "state": st["state"],
+        "unitMissing": st["missing"],
+        "running": st["busy"],
+        "pid": pid if st["busy"] else None,
         "memoryBytes": mem,
         "restarts": _int("NRestarts") or 0,
         "activeSince": _ts("ActiveEnterTimestamp"),

@@ -57,3 +57,25 @@ export function useDrawerWidth(fraction: number): ComputedRef<number> {
       : Math.min(Math.max(Math.round(viewportWidth.value * fraction), 420), 860),
   );
 }
+
+/**
+ * systemd 的 unit 状态 → CpStatusTag 的 status、说人话的文字、以及小圆点的色调。
+ *
+ * 判词只由后端 systemd_ops 出一份（列表与详情都带 unitState / unitMissing），这里只负责说法。
+ * 以前应用列表和详情页各自写 `running ? 运行中 : 已停止`，于是"正在启动""上次启动失败"
+ * "这台机器上根本没有这个 unit"全被压成"已停止"——而"已停止"在界面上的意思是"点启动就行"，
+ * 对一个不存在的 unit 点下去只会换来一句 not loaded。
+ */
+const UNIT_TAG: Record<string, { status: string; text: string; tone: string }> = {
+  active: { status: 'running', text: '运行中', tone: 'ok' },
+  reloading: { status: 'running', text: '重载中', tone: 'ok' },
+  activating: { status: 'starting', text: '正在启动', tone: 'warn' },
+  deactivating: { status: 'waiting', text: '正在停止', tone: 'warn' },
+  failed: { status: 'failed', text: '启动失败', tone: 'err' },
+  inactive: { status: 'stopped', text: '已停止', tone: 'idle' },
+};
+
+export function unitTag(r: { unitState?: string; unitMissing?: boolean }): { status: string; text: string; tone: string } {
+  if (r.unitMissing) return { status: 'notfound', text: '单元不存在', tone: 'err' };
+  return UNIT_TAG[r.unitState || ''] || { status: 'unknown', text: '状态未知', tone: 'idle' };
+}

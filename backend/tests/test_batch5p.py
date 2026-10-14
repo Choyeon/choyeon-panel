@@ -55,8 +55,14 @@ def _rows(path: str):
         con.close()
 
 
-def _false(*_a, **_kw):
-    return asyncio.sleep(0, False)
+def _idle(*_a, **_kw):
+    """批次㉜ 之后恢复路径问的是 unit_state（"此刻有没有活着的进程占着文件"），替身要回整份状态表。
+
+    has_systemd 一律钉成"有"：这几条用例测的是"没在跑就跳过停止"，不是容器分支。
+    """
+    st = dict(systemd_ops.UNKNOWN_STATE)
+    st.update(state="inactive")
+    return asyncio.sleep(0, st)
 
 
 def _none(*_a, **_kw):
@@ -92,7 +98,8 @@ class TestRestoreStaysOnSameFilesystem(_Tmp):
             st.enter_context(
                 mock.patch.object(B, "_sqlite_app", lambda *_a, **_kw: {"id": 7, "name": "p5p", "path": self.appdir})
             )
-            st.enter_context(mock.patch.object(systemd_ops, "is_active", _false))
+            st.enter_context(mock.patch.object(systemd_ops, "has_systemd", lambda: True))
+            st.enter_context(mock.patch.object(systemd_ops, "unit_state", _idle))
             st.enter_context(mock.patch.object(systemd_ops, "service_action", _none))
             for p in extra:
                 st.enter_context(p)
@@ -262,7 +269,8 @@ class TestAppRestoreEnvHonesty(_Tmp):
             # 误读成一条 running 部署记录。本用例测的是 .panel.env 的回写口径，闸本身
             # 由批次㉘（test_batch28）单独覆盖。
             mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None),
-            mock.patch.object(systemd_ops, "is_active", _false),
+            mock.patch.object(systemd_ops, "has_systemd", lambda: True),
+            mock.patch.object(systemd_ops, "unit_state", _idle),
             mock.patch.object(systemd_ops, "service_action", _none),
         ):
             p.start()

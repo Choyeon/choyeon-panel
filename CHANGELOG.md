@@ -331,6 +331,38 @@
 
 ### 修复
 
+- 「这个服务活着吗」全站只剩一个出处。这条判词此前在仓库里被抄了四遍，各有各的偏差：
+  应用列表把 `reloading`（`systemctl reload` 期间就是这个态）当成没在跑，把 `activating`
+  （Type=oneshot 的定时任务、正在启动的 JVM 应用）直接写成「已停止」，而同一时刻定时任务中心
+  显示「正在执行」；cron 那侧另有一份 `systemctl show` 解析，只看 `active`，于是会对一个正在
+  reload 的 unit 补发 restart；概览与详情页的端口探测也排在 `active` 后面，`activating` 期间
+  端口其实已经监听，页面却报「未运行」。现在 `systemd_ops.unit_state/unit_states` 一次
+  `systemctl show -pId -pLoadState -pActiveState -pMainPID` 派生出三个字段——`active`（能干活）、
+  `busy`（别去打扰它，含 activating/deactivating/reloading）、`missing`（本机没有这个 unit）——
+  四处判词改成调用同一个函数，`is_active`/`is_busy` 保留为它的薄封装。
+- 「探测失败」不再被粉饰成绿灯，也不再被粉饰成红灯。`systemctl` 没回话时（超时、被安全模块拦、
+  输出被截）`unit_state` 返回 `state="unknown"`：自检项报 warn「查不到……（systemctl 没有回话）」
+  而不是 pass，列表与详情显示「状态未知」而不是「已停止」。
+- 覆盖式恢复在探测不出状态时按最坏情况处理。`_stop_for_overwrite` 原先靠一次 `is-active` 的输出
+  决定要不要停服务，探测本身失败就被当成「没在跑」，然后直接往一个正在写的文件上覆盖——服务
+  其实在跑时，写坏半个数据库再启动就是数据损坏。现在 `unknown` 一律先停再恢复；`not-found`
+  明确说「本机没有这个 unit」（首次恢复或改名之后）而不是无声跳过；`failed` 恢复完先
+  `reset-failed` 再 start，并在日志里写明为什么多这一步；没有 systemd 的容器/WSL 走单独一条
+  判词，不再对不存在的服务发命令。每个分支都必须留下一句话，用户点完恢复不该只看到进度条。
+- 前端的状态说法收敛成一张表（`ui.ts` 的 `UNIT_TAG` + `unitTag()`）。应用列表与详情页此前各自把
+  一个布尔渲染成「运行中/已停止」两选一：正在启动的应用在列表是「已停止」，点进详情还是
+  「已停止」，三秒后它才变成运行中；unit 根本不存在时同样是「已停止」，管理员于是去点「启动」，
+  收到一条和 nginx、和端口都无关的错误。现在列表与详情共用同一份措辞，「单元不存在」还会把
+  「启动/重启」置灰并写明「本机没有这个 systemd 单元，请重新立即部署」。
+- `backend/tests/test_batch32.py`（55 条 + 38 子用例）钉住上述语义：`parse_show` 只认带 `Id` 的
+  块、缺 unit 时补 `UNKNOWN_STATE` 而不是漏 key、`_stop_for_overwrite` 六个分支各自的文案与
+  「返回 (stopped, restart)」真值、恢复后 start 失败只记日志不抛（否则用户看不到已经写回去的
+  文件）、自检项对 unknown/missing/activating 三态不给 pass。另有源码级守卫，防止判词再次分叉：
+  `apps_service`/`backup_service`/`cron_service`/三个 router 里不得再出现 `get("ActiveState")`、
+  `== "active"` 这类字面比较，每个文件至多一处 `parse_show` 定义，`UNIT_TAG` 全站只有一处，
+  两个视图必须从 `'../ui'` 引 `unitTag`。前端文案另用 jsdom + SSR 渲染实测九个状态的可见中文
+  （运行中/正在启动/正在停止/单元不存在/启动失败/重载中/已停止/状态未知，以及旧接口字段缺失时
+  的兜底），构建通过不再被当成界面写对了的证据。
 - SQL 浏览与行编辑的超时改成由服务端执行。此前面板这侧只有 `wait_for + kill_group`，杀掉的是
   psql 客户端：postgres 后端那条语句（`pg_sleep`、深 OFFSET 的 `count(*)`、被行锁卡住的
   `UPDATE`）感觉不到连接断开，会一路跑到自然结束，期间占着一个 `max_connections` 名额和它已经

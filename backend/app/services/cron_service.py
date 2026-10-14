@@ -38,6 +38,7 @@ from ..util import (
     unit_exec_arg_escape,
     unit_pct_escape,
 )
+from . import systemd_ops
 from .backup_service import _unit_dir, _write_if_changed
 
 PANEL_SERVICE = "choyeon-panel"
@@ -532,26 +533,8 @@ def _merge_last_run(item: dict, res: dict) -> None:
 
 
 def _parse_show(text: str) -> list[dict]:
-    """`systemctl show` 多单元输出 → 每个单元一个 dict。
-
-    块之间用空行分隔，而**属性顺序由 systemd 自己决定**：实测
-    NextElapseUSecRealtime 排在 Id 之前，所以"看到 Id 才开始收属性"的写法
-    会把下次执行时间整列丢掉（这块真在生产上红过：Timer 列永远显示"未取到"）。
-    """
-    blocks: list[dict] = []
-    cur: dict[str, str] = {}
-    for line in text.splitlines():
-        if not line.strip():
-            if cur:
-                blocks.append(cur)
-            cur = {}
-            continue
-        key, sep, val = line.partition("=")
-        if sep:
-            cur[key.strip()] = val.strip()
-    if cur:
-        blocks.append(cur)
-    return blocks
+    """本模块的 show 解析一律用 systemd_ops.parse_show（那里记着属性顺序的坑）。"""
+    return systemd_ops.parse_show(text)
 
 
 _TS_DROP_RE = re.compile(r"^(?:\w{3}\s+)?(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
@@ -597,9 +580,10 @@ async def _unit_results(bases: list[str]) -> dict[str, dict]:
         if not uid.endswith(".service"):
             continue
         start = _local_ts(block.get("ExecMainStartTimestamp", ""))
-        # Type=oneshot 正在执行时 ActiveState 是 **activating**（生产实测），跑完才回 inactive。
-        # 只认 active 会让重叠闸形同虚设：面板说"没在跑"，然后和定时器那一轮同时执行。
-        running = block.get("ActiveState") in ("activating", "active")
+        # "这一轮还在跑"的判词只有一个出处（systemd_ops.BUSY_STATES）：Type=oneshot 正在执行时
+        # ActiveState 是 activating（生产实测），跑完才回 inactive；deactivating 是进程还活着
+        # 但正在收。只认 active 会让重叠闸形同虚设：面板说"没在跑"，然后和定时器那一轮同时执行。
+        running = systemd_ops.derive_state(block)["busy"]
         out[uid[: -len(".service")]] = {
             "start": start,
             # 这一轮还没结束就没有"结果"可言：提前报 ok 会把上一次真正的失败盖成成功
@@ -629,7 +613,7 @@ async def _timer_states(units: list[str]) -> dict:
             continue
         nxt = block.get("NextElapseUSecRealtime", "")
         out[uid] = {
-            "active": block.get("ActiveState") == "active",
+            "active": systemd_ops.derive_state(block)["active"],
             "next": "" if nxt in ("n/a", "infinity") else nxt,
             "enabled": block.get("UnitFileState", ""),
         }

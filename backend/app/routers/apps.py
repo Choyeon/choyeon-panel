@@ -54,9 +54,13 @@ async def app_get(app_id: int, req: Request):
     if not a:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
     unit = apps_service.unit_name(a)
-    running = await systemd_ops.is_active(unit)
-    port = a["port"] if a["port"] is not None else (await apps_service.detect_port(unit) if running else None)
-    out = {**a, "running": running, "unit": unit, "port": port, "portAuto": a["port"] is None and port is not None}
+    st = await systemd_ops.unit_state(unit)
+    # running 只回答"健康运行中"；端口探测要问的是"此刻有没有活着的进程占着端口"，
+    # 正在起立（activating）的 unit 已经 bind 上了，按 running 显示会让详情页少一个端口。
+    running = st["active"]
+    port = a["port"] if a["port"] is not None else (await apps_service.detect_port(unit) if st["busy"] else None)
+    out = {**a, "running": running, "unit": unit, "unitState": st["state"], "unitMissing": st["missing"],
+           "port": port, "portAuto": a["port"] is None and port is not None}
     # 列表接口算了 deploying（apps_service.list_apps），详情接口一直没算，
     # 而 AppDetail 判断的正是 app.deploying —— 于是详情页标题永远显示"运行中/已停止"、
     # 「一键同步」永不置灰，用户点了才收到"部署进行中，不能同步"。

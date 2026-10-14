@@ -92,8 +92,11 @@ async def _no_domains(_path: str) -> dict:
     return {"domains": [], "issuer": None, "expiry": None}
 
 
-def _false(*_a, **_kw):
-    return asyncio.sleep(0, False)
+def _idle(*_a, **_kw):
+    """批次㉜：恢复路径改问 unit_state（整份状态表），不再只看 is_active 的退出码。"""
+    st = dict(systemd_ops.UNKNOWN_STATE)
+    st.update(state="inactive")
+    return asyncio.sleep(0, st)
 
 
 def _none(*_a, **_kw):
@@ -165,7 +168,8 @@ class TestSqliteRestorePreflight(_Tmp):
         app = {"id": 7, "name": "p5q", "path": self.appdir}
         with ExitStack() as st:
             st.enter_context(mock.patch.object(B, "_sqlite_app", lambda *_a, **_kw: dict(app)))
-            st.enter_context(mock.patch.object(systemd_ops, "is_active", _false))
+            st.enter_context(mock.patch.object(systemd_ops, "has_systemd", lambda: True))
+            st.enter_context(mock.patch.object(systemd_ops, "unit_state", _idle))
             st.enter_context(mock.patch.object(systemd_ops, "service_action", rec_action))
             st.enter_context(mock.patch.object(B, "run_in_threadpool", _passthrough))
             try:
@@ -344,7 +348,8 @@ class TestAppArchiveMustHaveMembers(_Tmp):
             st.enter_context(
                 mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None)
             )
-            st.enter_context(mock.patch.object(systemd_ops, "is_active", _false))
+            st.enter_context(mock.patch.object(systemd_ops, "has_systemd", lambda: True))
+            st.enter_context(mock.patch.object(systemd_ops, "unit_state", _idle))
             st.enter_context(mock.patch.object(systemd_ops, "service_action", rec_action))
             st.enter_context(mock.patch.object(B, "run_in_threadpool", _passthrough))
             with self.assertRaises(RuntimeError) as ctx:
@@ -366,7 +371,8 @@ class TestAppArchiveMustHaveMembers(_Tmp):
             st.enter_context(
                 mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None)
             )
-            st.enter_context(mock.patch.object(systemd_ops, "is_active", _false))
+            st.enter_context(mock.patch.object(systemd_ops, "has_systemd", lambda: True))
+            st.enter_context(mock.patch.object(systemd_ops, "unit_state", _idle))
             st.enter_context(mock.patch.object(systemd_ops, "service_action", _none))
             asyncio.run(B._restore_app({"id": 10, "kind": "app", "target": "p5q"}, p, log))
         self.assertTrue([x for x in log if "已解包" in x], log)
