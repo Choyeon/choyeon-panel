@@ -28,6 +28,7 @@ from pathlib import Path
 from .. import aio_db, config
 from .. import database as dbm
 from ..errors import BadInput, NotFound
+from ..log import warn
 from ..util import (
     CLI_LOG_LINES_MAX,
     LOG_LINES_DEFAULT,
@@ -401,10 +402,37 @@ def _validate_argv(argv: object) -> list[str]:
     return out
 
 
-def _exec_start(argv: list[str]) -> str:
-    """ExecStart 行：绝对路径 + 白名单参数，逐字下发。没有 shell，也没有变量展开的余地。"""
+def _exec_start(argv: list[str], tid: int) -> str:
+    """ExecStart 行：绝对路径 + 白名单参数，逐字下发。没有 shell，也没有变量展开的余地。
+
+    命令前面套 `flock -n -E 0 <锁文件>` 是给定时那一轮补的互斥（批次㉝）。手动那一侧
+    （`run_now`）早就 flock 了同一个文件，所以"手动 + 手动"和"点手动前先看看 timer 在不在跑"
+    两种重叠都挡得住；唯独反方向挡不住：管理员点下"立即执行"、锁在面板进程手里，timer 恰好
+    到点——systemd 只知道同一个 unit 不能重叠，看不见面板进程那把锁。于是两份
+    `choyeonctl backup run`／两个 `pg_dump` 同时打同一个目标，产物写出两份挤掉 keep 名额，
+    数据库那头是被互相拖住的元数据锁。
+
+    - `-n`（抢不到就走，不排队）：延后执行的这一轮跑的已经不是它这一轮本来要看的现场，
+      而排队的 oneshot 会一直占着这个 unit。
+    - `-E 0`（抢不到锁时按成功退出）而不是默认的 1：oneshot 非 0 退出会留在 failed 名单里
+      直到有人 `reset-failed`，而告警项 `failed-units` 是 crit——一次再正常不过的"跳过重叠
+      的一轮"会把 crit 告警长挂在手机上。实测 util-linux 2.41：`-E 0` 只改"抢不到锁"这一种
+      情况的退出码，命令自身失败仍原样传出（`flock -n -E 0 f /bin/sh -c 'exit 5'` 返回 5），
+      所以真失败照样报出来，没有把失败粉饰成绿灯。
+    - 机器上没有 flock（BusyBox 等）就退回裸 argv：宁可少一把锁，也不要让 ExecStart 指向
+      一个不存在的二进制、每一轮都退出 127。
+    """
     parts = [_resolve_binary(argv[0]), *[unit_exec_arg_escape(a) for a in argv[1:]]]
-    return "ExecStart=" + " ".join(f'"{p}"' if " " in p else p for p in parts)
+    body = " ".join(f'"{p}"' if " " in p else p for p in parts)
+    flker = shutil.which("flock")
+    if not flker:
+        return "ExecStart=" + body
+    lock = _lock_path(int(tid))
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return "ExecStart=" + body
+    return f"ExecStart=\"{flker}\" -n -E 0 {unit_exec_arg_escape(str(lock))} -- {body}"
 
 
 # ------------------------------------------------------------------ unit 落地
@@ -459,7 +487,7 @@ async def _sync_units(task: dict) -> None:
     _write_if_changed(
         svc,
         f"[Unit]\nDescription=choyeon-panel scheduled task #{task['id']} {task['name']}\n"
-        f"[Service]\nType=oneshot\nWorkingDirectory={wd}\n{_exec_start(argv)}\n"
+        f"[Service]\nType=oneshot\nWorkingDirectory={wd}\n{_exec_start(argv, task['id'])}\n"
         f'Environment="CP_DATA_DIR={data_dir}"\nEnvironment="CP_CLI_PYTHON={py}"\n',
     )
     _write_if_changed(
@@ -475,6 +503,28 @@ async def _sync_units(task: dict) -> None:
 
 async def _cleanup_units(task: dict) -> None:
     await _sync_units({**task, "enabled": 0})
+
+
+async def sync_all_units() -> int:
+    """启动时按库里的行重渲一遍启用中的任务，返回真正落过盘的任务数（main.py 调用）。
+
+    为什么必须有这一趟：unit 文件只在创建/更新任务时渲染，所以升级面板不会碰到存量任务的
+    `ExecStart=`。批次㉝ 给 `ExecStart` 套的 flock 因此在存量任务上根本不存在——"管理员点
+    立即执行（锁在面板进程里）、timer 恰好到点"这一方向的重叠照旧没人挡，而这一方向恰恰是
+    唯一没人挡得住的那个。备份那侧早就有 `sync_all_timers` 在启动时对账，这里是同一件事。
+    只处理 enabled 的行：禁用任务的 unit 本就不该在盘上，对它重跑 `_sync_units` 会朝
+    一个不存在的 unit 发 disable/stop/reset-failed 四趟命令，还会把管理员在面板外手工
+    enable 的 timer 按库里的禁用状态压回去——那是另一件事，不该由一次启动顺手决定。
+    逐行 try：一个坏任务（表达式解析不了、argv 不在白名单）不该把其余任务的对账一起停掉。
+    """
+    done = 0
+    for row in dbm.query("SELECT * FROM cron_task WHERE enabled=1"):
+        try:
+            await _sync_units(row)
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            warn(f"cron unit #{row['id']} sync failed: {e}")
+    return done
 
 
 # ------------------------------------------------------------------ CRUD 与执行

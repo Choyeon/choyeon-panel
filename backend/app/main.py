@@ -46,12 +46,29 @@ async def lifespan(_app: FastAPI):
     except Exception as e:  # noqa: BLE001
         warn("reset running deployments failed:", e)
 
-    try:
-        from .services import backup_service
+    # 延迟导入：backup_service 与 apps_service 互相引用，放到模块顶层会在 import 期转圈
+    from .services import backup_service, cron_service
 
+    try:
+        # 上次进程是被杀的还是正常退的要分得开：恢复中途死掉会留下一个"面板停掉的
+        # 服务"+半份归档，而这件事只有这条记录知道。判词进 journal 与审计，不静默清标记。
+        for _line in await backup_service.resume_interrupted_restores():
+            warn("restore interrupted:", _line)
+    except Exception as e:  # noqa: BLE001
+        warn("restore reconcile failed:", e)
+
+    try:
         await backup_service.sync_all_timers()
     except Exception as e:  # noqa: BLE001
         warn("backup timers sync failed:", e)
+
+    try:
+        # 计划任务的 unit 只在增删改时渲染，所以升级面板不会碰到存量任务的 ExecStart——
+        # 批次㉝ 给 ExecStart 套的 flock 因此在老任务上根本不存在。这一趟把盘上的 unit
+        # 对回库里的行；没有任务时一次 systemctl 都不发。
+        await cron_service.sync_all_units()
+    except Exception as e:  # noqa: BLE001
+        warn("cron units sync failed:", e)
 
     alerts_service.start_checker()
     hk = asyncio.create_task(_housekeeping())

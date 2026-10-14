@@ -566,7 +566,7 @@ class TestActionEndpointShape(unittest.TestCase):
 
     def test_rollback_shape_preserved(self):
         """前端 rollback() 读 res.commit，响应结构不能因为 ok 收敛而变。"""
-        async def rb(app_id):
+        async def rb(app_id, actor="system"):
             return {"ok": True, "commit": "abc123", "deployment": 9, "from": "def456"}
 
         with mock.patch.object(apps_service, "rollback_app", rb):

@@ -1,6 +1,6 @@
-import asyncio
 import errno
 import gzip
+import json
 import os
 import re
 import shutil
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
 
-from .. import backup_runner, config
+from .. import backup_runner, config, locks
 from .. import database as dbm
 from ..log import warn
 from ..util import is_name, redact_creds, run, sh_escape, unit_env_value, unit_pct_escape, write_secret_atomic
@@ -728,6 +728,10 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
         log.append(f"==> 产物预检通过：快照 {shown_snap} 张表 / 当前库 {shown_now} 张")
 
     stopped, restart = await _stop_for_overwrite(unit, log)
+    if stopped:
+        # 面板自己停的服务，要在持久记录里留下名字：进程被杀在覆盖中途时，
+        # 启动对账靠这一行判断"这个 unit 是恢复流程停的，可以替它拉回来"。
+        _note_stopped_unit(bk, unit)
     try:
         # 残留的 WAL/SHM 属于旧库：留着它们，服务一打开就会把旧帧套到刚写回的库上
         for ext in ("-wal", "-shm", "-journal"):
@@ -872,6 +876,10 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
         restored = False
         try:
             stopped, restart = await _stop_for_overwrite(unit, log)
+            if stopped:
+                # 面板自己停的服务，要在持久记录里留下名字：进程被杀在覆盖中途时，
+                # 启动对账靠这一行判断"这个 unit 是恢复流程停的，可以替它拉回来"。
+                _note_stopped_unit(bk, unit)
             # filter="tar" 是把当前行为钉住，不是放行风险：不安全条目（绝对路径、..、
             # 链接型）已由 _tar_checked 逐条拒掉，这里要的正是"按归档里的属主/权限原样落盘"。
             # 不写出来的话 Python 3.14 会默认改用 data filter，恢复出来的文件属主当场变掉。
@@ -998,11 +1006,136 @@ async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
         )
 
 
-_RESTORE_LOCKS: dict[str, asyncio.Lock] = {}
+_MARK_PREFIX = "restore:inflight:"
 
 
-def _restore_lock(key: str) -> asyncio.Lock:
-    return _RESTORE_LOCKS.setdefault(key, asyncio.Lock())
+def _mark_key(bid) -> str:
+    return f"{_MARK_PREFIX}{bid}"
+
+
+def _restore_target_app(bk: dict):
+    """恢复目标指向的那条 apps 记录，查不到就返回 None，不抛。
+
+    这里只是给锁挑一个键、给守卫看一眼有没有部署，不是恢复的前置条件：
+    `_sqlite_app`/`_restore_app` 才是干活时的校验入口，它们要目录存在才肯往下走。
+    用会抛的那个来挑键有两个坏处——应用已删除时锁还没拿到就报"应用目录不存在"，
+    报错的人以为自己点了恢复的正文，其实连锁都没上；而 `key_name` 那条回退分支
+    永远走不到，等于给"记录已不在的历史备份"配了一把不存在的锁。
+    """
+    target = str(bk["target"] or "")
+    if bk["kind"] == "sqlite":
+        if target.isdigit():
+            app = dbm.query_one("SELECT id FROM apps WHERE id=?", (int(target),))
+            if app:
+                return app
+        return dbm.query_one("SELECT id FROM apps WHERE name=?", (target,))
+    if bk["kind"] == "app":
+        return dbm.query_one("SELECT id FROM apps WHERE name=?", (target,))
+    return None
+
+
+def _ensure_no_deployment_for_restore(bk: dict) -> None:
+    """恢复不能和进行中的部署并发（批次㉘ 的守卫，㉝ 之后它是第二道闸）。
+
+    flock 已经挡住"同一个应用上正在跑的部署"，这一层挡的是锁之外的人：手工往
+    deployments 表插的 running 行、旧版本面板留下的行。pg 类恢复动的是数据库而不是
+    应用工作区，和部署不在同一个对象上，所以不拦。
+    """
+    app = _restore_target_app(bk)
+    if app and dbm.query_one(
+        "SELECT id FROM deployments WHERE app_id=? AND status='running'", (app["id"],)
+    ):
+        raise RuntimeError(f"应用 {bk['target']} 有部署正在进行，不能恢复")
+
+
+def _restore_lock_key(bk: dict) -> str:
+    """恢复锁的键 = 要覆盖的那个对象，不是备份任务行上写的字符串。
+
+    批次㉝ 之前键是 `kind:target`，于是同一个应用的两条备份任务——目录类（target 存
+    应用名）和 SQLite 类（target 存 app_id）——拿到两把锁，两次恢复可以同时
+    stop 同一个 unit、同时往同一个目录和同一个库上写。解析成 app id 之后它们
+    是同一把锁，而且和部署/同步/回滚/删除用的是同一把（apps_service 也按 app id 锁）。
+    """
+    if bk["kind"] == "pg":
+        return locks.key_pg(bk["target"])
+    app = _restore_target_app(bk)
+    return locks.key_app(app["id"]) if app else locks.key_name(bk["target"])
+
+
+def _mark_restore(bk: dict, actor: str) -> None:
+    """把"正在覆盖现场"这件事写成持久记录，供面板被杀之后的启动对账读取。
+
+    为什么不能只靠那把 flock：锁由内核在进程死亡时自动释放，恰好意味着死后的现场
+    什么都不留下——而恢复在停服务与覆盖文件之间被杀掉，留下的就是一个停止的服务
+    加一个半新半旧的目录，这两件事都需要人知道。"""
+    dbm.set_setting(
+        _mark_key(bk["id"]),
+        json.dumps(
+            {
+                "kind": bk["kind"],
+                "target": bk["target"],
+                "actor": actor,
+                "file": os.path.basename(str(bk.get("_file") or "")),
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+
+def _note_stopped_unit(bk: dict, unit: str) -> None:
+    """记下"面板为了这次恢复把 {unit} 停了"——这是启动对账敢不敢替它再拉起来的依据。"""
+    raw = dbm.get_setting(_mark_key(bk["id"]))
+    if not raw:
+        return
+    try:
+        rec = json.loads(raw)
+    except ValueError:
+        return
+    rec["unit"] = unit
+    rec["stopped_by_panel"] = True
+    dbm.set_setting(_mark_key(bk["id"]), json.dumps(rec, ensure_ascii=False))
+
+
+async def resume_interrupted_restores() -> list[str]:
+    """启动时清掉遗留的恢复标记，并把能救的救回来（main.py 的 lifespan 调用）。
+
+    每行都要说话，沉默的启动等于"上次什么都没发生"：面板被升级/OOM/重启打断在
+    stop 与覆盖之间时，应用服务就那样停着，而界面上没有任何地方显示它是因为一次
+    没跑完的恢复停的。判词沿用批次㉜ 的口径——查不到状态就是查不到，不擅自启动。
+    """
+    lines: list[str] = []
+    for row in dbm.query("SELECT key,value FROM settings WHERE key LIKE ?", (f"{_MARK_PREFIX}%",)):
+        key = str(row["key"])
+        bid = key.removeprefix(_MARK_PREFIX)
+        try:
+            rec = json.loads(row["value"] or "{}")
+        except ValueError:
+            rec = {}
+        # 先删标记：这条记录只该在启动时被说起一次，留着会让每次重启都报同一件事。
+        dbm.delete_setting(key)
+        unit = str(rec.get("unit") or "")
+        head = f"恢复 #{bid}（{rec.get('kind') or '?'} {rec.get('target') or '?'}）在面板运行中被中断"
+        if not rec.get("stopped_by_panel") or not unit:
+            lines.append(f"{head}：目标服务不是面板停的，未做处理；请核对目标内容是否完整")
+            continue
+        st = await systemd_ops.unit_state(unit)
+        if st["missing"]:
+            lines.append(f"{head}：本机没有 {unit} 这个 unit，未做处理")
+        elif st["busy"]:
+            lines.append(f"{head}：{unit} 现在在跑，但恢复可能只写了一半，请核对内容")
+        elif st["state"] == "unknown":
+            lines.append(f"{head}：查不到 {unit} 的状态（systemctl 没有回话），未擅自启动，请手工确认")
+        else:
+            if st["state"] == "failed":
+                await systemd_ops.reset_failed(unit)
+            r = await run("systemctl", ["start", "--", unit], timeout=60)
+            lines.append(
+                f"{head}：已重新拉起 {unit}，但恢复可能只写了一半，请核对内容"
+                if r["code"] == 0
+                else f"{head}：{unit} 启动失败，请手工 systemctl start {unit}：{(r['out'] or '').strip()[:160]}"
+            )
+        dbm.audit("system", "backup:restore-interrupted", f"{bid}:{unit or '-'}")
+    return lines
 
 
 async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict:
@@ -1013,17 +1146,17 @@ async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict
     path = _backup_file_path(bid, filename)
     if not _restoreable(bk["kind"], os.path.basename(path)):
         raise RuntimeError("该备份类型不支持自动恢复，请手工恢复")
-    # 同一个目标不叠两次恢复。两个 admin 各开一个页面、各点一次「恢复」是很常见的操作
-    # 现场，而两次恢复都先 stop 服务、再按各自的归档覆盖同一目录、再 start：后一次会把
-    # 前一次的成果整份换掉，先返回的那句「恢复完成」当场变成假的。锁按 kind:target 分，
-    # 不同互不相干的备份任务不必排队。
-    # locked() 与 acquire() 之间没有可挂起的 await（无竞争时 acquire 直接返回、不交还
-    # 控制权），所以"检测到忙就拒绝"不会被第二个请求钻过去。
-    lock = _restore_lock(f"{bk['kind']}:{bk['target']}")
-    if lock.locked():
-        raise RuntimeError(f"同一目标（{bk['target']}）的恢复正在进行，请等它结束后再试")
-    await lock.acquire()
+    # 同一个目标不叠两次恢复，也不和部署/同步/回滚/删除叠在一起：锁按解析后的 app id 分，
+    # 与 apps_service 用的是同一把（见 _restore_lock_key 与 app/locks.py）。两个 admin 各开
+    # 一个页面各点一次「恢复」是很常见的现场，而两次恢复都先 stop 服务、再按各自的归档
+    # 覆盖同一目录、再 start：后一次会把前一次的成果整份换掉，先返回的那句「恢复完成」
+    # 当场变成假的。
+    bk["_file"] = path
+    key = _restore_lock_key(bk)
+    _ensure_no_deployment_for_restore(bk)
+    guard = locks.acquire(key, f"恢复 {os.path.basename(path)}", actor)
     try:
+        _mark_restore(bk, actor)
         log: list[str] = [f"==> 恢复 {os.path.basename(path)}（kind={bk['kind']}, target={bk['target']}）"]
         try:
             if bk["kind"] == "sqlite":
@@ -1046,7 +1179,10 @@ async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict
         masked = redact_creds("\n".join(log))
         return {"ok": True, "warn": [line for line in masked.splitlines() if line.startswith("!!")], "log": masked}
     finally:
-        lock.release()
+        # 顺序要紧：先清标记再放锁。反过来会有一个窗口——锁已释放、标记还在，
+        # 此时另一个进程抢到锁并开始恢复，而启动对账把上一次的标记当成它的现场。
+        dbm.delete_setting(_mark_key(bid))
+        guard.release()
 
 
 async def run_backup_now(bid: int) -> dict:

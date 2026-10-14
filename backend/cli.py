@@ -535,7 +535,7 @@ async def cmd_app(a: argparse.Namespace) -> dict:
     if a.app_cmd == "deploy":
         if not a.id:
             Out.error("deploy 需要 --id", EXIT_USAGE)
-        dep = await apps_service.deploy_app(a.id)
+        dep = await apps_service.deploy_app(a.id, actor="cli")
         dbm.audit("cli", "app:deploy", str(a.id))
         # deploy_app 用 create_task 派发后台任务后立即返回；CLI 的 asyncio.run
         # 一退出就把这个任务取消掉，部署停在 status='running'，此后该应用无法
@@ -554,7 +554,7 @@ async def cmd_app(a: argparse.Namespace) -> dict:
     if a.app_cmd == "rollback":
         if not a.id:
             Out.error("rollback 需要 --id", EXIT_USAGE)
-        res = await apps_service.rollback_app(a.id)
+        res = await apps_service.rollback_app(a.id, actor="cli")
         dbm.audit("cli", "app:rollback", str(a.id))
         Out.result({"ok": True, **res}, f"已回滚到 {res.get('commit') or '上一版本'}")
         return {"ok": True, **res}

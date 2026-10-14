@@ -32,6 +32,8 @@ from pathlib import Path
 from unittest import mock
 
 from app import backup_runner as R
+from app import database as dbm
+from app import locks
 from app import util as U
 from app.services import apps_service as A
 from app.services import backup_service as B
@@ -85,10 +87,23 @@ class Case(unittest.TestCase):
     def mode(self, path):
         return stat.S_IMODE(os.stat(path).st_mode)
 
-    def restore_as(self, bk, fn_name, body):
-        """把 restore_backup 的取数与解包段都换成替身，只留互斥与流程本身。"""
+    def restore_as(self, bk, fn_name, body, app=None):
+        """把 restore_backup 的取数与解包段都换成替身，只留互斥与流程本身。
+
+        query_one 必须按 SQL 分流：一刀切返回 bk 等于给每次恢复都虚构出一条
+        "正在跑的部署"，恢复会在抢锁之前就被自己的守卫拦死，测到的是替身不是互斥。
+        """
+
+        def query_one(sql, _args=None):
+            s = str(sql)
+            if "FROM backups" in s:
+                return bk
+            if "FROM apps" in s:
+                return app
+            return None
+
         return (
-            mock.patch.object(B.dbm, "query_one", lambda *a, **k: bk),
+            mock.patch.object(B.dbm, "query_one", query_one),
             mock.patch.object(B.dbm, "audit", lambda *a, **k: None),
             mock.patch.object(B, "_backup_file_path", lambda bid, fn: f"/tmp/{fn}"),
             mock.patch.object(B, "_restoreable", lambda kind, name: True),
@@ -192,7 +207,7 @@ class TestRestoreMutex(Case):
                 return_exceptions=True,
             )
 
-        patches = self.restore_as(bk, "_restore_app", slow)
+        patches = self.restore_as(bk, "_restore_app", slow, app={"id": 1})
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             res = asyncio.run(go())
         self.assertEqual(live["peak"], 1)
@@ -200,18 +215,24 @@ class TestRestoreMutex(Case):
         err = [r for r in res if isinstance(r, RuntimeError)]
         self.assertEqual((len(ok), len(err)), (1, 2))
         for e in err:
-            self.assertIn("恢复正在进行", str(e))
+            # 抢不到锁必须当场说清楚"谁在占用、占了多久"，而不是"请稍后再试"
+            self.assertIn("无法开始", str(e))
+            self.assertIn("正在进行", str(e))
 
     def test_lock_is_released_after_a_successful_restore(self):
         bk = {"id": 7, "kind": "sqlite", "target": "1"}
+        key = locks.key_app(1)
 
         async def noop(_bk, _src, log):
             log.append("==> ok")
 
-        patches = self.restore_as(bk, "_restore_sqlite", noop)
+        patches = self.restore_as(bk, "_restore_sqlite", noop, app={"id": 1})
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             asyncio.run(B.restore_backup(7, "a.sqlite.gz", "admin"))
-            self.assertFalse(B._restore_lock("sqlite:1").locked())
+            # 锁放掉了（锁文件里不再留着持有者），恢复标记也清了：
+            # 残留的标记会让下一次重启把上一次的现场当成自己的。
+            self.assertIsNone(locks.holder_of(key))
+            self.assertIsNone(dbm.get_setting(B._mark_key(7)))
             # 第二次还能进来，不是"一次恢复把这个目标永久锁死"
             asyncio.run(B.restore_backup(7, "a.sqlite.gz", "admin"))
 

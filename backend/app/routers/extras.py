@@ -275,6 +275,10 @@ async def alerts_test(req: Request):
     if r := _need_admin(req):
         return r
     delivered = await alerts_service.notify_test()
+    # 这条也要写审计：它往管理员的邮箱/飞书里真发一条消息，而下面那条
+    # `run-checks` 同样会发通知、早就记了。测试通知事后查不到是谁发的，
+    # 就等于"谁在半夜把告警发到老板手机上"这个问题没有答案。
+    await aio_db.audit(req.state.cp_sub, "settings:alert-test", f"delivered={delivered}")
     if not delivered:
         return JSONResponse(status_code=400, content={"error": "没有可用通道，或全部投递失败（详见面板日志）"})
     return {"ok": True}

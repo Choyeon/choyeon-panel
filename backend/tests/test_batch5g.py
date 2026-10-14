@@ -139,7 +139,12 @@ class TestCancelledDeployment(unittest.IsolatedAsyncioTestCase):
         """deploy_app 登记的 id 必须随任务结束撤掉，否则看门狗永远不会回收这一行。"""
         app_id = _mkapp()
         try:
-            async def _noop(_app, _dep):
+            async def _noop(_app, _dep, guard=None):
+                # 正文替身也得按 `_run_deployment` 的契约把锁放掉：锁是 deploy_app
+                # 交给后台任务的，不放就一直握在这个测试进程手里，同目标的后续用例
+                # 会被自己的残留挡住。
+                if guard is not None:
+                    guard.release()
                 return None
 
             with mock.patch.object(apps_service, "_run_deployment", _noop):

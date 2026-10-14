@@ -366,7 +366,13 @@ class TestUnitFiles(_Case):
         svc = open(f"{base}.service").read()
         tmr = open(f"{base}.timer").read()
         self.assertIn("Type=oneshot", svc)
-        self.assertIn("ExecStart=/usr/local/bin/choyeonctl backup run", svc)
+        line = next(ln for ln in svc.splitlines() if ln.startswith("ExecStart="))
+        # 命令本体必须原样是 argv（结尾就是可执行文件 + 参数），不是 `sh -c "…"` 的字符串。
+        # 批次㉝ 之后它前面可以带一把 flock 重叠闸，那把闸同样以 argv 形态出现，
+        # `--` 之后还是原来那几个参数——所以断言只看结尾，中间的前缀由 TestExecStart 负责。
+        self.assertTrue(line.endswith("/usr/local/bin/choyeonctl backup run"), line)
+        if "flock" in line:
+            self.assertIn("-- /usr/local/bin/choyeonctl backup run", line)
         self.assertNotIn("sh -c", svc)
         self.assertNotIn("shell", svc)
         self.assertIn("OnCalendar=*-*-* 03:00:00", tmr)

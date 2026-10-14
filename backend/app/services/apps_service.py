@@ -7,7 +7,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-from .. import aio_db, config
+from .. import aio_db, config, locks
 from .. import database as dbm
 from ..util import (
     clean_abs_path,
@@ -505,6 +505,12 @@ def _ensure_no_deployment(app_id: int, action: str):
     `git reset --hard`：两边会互相把 HEAD 拧到不同 commit，
     部署结束时写回 unit 的还是旧快照，现场无法解释。
     旧代码只给 delete_app 加了这道守卫。
+
+    这是数据库状态位那一层的守卫，批次㉝ 之后它只是第二道闸：`status='running'`
+    是"上次有人记得写、下次没人记得清"的状态，进程被 OOM 杀掉就永远停在那里；
+    真正的互斥由 `locks.key_app(app_id)` 那把 flock 提供（跨 CLI/timer/网页三个入口，
+    且由内核在进程死亡时释放）。保留这一层的理由是它还能挡住"锁之外的人"——
+    手工往 deployments 表插一行、或旧版本面板留下的行。
     """
     if dbm.query_one("SELECT id FROM deployments WHERE app_id=? AND status='running'", (app_id,)):
         raise RuntimeError(f"部署进行中，不能{action}")
@@ -836,39 +842,43 @@ def _purge_app_dir(path: str):
         raise RuntimeError(f"删除应用目录失败：{e}") from e
 
 
-async def delete_app(app_id: int, purge: bool):
+async def delete_app(app_id: int, purge: bool, actor: str = "system"):
     app = get_app(app_id)
     if not app:
         raise RuntimeError("应用不存在")
     _ensure_no_deployment(app_id, "删除")
-    # purge 的目标先判定，避免 unit 与 nginx 都拆了才发现目录不能删、记录却已删掉
-    if purge:
-        _check_purge_target(app["path"])
-    await remove_unit(app)
-    # drop-in 是面板写进 /etc/systemd/system 的唯一"非 unit 本体"文件，必须跟着删：
-    # 外部 unit 的 unit 本体不归面板管、删掉记录后照样在跑，但它那个 <unit>.d 里
-    # 留着的面板配置会在应用目录被 purge 之后继续指向一个不存在的 .panel.env。
-    await remove_env_link(app)
-    if app.get("domain"):
-        await nginx_ops.remove_vhost(app["name"])
-    dbm.execute("DELETE FROM apps WHERE id=?", (app_id,))
-    # 部署记录只属于这个应用，删掉应用后没有任何入口能读到它们（含完整日志文本）。
-    dbm.execute("DELETE FROM deployments WHERE app_id=?", (app_id,))
-    # 告警标记的键名里带应用名，不跟着删就挂在一个不存在的对象上，
-    # 而且同名新建的应用会直接继承（见 alerts_service.forget_app）。
-    from . import alerts_service
+    guard = locks.acquire(locks.key_app(app_id), "删除", actor)
+    try:
+        # purge 的目标先判定，避免 unit 与 nginx 都拆了才发现目录不能删、记录却已删掉
+        if purge:
+            _check_purge_target(app["path"])
+        await remove_unit(app)
+        # drop-in 是面板写进 /etc/systemd/system 的唯一"非 unit 本体"文件，必须跟着删：
+        # 外部 unit 的 unit 本体不归面板管、删掉记录后照样在跑，但它那个 <unit>.d 里
+        # 留着的面板配置会在应用目录被 purge 之后继续指向一个不存在的 .panel.env。
+        await remove_env_link(app)
+        if app.get("domain"):
+            await nginx_ops.remove_vhost(app["name"])
+        dbm.execute("DELETE FROM apps WHERE id=?", (app_id,))
+        # 部署记录只属于这个应用，删掉应用后没有任何入口能读到它们（含完整日志文本）。
+        dbm.execute("DELETE FROM deployments WHERE app_id=?", (app_id,))
+        # 告警标记的键名里带应用名，不跟着删就挂在一个不存在的对象上，
+        # 而且同名新建的应用会直接继承（见 alerts_service.forget_app）。
+        from . import alerts_service
 
-    alerts_service.forget_app(app["name"])
-    if purge:
-        _purge_app_dir(app["path"])
+        alerts_service.forget_app(app["name"])
+        if purge:
+            _purge_app_dir(app["path"])
+    finally:
+        guard.release()
 
 
-async def app_action(app_id: int, verb: str) -> dict:
+async def app_action(app_id: int, verb: str, actor: str = "system") -> dict:
     app = get_app(app_id)
     if not app:
         raise RuntimeError("应用不存在")
     if verb == "rollback":
-        return await rollback_app(app_id)
+        return await rollback_app(app_id, actor)
     # 部署流程自己会在结束时 restart；这时用户再点一次停止/重启，
     # 两边抢同一个服务，出现"部署日志说成功、服务实际没起来"的现场。
     _ensure_no_deployment(app_id, f"{_VERB_CN.get(verb, verb)}服务")
@@ -973,23 +983,42 @@ async def restart_and_verify(unit: str, port=None, *, warn=None) -> None:
             warn(f"!!> {unit} 监听在 {listening}，与面板记录的 {port} 不一致，域名反代可能 502")
 
 
-async def deploy_app(app_id: int) -> int:
+async def deploy_app(app_id: int, actor: str = "system") -> int:
     app = get_app(app_id)
     if not app:
         raise RuntimeError("应用不存在")
     if dbm.query_one("SELECT id FROM deployments WHERE app_id=? AND status='running'", (app_id,)):
         raise RuntimeError("该应用已有部署任务在运行")
-    res = dbm.execute("INSERT INTO deployments(app_id,status) VALUES(?,'running')", (app_id,))
-    dep_id = res
-    _RUNNING_DEPS.add(dep_id)
-    task = asyncio.create_task(_run_deployment(app, dep_id))
-    _DEPLOY_TASKS.add(task)
+    # 锁在 INSERT 之前拿，且这里到 INSERT 之间没有任何 await：两个入口（网页 + CLI）
+    # 同时点部署时，先抢到锁的那个才写得出 running 行，后一个当场拿到"谁在占用"的文案。
+    # 锁交给后台任务释放——部署本身要跑几十分钟，中途释放就等于把守卫撤了。
+    guard = locks.acquire(locks.key_app(app_id), "部署", actor)
+    dep_id = None
+    try:
+        dep_id = dbm.execute("INSERT INTO deployments(app_id,status) VALUES(?,'running')", (app_id,))
+        _RUNNING_DEPS.add(dep_id)
+        task = asyncio.create_task(_run_deployment(app, dep_id, guard))
+        _DEPLOY_TASKS.add(task)
 
-    def _done(_t):
-        _DEPLOY_TASKS.discard(_t)
-        _RUNNING_DEPS.discard(dep_id)
+        def _done(_t):
+            _DEPLOY_TASKS.discard(_t)
+            _RUNNING_DEPS.discard(dep_id)
 
-    task.add_done_callback(_done)
+        task.add_done_callback(_done)
+    except Exception:
+        # 任务没起来（事件循环正在关、INSERT 抛错）就必须在这里放锁：
+        # 否则那把锁跟着一个永远不会结束的"进行中部署"把应用钉死。
+        guard.release()
+        if dep_id is not None:
+            # 记录也要当场收尾：这一行对应的任务从未被创建，等回收器等于让删除/回滚/
+            # 改配置被一条假 running 挡满 DEPLOY_BUDGET_SEC。
+            _RUNNING_DEPS.discard(dep_id)
+            _append_log(dep_id, "!!! 部署未能启动：后台任务没建起来，本次记录直接记为失败")
+            dbm.execute(
+                "UPDATE deployments SET status='failed', finished_at=datetime('now') WHERE id=? AND status='running'",
+                (dep_id,),
+            )
+        raise
     return dep_id
 
 
@@ -1109,7 +1138,7 @@ async def _is_newer_than(path: str, current: str | None, sha: str) -> bool | Non
     return None
 
 
-async def rollback_app(app_id: int) -> dict:
+async def rollback_app(app_id: int, actor: str = "system") -> dict:
     """回滚到**上一个**成功部署的版本，并重启服务。
 
     旧实现取"最近一条成功记录"的 commit，而部署成功时记下的正是当前正在运行的
@@ -1126,6 +1155,18 @@ async def rollback_app(app_id: int) -> dict:
     if not app:
         raise RuntimeError("应用不存在")
     _ensure_no_deployment(app_id, "回滚")
+    # 回滚此前不在**任何**互斥里：它只读 deployments 的 running 行，自己一行都不写，
+    # 于是点完回滚再点部署/同步/删除/恢复，两条 `git reset --hard` 与两次服务重启
+    # 叠在同一个工作区上（连点两次回滚同样是两份并发 reset）。锁按 app id 分，
+    # 与 deploy/sync/delete/restore 用的是同一把（见 app/locks.py）。
+    guard = locks.acquire(locks.key_app(app_id), "回滚", actor)
+    try:
+        return await _rollback_body(app, app_id)
+    finally:
+        guard.release()
+
+
+async def _rollback_body(app: dict, app_id: int) -> dict:
     repo_dir = await resolve_repo_dir(app["path"])
     if not repo_dir:
         raise RuntimeError("应用目录不在任何 Git 仓库里，无法回滚")
@@ -1171,12 +1212,17 @@ async def rollback_app(app_id: int) -> dict:
     return {"ok": True, "commit": target["commit_sha"], "deployment": target["id"], "from": current}
 
 
-async def sync_app(app_id: int) -> dict:
+async def sync_app(app_id: int, actor: str = "system") -> dict:
     """拉取远端最新代码并重启服务——比部署短的路径：不装依赖、不写 env/unit/nginx。
 
     代码改完想立刻上线时，走 deploy 要等 npm/pip 几分钟，sync 只有 fetch/reset/restart
     三步，通常在几秒内完成。仍然落一条 deployments 记录（status=success + commit_sha），
     这样同步上去的版本也能被「回滚」选中，不会出现"同步完发现坏了、回滚列表里找不到上一版"。
+
+    锁必须拿在**第一个 await 之前**：旧写法在 `_ensure_no_deployment` 与 INSERT 之间
+    await 了 resolve_repo_dir，于是连点两次「一键同步」时两个调用都过了守卫、各自插一条
+    running 行，然后两份 fetch/`reset --hard` 打在同一个工作区上，HEAD 互相拧——面板报
+    「同步完成」而盘上是哪一份代码取决于谁后跑完（批次㉝ 的竞态）。
     """
     app = get_app(app_id)
     if not app:
@@ -1189,6 +1235,14 @@ async def sync_app(app_id: int) -> dict:
     branch = app["branch"] or "main"
     if not is_branch(branch):
         raise RuntimeError("分支名不合法")
+    guard = locks.acquire(locks.key_app(app_id), "同步", actor)
+    try:
+        return await _sync_body(app, app_id, branch)
+    finally:
+        guard.release()
+
+
+async def _sync_body(app: dict, app_id: int, branch: str) -> dict:
     path = app["path"]
     # monorepo 的组件目录没有 .git，仓库根才是能 fetch/reset 的地方（见 resolve_repo_dir）。
     repo_dir = await resolve_repo_dir(path) or path
@@ -1264,7 +1318,18 @@ async def sync_app(app_id: int) -> dict:
         raise
 
 
-async def _run_deployment(app: dict, dep_id: int):
+async def _run_deployment(app: dict, dep_id: int, guard=None):
+    """一次部署的正文。`guard` 是 deploy_app 抢到的 per-app 文件锁，收尾时必须在这里释放
+    （任何一条出口——成功、失败、被取消——都不许把它留在手里，否则这个应用被一把
+    已经没有主人的锁钉住，恢复/回滚/删除全部拒绝，直到面板重启）。"""
+    try:
+        await _deployment_body(app, dep_id)
+    finally:
+        if guard is not None:
+            guard.release()
+
+
+async def _deployment_body(app: dict, dep_id: int):
     def finish(ok: bool):
         dbm.execute(
             "UPDATE deployments SET status=?, finished_at=datetime('now') WHERE id=?",

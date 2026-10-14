@@ -190,7 +190,9 @@ class TestDomainShadowing(_ConfDir):
 
     def test_deploy_logs_conflict_instead_of_failing(self):
         """跑了几分钟的部署不该因为这次域名冲突被判失败，但要在日志里留下这一行。"""
-        src = inspect.getsource(apps_service._run_deployment)
+        # 断言对象是 `_deployment_body`：批次㉝ 把部署正文和锁的收尾分成了两层
+        # （`_run_deployment` 只负责 finally 释放 fd），冲突处理在正文里。
+        src = inspect.getsource(apps_service._deployment_body)
         self.assertIn("except nginx_ops.DomainOwnedElsewhere", src)
         self.assertLess(src.index("except nginx_ops.DomainOwnedElsewhere"), src.index("==> 重启并确认服务"),
                         "冲突处理必须收在域名那一段里，而不是漏到最外层把部署判成失败")

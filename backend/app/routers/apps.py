@@ -125,14 +125,14 @@ async def _create_group(req: Request, comps: list):
         # 半途失败要把已建的组件清掉，否则留下没有父的孤儿应用
         for a in created:
             with contextlib.suppress(Exception):
-                await apps_service.delete_app(a["id"], False)
+                await apps_service.delete_app(a["id"], False, req.state.cp_sub)
         return err_json(e)
 
 
 @router.delete("/api/apps/{app_id}")
 async def app_delete(app_id: int, req: Request):
     try:
-        await apps_service.delete_app(app_id, req.query_params.get("purge") == "1")
+        await apps_service.delete_app(app_id, req.query_params.get("purge") == "1", req.state.cp_sub)
         # 父被删后子组件解除归属而不是连带删除：它们是各自独立的服务
         dbm.execute("UPDATE apps SET parent_id=NULL WHERE parent_id=?", (app_id,))
         await aio_db.audit(req.state.cp_sub, "app:delete", str(app_id))
@@ -160,7 +160,7 @@ async def app_update(app_id: int, req: Request):
 async def app_action(app_id: int, req: Request):
     verb = (await _body(req)).get("verb", "")
     try:
-        result = await apps_service.app_action(app_id, verb)
+        result = await apps_service.app_action(app_id, verb, actor=req.state.cp_sub)
         await aio_db.audit(req.state.cp_sub, f"app:{verb}", str(app_id))
         # 服务层已经统一返回 {"ok": true, ...}：rollback 带 commit/deployment/from，
         # start/stop/restart 带 active。这里不再重复包装，避免出现 ok 语义两套算法。
@@ -172,7 +172,7 @@ async def app_action(app_id: int, req: Request):
 @router.post("/api/apps/{app_id}/deploy")
 async def app_deploy(app_id: int, req: Request):
     try:
-        dep_id = await apps_service.deploy_app(app_id)
+        dep_id = await apps_service.deploy_app(app_id, actor=req.state.cp_sub)
         await aio_db.audit(req.state.cp_sub, "app:deploy", str(app_id))
         return {"deployment": dep_id}
     except Exception as e:  # noqa: BLE001
@@ -184,7 +184,7 @@ async def app_sync(app_id: int, req: Request):
     try:
         # 同步会动工作区并重启服务，属于写操作（viewer 已被中间件挡在 POST 之外），
         # 失败也要留下记录，所以审计写在服务层返回之后、只记动作与 commit。
-        r = await apps_service.sync_app(app_id)
+        r = await apps_service.sync_app(app_id, actor=req.state.cp_sub)
         await aio_db.audit(req.state.cp_sub, "app:sync", f"{app_id}({r.get('commit') or '-'})")
         return r
     except Exception as e:  # noqa: BLE001

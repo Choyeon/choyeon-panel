@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from . import config
+from . import config, locks
 from . import database as dbm
 from .config import BACKUP_DIR
 from .util import sh_escape
@@ -58,14 +58,33 @@ def stamp() -> str:
 
 
 def _free_path(bk_id, stamp: str, suffix: str, backup_dir: str) -> str:
-    """秒级时间戳仍可能撞（同一秒内两次），撞了就补序号，绝不覆盖已有备份。"""
+    """秒级时间戳仍可能撞（同一秒内两次），撞了就补序号，绝不覆盖已有备份。
+
+    占名必须是 O_CREAT|O_EXCL 的**原子创建**，不能 `os.path.exists()` 判断完再把名字
+    返回：定时器和手动备份、或者两个恢复请求，会在同一瞬间都看到"这个名字还空着"，
+    于是其中一个把另一个刚写好的归档原地覆盖，而两边都报告成功——目录里只剩一份，
+    那个时间点的一份历史无声消失。存在性检查挡不住两个进程同时通过，只有创建本身
+    原子才行。空文件就是本次的产物，写失败时由 `dump_cmd` 的 `rm -f` 与
+    `sqlite_snapshot` 的清理分支各自删掉；留在原地也认得出形状，会随 keep 轮替淘汰。
+    补号循环要有上界：`backup_dir` 里若已堆了一个同秒的目录（异常情形），无限递增
+    会把调用方挂死，不如如实报错。
+    """
     base = f"{backup_dir}/bk{bk_id}-{stamp}{suffix}"
     path = base
     n = 1
-    while os.path.exists(path):
-        n += 1
-        path = f"{backup_dir}/bk{bk_id}-{stamp}-{n}{suffix}"
-    return path
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            n += 1
+            if n > 100:
+                raise RuntimeError(f"同一秒内 {base} 的同名产物已排到 {n}，拒绝继续找名字") from None
+            path = f"{backup_dir}/bk{bk_id}-{stamp}-{n}{suffix}"
+            continue
+        except OSError as e:
+            raise RuntimeError(f"无法在备份目录里占名：{e}") from None
+        os.close(fd)
+        return path
 
 
 def find_sqlite_dbs(app_path: str) -> list:
@@ -243,11 +262,16 @@ def _prune_order(bid: int) -> list:
     `…-03-41-00-app.sqlite.gz` 之前（`2` < `a`）——按名字排会把刚写完的那一份当"最旧"
     删掉，目录里留下的反而是更早的一份，界面却报"备份完成"。线上探针实测到的正是这一支。
     无序号一定是先写的那一份（`_free_path` 只在基础名已存在时才补号），所以缺省记 0。
-    末尾必须落在 `.gz`/`.tgz` 上：`sqlite_snapshot` 的中间库叫 `….sqlite.gz.tmp`，崩在半路
+    末尾必须落在 `.gz`/`.tgz`/`.env` 上：`sqlite_snapshot` 的中间库叫 `….sqlite.gz.tmp`，崩在半路
     时它会留在目录里，不认扩展名就等于让一个读不了的半成品占掉一个保留名额。
+    `.env` 也要认：`_restore_app` 把应用当前的 `.panel.env` 暂存成
+    `bk<id>-<时间戳>-pre-restore.env`（含口令的副本，写在 root 0700 的备份目录里），
+    正常路径在 finally 里回写后就地删除，但进程被 OOM/升级杀在半程时它就留下了——
+    旧写法只认 `.gz`/`.tgz`，于是每次崩掉的恢复都在备份目录里存一份永不轮替的凭据副本，
+    既占磁盘又扩大口令的可读面。认进形状里，它就和真备份一起按 keep 淘汰。
     """
     auto = re.compile(
-        rf"^bk{bid}-(\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}})(?:-(\d+))?.*(?:\.gz|\.tgz)$"
+        rf"^bk{bid}-(\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}})(?:-(\d+))?.*(?:\.gz|\.tgz|\.env)$"
     )
     held = []
     for name in os.listdir(BACKUP_DIR):
@@ -284,22 +308,48 @@ def prune(bk: dict):
             pass
 
 
-if __name__ == "__main__":
-    try:
-        bid = int(sys.argv[1])
-    except (IndexError, ValueError):
-        print("usage: python3 -m app.backup_runner <backupId>", file=sys.stderr)
-        sys.exit(2)
+def run_job(bid: int) -> int:
+    """进程入口：按备份任务抢一把跨进程锁，再跑 `main()`。返回退出码。
+
+    锁为什么在这一层而不是 `main()` 里面：timer 的 `ExecStart=`、界面上的"立即备份"
+    （`backup_service.run_backup_now`）和 `choyeonctl backup run` 三路都是
+    `python -m app.backup_runner <id>` 起独立进程，只共用这一个入口；而 `main()` 还要被
+    测试和将来的进程内调用直接调，不该平白带上文件锁副作用。
+    没有这把锁时，"手动备份"撞上"定时器到点"是两个进程在同一个 `bk<id>-<同一秒>`
+    名字上各写一份：`_free_path` 现在会补号，产物不至于互相覆盖，但两份 tar 同时读同一个
+    正在被部署改写的目录，多出来的那一份既占 keep 名额又没人知道它从哪来。
+
+    抢不到锁返回 0 并打印跳过原因，不返回失败：同一个任务同时跑两次时，放弃后到的那一次
+    是**正确行为**（前一份马上就要落盘），把它报成失败会让 timer 的 journal 和 unit 状态
+    长期挂着一条假故障，而真正该失败的（pg_dump 崩了、磁盘满）就被淹没了。
+    """
     row = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
     if not row:
         print("backup not found", file=sys.stderr)
-        sys.exit(2)
+        return 2
+    try:
+        guard = locks.acquire(locks.key_backup(bid), f"备份任务 {bid}", "system")
+    except RuntimeError as e:
+        print(f"backup skipped: {e}")
+        return 0
     try:
         main(row)
         print("backup ok")
     except subprocess.CalledProcessError as e:
         print(f"backup failed: exit {e.returncode}", file=sys.stderr)
-        sys.exit(1)
+        return 1
     except Exception as e:  # noqa: BLE001
         print(f"backup failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+    finally:
+        guard.release()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        _bid = int(sys.argv[1])
+    except (IndexError, ValueError):
+        print("usage: python3 -m app.backup_runner <backupId>", file=sys.stderr)
+        sys.exit(2)
+    sys.exit(run_job(_bid))

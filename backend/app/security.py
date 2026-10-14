@@ -152,8 +152,11 @@ def session_epoch(username: str) -> str:
 def session_identity(username: str) -> tuple[str, str]:
     """长连接复验用的身份快照 =（库里的角色，token 版本号）。同步 sqlite，调用方放线程里跑。
 
-    只看 epoch 不够：管理员把某人降为只读时改的是 users.role，不 bump epoch，那台已经
-    握手的 root shell/日志流就感觉不到。账号不存在按 LookupError 抛：调用方把"查不到人"
+    只看 epoch 不够：降权改的是 users.role，虽然 `user_update` 现在也会顺手 bump epoch
+    （extras.py 里 role/password 变更都调 bump_user_epoch），但复验要的答案是"这条连接
+    此刻该不该继续、以什么身份继续"，直接读库里的角色才是那句答案——把正确性押在
+    "每个改权限的地方都记得 bump 那个计数器"上，和押在"每个改角色的人都记得改名"一样脆。
+    账号不存在按 LookupError 抛：调用方把"查不到人"
     和"变了"同样当成失效。
     """
     from . import database as dbm
