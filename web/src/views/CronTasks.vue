@@ -3,7 +3,7 @@ import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   NAlert, NCard, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, NText,
 } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, useDrawerWidth } from '../ui';
 import { req, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useVisiblePoll } from '../composables/useVisiblePoll';
@@ -46,6 +46,7 @@ const options = ref<Options>({ allowed: [], presets: [], units: [], note: '' });
 const showForm = ref(false);
 const editing = ref<Task | null>(null);
 const logRow = ref<Task | null>(null);
+const drawerW = useDrawerWidth(0.5);
 // 抽屉内容一律来自 GET /cron/{id}/log，而不是列表行里带的 log_tail：面板库里的尾巴只有
 // 手动执行写得出，被定时器唤醒的那一轮在 journald 里，只读 log_tail 会把"天天在跑"显示成"从未执行"。
 const logData = ref<RunLog | null>(null);
@@ -503,7 +504,7 @@ const cols: any[] = [
       </NSpace>
     </NModal>
 
-    <NDrawer :show="!!logRow" :width="'50%'" @update:show="(v: boolean) => { if (!v) { logRow = null; logData = null; } }">
+    <NDrawer :show="!!logRow" :width="drawerW" @update:show="(v: boolean) => { if (!v) { logRow = null; logData = null; } }">
       <NDrawerContent :title="`最近一次输出 - ${logRow?.name || ''}`" closable>
         <NSpace vertical :size="10" style="width: 100%">
           <DescriptionsCard

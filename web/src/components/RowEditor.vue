@@ -3,6 +3,7 @@ import { computed, h, nextTick, ref, watch } from 'vue';
 import {
   NDrawer, NDrawerContent, NSpace, NTag, NCheckbox, NInput, NPopconfirm, NText, useMessage,
 } from 'naive-ui';
+import { useDrawerWidth } from '../ui';
 import { NButton } from '../ui';
 import { api, getRole } from '../api';
 import { icon } from '../icons';
@@ -27,6 +28,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{ 'update:show': [v: boolean]; saved: [] }>();
 
 const msg = useMessage();
+const drawerW = useDrawerWidth(0.44);
 const editing = ref(false);
 const busy = ref(false);
 const form = ref<Record<string, { isNull: boolean; text: string }>>({});
@@ -205,7 +207,7 @@ async function delRow() {
 
 <template>
   <NDrawer
-    v-if="show" :show="true" :width="560" placement="right"
+    v-if="show" :show="true" :width="drawerW" placement="right"
     @update:show="(v: boolean) => emit('update:show', v)"
   >
     <NDrawerContent :native-scrollbar="false" closable>

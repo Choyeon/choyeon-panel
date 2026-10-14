@@ -5,7 +5,7 @@ import {
   NAlert, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NModal, NPopconfirm, NSpace,
   NSwitch, NSelect, NTag, NText, useMessage,
 } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, useDrawerWidth } from '../ui';
 import { api, apiUrl, getRole, getToken } from '../api';
 import { icon, icons } from '../icons';
 import EmptyBox from '../components/EmptyBox.vue';
@@ -172,6 +172,7 @@ function confirmDelChecked() {
 
 // ---------- 上传产物 ----------
 const showUpload = ref(false);
+const drawerW = useDrawerWidth(0.4);
 const uploadJob = ref<number | null>(null);
 const uploadFile = ref<File | null>(null);
 const uploadOverwrite = ref(false);
@@ -362,7 +363,7 @@ onMounted(() => {
       </NDataTable>
     </CpToolbarCard>
 
-    <NModal v-model:show="showRestore" preset="card" title="从该备份文件恢复" :style="{ width: '40vw', minWidth: '420px', maxWidth: '94vw' }">
+    <NModal v-model:show="showRestore" preset="card" title="从该备份文件恢复" style="width: max(40vw, 420px); max-width: 94vw">
       <NSpace vertical :size="12">
         <NAlert type="warning" :bordered="false" size="small" role="alert">
           {{ RESTORE_WARN[restoreTarget?.kind] || '恢复会用备份内容覆盖当前数据，操作不可撤销。' }}
@@ -390,7 +391,7 @@ onMounted(() => {
       </NSpace>
     </NModal>
 
-    <NDrawer v-model:show="showUpload" :width="'40%'">
+    <NDrawer v-model:show="showUpload" :width="drawerW">
       <NDrawerContent title="上传备份产物" closable>
         <NForm label-placement="top">
           <NSpace vertical :size="12">

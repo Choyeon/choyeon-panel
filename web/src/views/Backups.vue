@@ -5,7 +5,7 @@ import {
   NDataTable, NSpace, NTag, NDrawer, NDrawerContent, NForm, NFormItem, NInputNumber,
   NSelect, useMessage, NIcon, NAlert, NSwitch,
 } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, useDrawerWidth } from '../ui';
 import { api, getRole } from '../api';
 import { icon, icons } from '../icons';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
@@ -22,6 +22,7 @@ const router = useRouter();
 // 备份任务的增删改与立即执行都是 MUTATION，服务端统一拦 403：只读账号只看计数
 const isAdmin = getRole() === 'admin';
 const show = ref(false);
+const drawerW = useDrawerWidth(0.5);
 const busy = ref<number | null>(null);
 const toggling = ref<number | null>(null);
 const submitting = ref(false);
@@ -312,7 +313,7 @@ async function submit() {
       </NDataTable>
     </CpToolbarCard>
 
-    <NDrawer v-model:show="show" :width="'50%'">
+    <NDrawer v-model:show="show" :width="drawerW">
       <NDrawerContent :title="`${editingId == null ? '新建备份任务' : '编辑备份任务'} - ${form.target || ''}`" closable>
         <NForm label-placement="top">
           <NSpace vertical :size="12">
@@ -380,7 +381,7 @@ async function submit() {
       </NDrawerContent>
     </NDrawer>
 
-    <NDrawer v-model:show="logShow" :width="'50%'">
+    <NDrawer v-model:show="logShow" :width="drawerW">
       <NDrawerContent :title="`执行日志 - ${logTitle}`" closable>
         <pre class="cr-log mono">{{ logText || '（无输出）' }}</pre>
       </NDrawerContent>

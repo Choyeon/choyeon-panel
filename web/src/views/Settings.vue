@@ -5,7 +5,7 @@ import {
   NInputNumber, NSwitch, NDrawer, NDrawerContent, NText, NAlert,
 } from 'naive-ui';
 import { useRoute, useRouter } from 'vue-router';
-import { NButton } from '../ui';
+import { NButton, useDrawerWidth } from '../ui';
 import { api, getRole, getUsername } from '../api';
 import { icon } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
@@ -156,6 +156,8 @@ const CHAN_META = {
 } as const;
 type ChanKey = keyof typeof CHAN_META;
 const chanOpen = ref(false);
+const chanDrawerW = useDrawerWidth(0.3);
+const twDrawerW = useDrawerWidth(0.32);
 const chanKey = ref<ChanKey>('alert_telegram_bot');
 const chanDraft = ref('');
 const chanSaving = ref(false);
@@ -471,7 +473,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       </section>
     </CpToolbarCard>
 
-    <NDrawer v-model:show="chanOpen" :width="'30%'">
+    <NDrawer v-model:show="chanOpen" :width="chanDrawerW">
       <NDrawerContent :title="chanMeta.label" closable>
         <NForm label-placement="top" size="small">
           <NFormItem :label="chanMeta.label">
@@ -486,7 +488,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </template>
       </NDrawerContent>
     </NDrawer>
-    <NDrawer v-model:show="twOpen" :width="'32%'">
+    <NDrawer v-model:show="twOpen" :width="twDrawerW">
       <NDrawerContent :title="twMode === 'enable' ? '开启两步验证' : '关闭两步验证'" closable>
         <NForm label-placement="top" size="small">
           <NAlert v-if="twMode === 'disable'" type="warning" :bordered="false" size="small" class="tw-alert">
@@ -504,7 +506,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           </NFormItem>
           <template v-if="twMode === 'enable' && twStep === 'scan'">
             <div class="tw-qr">
-              <img v-if="twQr" :src="twQr" width="220" height="220" alt="两步验证绑定二维码" />
+              <img v-if="twQr" :src="twQr" width="220" height="220" style="max-width: 100%; height: auto" alt="两步验证绑定二维码" />
               <NText v-else depth="3" style="font-size: var(--fs-xs)">二维码没出来，用验证器的手工录入填下面两行。</NText>
             </div>
             <div class="tw-key">
