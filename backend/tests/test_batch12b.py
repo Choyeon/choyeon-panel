@@ -618,7 +618,8 @@ class DoctorItemTests(unittest.TestCase):
         self.assertEqual(item["status"], "warn")
         self.assertEqual(item["fix"], "choyeonctl storage")
         self.assertIn("分区已用 93%", item["detail"])
-        self.assertIn("另有 2 项", item["detail"])
+        # 存储数的是「处」，尾巴跟着用「处」；量词换了半句就等于换了一件事。
+        self.assertIn("另有 2 处", item["detail"])
 
     def test_nothing_readable_is_warn(self):
         item = ss.doctor_item({"counts": {"roots": 0}, "findings": [], "disk": {"ok": False}})

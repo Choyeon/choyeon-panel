@@ -35,6 +35,7 @@ import time
 from datetime import UTC, datetime
 
 from .. import aio_db
+from ..util import tallied
 
 CACHE_TTL = 90.0
 RATE_WINDOW_SEC = 0.8
@@ -763,13 +764,12 @@ def doctor_item(data: dict) -> dict:
         risky = [f["title"] for f in data.get("findings") or [] if f["severity"] == SEV_RISK]
         detail = f"OOM 杀掉过 {total} 个进程；{head}"
         if risky:
-            detail += f"。判词：{risky[0]}"
+            detail += "。" + tallied(risky, " 项判词")
         return {"status": "fail", "detail": detail, "fix": "choyeonctl memory"}
     risky_f = [f for f in data.get("findings") or [] if f["severity"] in (SEV_RISK, SEV_WARN)]
     if risky_f:
-        more = f"，另有 {len(risky_f) - 1} 项" if len(risky_f) > 1 else ""
         return {"status": "warn",
-                "detail": f"{len(risky_f)} 项内存压力值得处理：{risky_f[0]['title']}{more}；{head}",
+                "detail": tallied([f["title"] for f in risky_f], " 项内存压力值得处理") + f"；{head}",
                 "fix": "choyeonctl memory"}
     info = int((data.get("counts") or {}).get("info") or 0)
     detail = f"内存没有压力：{head}，没有停顿、换页与 OOM 记录"

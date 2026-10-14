@@ -30,6 +30,8 @@ import subprocess
 import time
 from datetime import UTC, datetime
 
+from ..util import tallied
+
 CACHE_TTL = 120.0
 MAX_STALE_UNITS = 12
 MAX_PKG_LOOKUPS = 12
@@ -813,13 +815,12 @@ def doctor_item(data: dict) -> dict:
     risky = [f for f in data.get("findings") or [] if f["severity"] == SEV_RISK]
     if risky:
         return {"status": "fail",
-                "detail": f"{len(risky)} 项改动没进正在跑的进程：{risky[0]['title']}",
+                "detail": tallied([f["title"] for f in risky], " 项改动没进正在跑的进程"),
                 "fix": "choyeonctl pending"}
     warns = [f for f in data.get("findings") or [] if f["severity"] == SEV_WARN]
     if warns:
-        more = f"，另有 {len(warns) - 1} 项" if len(warns) > 1 else ""
         return {"status": "warn",
-                "detail": f"{len(warns)} 项改动可能还没生效：{warns[0]['title']}{more}",
+                "detail": tallied([f["title"] for f in warns], " 项改动可能还没生效"),
                 "fix": "choyeonctl pending"}
     info = int(counts.get("info") or 0)
     detail = f"改动都生效了：内核 {kernel.get('running')}，没有踩旧映射的服务，nginx/sshd/systemd 都没有待重载"

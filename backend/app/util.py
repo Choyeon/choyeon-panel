@@ -318,6 +318,33 @@ def disk_usage_pct(path: str) -> int | None:
         return None
 
 
+# 自检判词里「一共几项」与「点名哪一项」是同一个事实的两半，以前却各服务手抄一份
+# `，另有 N 项`，三条分支抄漏了（load 的 fail、pending 的 fail、login 的合并判词）：写着
+# 「2 项改动没进正在跑的进程」却只点第一条名字，本机实测被吞掉的那条正是
+# postgresql@17-main.service——最该看见的那一个。收成一条函数，漏写这一半就没法编译过用例。
+def tallied(names, noun: str, unit: str = "项", total: int | None = None,
+            lead: str = "", mid: str = "") -> str:
+    """报数在前、点名在后，拼成自检的一句判词。
+
+    形如 `3 处占用值得处理（另有 2 处）：分区已用 93%`。`noun`/`lead`/`mid` 是调用方自己的措辞
+    （数字前后那几个字），这条函数只管数字、量词和点名的那一条。
+
+    数字在前是有原因的：自检列表把判词放在项目名下面的副标题行，窄屏那一列实测 187px，
+    三行折行仍放不下整句（本机那条 pending 的 fail 要 5 行，「另有」排在第 69 个字符）。
+    「另有 N」挂在句尾时被裁掉的正好是它，而那半句是「不止这一条」的唯一凭证——
+    它得站在第一行里。
+
+    total 是前半句里那个总数，默认就是 names 的长度；只有总数另有出处时才显式给（登录项用的是
+    `_summary(findings)`），给了就必须盖得住点名的这一列，否则前半句说 3 项、尾巴说另有 1 项，
+    加起来只有 2 项。空标题不计，免得「另有 1 项」指的是一条没有文字的判词。
+    """
+    ts = [str(t) for t in (names or []) if t]
+    n = len(ts) if total is None else max(int(total or 0), len(ts))
+    rest = f"（另有 {n - 1} {unit}）" if n > 1 else ""
+    head = f"{lead}{n}{noun}{rest}{mid}"
+    return f"{head}：{ts[0]}" if ts else head
+
+
 async def run_shell_async(cmd: str, timeout: float | None = 10) -> str:
     """在事件循环中安全地执行 shell 命令（避免阻塞）。返回 stdout；失败返回空串。"""
     def _sync() -> str:

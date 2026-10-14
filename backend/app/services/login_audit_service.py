@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 
 from .. import config, security
 from .. import database as dbm
-from ..util import run
+from ..util import run, tallied
 from . import exposure_service
 
 CACHE_TTL = 300.0
@@ -685,8 +685,10 @@ def doctor_item(data: dict) -> dict:
         return {"status": "fail", "detail": f"存在不该有的账号：{names}（空口令或额外 uid=0）",
                 "fix": "choyeonctl ssh-audit 里看完整判词，先按入侵痕迹处理", "fixable": False}
     if counts["risk"]:
-        first = data["findings"][0]["title"]
-        return {"status": "warn", "detail": f"登录方式有 {counts['risk']} 项要紧、{counts['warn']} 项值得处理：{first}",
+        risk_titles = [f["title"] for f in data["findings"] if f["severity"] == "risk"]
+        return {"status": "warn",
+                "detail": tallied(risk_titles, " 项要紧", "项要紧", counts["risk"],
+                                  lead="登录方式有 ", mid=f"、{counts['warn']} 项值得处理"),
                 "fix": "choyeonctl ssh-audit", "fixable": False}
     if counts["warn"]:
         return {"status": "warn", "detail": f"没有要紧项，另有 {counts['warn']} 项加固建议",

@@ -349,6 +349,10 @@ button.cell-name > .n-button__content {
   white-space: nowrap;
 }
 .cell-sub { font-size: var(--fs-2xs); color: var(--cp-text-mute); min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 副标题位置放的是「整句话」时（自检判词就是这种），一行截断等于把结论丢掉：
+   title 只在桌面 hover 出得来，手机上没有 hover，摸不到那一行看不全的字。
+   放开到三行封顶，再长仍然是滚动区里的事——行高不能无限撑，一屏要看得见几项。 */
+.cell-sub.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .vchip {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px var(--space-2); border-radius: var(--radius-pill); font-size: var(--fs-xs); line-height: 18px;

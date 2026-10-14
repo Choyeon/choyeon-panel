@@ -87,7 +87,7 @@ const columns: any[] = [
         ]),
         h('div', { class: 'cell-txt' }, [
           h('div', { class: 'cell-name' }, r.title),
-          h('div', { class: 'cell-sub', title: r.detail }, r.detail),
+          h('div', { class: 'cell-sub wrap', title: r.detail }, r.detail),
         ]),
       ]),
   },

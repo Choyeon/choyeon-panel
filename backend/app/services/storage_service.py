@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import config
-from ..util import run
+from ..util import run, tallied
 from . import alerts_service
 
 CACHE_TTL = 300.0
@@ -685,10 +685,9 @@ def doctor_item(data: dict) -> dict:
     risky = [f for f in data.get("findings") or [] if f["severity"] in (SEV_RISK, SEV_WARN)]
     used = f"，分区已用 {disk['used_pct']}%" if disk.get("ok") and isinstance(disk.get("used_pct"), int) else ""
     if risky:
-        more = f"，另有 {len(risky) - 1} 项" if len(risky) > 1 else ""
         return {
             "status": "warn",
-            "detail": f"{len(risky)} 处占用值得处理：{risky[0]['title']}{more}{used}",
+            "detail": tallied([f["title"] for f in risky], " 处占用值得处理", "处") + used,
             "fix": "choyeonctl storage",
         }
     info = int(counts.get("info") or 0)

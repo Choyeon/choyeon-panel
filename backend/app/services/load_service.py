@@ -34,6 +34,8 @@ import os
 import time
 from datetime import UTC, datetime
 
+from ..util import tallied
+
 CACHE_TTL = 60.0
 SAMPLE_WINDOW_SEC = 1.0
 PROC_SCAN_CAP = 4000
@@ -645,13 +647,12 @@ def doctor_item(data: dict) -> dict:
     risky = [f for f in data.get("findings") or [] if f["severity"] == SEV_RISK]
     if risky:
         return {"status": "fail",
-                "detail": f"{len(risky)} 项要紧的负载问题：{risky[0]['title']}",
+                "detail": tallied([f["title"] for f in risky], " 项要紧的负载问题"),
                 "fix": "choyeonctl load"}
     warns = [f for f in data.get("findings") or [] if f["severity"] == SEV_WARN]
     if warns:
-        more = f"，另有 {len(warns) - 1} 项" if len(warns) > 1 else ""
         return {"status": "warn",
-                "detail": f"{len(warns)} 项值得处理：{warns[0]['title']}{more}",
+                "detail": tallied([f["title"] for f in warns], " 项值得处理"),
                 "fix": "choyeonctl load"}
     one = load.get("one")
     per_core = _round(one / cores, 2) if cores and one is not None else None
