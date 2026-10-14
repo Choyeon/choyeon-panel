@@ -20,11 +20,13 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 
 
 def is_ident(s: str) -> bool:
-    return bool(IDENT_RE.match(s or ""))
+    # fullmatch：`$` 在 match 下允许末尾一个换行过关，"appdb\n" 会被当成合法标识符，
+    # 而这个名字接着要拼进 psql -d、sh -c 里的 pg_dump/pg_restore 命令串和 SQL 字面量。
+    return bool(IDENT_RE.fullmatch(s or ""))
 
 
 def _quote_pass(p: str) -> str:
-    if not re.match(r"^[\x20-\x7e]{1,128}$", p or ""):
+    if not re.fullmatch(r"[\x20-\x7e]{1,128}", p or ""):
         raise RuntimeError("密码只允许可见 ASCII 字符且不超过 128 位")
     return "'" + p.replace("'", "''") + "'"
 
@@ -326,7 +328,7 @@ def set_redis_password(p: str):
     # 接口返回 ok、前端提示已保存，但 redis_password() 仍返回旧值，
     # 面板从此卡在 NOAUTH，唯一出路是手工改数据库。
     p = (p or "").strip()
-    if p and not re.match(r"^\S{1,512}$", p):
+    if p and not re.fullmatch(r"\S{1,512}", p):
         raise RuntimeError("Redis 口令不能包含空白字符，且不超过 512 位")
     dbm.set_setting("redis_password", p)
     # 缓存不失效就是"保存成功但仍卡在 NOAUTH 60 秒"，正是下面注释里那条老 bug 的翻版。
@@ -924,7 +926,7 @@ async def redis_member(k: str, typ: str, op: str, value: str = "", field: str = 
         args = ["SADD", k, value] if op == "add" else ["SREM", k, value]
     else:
         s = str(score or "").strip()
-        if op == "add" and not re.match(r"^-?\d+(\.\d+)?$", s):
+        if op == "add" and not re.fullmatch(r"-?\d+(\.\d+)?", s):
             raise RuntimeError("score 必须是数字")
         args = ["ZADD", k, s, value] if op == "add" else ["ZREM", k, value]
     n = await _r(args, kind="int")

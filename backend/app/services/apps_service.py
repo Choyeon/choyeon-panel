@@ -22,6 +22,7 @@ from ..util import (
     run_shell_async,
     sub_port,
     unit_exec_arg_escape,
+    write_secret_atomic,
 )
 from . import nginx_ops, systemd_ops
 from .systemd_ops import is_active, service_action
@@ -145,7 +146,9 @@ def env_body(app: dict) -> str:
     return "\n".join(
         f'{x["k"]}="{_env_escape(x.get("v", ""))}"'
         for x in vars_
-        if isinstance(x, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", x.get("k") or "")
+        # fullmatch：$ 在 re.match 下允许末尾一个换行过关，键名 "A\n" 会被写成
+        # 跨行的 `A\n="v"`，systemd 读到的是两个畸形行。
+        if isinstance(x, dict) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", x.get("k") or "")
     )
 
 
@@ -168,8 +171,7 @@ def write_env_file(app: dict) -> str:
             # 权限未必对，而这里正是唯一一次机会。
             os.chmod(target, 0o600)
             return "unchanged"
-        target.write_text(body + "\n", encoding="utf-8")
-        os.chmod(target, 0o600)  # 环境变量常含密钥，禁止同机其他用户读取
+        write_secret_atomic(target, body + "\n")
     except OSError as e:
         raise RuntimeError(f"写入 .panel.env 失败：{e}") from e
     return "written"
@@ -238,8 +240,7 @@ async def ensure_env_link(app: dict) -> str:
     try:
         same = target.is_file() and target.read_text(errors="replace") == want
         if not same:
-            target.write_text(want, encoding="utf-8")
-            os.chmod(target, 0o600)  # 里面写着 env 文件的绝对路径，同机普通用户不该看到布局
+            write_secret_atomic(target, want)
     except OSError as e:
         raise RuntimeError(f"写入 systemd drop-in 失败：{e}") from e
     if same:
@@ -279,7 +280,8 @@ async def ensure_unit(app: dict, warn=None):
     """
     if app.get("unit_override"):
         return
-    Path(f"{UNIT_DIR}/{unit_name(app)}").write_text(render_unit(app))
+    # 半截 unit 当场看不出来（还没 daemon-reload），要等下一次 reload 才被读进去。
+    write_secret_atomic(Path(f"{UNIT_DIR}/{unit_name(app)}"), render_unit(app))
     r = await run("systemctl", ["daemon-reload"])
     if r["code"] != 0:
         raise RuntimeError(r["out"])
@@ -353,8 +355,12 @@ async def _port_for_pid(main: int, lines: list) -> int | None:
     pids = await asyncio.to_thread(_pid_tree, main)
     ports = set()
     for line in lines:
-        pm = re.search(r"pid=(\d+)", line)
-        if not pm or int(pm.group(1)) not in pids:
+        # 一行可以挂着多个共享同一监听套接字的进程（cluster/预派生 worker 先 bind
+        # 再 fork，`ss` 就把它们写进同一个 users:(...)）。旧写法用 re.search 只取
+        # 第一个 pid：主进程排在后面时这行整个被跳过，于是端口探测随机失灵——
+        # 表现为应用确实在监听、面板却显示「端口未知」，域名/反代对齐也拿不到端口。
+        pids_on_line = {int(x) for x in re.findall(r"pid=(\d+)", line)}
+        if not (pids_on_line & pids):
             continue
         parts = line.strip().split()
         addr = parts[3] if len(parts) > 3 else ""
@@ -460,7 +466,10 @@ def _validate(i: dict, ignore_id: int = -1):
         raise RuntimeError("unit 名不合法：需以字母或数字开头，仅含 A-Za-z0-9@:._-，并以 .service 结尾")
     if i.get("db_names"):
         for d in i["db_names"].split(","):
-            if d and not re.match(r"^[a-z0-9_]{1,63}$", d):
+            # fullmatch 而不是 match：`$` 允许末尾一个换行通过，于是 "appdb\n"
+            # 也算合法库名。这个名字后面直接进 `psql -d`、sh -c 里的 pg_dump 命令串
+            # 与 SQL 字面量，带着换行的那一份会在 shell 里断成两个参数。
+            if d and not re.fullmatch(r"[a-z0-9_]{1,63}", d):
                 raise RuntimeError(f"关联数据库名不合法: {d}")
     path = _app_path(i)
     # 要害目录检查按"最终目录"做，而不是只看用户填没填 path：不填时默认值是
@@ -1437,15 +1446,13 @@ async def save_unit(app_id: int, content: str) -> dict:
         这份没通过 verify 的 unit 会留在 UNIT_DIR 里——当下没 daemon-reload 所以还没加载，
         可之后任何一次 daemon-reload（别的应用部署、面板重启）都会把它读进去。
         """
-        try:
+        with suppress(Exception):
             if old is None:
                 os.unlink(path)
             else:
-                Path(path).write_text(old)
-        except OSError:
-            pass
+                write_secret_atomic(Path(path), old)
 
-    Path(path).write_text(normalized)
+    write_secret_atomic(Path(path), normalized)
     verify = await run("systemd-analyze", ["verify", path], timeout=30)
     if verify["code"] != 0:
         _restore()

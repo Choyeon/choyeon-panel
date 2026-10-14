@@ -112,7 +112,6 @@ class TestRedisStatsSingleColumnTier(unittest.TestCase):
 
     def test_all_items_span_one_at_every_break(self):
         text = view("Databases")
-        items = re.findall(r'<NGridItem span="([^"]+)">', text)
         grid_at = text.index('cols="1 s:2 m:4"')
         for m in re.finditer(r'<NGridItem span="([^"]+)">', text):
             if abs(m.start() - grid_at) < 4000:

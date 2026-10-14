@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import gzip
 import os
@@ -16,7 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from .. import backup_runner, config
 from .. import database as dbm
 from ..log import warn
-from ..util import is_name, redact_creds, run, sh_escape, unit_env_value, unit_pct_escape
+from ..util import is_name, redact_creds, run, sh_escape, unit_env_value, unit_pct_escape, write_secret_atomic
 from .files_service import iso_ms
 from .pg_service import is_ident, psql
 
@@ -155,7 +156,9 @@ def _sqlite_target_label(target) -> str:
 def _write_if_changed(path: str, content: str):
     if os.path.exists(path) and Path(path).read_text() == content:
         return
-    Path(path).write_text(content)
+    # 原子写：这两个文件是定时器 unit，就地截断重写被打断留下的半截 unit，会被之后
+    # 任何一次 daemon-reload 读进去——报出来的语法错误和这次改动看着毫无关系。
+    write_secret_atomic(path, content)
 
 
 async def _sync_timer(b: dict):
@@ -586,6 +589,9 @@ async def _restore_sqlite(bk: dict, src_file: str, log: list) -> None:
     from . import apps_service, systemd_ops
 
     app = _sqlite_app(bk["target"])
+    # 恢复流程会停掉再启动这个 unit，部署也在同一时刻按自己的快照启停同一个 unit，
+    # 两边交错出来的"服务是谁停的、该不该起来"没有任何一份日志解释得清。
+    apps_service._ensure_no_deployment(app["id"], "恢复数据库")
     unit = apps_service.unit_name(app)
     ts = backup_runner.stamp()
 
@@ -725,6 +731,33 @@ def _tar_checked(tf: tarfile.TarFile) -> list:
     return members
 
 
+def _reject_symlink_ancestors(dest: str, members: list) -> None:
+    """解包前挡掉「落点穿过已存在软链」的归档。
+
+    `_tar_checked` 管的是归档里条目的类型，管不了目标目录里本来就有软链：应用目录里
+    躺着一条 `data -> /var/lib/app`（安装脚本把可变数据挪出仓库的常见写法），而解包
+    按名字落盘，于是 `data/x.json` 写进的是 /var/lib/app。面板以 root 运行，一份手工
+    上传的归档就能借这条链接往目录外任意位置落文件——正是"备份页上传即 RCE"之外
+    更安静的一条越权路径。
+    判据按每一级路径做 lstat（含文件本身：现存的 config.json 若是软链，写它就是写
+    链接目标），命中就整份拒绝。宁可拒一份可疑产物，也不要"解了一半"的目录。
+    """
+    seen: set[str] = set()
+    for m in members:
+        acc = dest
+        for p in m.name.replace("\\", "/").split("/"):
+            if not p or p == ".":
+                continue
+            acc = os.path.join(acc, p)
+            if acc in seen:
+                continue
+            seen.add(acc)
+            if os.path.islink(acc):
+                raise RuntimeError(
+                    f"目标目录里 {acc.removeprefix(dest)} 是符号链接，为避免写到 {dest} 之外已拒绝整份归档"
+                )
+
+
 def _strip_setuid(dest: str, members: list) -> int:
     """解包后收平 setuid/setgid/sticky，返回被收平的条目数。
 
@@ -759,6 +792,11 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
     app = dbm.query_one("SELECT * FROM apps WHERE name=?", (bk["target"],))
     if not app:
         raise RuntimeError("备份目标应用已不存在")
+    # 恢复不能和部署并发：部署在开始时拿了 app 字典快照，最后用它写回 unit 并重启服务；
+    # 恢复在同一目录上停服务、解包、再启动。两边交错会出现"部署结束时把 unit 指回旧路径、
+    # 目录里却是新内容"这种谁也解释不了的现场。删除/回滚/改配置都已经过这道闸（
+    # apps_service._ensure_no_deployment），恢复是最后一个能改写应用目录的入口。
+    apps_service._ensure_no_deployment(app["id"], "恢复应用目录")
     dest = app["path"]
     if not os.path.isdir(dest):
         raise RuntimeError(f"应用目录不存在：{dest}")
@@ -789,6 +827,8 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
                 f"归档里没有任何条目（{os.path.getsize(src_file)} 字节），未停止服务、未改动目录；"
                 "这份产物不是完整备份，请改用更早的一份"
             )
+        # 落点检查必须在停服务之前：拒绝一份穿越软链的归档不该顺带把线上服务停掉。
+        await run_in_threadpool(_reject_symlink_ancestors, dest, members)
         stopped = False
         restored = False
         try:
@@ -928,6 +968,13 @@ async def _restore_pg(bk: dict, src_file: str, log: list) -> None:
         )
 
 
+_RESTORE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _restore_lock(key: str) -> asyncio.Lock:
+    return _RESTORE_LOCKS.setdefault(key, asyncio.Lock())
+
+
 async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict:
     """用指定备份文件把目标覆盖回备份当时的状态（admin 手动触发，不可逆操作）。"""
     bk = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
@@ -936,27 +983,40 @@ async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict
     path = _backup_file_path(bid, filename)
     if not _restoreable(bk["kind"], os.path.basename(path)):
         raise RuntimeError("该备份类型不支持自动恢复，请手工恢复")
-    log: list[str] = [f"==> 恢复 {os.path.basename(path)}（kind={bk['kind']}, target={bk['target']}）"]
+    # 同一个目标不叠两次恢复。两个 admin 各开一个页面、各点一次「恢复」是很常见的操作
+    # 现场，而两次恢复都先 stop 服务、再按各自的归档覆盖同一目录、再 start：后一次会把
+    # 前一次的成果整份换掉，先返回的那句「恢复完成」当场变成假的。锁按 kind:target 分，
+    # 不同互不相干的备份任务不必排队。
+    # locked() 与 acquire() 之间没有可挂起的 await（无竞争时 acquire 直接返回、不交还
+    # 控制权），所以"检测到忙就拒绝"不会被第二个请求钻过去。
+    lock = _restore_lock(f"{bk['kind']}:{bk['target']}")
+    if lock.locked():
+        raise RuntimeError(f"同一目标（{bk['target']}）的恢复正在进行，请等它结束后再试")
+    await lock.acquire()
     try:
-        if bk["kind"] == "sqlite":
-            await _restore_sqlite(bk, path, log)
-        elif bk["kind"] == "app":
-            await _restore_app(bk, path, log)
-        else:
-            await _restore_pg(bk, path, log)
-    except Exception as e:  # noqa: BLE001
-        # 半途失败时 log 里那句「解包中断：目录可能处于半恢复状态，服务保持停止」是用户
-        # 唯一能照着处理的现场说明。旧写法只把异常往上抛，这段说明连同整个 log 一起丢了，
-        # 界面上一行 "恢复失败: …"，没人知道服务其实被恢复流程停掉了、目录是半新的。
-        raise RuntimeError(f"{e}\n\n执行记录：\n" + "\n".join(log)) from e
-    # actor 由路由传当前登录用户：覆盖线上数据这种事记成 "system" 等于没记
-    dbm.audit(actor, "backup:restore", f"{bid}:{os.path.basename(path)}")
-    # 数据确实装上了，但日志里有 `!!` 行 = 有一件事要人接手（服务没起来、按最大库定位、
-    # 归档环境变量生效）。这些行过去只藏在 log 里，而界面收到 ok:true 就一律报
-    # 「恢复完成」——绿色成功提示正好把要处理的那行盖住。单独带出来给前端定调性。
-    # 整段遮一次凭据：pg_restore/tar 的原文里带过连接串，而这段文字要进浏览器。
-    masked = redact_creds("\n".join(log))
-    return {"ok": True, "warn": [line for line in masked.splitlines() if line.startswith("!!")], "log": masked}
+        log: list[str] = [f"==> 恢复 {os.path.basename(path)}（kind={bk['kind']}, target={bk['target']}）"]
+        try:
+            if bk["kind"] == "sqlite":
+                await _restore_sqlite(bk, path, log)
+            elif bk["kind"] == "app":
+                await _restore_app(bk, path, log)
+            else:
+                await _restore_pg(bk, path, log)
+        except Exception as e:  # noqa: BLE001
+            # 半途失败时 log 里那句「解包中断：目录可能处于半恢复状态，服务保持停止」是用户
+            # 唯一能照着处理的现场说明。旧写法只把异常往上抛，这段说明连同整个 log 一起丢了，
+            # 界面上一行 "恢复失败: …"，没人知道服务其实被恢复流程停掉了、目录是半新的。
+            raise RuntimeError(f"{e}\n\n执行记录：\n" + "\n".join(log)) from e
+        # actor 由路由传当前登录用户：覆盖线上数据这种事记成 "system" 等于没记
+        dbm.audit(actor, "backup:restore", f"{bid}:{os.path.basename(path)}")
+        # 数据确实装上了，但日志里有 `!!` 行 = 有一件事要人接手（服务没起来、按最大库定位、
+        # 归档环境变量生效）。这些行过去只藏在 log 里，而界面收到 ok:true 就一律报
+        # 「恢复完成」——绿色成功提示正好把要处理的那行盖住。单独带出来给前端定调性。
+        # 整段遮一次凭据：pg_restore/tar 的原文里带过连接串，而这段文字要进浏览器。
+        masked = redact_creds("\n".join(log))
+        return {"ok": True, "warn": [line for line in masked.splitlines() if line.startswith("!!")], "log": masked}
+    finally:
+        lock.release()
 
 
 async def run_backup_now(bid: int) -> dict:

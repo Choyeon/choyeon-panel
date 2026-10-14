@@ -36,8 +36,8 @@ os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch5p_roots
 from app import backup_runner as R
 from app import config
 from app import database as dbm
+from app.services import apps_service, systemd_ops
 from app.services import backup_service as B
-from app.services import systemd_ops
 
 
 def _mk_db(path: str, value: str) -> None:
@@ -258,6 +258,10 @@ class TestAppRestoreEnvHonesty(_Tmp):
         app = {"id": 7, "name": "p5p", "path": self.appdir, "unit_override": None}
         for p in (
             mock.patch.object(dbm, "query_one", return_value=app),
+            # 这里的 query_one 是无条件返回 app，恢复新增的"部署进行中"闸会把 app 字典
+            # 误读成一条 running 部署记录。本用例测的是 .panel.env 的回写口径，闸本身
+            # 由批次㉘（test_batch28）单独覆盖。
+            mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None),
             mock.patch.object(systemd_ops, "is_active", _false),
             mock.patch.object(systemd_ops, "service_action", _none),
         ):

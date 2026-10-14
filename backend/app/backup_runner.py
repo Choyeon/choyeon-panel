@@ -141,7 +141,10 @@ def main(bk: dict):
             file = _free_path(bk["id"], ts, ".sql.gz", BACKUP_DIR)
             producer = "su -s /bin/sh postgres -c 'pg_dumpall'"
         else:
-            if not re.match(r"^[a-z_][a-z0-9_]{0,62}$", bk["target"]):
+            # fullmatch：`$` 在 re.match 下允许尾部一个换行过关，"appdb\n" 会走到下一行
+            # 直接被拼进 `sh -c 'pg_dump -Fc appdb\n'`——换行在 shell 里断行，等价于往
+            # 那条 root→postgres 的命令串里多塞一个参数/一条命令。
+            if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", bk["target"]):
                 raise SystemExit("库名不合法")
             file = _free_path(bk["id"], ts, ".dump.gz", BACKUP_DIR)
             producer = f"su -s /bin/sh postgres -c 'pg_dump -Fc {bk['target']}'"

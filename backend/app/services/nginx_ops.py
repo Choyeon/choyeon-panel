@@ -683,7 +683,7 @@ async def quick_edit_config(path: str, kind: str, value: str | None = None) -> d
         )
         c = c.replace(m.group(0), f"{m.group(0)}\n{upgrade_headers}")
     elif kind == "body":
-        if not re.match(r"^\d{1,4}[kmg]$", value or "", re.I):
+        if not re.fullmatch(r"\d{1,4}[kmg]", value or "", re.I):
             raise RuntimeError("大小格式应如 50m / 1g")
         if re.search(r"client_max_body_size", c):
             c = re.sub(r"client_max_body_size\s+[^;]+;", f"client_max_body_size {value};", c, count=1)

@@ -40,8 +40,8 @@ os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch5q_roots
 from app import backup_runner as R
 from app import config
 from app import database as dbm
+from app.services import apps_service, cert_ops, nginx_ops, systemd_ops
 from app.services import backup_service as B
-from app.services import cert_ops, nginx_ops, systemd_ops
 
 
 def _db_with_rows(path: str, value: str = "current") -> None:
@@ -339,6 +339,11 @@ class TestAppArchiveMustHaveMembers(_Tmp):
         log: list[str] = []
         with ExitStack() as st:
             st.enter_context(mock.patch.object(dbm, "query_one", return_value=self._app(9)))
+            # query_one 在这里无条件返回 app，恢复新增的"部署进行中"闸会把那条 running
+            # 部署的查询读成命中。闸本身由 test_batch28 覆盖，本用例只测 0 条目硬挡。
+            st.enter_context(
+                mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None)
+            )
             st.enter_context(mock.patch.object(systemd_ops, "is_active", _false))
             st.enter_context(mock.patch.object(systemd_ops, "service_action", rec_action))
             st.enter_context(mock.patch.object(B, "run_in_threadpool", _passthrough))
@@ -358,6 +363,9 @@ class TestAppArchiveMustHaveMembers(_Tmp):
         log: list[str] = []
         with ExitStack() as st:
             st.enter_context(mock.patch.object(dbm, "query_one", return_value=self._app(10)))
+            st.enter_context(
+                mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None)
+            )
             st.enter_context(mock.patch.object(systemd_ops, "is_active", _false))
             st.enter_context(mock.patch.object(systemd_ops, "service_action", _none))
             asyncio.run(B._restore_app({"id": 10, "kind": "app", "target": "p5q"}, p, log))

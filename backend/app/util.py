@@ -2,7 +2,9 @@ import asyncio
 import os
 import re
 import subprocess
+import threading
 from contextlib import suppress
+from pathlib import Path
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}$")
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
@@ -65,6 +67,33 @@ def sub_port(text, old, new):
     if not text or old in (None, "") or new in (None, "") or str(old) == str(new):
         return text
     return re.sub(rf"(?<!\d){re.escape(str(old))}(?!\d)", str(new), str(text))
+
+
+def write_secret_atomic(target, text):
+    """含凭据/布局信息的落盘文件统一走这里：0600 从创建起生效，且整份替换。
+
+    旧写法是 write_text + chmod：O_CREAT 按 umask（root 常态 022 → 0644）建文件，
+    chmod 排在写完之后，新 .panel.env 从出现的第一刻起就世界可读，直到那一下 chmod
+    为止——同机任意用户在这个窗口 cat 一下，口令就漏了。而且就地截断重写时，
+    写一半被磁盘满/断电打断，目标文件剩半截：.env 当场变成不可解析的配置，
+    unit 则留到下一次 daemon-reload 才炸，报一句和这次保存无关的语法错误。
+    同目录 O_EXCL 临时文件（0600）+ fsync + os.replace：要么旧内容要么新内容，
+    新文件从建立起就是 0600，全程没有可读窗口，也没有半截态。
+    """
+    target = Path(str(target))
+    parent = str(target.parent)
+    tmp = os.path.join(parent, f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, str(target))
+    except OSError as e:
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise RuntimeError(f"写入 {target.name} 失败：{e}") from e
 
 
 def redact_creds(s):

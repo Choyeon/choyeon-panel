@@ -175,7 +175,7 @@ def _post(url: str, payload: dict):
 
 def _telegram_configured(bot: str, chat: str) -> bool:
     """bot token 形如 `123456:ABC-DEF...`；填反了（chat 当 token）时 URL 会拼出畸形请求。"""
-    return bool(bot and chat) and bool(re.match(r"^\d{6,}:[\w-]{20,}$", bot.strip()))
+    return bool(bot and chat) and bool(re.fullmatch(r"\d{6,}:[\w-]{20,}", bot.strip()))
 
 
 async def notify(text: str) -> bool:
