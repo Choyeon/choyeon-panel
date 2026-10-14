@@ -153,7 +153,7 @@ const filtered = computed(() => {
   <div>
     <PageHeader title="用户管理" sub="管理员可执行全部操作；只读账号可看监控/日志/数据，但不能启停、部署、删除或使用终端。两步验证由各账号在设置页自行开关，这里只显示状态">
       <template #actions>
-        <NInput v-model:value="kw" placeholder="搜索用户名/昵称" size="small" clearable style="width: 180px">
+        <NInput v-model:value="kw" placeholder="搜索用户名/昵称" size="small" clearable style="width: 180px; max-width: 100%">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
         <NButton size="small" tertiary :loading="busy" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>

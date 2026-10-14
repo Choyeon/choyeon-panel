@@ -214,20 +214,20 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
       <NTabPane name="journal" tab="系统日志检索">
         <NSpace :size="8" wrap align="end" style="margin-bottom: var(--space-3)">
           <NSelect
-            :value="jf.unit" size="small" style="width: 210px" filterable aria-label="按 unit 过滤"
+            :value="jf.unit" size="small" style="width: 210px; max-width: 100%" filterable aria-label="按 unit 过滤"
             :options="unitOpts" placeholder="全部 unit"
             @update:value="(v: string) => { jf.unit = v; }"
           />
-          <NInput :value="jf.since" size="small" style="width: 152px" placeholder="起始 30min/6h" aria-label="起始时间" @update:value="(v: string) => { jf.since = v; }" />
-          <NInput :value="jf.until" size="small" style="width: 152px" placeholder="结束（留空=现在）" aria-label="结束时间" @update:value="(v: string) => { jf.until = v; }" />
+          <NInput :value="jf.since" size="small" style="width: 152px; max-width: 100%" placeholder="起始 30min/6h" aria-label="起始时间" @update:value="(v: string) => { jf.since = v; }" />
+          <NInput :value="jf.until" size="small" style="width: 152px; max-width: 100%" placeholder="结束（留空=现在）" aria-label="结束时间" @update:value="(v: string) => { jf.until = v; }" />
           <NSelect
-            :value="jf.level" size="small" style="width: 132px" clearable aria-label="按级别过滤" placeholder="全部级别"
+            :value="jf.level" size="small" style="width: 132px; max-width: 100%" clearable aria-label="按级别过滤" placeholder="全部级别"
             :options="LEVELS.map((l) => ({ label: `${PRIO_CN[l] || l} (${l})`, value: l }))"
             @update:value="(v: string) => { jf.level = v || ''; }"
           />
-          <NInput :value="jf.grep" size="small" style="width: 220px" placeholder="关键词（PCRE 正则）" aria-label="关键词" @update:value="(v: string) => { jf.grep = v; }" @keyup.enter="searchJournal()" />
+          <NInput :value="jf.grep" size="small" style="width: 220px; max-width: 100%" placeholder="关键词（PCRE 正则）" aria-label="关键词" @update:value="(v: string) => { jf.grep = v; }" @keyup.enter="searchJournal()" />
           <NSelect
-            :value="jf.limit || null" size="small" style="width: 122px" aria-label="返回行数"
+            :value="jf.limit || null" size="small" style="width: 122px; max-width: 100%" aria-label="返回行数"
             :options="lineOpts" placeholder="行数"
             @update:value="(v: number) => { jf.limit = v; }"
           />
@@ -261,13 +261,13 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
                候选文件还没取、行数清单还没回来时，框里是一个孤零零的数字而不是提示语。
                文件那个 0 是合法序号（第一个候选），所以要按"有没有候选"判，不能按真假判。 -->
           <NSelect
-            :value="nginxFileOpts.length ? nf.file : null" size="small" style="width: 260px" :options="nginxFileOpts" :disabled="!nginxFileOpts.length"
+            :value="nginxFileOpts.length ? nf.file : null" size="small" style="width: 260px; max-width: 100%" :options="nginxFileOpts" :disabled="!nginxFileOpts.length"
             filterable placeholder="先取一次候选文件" aria-label="日志文件"
             @update:value="(v: number) => { nf.file = v; }"
           />
-          <NInput :value="nf.filter" size="small" style="width: 220px" placeholder="过滤词（子串，不区分大小写）" aria-label="过滤词" @update:value="(v: string) => { nf.filter = v; }" @keyup.enter="tailNginx" />
+          <NInput :value="nf.filter" size="small" style="width: 220px; max-width: 100%" placeholder="过滤词（子串，不区分大小写）" aria-label="过滤词" @update:value="(v: string) => { nf.filter = v; }" @keyup.enter="tailNginx" />
           <NSelect
-            :value="nf.lines || null" size="small" style="width: 122px" aria-label="尾读行数"
+            :value="nf.lines || null" size="small" style="width: 122px; max-width: 100%" aria-label="尾读行数"
             :options="lineOpts" placeholder="行数"
             @update:value="(v: number) => { nf.lines = v; }"
           />

@@ -327,9 +327,9 @@ const rangeHint = computed(() => {
         <div class="field">
           <span class="lab">端口</span>
           <NSpace :size="8" align="center">
-            <NInput v-model:value="form.port" type="text" placeholder="8080" maxlength="5" style="width: 110px" />
+            <NInput v-model:value="form.port" type="text" placeholder="8080" maxlength="5" style="width: 110px; max-width: 100%" />
             <NText depth="3" style="font-size: var(--fs-xs)">到</NText>
-            <NInput v-model:value="form.port_to" type="text" placeholder="可空" maxlength="5" style="width: 110px" />
+            <NInput v-model:value="form.port_to" type="text" placeholder="可空" maxlength="5" style="width: 110px; max-width: 100%" />
           </NSpace>
         </div>
         <div class="field"><span class="lab"></span><NText depth="3" style="font-size: var(--fs-2xs)">{{ rangeHint }}</NText></div>
@@ -357,11 +357,11 @@ const rangeHint = computed(() => {
         </div>
         <div class="field">
           <span class="lab">来源</span>
-          <NInput v-model:value="form.source" placeholder="留空表示任意地址；或 10.0.0.0/8" style="width: 240px" />
+          <NInput v-model:value="form.source" placeholder="留空表示任意地址；或 10.0.0.0/8" style="width: 240px; max-width: 100%" />
         </div>
         <div class="field">
           <span class="lab">备注</span>
-          <NInput v-model:value="form.comment" placeholder="例如 office vpn" maxlength="40" style="width: 240px" />
+          <NInput v-model:value="form.comment" placeholder="例如 office vpn" maxlength="40" style="width: 240px; max-width: 100%" />
         </div>
         <NText v-if="isFirewalld && !form.source" depth="3" style="font-size: var(--fs-2xs)">
           firewalld 上无来源的放行会写成端口规则；带来源则写成 rich rule（面板按来源的地址族选 IPv4/IPv6）。

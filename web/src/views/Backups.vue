@@ -294,7 +294,7 @@ async function submit() {
         <NButton size="small" tertiary :icon="icon('FolderOpenOutline', 14)" @click="router.push('/backups/files')">备份文件</NButton>
       </template>
       <template #right>
-        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px" aria-label="自动刷新间隔" />
+        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px; max-width: 100%" aria-label="自动刷新间隔" />
         <NButton size="small" tertiary :loading="loading || refreshing" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
       </template>
 
@@ -334,7 +334,7 @@ async function submit() {
                     filterable
                     tag
                     placeholder="选择数据库"
-                    style="width: 230px"
+                    style="width: 230px; max-width: 100%"
                     aria-label="数据库名称"
                   />
                   <NButton size="small" tertiary @click="form.target = 'all'">全部</NButton>
@@ -356,8 +356,8 @@ async function submit() {
             </NFormItem>
             <NFormItem v-if="form.schedule !== 'manual'" label="执行时刻">
               <NSpace align="center" :size="8">
-                <NInputNumber v-model:value="form.hour" :min="0" :max="23" :input-props="{ 'aria-label': '执行小时' }" style="width: 84px" /> 时
-                <NInputNumber v-model:value="form.minute" :min="0" :max="59" :input-props="{ 'aria-label': '执行分钟' }" style="width: 84px" /> 分（本地时区）
+                <NInputNumber v-model:value="form.hour" :min="0" :max="23" :input-props="{ 'aria-label': '执行小时' }" style="width: 84px; max-width: 100%" /> 时
+                <NInputNumber v-model:value="form.minute" :min="0" :max="59" :input-props="{ 'aria-label': '执行分钟' }" style="width: 84px; max-width: 100%" /> 分（本地时区）
               </NSpace>
             </NFormItem>
             <NSpace justify="space-between" align="center" style="width: 100%">
@@ -366,7 +366,7 @@ async function submit() {
             </NSpace>
             <NFormItem label="保留份数">
               <NSpace vertical :size="2">
-                <NInputNumber v-model:value="form.keep" :min="1" :max="365" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px" />
+                <NInputNumber v-model:value="form.keep" :min="1" :max="365" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px; max-width: 100%" />
                 <span class="cp-help">超出份数后由任务自动裁剪最旧的产物（按写入顺序删，同一秒生成的多份按序号排；不是按文件名的字母序）。</span>
               </NSpace>
             </NFormItem>

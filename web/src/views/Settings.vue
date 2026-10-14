@@ -381,27 +381,27 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <CpSettingRow label="通用 Webhook URL" :value="mask(alerts.alert_webhook_url)" @edit="openChan('alert_webhook_url')" />
           <CpSettingRow label="磁盘阈值 %" :help="critHint('alert_disk_pct')">
             <template #control>
-              <NInputNumber :value="alerts.alert_disk_pct" :min="lim('alert_disk_pct').min" :max="lim('alert_disk_pct').max" style="width: 118px" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
+              <NInputNumber :value="alerts.alert_disk_pct" :min="lim('alert_disk_pct').min" :max="lim('alert_disk_pct').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="SSL 剩余天数">
             <template #control>
-              <NInputNumber :value="alerts.alert_ssl_days" :min="lim('alert_ssl_days').min" :max="lim('alert_ssl_days').max" style="width: 118px" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" @update:value="commitNum('alert_ssl_days', $event)" />
+              <NInputNumber :value="alerts.alert_ssl_days" :min="lim('alert_ssl_days').min" :max="lim('alert_ssl_days').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" @update:value="commitNum('alert_ssl_days', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="CPU 阈值 %" :help="critHint('alert_cpu_pct')">
             <template #control>
-              <NInputNumber :value="alerts.alert_cpu_pct" :min="lim('alert_cpu_pct').min" :max="lim('alert_cpu_pct').max" style="width: 118px" :input-props="{ 'aria-label': 'CPU 使用率阈值百分比' }" @update:value="commitNum('alert_cpu_pct', $event)" />
+              <NInputNumber :value="alerts.alert_cpu_pct" :min="lim('alert_cpu_pct').min" :max="lim('alert_cpu_pct').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': 'CPU 使用率阈值百分比' }" @update:value="commitNum('alert_cpu_pct', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="内存阈值 %" :help="critHint('alert_mem_pct')">
             <template #control>
-              <NInputNumber :value="alerts.alert_mem_pct" :min="lim('alert_mem_pct').min" :max="lim('alert_mem_pct').max" style="width: 118px" :input-props="{ 'aria-label': '内存使用率阈值百分比' }" @update:value="commitNum('alert_mem_pct', $event)" />
+              <NInputNumber :value="alerts.alert_mem_pct" :min="lim('alert_mem_pct').min" :max="lim('alert_mem_pct').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '内存使用率阈值百分比' }" @update:value="commitNum('alert_mem_pct', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="load1 ×核数" help="这一条只决定告警。概览的负载环按物理饱和度变色（满一格是每核一个排队任务），不会跟着这个倍数走。">
             <template #control>
-              <NInputNumber :value="alerts.alert_load1_x" :min="lim('alert_load1_x').min" :max="lim('alert_load1_x').max" style="width: 118px" :input-props="{ 'aria-label': '一分钟负载阈值倍数' }" @update:value="commitNum('alert_load1_x', $event)" />
+              <NInputNumber :value="alerts.alert_load1_x" :min="lim('alert_load1_x').min" :max="lim('alert_load1_x').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '一分钟负载阈值倍数' }" @update:value="commitNum('alert_load1_x', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="应用探活">
@@ -411,17 +411,17 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           </CpSettingRow>
           <CpSettingRow label="期望状态码" help="失焦或回车即保存">
             <template #control>
-              <NInput :value="alerts.alert_probe_expect" size="small" style="width: 130px" placeholder="2xx/3xx" :input-props="{ 'aria-label': '全局探活期望状态码' }" @change="commitExpect" />
+              <NInput :value="alerts.alert_probe_expect" size="small" style="width: 130px; max-width: 100%" placeholder="2xx/3xx" :input-props="{ 'aria-label': '全局探活期望状态码' }" @change="commitExpect" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="历史保留天数">
             <template #control>
-              <NInputNumber :value="alerts.alert_keep_days" :min="lim('alert_keep_days').min" :max="lim('alert_keep_days').max" style="width: 118px" :input-props="{ 'aria-label': '告警历史保留天数' }" @update:value="commitNum('alert_keep_days', $event)" />
+              <NInputNumber :value="alerts.alert_keep_days" :min="lim('alert_keep_days').min" :max="lim('alert_keep_days').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '告警历史保留天数' }" @update:value="commitNum('alert_keep_days', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="历史上限行">
             <template #control>
-              <NInputNumber :value="alerts.alert_keep_rows" :min="lim('alert_keep_rows').min" :max="lim('alert_keep_rows').max" :step="100" style="width: 118px" :input-props="{ 'aria-label': '告警历史最多保留行数' }" @update:value="commitNum('alert_keep_rows', $event)" />
+              <NInputNumber :value="alerts.alert_keep_rows" :min="lim('alert_keep_rows').min" :max="lim('alert_keep_rows').max" :step="100" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '告警历史最多保留行数' }" @update:value="commitNum('alert_keep_rows', $event)" />
             </template>
           </CpSettingRow>
           <CpSettingRow label="按应用覆写期望状态码" help="探活只看端口是否应答：连不上或超时才算 crit，4xx/5xx 说明进程还在。覆写值留空即回落到上面的全局期望。">
@@ -429,14 +429,14 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
               <NSpace vertical :size="6" style="width: 100%">
                 <NSpace v-for="row in probeList" :key="row.name" align="center" :size="8">
                   <span class="mono-dim cp-break" style="min-width: 148px">{{ row.name }}</span>
-                  <NInput :value="row.expect" size="tiny" style="width: 132px" placeholder="200 204" :input-props="{ 'aria-label': `${row.name} 的期望状态码` }" @update:value="(v: string) => { row.expect = v; }" />
+                  <NInput :value="row.expect" size="tiny" style="width: 132px; max-width: 100%" placeholder="200 204" :input-props="{ 'aria-label': `${row.name} 的期望状态码` }" @update:value="(v: string) => { row.expect = v; }" />
                   <NButton size="tiny" tertiary :icon="ico('SaveOutline', 12)" @click="saveProbeRow(row)">保存</NButton>
                   <NButton size="tiny" tertiary :icon="ico('TrashOutline', 12)" aria-label="删除该覆写" @click="dropProbeRow(row.name)">删除</NButton>
                 </NSpace>
                 <EmptyBox v-if="!probeList.length" text="还没有按应用覆写，默认全部走全局期望状态码" />
                 <NSpace align="center" :size="8">
-                  <NInput v-model:value="probeDraft.name" size="tiny" style="width: 148px" placeholder="应用名" :input-props="{ 'aria-label': '新增覆写的应用名' }" @keyup.enter="addProbeRow" />
-                  <NInput v-model:value="probeDraft.expect" size="tiny" style="width: 132px" placeholder="200 204" :input-props="{ 'aria-label': '新增覆写的期望状态码' }" @keyup.enter="addProbeRow" />
+                  <NInput v-model:value="probeDraft.name" size="tiny" style="width: 148px; max-width: 100%" placeholder="应用名" :input-props="{ 'aria-label': '新增覆写的应用名' }" @keyup.enter="addProbeRow" />
+                  <NInput v-model:value="probeDraft.expect" size="tiny" style="width: 132px; max-width: 100%" placeholder="200 204" :input-props="{ 'aria-label': '新增覆写的期望状态码' }" @keyup.enter="addProbeRow" />
                   <NButton size="tiny" tertiary :icon="ico('AddOutline', 12)" @click="addProbeRow">新增覆写</NButton>
                 </NSpace>
               </NSpace>

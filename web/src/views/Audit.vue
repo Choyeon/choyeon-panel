@@ -78,11 +78,11 @@ const cols: any[] = [
   <div>
     <PageHeader title="操作审计" sub="面板内全部写操作留痕：部署、启停、删除、配置修改、终端会话与登录口令变更">
       <template #actions>
-        <NInput v-model:value="kw" placeholder="过滤用户/操作/详情" size="small" clearable style="width: 200px">
+        <NInput v-model:value="kw" placeholder="过滤用户/操作/详情" size="small" clearable style="width: 200px; max-width: 100%">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
         <NSelect
-          :value="shownLimit" size="small" style="width: 126px" aria-label="加载条数"
+          :value="shownLimit" size="small" style="width: 126px; max-width: 100%" aria-label="加载条数"
           :options="limitOpts" :loading="!limitOpts.length"
           @update:value="(v: number) => { limit = v; }"
         />

@@ -237,16 +237,16 @@ async function saveTtl() {
         <NSpace v-if="isAdmin" align="end" :size="8" wrap>
           <NInput
             v-if="type === 'hash'" v-model:value="addForm.field" size="tiny" placeholder="field"
-            style="width: 140px" :input-props="{ class: 'mono', 'aria-label': '新增条目的 field' }"
+            style="width: 140px; max-width: 100%" :input-props="{ class: 'mono', 'aria-label': '新增条目的 field' }"
           />
           <NInput
             v-model:value="addForm.value" size="tiny" :placeholder="type === 'hash' ? 'value' : '要新增的值'"
-            style="width: 190px" :input-props="{ class: 'mono', 'aria-label': '新增条目的值' }"
+            style="width: 190px; max-width: 100%" :input-props="{ class: 'mono', 'aria-label': '新增条目的值' }"
             @keyup.enter="addMember"
           />
           <NInput
             v-if="type === 'zset'" v-model:value="addForm.score" size="tiny" placeholder="score"
-            style="width: 90px" :input-props="{ class: 'mono', 'aria-label': 'sorted set 的 score' }"
+            style="width: 90px; max-width: 100%" :input-props="{ class: 'mono', 'aria-label': 'sorted set 的 score' }"
           />
           <NButton size="tiny" tertiary type="primary" :loading="busy" :icon="addIco" @click="addMember">新增条目</NButton>
         </NSpace>
@@ -257,7 +257,7 @@ async function saveTtl() {
       <div v-if="isAdmin" class="ttl-row">
         <NText depth="3" class="ttl-label">过期时间</NText>
         <NInput
-          v-model:value="ttlDraft" size="tiny" style="width: 128px"
+          v-model:value="ttlDraft" size="tiny" style="width: 128px; max-width: 100%"
           :placeholder="detail.ttl === -1 ? '秒数，如 3600' : `当前 ${detail.ttl}s`"
           :input-props="{ class: 'mono', 'aria-label': 'TTL 秒数' }"
           @keyup.enter="saveTtl"

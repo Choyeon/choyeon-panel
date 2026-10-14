@@ -488,7 +488,9 @@ watch(
           <template v-else>
             <NDynamicInput v-model:value="env" :on-create="() => ({ k: '', v: '' })">
               <template #default="{ value }">
-                <NInput v-model:value="value.k" placeholder="KEY" style="width: 220px; margin-right: var(--space-2)" :input-props="{ class: 'mono', 'aria-label': '环境变量名' }" />
+                <!-- KEY 写死 220px：375px 屏上 220+8+两枚按钮(~64) 之后，
+                     flex:1 的值栏只剩 ~30px，环境变量根本没法编辑。 -->
+                <NInput v-model:value="value.k" placeholder="KEY" style="width: clamp(110px, 38%, 220px); margin-right: var(--space-2)" :input-props="{ class: 'mono', 'aria-label': '环境变量名' }" />
                 <NInput v-model:value="value.v" placeholder="value" style="flex: 1" :input-props="{ class: 'mono', 'aria-label': '环境变量值' }" />
               </template>
               <!-- 默认的行内按钮是两块无名的圆形图标按钮：读屏只念得出「按钮」，
@@ -553,7 +555,7 @@ watch(
           <div style="flex: 1; min-width: 0">
             <NSpace v-if="isAdmin" size="small" style="margin-bottom: var(--space-3)" wrap>
               <NButton size="small" tertiary round :disabled="!ngxFile || ngxFile.analysis.websocket || ngxSaving" :loading="ngxSaving" :icon="ico('PulseOutline')" @click="quick('ws')">添加 WebSocket 支持</NButton>
-              <NInput v-model:value="bodySizeVal" size="small" style="width: 80px" placeholder="50m" :input-props="{ 'aria-label': '上传大小限制' }" />
+              <NInput v-model:value="bodySizeVal" size="small" style="width: 80px; max-width: 100%" placeholder="50m" :input-props="{ 'aria-label': '上传大小限制' }" />
               <NButton size="small" tertiary round :disabled="!ngxFile || ngxSaving" :loading="ngxSaving" :icon="ico('DownloadOutline')" @click="quick('body')">设置上传限制</NButton>
               <NButton size="small" tertiary round :disabled="!ngxFile || !ngxFile.analysis.ssl || ngxFile.analysis.httpsRedirect || ngxSaving" :loading="ngxSaving" :icon="ico('ShieldCheckmarkOutline')" @click="quick('redirect')">强制 HTTPS 跳转</NButton>
             </NSpace>
@@ -607,7 +609,7 @@ watch(
           </NSpace>
           <div class="cp-help">要求该域名 DNS A 记录已指向本机 IP。申请成功后自动切换为 HTTPS 反代并开启 80 → 443 跳转。</div>
           <NSpace>
-            <NInput v-model:value="sslEmail" :disabled="!isAdmin" placeholder="邮箱（可选，用于到期通知）" style="width: 300px" :input-props="{ 'aria-label': 'SSL 到期通知邮箱' }" />
+            <NInput v-model:value="sslEmail" :disabled="!isAdmin" placeholder="邮箱（可选，用于到期通知）" style="width: 300px; max-width: 100%" :input-props="{ 'aria-label': 'SSL 到期通知邮箱' }" />
             <NButton v-if="isAdmin" type="primary" round :disabled="!app.domain || acting === 'ssl'" :loading="acting === 'ssl'" :icon="ico('KeyOutline')" @click="ssl">申请 / 配置证书</NButton>
           </NSpace>
         </NSpace>

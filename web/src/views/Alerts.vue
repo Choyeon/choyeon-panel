@@ -222,11 +222,11 @@ async function runRound(kind: 'run' | 'probe') {
         </template>
       </template>
       <template #right>
-        <NInput v-model:value="kw" placeholder="过滤来源/内容" size="small" clearable style="width: 200px">
+        <NInput v-model:value="kw" placeholder="过滤来源/内容" size="small" clearable style="width: 200px; max-width: 100%">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
         <NSelect
-          :value="level" size="small" style="width: 200px" aria-label="按级别过滤"
+          :value="level" size="small" style="width: 200px; max-width: 100%" aria-label="按级别过滤"
           :options="[
             { label: '全部级别', value: '' },
             { label: '仅严重', value: 'crit' },
@@ -236,7 +236,7 @@ async function runRound(kind: 'run' | 'probe') {
           @update:value="(v: string) => { level = v; }"
         />
         <NSelect
-          :value="shownLimit" size="small" style="width: 110px" aria-label="加载条数"
+          :value="shownLimit" size="small" style="width: 110px; max-width: 100%" aria-label="加载条数"
           :options="limitOpts" :loading="!limitOpts.length"
           @update:value="(v: number) => { limit = v; }"
         />

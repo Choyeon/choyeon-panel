@@ -404,7 +404,7 @@ const cols: any[] = [
         <NButton v-if="isAdmin" size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建任务</NButton>
       </template>
       <template #right>
-        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px" aria-label="自动刷新间隔" />
+        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px; max-width: 100%" aria-label="自动刷新间隔" />
         <NButton size="small" tertiary :loading="busy" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
       </template>
 
@@ -483,7 +483,7 @@ const cols: any[] = [
               <NFormItem v-if="isLogs" label="尾读行数">
                 <NSpace vertical :size="2" style="width: 100%">
                   <NInputNumber
-                    :value="form.lines" :min="linesMin" :max="linesMax" style="width: 140px"
+                    :value="form.lines" :min="linesMin" :max="linesMax" style="width: 140px; max-width: 100%"
                     aria-label="尾读行数" @update:value="(v: number | null) => { form.lines = v ?? linesDefault; }"
                   />
                   <span class="cp-help">拼成 choyeonctl logs --lines=N，取值 {{ linesMin }}-{{ linesMax }}，区间由服务端白名单下发；logs 之后不再接受其它参数，定时任务的输出服务端只保留最后 {{ keepBytes }} 字节。</span>

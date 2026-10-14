@@ -432,7 +432,7 @@ async function delKeys(keys: string[]) {
           <NSpace vertical :size="12" style="width: 100%">
             <NSpace align="center" :size="10">
               <NText depth="3" style="font-size: var(--fs-xs)">执行库</NText>
-              <NSelect v-model:value="sqlDb" :options="sqlOptions" size="small" style="width: 200px" placeholder="选择数据库" aria-label="SQL 执行的数据库" />
+              <NSelect v-model:value="sqlDb" :options="sqlOptions" size="small" style="width: 200px; max-width: 100%" placeholder="选择数据库" aria-label="SQL 执行的数据库" />
               <NText depth="3" style="font-size: var(--fs-xs)">语句只在上面选中的库里执行</NText>
             </NSpace>
             <NInput
@@ -453,7 +453,7 @@ async function delKeys(keys: string[]) {
           <NSpace vertical :size="12">
             <NSpace align="center" :size="10" wrap>
               <NText depth="3" style="font-size: var(--fs-xs)">数据库</NText>
-              <NSelect v-model:value="brDb" :options="dbOptions" size="small" style="width: 200px" placeholder="选择数据库" aria-label="浏览的数据库" @update:value="loadTables" />
+              <NSelect v-model:value="brDb" :options="dbOptions" size="small" style="width: 200px; max-width: 100%" placeholder="选择数据库" aria-label="浏览的数据库" @update:value="loadTables" />
               <NText depth="3" style="font-size: var(--fs-xs)">共 {{ tables.length }} 张表</NText>
             </NSpace>
             <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" :row-key="(r: any) => `${r.schema}.${r.name}`" class="cp-tbl tbl-dbs-browse" max-height="var(--table-h)" :scroll-x="560">
@@ -478,7 +478,7 @@ async function delKeys(keys: string[]) {
         <NTabPane name="rbr" tab="Redis 浏览器">
           <NSpace vertical :size="12">
             <NSpace align="center" :size="8" wrap>
-              <NInput v-model:value="rPattern" size="small" placeholder="匹配模式，如 session:*" style="width: 220px" :input-props="{ 'aria-label': 'Redis key 匹配模式', class: 'mono' }" @keyup.enter="scanKeys(false)" />
+              <NInput v-model:value="rPattern" size="small" placeholder="匹配模式，如 session:*" style="width: 220px; max-width: 100%" :input-props="{ 'aria-label': 'Redis key 匹配模式', class: 'mono' }" @keyup.enter="scanKeys(false)" />
               <NButton size="small" type="primary" :loading="rBusy" :icon="ico('SearchOutline')" @click="scanKeys(false)">扫描</NButton>
               <NButton v-if="rCursor !== '0'" size="small" tertiary :loading="rBusy" :icon="ico('RefreshCircleOutline')" @click="scanKeys(true)">加载更多</NButton>
               <NText depth="3" style="font-size: var(--fs-xs)">已加载 {{ rKeys.length }} 个 key</NText>
@@ -522,20 +522,22 @@ async function delKeys(keys: string[]) {
         <NTabPane name="redis" tab="Redis">
           <EmptyBox v-if="redis?.error" :text="`Redis 连接失败：${redis.error}`" />
           <template v-else-if="redis">
-            <NGrid cols="2 s:4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">版本</div><div class="rv">{{ redis.info?.redis_version || '—' }}</div></NCard></NGridItem>
-              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">运行模式</div><div class="rv">{{ redis.info?.redis_mode || '—' }} / {{ redis.authed ? '面板密码' : 'redis.conf' }}</div></NCard></NGridItem>
-              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">连接客户端</div><div class="rv">{{ redis.info?.connected_clients ?? '—' }}</div></NCard></NGridItem>
-              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">Key 总数</div><div class="rv">{{ redis.dbsize ?? '—' }}</div></NCard></NGridItem>
-              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">内存占用</div><div class="rv">{{ redis.info?.used_memory_human || '—' }}</div></NCard></NGridItem>
-              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">运行时长</div><div class="rv">{{ Math.round((redis.info?.uptime_in_seconds || 0) / 3600) }} 小时</div></NCard></NGridItem>
-              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">累计命令</div><div class="rv">{{ redis.info?.total_commands_processed ?? '—' }}</div></NCard></NGridItem>
-              <NGridItem span="1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
+            <!-- 手机档两列小卡各 ~150px，「standalone / 面板密码」这类组合值被折得没法读；
+                 ≤640px（默认档）收成一列。 -->
+            <NGrid cols="1 s:2 m:4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">版本</div><div class="rv">{{ redis.info?.redis_version || '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">运行模式</div><div class="rv">{{ redis.info?.redis_mode || '—' }} / {{ redis.authed ? '面板密码' : 'redis.conf' }}</div></NCard></NGridItem>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">连接客户端</div><div class="rv">{{ redis.info?.connected_clients ?? '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">Key 总数</div><div class="rv">{{ redis.dbsize ?? '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">内存占用</div><div class="rv">{{ redis.info?.used_memory_human || '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">运行时长</div><div class="rv">{{ Math.round((redis.info?.uptime_in_seconds || 0) / 3600) }} 小时</div></NCard></NGridItem>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">累计命令</div><div class="rv">{{ redis.info?.total_commands_processed ?? '—' }}</div></NCard></NGridItem>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
             </NGrid>
             <NSpace v-if="isAdmin" align="center" :size="12" wrap style="margin-top: var(--space-4)">
               <!-- 输入框里的 placeholder 不滚动也不换行：24 个中文字在 320px 里必然被裁成半截。
                    说明挪到框外用文字写清楚，框内只留能看全的短提示。 -->
-              <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码" style="width: 240px" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />
+              <NInput v-model:value="redisPass" type="password" show-password-on="click" placeholder="Redis 密码" style="width: 240px; max-width: 100%" size="small" :input-props="{ 'aria-label': 'Redis 密码' }" />
               <NButton size="small" :icon="ico('SaveOutline')" @click="saveRedisPass">保存</NButton>
               <NText depth="3" style="font-size: var(--fs-xs)">留空保存＝清除面板密码，改回读取 redis.conf</NText>
             </NSpace>

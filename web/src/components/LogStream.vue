@@ -131,7 +131,7 @@ onBeforeUnmount(() => {
         复制全部日志
       </NTooltip>
       <NText depth="3" style="font-size: var(--fs-xs)">初始行数</NText>
-      <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px" :min="10" :max="maxLines"
+      <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px; max-width: 100%" :min="10" :max="maxLines"
                     placeholder="默认" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="onCountChange" />
       <NText depth="3" id="ls-autoscroll-label" style="font-size: var(--fs-xs)">自动滚动</NText>
       <NSwitch v-model:value="autoScroll" size="small" aria-labelledby="ls-autoscroll-label" />

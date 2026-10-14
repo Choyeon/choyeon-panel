@@ -414,7 +414,9 @@ button.cell-name > .n-button__content {
 }
 .json-chip:hover { border-style: solid; color: var(--cp-brand-soft); }
 .json-tip {
-  margin: 0; max-width: 420px; max-height: 320px; overflow: auto;
+  /* 浮层不跟着视口缩：420px 的预格式化块在 375px 手机上顶出屏幕右侧，
+     而 tooltip 里滚不动，开头几列字符直接看不着。封顶到视口减安全边距。 */
+  margin: 0; max-width: min(420px, calc(100vw - 24px)); max-height: 320px; overflow: auto;
   font-family: var(--font-mono); font-size: var(--fs-2xs);
   white-space: pre-wrap; word-break: break-all; line-height: 1.5;
 }

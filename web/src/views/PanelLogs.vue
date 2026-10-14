@@ -26,7 +26,7 @@ const unitOptions = [
       <template #actions>
         <NSpace align="center" :size="8">
           <NIcon :component="icons.CubeOutline" :size="15" color="var(--cp-text-mute)" />
-          <NSelect v-model:value="unit" size="small" style="width: 260px" :options="unitOptions" aria-label="选择日志来源服务" />
+          <NSelect v-model:value="unit" size="small" style="width: 260px; max-width: 100%" :options="unitOptions" aria-label="选择日志来源服务" />
         </NSpace>
       </template>
     </PageHeader>

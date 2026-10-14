@@ -331,12 +331,12 @@ onMounted(() => {
         </NButton>
       </template>
       <template #right>
-        <NSelect v-model:value="jobFilter" :options="jobOpts" size="small" style="width: 200px" placeholder="全部任务" aria-label="按备份任务筛选" />
-        <NSelect v-model:value="kindFilter" :options="kindOpts" size="small" style="width: 200px" placeholder="全部类型" aria-label="按备份类型筛选" />
-        <NInput v-model:value="pattern" size="small" clearable placeholder="搜索文件名…" style="width: 200px" :input-props="{ 'aria-label': '备份文件名' }">
+        <NSelect v-model:value="jobFilter" :options="jobOpts" size="small" style="width: 200px; max-width: 100%" placeholder="全部任务" aria-label="按备份任务筛选" />
+        <NSelect v-model:value="kindFilter" :options="kindOpts" size="small" style="width: 200px; max-width: 100%" placeholder="全部类型" aria-label="按备份类型筛选" />
+        <NInput v-model:value="pattern" size="small" clearable placeholder="搜索文件名…" style="width: 200px; max-width: 100%" :input-props="{ 'aria-label': '备份文件名' }">
           <template #prefix><NIcon :component="icons.SearchOutline" /></template>
         </NInput>
-        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px" aria-label="自动刷新间隔" />
+        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px; max-width: 100%" aria-label="自动刷新间隔" />
         <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
       </template>
 

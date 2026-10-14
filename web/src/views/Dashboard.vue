@@ -645,12 +645,12 @@ onBeforeUnmount(() => {
           </div>
           <div v-show="procsOpen">
             <div class="proc-row proc-head">
-              <span>PID</span><span>进程</span><span>用户</span><span class="num">CPU</span><span class="num">内存</span>
+              <span>PID</span><span>进程</span><span class="proc-user">用户</span><span class="num">CPU</span><span class="num">内存</span>
             </div>
             <div v-for="p in procs" :key="p.pid" class="proc-row">
               <span class="proc-pid">{{ p.pid }}</span>
               <span class="proc-name">{{ p.name }}</span>
-              <span>{{ p.user }}</span>
+              <span class="proc-user">{{ p.user }}</span>
               <span class="num">{{ p.cpu }}%</span>
               <span class="num">{{ p.memMb }} MB</span>
             </div>
@@ -808,4 +808,10 @@ onBeforeUnmount(() => {
 .proc-head { color: var(--cp-text-mute); font-size: var(--fs-2xs); border-bottom: 1px solid var(--cp-line); }
 .proc-pid { color: var(--cp-text-mute); }
 .proc-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 手机档五列硬挤：固定四列 264px + 4×8 gap 后，进程名只剩 ~20px，整列白搭。
+   ≤640px 藏掉「用户」列（PID 已能定位进程），把 72px+gap 还给进程名。 */
+@media (max-width: 640px) {
+  .proc-row { grid-template-columns: 56px minmax(0, 1fr) 60px 64px; }
+  .proc-user { display: none; }
+}
 </style>
