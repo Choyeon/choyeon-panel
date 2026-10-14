@@ -4,7 +4,7 @@ import os
 import re
 import time
 
-from .. import aio_db
+from .. import aio_db, config
 from .. import database as dbm
 from ..util import kill_group, run
 from . import redis_client
@@ -32,11 +32,63 @@ def _quote_pass(p: str) -> str:
 
 
 PSQL_BASE = "psql -X -A -t -v ON_ERROR_STOP=1"
+PSQL_OUTPUT_BYTES = 512 * 1024
+# 面板这侧的墙钟兜底值（关掉服务端超时时的默认）。
+PSQL_WALL_SEC = 30
 # standard_conforming_strings=on 必须由服务端保证：关掉时反斜杠参与转义，
 # \' 就能提前结束字符串，_sql_lit 的双写单引号挡不住。走 PGOPTIONS 而不是
 # 在脚本里 `SET ...;`——psql 会把这条 utility 语句的命令标签 "SET" 打到 stdout，
 # 混进 RETURNING 的结果里，实测让 affected 多算 1 行、让"没匹配到行"变成假成功。
-PGOPTS = "PGOPTIONS='-c standard_conforming_strings=on' "
+#
+# 同一条通道还要下发 statement/lock 超时，因为 wait_for + kill_group 杀的是 psql 客户端：
+# 后端那条语句（pg_sleep、深 OFFSET 的 count(*)、被行锁卡住的 UPDATE）感觉不到连接断开，
+# 会一路跑到自然结束，期间占着 max_connections 名额和它已经拿到的锁。浏览器关掉标签页
+# 再点几次，库就被自己拖死了。只有服务端超时才能真正中止执行。
+# 两个数都来自配置且已被 _int 压成整数，拼进单引号里不存在注入面；0 表示不注入。
+PG_TIMEOUTS = (
+    ("statement_timeout", "PG_STATEMENT_TIMEOUT_MS"),
+    ("lock_timeout", "PG_LOCK_TIMEOUT_MS"),
+)
+
+
+def psql_options() -> str:
+    parts = ["-c standard_conforming_strings=on"]
+    for name, attr in PG_TIMEOUTS:
+        ms = getattr(config, attr)
+        if ms > 0:
+            parts.append(f"-c {name}={ms}")
+    return "PGOPTIONS='" + " ".join(parts) + "' "
+
+
+def psql_wall_timeout() -> float:
+    """墙钟超时派生自服务端 statement_timeout，保证服务端先取消、面板不会先报错。
+
+    反过来（墙钟更短）时 kill_group 只杀掉客户端，服务端继续跑，面板却已经对用户说
+    "超时"——那时查询还在吃 CPU，而用户以为它结束了，于是重查一次，翻倍。
+    """
+    ms = config.PG_STATEMENT_TIMEOUT_MS
+    return PSQL_WALL_SEC if ms <= 0 else ms / 1000 + 10
+
+
+async def drain_head(stream, limit: int) -> bytes:
+    """读到 EOF，但只保留前 limit 字节。
+
+    stderr 不能用 stdout 那套"超限就抛"：那是这条 SQL 的报错正文，截断了也得让它说话。
+    也不能读到超限就停——管道填满后 psql 会卡在写下一条错误上，最后只剩一句没头没尾的
+    「psql 超时」。`DO $$/RAISE NOTICE` 这类循环几百 MB 的通知全走 stderr。
+    """
+    kept = bytearray()
+    total = 0
+    while True:
+        part = await stream.read(64 * 1024)
+        if not part:
+            break
+        total += len(part)
+        if len(kept) < limit:
+            kept += part[: limit - len(kept)]
+    if total > limit:
+        return bytes(kept) + "\n...(stderr 已截断)".encode()
+    return bytes(kept)
 
 
 async def psql(sql: str, db: str | None = None, quiet: bool = False) -> str:
@@ -52,7 +104,7 @@ async def psql(sql: str, db: str | None = None, quiet: bool = False) -> str:
     `UPDATE ... RETURNING 1` 未命中时 stdout 是 "UPDATE 0"，按行数统计影响条数
     会得出 1，把"没改到任何行"报成成功。加 `-q` 后只剩 RETURNING 的真实行。
     """
-    base = PGOPTS + PSQL_BASE + (" -q" if quiet else "") + (f" -d {db}" if db else "")
+    base = psql_options() + PSQL_BASE + (" -q" if quiet else "") + (f" -d {db}" if db else "")
     proc = await asyncio.create_subprocess_exec(
         "su", "-s", "/bin/sh", "postgres", "-c", base,
         stdin=asyncio.subprocess.PIPE,
@@ -85,13 +137,13 @@ async def psql(sql: str, db: str | None = None, quiet: bool = False) -> str:
         # 三个方向必须并发：先写完再读，遇到「SQL 很长 + 输出撑满 64KB 管道」时
         # 双方互等，只会以一句没头没尾的「psql 超时」收场（stderr 同理）。
         _, out, err = await asyncio.gather(
-            _write_stdin(), _drain(proc.stdout, 512 * 1024), proc.stderr.read()
+            _write_stdin(), _drain(proc.stdout, PSQL_OUTPUT_BYTES), drain_head(proc.stderr, PSQL_OUTPUT_BYTES)
         )
         await proc.wait()
         return out, err
 
     try:
-        out, err = await asyncio.wait_for(_collect(), timeout=30)
+        out, err = await asyncio.wait_for(_collect(), timeout=psql_wall_timeout())
     except TimeoutError:
         kill_group(proc)
         # from None：超时原因已经明确，不需要把 TimeoutError 的上下文再叠加上去
@@ -394,7 +446,9 @@ def _row_predicate(key, pk: list) -> str:
         raise RuntimeError("缺少行定位条件")
     if "_ctid" in key:
         c = str(key["_ctid"])
-        if not CTID_RE.match(c):
+        # fullmatch：`$` 在 match 下允许末尾多一个换行过关，"(1,1)\n" 会被当成合法 tid，
+        # 而它接着拼进 `ctid = '...'::tid`（与上面 is_ident 同一类缺陷）。
+        if not CTID_RE.fullmatch(c):
             raise RuntimeError("ctid 格式不合法")
         return f"ctid = '{c}'::tid"
     if not pk:
@@ -549,15 +603,57 @@ _RERR_RE = re.compile(
 )
 
 
-async def _rcli(args: list) -> str:
+async def _rcli_raw(args: list) -> tuple[int, str]:
+    """跑一次 redis-cli，返回 (退出码, 原样 stdout)。
+
+    字节上界与 RESP 客户端共用 redis_client.MAX_REPLY_BYTES，两个数必须同源：
+    集合类型这边只按条目数截（200 条），每条 1MB 就是 200MB，而 RESP 路线在同一个
+    key 上恰好先撞自己的上界报 RedisConnectionError——于是失败必然落到这条回退路上，
+    如果这边不拦，communicate() 就把几百 MB 整个搬进 root 进程的内存，后面还跟着
+    一份同样量级的 JSON 响应。
+    """
     env = dict(os.environ)
     p = redis_password()
     if p:
         env["REDISCLI_AUTH"] = p
-    r = await run("redis-cli", ["--no-auth-warning"] + args, env=env, timeout=20)
-    out = r["out"] or ""
-    if r["code"] != 0:
-        raise RuntimeError(out or f"redis-cli 执行失败（code {r['code']}，未安装或 Redis 未运行）")
+    proc = await asyncio.create_subprocess_exec(
+        "redis-cli", "--no-auth-warning", *[str(a) for a in args], env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    limit = redis_client.MAX_REPLY_BYTES
+
+    async def _read() -> bytes:
+        buf = bytearray()
+        while True:
+            part = await proc.stdout.read(64 * 1024)
+            if not part:
+                break
+            buf += part
+            if len(buf) > limit:
+                kill_group(proc)
+                raise RuntimeError(
+                    f"redis-cli 回退的输出超过 {limit // 1024 // 1024}MB："
+                    "这个 key 太大，请到服务器上直接用 redis-cli 处理"
+                )
+        return bytes(buf)
+
+    try:
+        out = await asyncio.wait_for(_read(), timeout=20)
+    except TimeoutError:
+        kill_group(proc)
+        raise RuntimeError("redis-cli 超时") from None
+    finally:
+        await proc.wait()
+    return proc.returncode or 0, out.decode(errors="replace")
+
+
+async def _rcli(args: list) -> str:
+    code, text = await _rcli_raw(args)
+    out = text.strip()
+    if code != 0:
+        raise RuntimeError(out or f"redis-cli 执行失败（code {code}，未安装或 Redis 未运行）")
     if _RERR_RE.match(out):
         # redis-cli 出错时退出码仍是 0（实测 WRONGTYPE/NOAUTH 都返回 0），
         # 只能按错误回应的首 token 判；不判就会把 "(error)" 文本当数据返回给上层，
@@ -573,26 +669,11 @@ def _lines(out: str) -> list:
 async def _rcli_exact(args: list) -> str:
     """与 _rcli 相同的调用，但保留 stdout 原样（只去掉 redis-cli 自己补的结尾换行）。
 
-    util.run 会 strip() 输出：编辑 string key 的表单若用 strip 过的值回填，
-    用户点一次「保存」就把值末尾的换行静默吃掉了——读来改数据必须用原始字节。
+    回退路线读来是要改数据再写回去的：strip 过的值回填进编辑表单，
+    用户点一次「保存」就把值末尾的换行静默吃掉了。
     """
-    env = dict(os.environ)
-    p = redis_password()
-    if p:
-        env["REDISCLI_AUTH"] = p
-    proc = await asyncio.create_subprocess_exec(
-        "redis-cli", "--no-auth-warning", *args, env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
-    except TimeoutError:
-        kill_group(proc)
-        raise RuntimeError("redis-cli 超时") from None
-    text = out.decode(errors="replace")
-    if proc.returncode or text.startswith(("NOAUTH", "WRONGPASS", "(error)")):
+    code, text = await _rcli_raw(args)
+    if code or text.startswith(("NOAUTH", "WRONGPASS", "(error)")):
         raise RuntimeError(text.strip() or "redis-cli 执行失败（未安装或 Redis 未运行）")
     return text[:-1] if text.endswith("\n") else text
 

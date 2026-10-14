@@ -485,14 +485,31 @@ class TestPgServiceWithClient(PgAgainstFake):
 
 
 # ------------------------------------------------------------------ pg_service：回退 redis-cli
+class _FakeStream:
+    """真 subprocess 的 stdout 是分块读、读到 EOF 返回 b""，回退路线就靠这个限字节。"""
+
+    def __init__(self, out: bytes):
+        self._out = out
+        self.reads = 0
+
+    async def read(self, _n: int) -> bytes:
+        self.reads += 1
+        if self._out:
+            chunk, self._out = self._out, b""
+            return chunk
+        return b""
+
+
 class _FakeProc:
     def __init__(self, out: bytes, code: int = 0):
-        self._out = out
+        self.stdout = _FakeStream(out)
         self.returncode = code
         self.pid = 4242
+        self.waited = False
 
-    async def communicate(self):
-        return self._out, None
+    async def wait(self):
+        self.waited = True
+        return self.returncode
 
 
 class TestCliFallback(unittest.IsolatedAsyncioTestCase):

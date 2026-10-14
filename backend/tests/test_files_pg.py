@@ -341,8 +341,14 @@ class TestPgParsing(unittest.TestCase):
                     b'CONTEXT:  while executing command on stdin\n')
 
         class ErrReader:
-            async def read(self):
-                return err_text
+            """stderr 现在是 drain_head 分块读到 EOF：一次给完，下一次给空。"""
+
+            def __init__(self):
+                self.left = err_text
+
+            async def read(self, _n):
+                chunk, self.left = self.left, b""
+                return chunk
 
         proc = FakeProc()
         proc.stderr = ErrReader()

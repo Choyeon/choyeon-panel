@@ -400,7 +400,7 @@ const rowSelection = computed(() => ({
 
     <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">
       可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑；勾选多项可打包成 tar.gz。
-      当前 {{ entryCount }} 项{{ truncated ? `（条目过多，按名称只列出前 ${data?.maxEntries ?? entries.length} 项，进子目录缩小范围）` : '' }}{{ entries.length > 200 ? '（虚拟滚动，只渲染可见行）' : '' }}。
+      当前 {{ entryCount }} 项{{ truncated ? `（条目过多，按名称只列出前 ${data?.maxEntries ?? entries.length} 项，进子目录缩小范围）` : '' }}。
     </NText>
 
     <NDataTable

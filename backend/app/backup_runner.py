@@ -8,7 +8,9 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 
+from . import config
 from . import database as dbm
 from .config import BACKUP_DIR
 from .util import sh_escape
@@ -70,11 +72,26 @@ def find_sqlite_dbs(app_path: str) -> list:
     """应用目录下的候选 SQLite 主库，按体积降序（排除 -wal/-shm/journal 与依赖目录）。
 
     只扫主库文件：WAL 与 SHM 是在途日志，单独备份它们恢复不出任何可用数据库。
+
+    扫描有上界，超了是**报错**而不是返回半份结果：调用方靠"目录里有没有和备份同名的库"
+    （旧格式靠"最大的那个库"）定位恢复目标，半份结果会把目标认错，把备份覆盖到另一个库上——
+    那是数据丢失，不是慢一点。uploads/、media/ 这类目录不在排除名单里（它们确实可能装着
+    业务库），几百万元素的树只能靠上界兜住。
     """
     found = []
+    visited = 0
+    deadline = time.monotonic() + config.SQLITE_SCAN_BUDGET_SEC
     for root, dirs, files in os.walk(app_path):
         dirs[:] = [d for d in dirs if d not in _SQLITE_SKIP and not d.startswith(".")]
         for f in files:
+            visited += 1
+            if visited > config.SQLITE_SCAN_MAX_ENTRIES or time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"{app_path} 下文件过多或磁盘响应过慢：已扫 {visited} 个条目仍未走完"
+                    f"（上限 {config.SQLITE_SCAN_MAX_ENTRIES} 个 / {config.SQLITE_SCAN_BUDGET_SEC} 秒）。"
+                    "恢复需要在目录里按名字定位目标库，半份扫描结果会认错库，所以这里直接失败；"
+                    "可清理依赖与资产目录，或调大 CP_SQLITE_SCAN_MAX_ENTRIES / CP_SQLITE_SCAN_BUDGET_SEC"
+                )
             low = f.lower()
             if not low.endswith(_SQLITE_EXTS):
                 continue

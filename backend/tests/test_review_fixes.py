@@ -967,7 +967,7 @@ class TestPsqlPipesDoNotDeadlock(unittest.TestCase):
                 return b"1 row\n"
 
         class Stderr:
-            async def read(self):
+            async def read(self, _n):
                 return b""
 
         class Proc:

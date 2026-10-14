@@ -233,6 +233,10 @@ LICENSE                MIT
 | `CP_MAX_UPLOAD_MB` | `8` | 单文件上限（nginx `client_max_body_size` 需 ≥ 此值） |
 | `CP_MAX_BODY_MB` | `2` | 非上传接口的请求体上限（超出返回 413；上传类按 `CP_MAX_UPLOAD_MB`+4MB） |
 | `CP_MAX_DIR_ENTRIES` | `5000` | 文件页一次列目录的条目上限，超出按名称截断并如实提示 |
+| `CP_PG_STATEMENT_TIMEOUT_MS` | `20000` | 下发给 PostgreSQL 的语句超时（面板杀不掉服务端已开跑的查询，只能由服务端中止；`0` 不注入） |
+| `CP_PG_LOCK_TIMEOUT_MS` | `5000` | 行编辑等锁上限，超时如实报"拿不到锁"而不是把工作线程排到墙钟超时 |
+| `CP_SQLITE_SCAN_MAX_ENTRIES` | `200000` | 恢复定位目标库时扫描应用目录的条目上界，超出直接报错（半份结果会认错库） |
+| `CP_SQLITE_SCAN_BUDGET_SEC` | `20` | 同一次扫描的时间上界 |
 | `CP_TERMINAL_MAX_SESSIONS` | `4` | 并发终端会话上限 |
 | `CP_AUDIT_KEEP` | `5000` | 审计日志保留条数 |
 | `CP_PYTHON` | `python3` | 系统指标采集解释器 |

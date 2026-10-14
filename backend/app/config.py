@@ -146,6 +146,20 @@ TERMINAL_OUT_BUFFER = _int("CP_TERMINAL_OUT_BUFFER_KB", 4096, 256, 65536) * 1024
 # 全量返回就是几十万次 stat 加一份几十 MB 的 JSON——面板自己未必先炸，浏览器一定先炸，
 # 而且这个请求还是同步 I/O 走线程池的，多开几个标签页能把线程占满。
 MAX_DIR_ENTRIES = _int("CP_MAX_DIR_ENTRIES", 5000, 100, 200000)
+# SQL 的服务端上界。面板这侧的 asyncio 墙钟只能杀掉 psql 客户端，杀不掉 postgres
+# 后端正在跑的语句：pg_sleep、深 OFFSET 的 count(*)、被行锁卡住的 UPDATE 会继续占着
+# 一条 max_connections 连接和它已经拿到的锁，浏览器断开也没人替它取消。
+# 能真正中止执行的是服务端自己的 statement_timeout / lock_timeout，所以上界必须下发。
+# 0 = 不注入，留给确实需要跑很久的维护语句。
+PG_STATEMENT_TIMEOUT_MS = _int("CP_PG_STATEMENT_TIMEOUT_MS", 20000, 0, 300000)
+PG_LOCK_TIMEOUT_MS = _int("CP_PG_LOCK_TIMEOUT_MS", 5000, 0, 60000)
+# 恢复 SQLite 备份前要在应用目录里 walk 一遍找候选库。一个几百万元素的 uploads/
+# 或 vendor/ 树能把一次点击变成几分钟的 scandir 风暴，而线程池的 worker 只有几十个，
+# 文件页、备份列表、概览都从同一池子里取。命中上界时是报错而不是返回半份结果：
+# 恢复靠名字（旧格式靠"最大的库"）在候选里定位目标文件，半份结果会认错库、
+# 把备份覆盖到另一个库上——那是数据丢失，不是慢一点。
+SQLITE_SCAN_MAX_ENTRIES = _int("CP_SQLITE_SCAN_MAX_ENTRIES", 200000, 1000, 5000000)
+SQLITE_SCAN_BUDGET_SEC = _int("CP_SQLITE_SCAN_BUDGET_SEC", 20, 1, 300)
 
 # 是否发送 HSTS 头（仅在 HTTPS 直接暴露时开启；反代场景由 nginx 负责）
 HSTS = _bool("CP_HSTS")
