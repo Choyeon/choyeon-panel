@@ -446,21 +446,6 @@ def _unit_files(tid: int) -> tuple[str, str]:
     return f"{d}/{u}.service", f"{d}/{u}.timer"
 
 
-def _tz() -> str:
-    """时区名写进 OnCalendar，避免"面板说本地时间、timer 按 UTC 跑"的错位。"""
-    try:
-        tz = Path("/etc/timezone").read_text().strip()
-        if tz:
-            return tz
-    except OSError:
-        pass
-    try:
-        link = str(Path("/etc/localtime").resolve())
-    except OSError:
-        return "UTC"
-    return link.split("/zoneinfo/")[1] if "/zoneinfo/" in link else "UTC"
-
-
 async def _sync_units(task: dict) -> None:
     """按库里的行渲染或清理 unit 对；禁用与删除共用同一段清理逻辑。"""
     svc, tmr = _unit_files(task["id"])
@@ -493,7 +478,8 @@ async def _sync_units(task: dict) -> None:
     _write_if_changed(
         tmr,
         f"[Unit]\nDescription=choyeon-panel cron timer #{task['id']} {task['name']}\n"
-        f"[Timer]\nOnCalendar={cal} {_tz()}\nPersistent=true\n[Install]\nWantedBy=timers.target\n",
+        f"[Timer]\nOnCalendar={cal} {systemd_ops.timezone_name()}\n"
+        f"Persistent=true\n[Install]\nWantedBy=timers.target\n",
     )
     await run("systemctl", ["daemon-reload"])
     r = await run("systemctl", ["enable", "--now", f"{base}.timer"], timeout=30)

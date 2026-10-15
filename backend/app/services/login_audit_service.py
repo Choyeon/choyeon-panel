@@ -25,13 +25,13 @@ import os
 import re
 import shutil
 import stat
-import time
 from datetime import UTC, datetime
 
-from .. import config, security
+from .. import config, probe, security
 from .. import database as dbm
+from ..severity import SEV_ORDER
 from ..util import run, tallied
-from . import exposure_service
+from . import exposure_service, systemd_ops
 
 CACHE_TTL = 300.0
 SSHD_TIMEOUT = 10.0
@@ -65,7 +65,7 @@ _IP_RE = re.compile(
 )
 
 _LOCK = asyncio.Lock()
-_cache: dict = {"at": 0.0, "data": None}
+_cache: dict = probe.new_cache()
 
 
 def _read_text(path: str, limit: int = 200000) -> str | None:
@@ -143,16 +143,19 @@ def _yes(values: dict, key: str) -> bool:
     return _val(values, key) == "yes"
 
 
-def _setting_rows(values: dict, reachable: bool, guarded: bool) -> list[dict]:
+def _setting_rows(values: dict, reachable: bool, guard_status: str) -> list[dict]:
     """把关心的几项排成表：判词在这一层算完，前端只负责显示。"""
     pw = _yes(values, "passwordauthentication")
     root_yes = _val(values, "permitrootlogin") == "yes"
     tries = _val(values, "maxauthtries")
     tries_bad = tries.isdigit() and int(tries) > 6
-    # 三件事叠在一起才是最坏组合：口令能试、外面碰得到、没人管爆破
+    # 三件事叠在一起才是最坏组合：口令能试、外面碰得到、没人管爆破。
+    # 「没人管」只认核对到的那两种状态（没在跑 / 压根没装）：防护正在起停或 systemctl 没回话时
+    # 升级成要紧，等于把一句没验证的话写进红字里。
+    no_guard = guard_status in ("unguarded", "absent")
     pw_exposed = pw and reachable
     root_flag = "risk" if pw_exposed and root_yes else "note" if root_yes else ""
-    pw_flag = "risk" if pw_exposed and not guarded else "warn" if pw_exposed else ""
+    pw_flag = "risk" if pw_exposed and no_guard else "warn" if pw_exposed else ""
     kbd_flag = "warn" if pw and _yes(values, "kbdinteractiveauthentication") else ""
     empty_pw_yes = _yes(values, "permitemptypasswords")
     x11_yes = _yes(values, "x11forwarding")
@@ -359,16 +362,94 @@ def _accounts(users: list[dict]) -> dict:
 
 
 async def _guard_status() -> dict:
-    """fail2ban / sshguard 这类"撞库有没有人管"的东西，只看服务此刻在不在跑。"""
-    if not shutil.which("systemctl"):
-        return {"units": [], "any_active": False, "note": "没有 systemctl，无法判断爆破防护是否在跑"}
-    r = await run("systemctl", ["is-active", *GUARD_UNITS], timeout=SSHD_TIMEOUT)
-    words = (r["out"] or "").split()
+    """fail2ban / sshguard 这类"撞库有没有人管"的东西，只看服务此刻在不在跑。
+
+    判词从 systemd_ops.unit_states 取（批次㉜定下的唯一出处），换掉原来的
+    `systemctl is-active a b` + 按位置切词，有两个原因：
+    ① is-active 只会回"0 / 非 0"，正在启动、单元不存在、dbus 查失败三种情况在退出码上长一样，
+       而这一页对三种情况要说的话不同（前者别急着说没防护，中者是这台机器压根没装，
+       后者是这一项没核对成，不能写成"都没在跑"）；
+    ② "装没装"原来用 `shutil.which(unit 名)` 判断，而 fail2ban 装的可执行文件叫
+       fail2ban-client / fail2ban-server，包名根本不是命令名——装了也报"没装"。
+       systemd 的 LoadState=not-found 才是"这台机器上没有这个单元"的权威说法。
+    """
+    if not systemd_ops.has_systemd():
+        payload = {"units": [], "status": "no-systemd",
+                   "note": "本机没有可管理的 systemd，「爆破防护在不在跑」这一项没有核对成"}
+        payload["phrase"] = _guard_phrase(payload)
+        return payload
+    states = await systemd_ops.unit_states(list(GUARD_UNITS))
     units = []
-    for i, name in enumerate(GUARD_UNITS):
-        state = words[i] if i < len(words) else "unknown"
-        units.append({"name": name, "state": state, "active": state == "active", "installed": bool(shutil.which(name))})
-    return {"units": units, "any_active": any(u["active"] for u in units), "note": ""}
+    for name in GUARD_UNITS:
+        st = states.get(name) or dict(systemd_ops.UNKNOWN_STATE)
+        units.append({
+            "name": name,
+            "state": st["state"],
+            "active": st["active"],
+            "busy": st["busy"],
+            "missing": st["missing"],
+            "unknown": st["state"] == "unknown",
+            "desc": _unit_desc(st),
+        })
+    status = _guard_verdict(units)
+    note = ""
+    if status == "unknown":
+        note = (f"systemctl 这次没回话，{' / '.join(GUARD_UNITS)} 是否在跑没有核对成——"
+                "这一项按「没查到」处理，不算成「没有防护」。")
+    elif status == "pending":
+        note = "防护单元正在启动或停止中，这一轮没有把它算成「正在跑的防护」。"
+    return {"units": units, "status": status, "note": note}
+
+
+def _guard_verdict(units: list) -> str:
+    """guarded / pending / unguarded / absent / unknown：判词要说的是哪一种，只在这一处定。
+
+    只有"每一个候选都没核对到状态"才算 unknown。反过来，只要有一个单元确认没在跑、
+    且没有任何一个在跑，"没有防护在跑"这句话就是核对过的，不必因为另一个单元查失败而闭嘴。
+    """
+    if any(u["active"] for u in units):
+        return "guarded"
+    if any(u["busy"] for u in units):  # activating / deactivating
+        return "pending"
+    known = [u for u in units if not u["unknown"]]
+    if not known:
+        return "unknown"
+    return "absent" if all(u["missing"] for u in known) else "unguarded"
+
+
+def _unit_desc(st: dict) -> str:
+    """一个防护单元的说人话状态。判词在这里成型，CLI 与前端只负责摆出来。
+
+    先问"查没查到"再问"在不在跑"：systemctl 没回话时 ActiveState 是空串，
+    照状态表翻译就成了"没在跑"——那是把一次探测失败写成了一句安全结论。
+    """
+    if st["state"] == "unknown":
+        return "没查到"
+    if st["missing"]:
+        return "没有这个单元"
+    return {
+        "active": "在跑", "reloading": "在跑（重载中）", "activating": "正在启动",
+        "deactivating": "正在停止", "failed": "上次启动失败", "inactive": "没在跑",
+    }.get(st["state"], st["state"])
+
+
+def _guard_phrase(guard: dict) -> str:
+    """判词里那句「爆破防护现在怎么样」。只说真正核对到的那一部分。"""
+    units = [u for u in guard["units"] if not u["unknown"]]
+    status = guard["status"]
+    on = [u["name"] for u in units if u["active"]]
+    if status == "no-systemd":
+        return "本机没有可管理的 systemd"
+    if on:
+        return "、".join(on) + " 正在跑"
+    if status == "pending":
+        return "、".join(f"{u['name']}（{u['desc']}）" for u in units if u["busy"]) + "，正在起停"
+    if status == "absent":
+        return "systemd 里没有 " + " / ".join(u["name"] for u in units) + " 单元（这台机器没装）"
+    if status == "unguarded":
+        tail = " 都没在跑" if len(units) > 1 else " 没在跑"
+        return "、".join(u["name"] for u in units) + tail
+    return "这一项没核对成"
 
 
 def _no_attempts(note: str) -> dict:
@@ -453,7 +534,10 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
     pw = _yes(vals, "passwordauthentication")
     # reachable 为 None（端口表里没找到）时不能当成"安全"，按可达判。
     reachable = exposure["reachable"] is not False
-    guarded = guard["any_active"]
+    guarded = guard["status"] == "guarded"
+    # 「没有防护」这句话只在真核对到时才说；正在起停或 systemctl 没回话时不产出这条判断，
+    # 由 notes 如实说明这一项没核对成。
+    no_guard = guard["status"] in ("unguarded", "absent")
     failed = attempts["failed"] if attempts["ok"] else 0
 
     if accounts["empty_password"]:
@@ -486,15 +570,16 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
                       + (f"过去 24 小时 {failed} 次失败认证。" if attempts["ok"] else ""),
             "fix": "改用 SSH 钥匙后设 PasswordAuthentication no（关之前拿另一台机器验证钥匙能登进来）",
         })
-    if pw and not guarded:
+    if pw and no_guard:
+        phrase = _guard_phrase(guard)
         out.append({
             "id": "no-guard",
             "severity": "risk" if failed >= 100 else "warn",
             "title": "口令认证开着，却没有正在运行的爆破防护",
-            "detail": (f"fail2ban / sshguard 都不在跑，过去 24 小时 {failed} 次失败认证、来自 "
+            "detail": (f"{phrase}，过去 24 小时 {failed} 次失败认证、来自 "
                        f"{attempts['distinct_ips']} 个地址，全靠 sshd 自己扛。")
-                      if attempts["ok"] else "fail2ban / sshguard 都不在跑，而这段窗口又读不到 sshd 日志。",
-            "fix": "二选一：启用 fail2ban 的 sshd jail，或者干脆关掉口令认证（后者更彻底）",
+                      if attempts["ok"] else f"{phrase}，而这段窗口又读不到 sshd 日志。",
+            "fix": "二选一：装上并启用 fail2ban 的 sshd jail，或者干脆关掉口令认证（后者更彻底）",
         })
     if _yes(vals, "kbdinteractiveauthentication") and pw:
         out.append({
@@ -592,8 +677,9 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
                           "而它往往正是给别人建的那类账号。",
                 "fix": "让未开启的账号本人登录后在设置页开启；只有 root 能用 choyeonctl user 2fa-disable 关闭",
             })
-    order = {"risk": 0, "warn": 1, "note": 2}
-    out.sort(key=lambda f: (order[f["severity"]], f["id"]))
+    # 排序与标签同一出处（app.severity）：这一页最轻那档叫 note，四个对账页叫 info，
+    # 两者在 SEV_ORDER 里同为末档，新页签不必再猜哪个词排在最后。
+    out.sort(key=lambda f: (SEV_ORDER[f["severity"]], f["id"]))
     return out
 
 
@@ -605,16 +691,8 @@ def _summary(findings: list[dict]) -> dict:
 
 
 async def audit(refresh: bool = False) -> dict:
-    """带 TTL 的只读对账入口；并发调用只回源一次。"""
-    async with _LOCK:
-        now = time.time()
-        data = _cache["data"]
-        if not refresh and data and now - _cache["at"] < CACHE_TTL:
-            return {**data, "cached": True}
-        data = await _collect()
-        _cache["at"] = time.time()
-        _cache["data"] = data
-        return {**data, "cached": False}
+    """带 TTL 的只读对账入口；并发与连点合并成一轮 `sshd -T` + journal 读取（见 app/probe.py）。"""
+    return await probe.read(_cache, _LOCK, _collect, refresh=refresh, ttl=CACHE_TTL)
 
 
 async def _collect() -> dict:
@@ -652,8 +730,8 @@ async def _collect() -> dict:
         "sshd": {"source": ssh["source"], "effective": ssh["effective"],
                  "port": exposure["port"], "reachable": exposure["reachable"], "verdict": exposure["verdict"],
                  "reason": exposure["reason"]},
-        "settings": _setting_rows(ssh["values"], exposure["reachable"] is not False, guard["any_active"]),
-        "guard": guard["units"],
+        "settings": _setting_rows(ssh["values"], exposure["reachable"] is not False, guard["status"]),
+        "guard": {"status": guard["status"], "phrase": _guard_phrase(guard), "units": guard["units"]},
         "keys": keys,
         "accounts": accounts,
         "attempts": attempts,
@@ -663,9 +741,6 @@ async def _collect() -> dict:
         "findings": findings,
         "notes": notes,
     }
-
-
-SEV_LABEL = {"risk": "要紧", "warn": "值得处理", "note": "知道就好"}
 
 
 def doctor_item(data: dict) -> dict:
@@ -686,14 +761,22 @@ def doctor_item(data: dict) -> dict:
                 "fix": "choyeonctl ssh-audit 里看完整判词，先按入侵痕迹处理", "fixable": False}
     if counts["risk"]:
         risk_titles = [f["title"] for f in data["findings"] if f["severity"] == "risk"]
+        # 没有值得处理的那一档就别写"0 项"：那是一句关于不存在之事的陈述
+        mid = f"、{counts['warn']} 项值得处理" if counts["warn"] else ""
         return {"status": "warn",
-                "detail": tallied(risk_titles, " 项要紧", "项要紧", counts["risk"],
-                                  lead="登录方式有 ", mid=f"、{counts['warn']} 项值得处理"),
+                "detail": tallied(risk_titles, " 项要紧", "项", counts["risk"],
+                                  lead="登录方式有 ", mid=mid),
                 "fix": "choyeonctl ssh-audit", "fixable": False}
     if counts["warn"]:
         return {"status": "warn", "detail": f"没有要紧项，另有 {counts['warn']} 项加固建议",
                 "fix": "choyeonctl ssh-audit", "fixable": False}
     detail = f"sshd 端口 {data['sshd']['port']} 的登录方式没有要紧项；24h 失败认证 {data['attempts']['failed']} 次"
+    if data["guard"]["status"] in ("unknown", "no-systemd"):
+        # 没核对成不等于没问题：绿灯不能说"这台机器没人撞库也不怕"，
+        # 而爆破防护恰恰是这句话里唯一还没验证的那一半。
+        return {"status": "warn",
+                "detail": f"登录方式没有要紧项，但爆破防护是否在跑没核对成（{data['guard']['phrase']}）",
+                "fix": "choyeonctl ssh-audit", "fixable": False}
     if not data["as_root"]:
         detail += "（非 root，空口令与他人的 authorized_keys 未核对）"
     return {"status": "pass", "detail": detail, "fix": "", "fixable": False}

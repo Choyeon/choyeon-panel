@@ -38,7 +38,7 @@ BACKEND_DIR = Path(__file__).resolve().parent
 ROOT = BACKEND_DIR.parent
 sys.path.insert(0, str(BACKEND_DIR))
 
-from app import avatars, config, security  # noqa: E402
+from app import avatars, config, security, severity  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.errors import BadInput, public_message  # noqa: E402
 from app.routers.meta import run_checks  # noqa: E402
@@ -52,7 +52,7 @@ from app.services import (  # noqa: E402
     storage_service,
     updates_service,
 )
-from app.util import CLI_LOG_LINES_MAX  # noqa: E402
+from app.util import CLI_LOG_LINES_MAX, human_bytes  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -840,7 +840,7 @@ def _ssh_audit_text(d: dict) -> str:
         f"（{att.get('distinct_ips', 0)} 个来源地址）",
     ]
     for f in d.get("findings") or []:
-        sev = login_audit_service.SEV_LABEL.get(f["severity"], f["severity"])
+        sev = severity.SEV_LABEL.get(f["severity"], f["severity"])
         lines.append(f"[{sev}] {f['title']}")
         if f.get("detail"):
             lines.append(f"    {f['detail']}")
@@ -852,7 +852,7 @@ def _ssh_audit_text(d: dict) -> str:
     lines.append("sshd 关键配置：")
     for r in d.get("settings") or []:
         flag = r.get("flag") or ""
-        mark = f"  ← {login_audit_service.SEV_LABEL.get(flag, flag)}" if flag else ""
+        mark = f"  ← {severity.SEV_LABEL.get(flag, flag)}" if flag else ""
         lines.append(f"  {r['label']} = {r['value']}{mark}")
         if r.get("fix"):
             lines.append(f"      建议：{r['fix']}")
@@ -887,12 +887,12 @@ def _ssh_audit_text(d: dict) -> str:
             if p2.get("ok") else f"面板账号：{p2.get('note') or '读不到'}"
         )
 
-    if d.get("guard"):
-        parts = []
-        for g in d["guard"]:
-            state = "在跑" if g.get("active") else ("未运行" if g.get("installed") else "未安装")
-            parts.append(f"{g['name']} {state}")
-        lines.append("爆破防护：" + "、".join(parts))
+    guard = d.get("guard") or {}
+    if guard.get("units"):
+        # 判词由服务端算（phrase），逐单元的说法也由服务端算（desc）：这里不再自己比较状态串，
+        # 否则同一个事实在第 ③ 处又长出一套说法，而它们迟早对不上。
+        parts = [f"{g['name']} {g['desc']}" for g in guard["units"]]
+        lines.append(f"爆破防护：{guard.get('phrase') or '这一项没核对成'}（{'、'.join(parts)}）")
     top = att.get("top") or []
     if top:
         lines.append("失败来源：" + "、".join(f"{t['ip']}（{t['count']} 次）" for t in top))
@@ -1029,7 +1029,7 @@ def _storage_text(d: dict) -> str:
         f"判词：要紧 {c.get('risk', 0)} · 值得处理 {c.get('warn', 0)} · 知道就好 {c.get('info', 0)}"
     )
     for f in d.get("findings") or []:
-        sev = storage_service.SEV_LABEL.get(f["severity"], f["severity"])
+        sev = severity.SEV_LABEL.get(f["severity"], f["severity"])
         lines.append(f"  [{sev}] {f['title']}")
         if f.get("detail"):
             lines.append(f"      {f['detail']}")
@@ -1065,7 +1065,7 @@ async def cmd_memory(a: argparse.Namespace) -> dict:
 
 
 def _memory_text(d: dict) -> str:
-    hu = memory_service._human
+    hu = human_bytes
     c = d.get("counts") or {}
     mem = d.get("mem") or {}
     press = d.get("pressure") or {}
@@ -1169,7 +1169,7 @@ def _memory_text(d: dict) -> str:
         f"判词：要紧 {c.get('risk', 0)} · 值得处理 {c.get('warn', 0)} · 知道就好 {c.get('info', 0)}"
     )
     for f in d.get("findings") or []:
-        sev = memory_service.SEV_LABEL.get(f["severity"], f["severity"])
+        sev = severity.SEV_LABEL.get(f["severity"], f["severity"])
         lines.append(f"  [{sev}] {f['title']}")
         if f.get("detail"):
             lines.append(f"      {f['detail']}")
@@ -1262,7 +1262,7 @@ def _pending_text(d: dict) -> str:
 
     lines.append(f"判词：要紧 {c.get('risk', 0)} · 值得处理 {c.get('warn', 0)} · 知道就好 {c.get('info', 0)}")
     for f in d.get("findings") or []:
-        sev = pending_service.SEV_LABEL.get(f["severity"], f["severity"])
+        sev = severity.SEV_LABEL.get(f["severity"], f["severity"])
         lines.append(f"  [{sev}] {f['title']}")
         if f.get("detail"):
             lines.append(f"      {f['detail']}")
@@ -1379,7 +1379,7 @@ def _load_text(d: dict) -> str:
 
     lines.append(f"判词：要紧 {c.get('risk', 0)} · 值得处理 {c.get('warn', 0)} · 知道就好 {c.get('info', 0)}")
     for f in d.get("findings") or []:
-        sev = load_service.SEV_LABEL.get(f["severity"], f["severity"])
+        sev = severity.SEV_LABEL.get(f["severity"], f["severity"])
         lines.append(f"  [{sev}] {f['title']}")
         if f.get("detail"):
             lines.append(f"      {f['detail']}")

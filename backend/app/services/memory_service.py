@@ -34,8 +34,9 @@ import subprocess
 import time
 from datetime import UTC, datetime
 
-from .. import aio_db
-from ..util import tallied
+from .. import aio_db, probe
+from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
+from ..util import human_bytes, tallied
 
 CACHE_TTL = 90.0
 RATE_WINDOW_SEC = 0.8
@@ -60,11 +61,6 @@ CAP_WARN_PCT = 80                     # 单元用到了自己声明上限的八�
 CAP_RISK_PCT = 95
 PID_WARN_PCT = 80                     # pids.current / TasksMax
 
-SEV_RISK = "risk"
-SEV_WARN = "warn"
-SEV_INFO = "info"
-SEV_LABEL = {SEV_RISK: "要紧", SEV_WARN: "值得处理", SEV_INFO: "知道就好"}
-
 NOTES = (
     f"换页、直接回收的速率只采 {RATE_WINDOW_SEC:.1f} 秒窗口，回答的是「此刻有没有在抖」，"
     "不是历史曲线（曲线在概览的内存图上，那里只有总量没有压力）。",
@@ -87,21 +83,6 @@ try:
     _PAGE = int(os.sysconf("SC_PAGE_SIZE")) or 4096
 except (ValueError, OSError):
     _PAGE = 4096
-
-
-def _human(n) -> str:
-    """字节数折成人话。与存储占用那一页同一套单位，两页对照时不会看错一个数量级。"""
-    try:
-        v = float(n)
-    except (TypeError, ValueError):
-        return "—"
-    if v < 0:
-        v = 0.0
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if v < 1024 or unit == "TB":
-            return f"{v:.0f}{unit}" if unit == "B" else f"{v:.1f}{unit}"
-        v /= 1024
-    return "—"
 
 
 def _read(path: str) -> str:
@@ -558,7 +539,7 @@ def _findings(mem: dict, press: dict, rates: dict, units: dict, oom: dict, tun: 
         swap_out = rates.get("swap_out")
         reclaim = rates.get("direct_reclaim")
         if isinstance(swap_out, int) and swap_out >= SWAP_RATE_WARN:
-            add("swapping", SEV_WARN, f"正在往 swap 写（{_human(swap_out)}/秒）",
+            add("swapping", SEV_WARN, f"正在往 swap 写（{human_bytes(swap_out)}/秒）",
                 f"换出非零说明匿名页已经放不进物理内存。这台机器 swappiness={tun.get('swappiness')}，"
                 "写 swap 是内核的主动选择而不是故障；但持续写入意味着被换出的那部分一旦被访问就要"
                 "等磁盘，延迟会打到业务上。",
@@ -573,34 +554,34 @@ def _findings(mem: dict, press: dict, rates: dict, units: dict, oom: dict, tun: 
         pct = mem.get("used_pct")
         if isinstance(pct, int) and pct >= MEM_RISK_PCT:
             add("mem-used", SEV_RISK, f"内存已用 {pct}%，只剩 {mem['available_pct']}% 能腾出来",
-                f"已用 {_human(mem['used'])} / {_human(mem['total'])}，可腾出 "
-                f"{_human(mem['available'])}。再往上就是 OOM 那条线。",
+                f"已用 {human_bytes(mem['used'])} / {human_bytes(mem['total'])}，可腾出 "
+                f"{human_bytes(mem['available'])}。再往上就是 OOM 那条线。",
                 "choyeonctl memory")
         elif isinstance(pct, int) and pct >= MEM_WARN_PCT:
             add("mem-used", SEV_WARN, f"内存已用 {pct}%",
                 f"按 MemTotal - MemAvailable 口径到了 {pct}%，页缓存还能腾出 "
-                f"{_human(mem['reclaimable'])}。留头不大，突发分配会先撞上回收。",
+                f"{human_bytes(mem['reclaimable'])}。留头不大，突发分配会先撞上回收。",
                 "choyeonctl memory")
         sp = mem.get("swap_pct")
         if isinstance(sp, int) and sp >= SWAP_RISK_PCT:
             add("swap-full", SEV_RISK, f"swap 已用 {sp}%",
-                f"换出空间只剩 {_human(max(mem['swap_total'] - mem['swap_used'], 0))}。swap 满了之后，"
+                f"换出空间只剩 {human_bytes(max(mem['swap_total'] - mem['swap_used'], 0))}。swap 满了之后，"
                 "下一次回收失败就直接走 OOM，而不是继续换页。",
                 "cat /proc/swaps")
         elif isinstance(sp, int) and sp >= SWAP_WARN_PCT:
-            add("swap-full", SEV_WARN, f"swap 已用 {sp}%（{_human(mem['swap_used'])}）",
+            add("swap-full", SEV_WARN, f"swap 已用 {sp}%（{human_bytes(mem['swap_used'])}）",
                 "放进去的不会自己回来：swap 长期高位通常意味着曾经缺过内存，或者有些进程早就该重启了。",
                 "choyeonctl memory")
         cl, ca = mem.get("commit_limit"), mem.get("committed")
         if isinstance(cl, int) and cl > 0 and isinstance(ca, int) and ca > cl:
             if tun.get("overcommit_memory") == 2:
-                add("commit", SEV_RISK, f"内存承诺超过上限（{_human(ca)} > {_human(cl)}）",
+                add("commit", SEV_RISK, f"内存承诺超过上限（{human_bytes(ca)} > {human_bytes(cl)}）",
                     "vm.overcommit_memory=2 时内核会直接拒绝新的分配与 fork，表现为服务起不来、"
                     "cron 报 cannot fork，而物理内存可能还很空。",
                     "grep -E 'CommitLimit|Committed_AS' /proc/meminfo")
             else:
                 add("commit", SEV_INFO, f"承诺内存已是 CommitLimit 的 {round(ca * 100 / cl)}%",
-                    f"Committed_AS {_human(ca)} 超过内核的启发式上限 {_human(cl)}。当前 "
+                    f"Committed_AS {human_bytes(ca)} 超过内核的启发式上限 {human_bytes(cl)}。当前 "
                     f"overcommit_memory={tun.get('overcommit_memory')}，内核不会因此拒绝分配，"
                     "这个数字只是提示：真到用的时候能不能拿到，看物理内存和回收。",
                     "grep -E 'CommitLimit|Committed_AS' /proc/meminfo")
@@ -612,14 +593,14 @@ def _findings(mem: dict, press: dict, rates: dict, units: dict, oom: dict, tun: 
         path = f"/sys/fs/cgroup/system.slice/{row['unit']}"
         if isinstance(cap, int) and cap >= CAP_RISK_PCT:
             add(f"cap:{row['unit']}", SEV_RISK, f"{who} 用到自己上限的 {cap}%",
-                f"memory.current {_human(row['current'])} / MemoryMax {_human(row['max'])}。越过这条线"
+                f"memory.current {human_bytes(row['current'])} / MemoryMax {human_bytes(row['max'])}。越过这条线"
                 "内核就在这个单元里挑一个杀掉，别的单元不受影响——所以它的重启看起来毫无道理，而整机"
                 "内存可能还很空。",
                 f"systemctl status {row['unit']}; cat {path}/memory.events")
         elif isinstance(cap, int) and cap >= CAP_WARN_PCT:
             left = max((row["max"] or 0) - (row["current"] or 0), 0)
             add(f"cap:{row['unit']}", SEV_WARN, f"{who} 用到自己上限的 {cap}%",
-                f"离 MemoryMax 还剩 {_human(left)}。先读 memory.peak 判断这是稳态还是尖峰，"
+                f"离 MemoryMax 还剩 {human_bytes(left)}。先读 memory.peak 判断这是稳态还是尖峰，"
                 "别照着峰值设上限。",
                 f"cat {path}/memory.peak")
         elif int(ev.get("max") or 0):
@@ -697,7 +678,7 @@ def _collect(app_map: dict | None = None, window: float = RATE_WINDOW_SEC) -> di
 
 
 _LOCK = asyncio.Lock()
-_cache: dict = {"at": 0.0, "data": None}
+_cache: dict = probe.new_cache()
 
 
 async def _unit_map() -> dict:
@@ -718,29 +699,17 @@ async def _unit_map() -> dict:
 
 
 async def audit(refresh: bool = False) -> dict:
-    now = time.monotonic()
-    if not refresh and _cache["data"] and now - _cache["at"] < CACHE_TTL:
-        data = dict(_cache["data"])
-        data["cached"] = True
-        return data
-    async with _LOCK:
-        now = time.monotonic()
-        if not refresh and _cache["data"] and now - _cache["at"] < CACHE_TTL:
-            data = dict(_cache["data"])
-            data["cached"] = True
-            return data
-        app_map = await _unit_map()
-        data = await asyncio.to_thread(_collect, app_map)
-        _cache["at"] = now
-        _cache["data"] = data
-        out = dict(data)
-        out["cached"] = False
-        return out
+    """带 TTL 的探测入口；并发与连点合并成一轮采样（见 app/probe.py）。"""
+    return await probe.read(_cache, _LOCK, _reprobe, refresh=refresh, ttl=CACHE_TTL)
+
+
+async def _reprobe() -> dict:
+    app_map = await _unit_map()
+    return await asyncio.to_thread(_collect, app_map)
 
 
 def reset_cache() -> None:
-    _cache["at"] = 0.0
-    _cache["data"] = None
+    probe.reset(_cache)
 
 
 def doctor_item(data: dict) -> dict:
@@ -758,7 +727,7 @@ def doctor_item(data: dict) -> dict:
     oom = data.get("oom") or {}
     kills = int(oom.get("kernel_total") or 0)
     unit_kills = oom.get("unit_kills") or {}
-    head = f"已用 {mem.get('used_pct')}%（{_human(mem.get('available'))} 可腾出）"
+    head = f"已用 {mem.get('used_pct')}%（{human_bytes(mem.get('available'))} 可腾出）"
     if kills or unit_kills:
         total = kills + sum(int(v) for v in unit_kills.values())
         risky = [f["title"] for f in data.get("findings") or [] if f["severity"] == SEV_RISK]

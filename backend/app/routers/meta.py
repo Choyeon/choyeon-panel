@@ -129,7 +129,7 @@ async def _check_service() -> dict:
     if st["state"] == "unknown":
         return {"status": "warn", "detail": f"查不到 {SERVICE_NAME} 的状态（systemctl 没有回话）",
                 "fix": f"systemctl status {SERVICE_NAME}.service"}
-    if st["state"] in ("activating", "deactivating"):
+    if st["state"] in systemd_ops.TRANSITION_STATES:
         # 正在起/正在收：不能报"运行中"，也不该按停掉处理——此刻 restart 会打断它自己
         return {"status": "warn", "detail": f"{SERVICE_NAME} 状态切换中（{st['state']}）",
                 "fix": f"systemctl status {SERVICE_NAME}.service"}

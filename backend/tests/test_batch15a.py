@@ -415,8 +415,10 @@ class ReloadStateTests(unittest.TestCase):
     def test_systemd_need_daemon_reload_pairing(self):
         listed = mock.Mock(returncode=0, stdout="  a.service  loaded active running A\n"
                                                 "  b.service  loaded active exited  B\n", stderr="")
-        shown = mock.Mock(returncode=0, stdout="Id=a.service\nNeedDaemonReload=no\n"
-                                               "Id=b.service\nNeedDaemonReload=yes\n", stderr="")
+        # systemctl show 的回显是「每个 unit 一块、空行分隔」；挤成一块就只解析出一个 unit，
+        # 这条断言会在错误的理由上变绿。
+        shown = mock.Mock(returncode=0, stdout="Id=a.service\nNeedDaemonReload=no\n\n"
+                                               "Id=b.service\nNeedDaemonReload=yes\n\n", stderr="")
         with mock.patch.object(ps.subprocess, "run", mock.Mock(side_effect=[listed, shown])):
             out = ps._systemd_state()
         self.assertTrue(out["ok"])

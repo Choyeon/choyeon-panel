@@ -21,10 +21,10 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
-import time
 from datetime import UTC, datetime
 
 from .. import database as dbm
+from .. import probe
 from ..util import run
 from . import firewall_service
 
@@ -52,7 +52,7 @@ DOCKER_PROXIES = {"docker-proxy", "dockerd"}
 LINK_LOCAL_PORTS = {5353, 5355}
 
 _LOCK = asyncio.Lock()
-_cache: dict = {"at": 0.0, "data": None}
+_cache: dict = probe.new_cache()
 
 _NAME_RE = re.compile(r'"([^"]*)"')
 _PID_RE = re.compile(r"\bpid=(\d+)")
@@ -216,16 +216,8 @@ def _summary(ports: list[dict]) -> dict:
 
 
 async def audit(refresh: bool = False) -> dict:
-    """带 TTL 的对账入口；并发调用只回源一次。"""
-    async with _LOCK:
-        now = time.time()
-        data = _cache["data"]
-        if not refresh and data and now - _cache["at"] < CACHE_TTL:
-            return {**data, "cached": True}
-        data = await _collect()
-        _cache["at"] = time.time()
-        _cache["data"] = data
-        return {**data, "cached": False}
+    """带 TTL 的对账入口；并发与连点合并成一轮 `ss` + 防火墙规则读取（见 app/probe.py）。"""
+    return await probe.read(_cache, _LOCK, _collect, refresh=refresh, ttl=CACHE_TTL)
 
 
 async def _collect() -> dict:

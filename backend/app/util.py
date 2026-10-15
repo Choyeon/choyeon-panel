@@ -347,6 +347,24 @@ def disk_usage_pct(path: str) -> int | None:
         return None
 
 
+# 字节数折成人话：存储占用与内存压力两页原来各写一份，单位表一份到 TB、一份到 PB，
+# 非数字时一个回 "—"、一个回 "0B"。同一个数量在两个页签里差一个数量级的写法，
+# 用户对照着看就会怀疑是不是自己看错了盘。
+def human_bytes(n) -> str:
+    """None / 读不到的时候回 "—"，绝不回 "0B"：0 字节是一个结论，"—" 才是"没核对成"。"""
+    try:
+        val = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    if val < 0:
+        val = 0.0
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if val < 1024 or unit == "PB":
+            return f"{val:.0f}B" if unit == "B" else f"{val:.1f}{unit}"
+        val /= 1024
+    return "—"
+
+
 # 自检判词里「一共几项」与「点名哪一项」是同一个事实的两半，以前却各服务手抄一份
 # `，另有 N 项`，三条分支抄漏了（load 的 fail、pending 的 fail、login 的合并判词）：写着
 # 「2 项改动没进正在跑的进程」却只点第一条名字，本机实测被吞掉的那条正是

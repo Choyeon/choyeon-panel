@@ -59,6 +59,28 @@ export function useDrawerWidth(fraction: number): ComputedRef<number> {
 }
 
 /**
+ * systemd 的 ActiveState → 说人话。整个前端只有这一份。
+ *
+ * 服务列表原来自己写了一份（`failed: '异常'`、`activating: '启动中'`），应用列表与详情走
+ * 下面的 UNIT_TAG（`failed: '启动失败'`、`activating: '正在启动'`），同一个 unit 在两个页面上
+ * 挂着两种说法，用户会当成两件事。状态取值仍按 systemd 回什么来（列表那边是枚举里挑出来的），
+ * 认不出的原样显示——把未知状态翻译成一个已知说法，比原样摆着更误导人。
+ */
+export const UNIT_STATE_LABELS: Record<string, string> = {
+  active: '运行中',
+  reloading: '重载中',
+  activating: '正在启动',
+  deactivating: '正在停止',
+  failed: '启动失败',
+  inactive: '已停止',
+  maintenance: '维护中',
+};
+
+export function stateLabel(s: string): string {
+  return UNIT_STATE_LABELS[s || ''] || s;
+}
+
+/**
  * systemd 的 unit 状态 → CpStatusTag 的 status、说人话的文字、以及小圆点的色调。
  *
  * 判词只由后端 systemd_ops 出一份（列表与详情都带 unitState / unitMissing），这里只负责说法。
@@ -67,12 +89,12 @@ export function useDrawerWidth(fraction: number): ComputedRef<number> {
  * 对一个不存在的 unit 点下去只会换来一句 not loaded。
  */
 const UNIT_TAG: Record<string, { status: string; text: string; tone: string }> = {
-  active: { status: 'running', text: '运行中', tone: 'ok' },
-  reloading: { status: 'running', text: '重载中', tone: 'ok' },
-  activating: { status: 'starting', text: '正在启动', tone: 'warn' },
-  deactivating: { status: 'waiting', text: '正在停止', tone: 'warn' },
-  failed: { status: 'failed', text: '启动失败', tone: 'err' },
-  inactive: { status: 'stopped', text: '已停止', tone: 'idle' },
+  active: { status: 'running', text: UNIT_STATE_LABELS.active, tone: 'ok' },
+  reloading: { status: 'running', text: UNIT_STATE_LABELS.reloading, tone: 'ok' },
+  activating: { status: 'starting', text: UNIT_STATE_LABELS.activating, tone: 'warn' },
+  deactivating: { status: 'waiting', text: UNIT_STATE_LABELS.deactivating, tone: 'warn' },
+  failed: { status: 'failed', text: UNIT_STATE_LABELS.failed, tone: 'err' },
+  inactive: { status: 'stopped', text: UNIT_STATE_LABELS.inactive, tone: 'idle' },
 };
 
 export function unitTag(r: { unitState?: string; unitMissing?: boolean }): { status: string; text: string; tone: string } {

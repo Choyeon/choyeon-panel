@@ -30,7 +30,10 @@ import subprocess
 import time
 from datetime import UTC, datetime
 
+from .. import probe
+from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
 from ..util import tallied
+from . import systemd_ops
 
 CACHE_TTL = 120.0
 MAX_STALE_UNITS = 12
@@ -38,11 +41,6 @@ MAX_PKG_LOOKUPS = 12
 PROC_SCAN_CAP = 4000
 SCAN_BUDGET_SEC = 3.0
 SUBPROCESS_TIMEOUT = 6
-
-SEV_RISK = "risk"
-SEV_WARN = "warn"
-SEV_INFO = "info"
-SEV_LABEL = {SEV_RISK: "要紧", SEV_WARN: "值得处理", SEV_INFO: "知道就好"}
 
 REBOOT_MARKER = "/run/reboot-required"
 REBOOT_MARKER_PKGS = "/run/reboot-required.pkgs"
@@ -561,7 +559,7 @@ def _systemd_state() -> dict:
     out["checked"] = len(units)
     try:
         shown = subprocess.run(
-            ["systemctl", "show", *units, "-p", "Id", "-p", "NeedDaemonReload"],
+            ["systemctl", "show", "-p", "Id", "-p", "NeedDaemonReload", "--", *units],
             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -570,12 +568,12 @@ def _systemd_state() -> dict:
     if shown.returncode != 0:
         out["reason"] = (shown.stderr or "").strip()[:120] or "systemctl show 失败"
         return out
-    cur = ""
-    for line in (shown.stdout or "").splitlines():
-        if line.startswith("Id="):
-            cur = line[3:].strip()
-        elif line.startswith("NeedDaemonReload=") and line.split("=", 1)[1].strip() == "yes":
-            out["need_reload"].append(cur)
+    # 按块解析（systemd_ops.parse_show），不按行顺序认领：属性顺序是 systemd 自己定的，
+    # 本机实测 MainPID 就排在 Id 前面。逐行认领的写法一旦把 NeedDaemonReload 排在 Id 之前，
+    # 就把上一个 unit 的名字挂到这一个的"要重载"上——点名点错服务比不点名更糟。
+    for props in systemd_ops.parse_show(shown.stdout or ""):
+        if (props.get("NeedDaemonReload") or "").strip() == "yes":
+            out["need_reload"].append(props["Id"])
     out["need_reload"] = out["need_reload"][:MAX_STALE_UNITS]
     out["ok"] = True
     return out
@@ -765,7 +763,7 @@ def _collect(self_unit: str) -> dict:
     }
 
 
-_cache = {"at": 0.0, "data": None}
+_cache: dict = probe.new_cache()
 _LOCK = asyncio.Lock()
 
 
@@ -775,28 +773,16 @@ def _self_unit_name() -> str:
 
 
 async def audit(refresh: bool = False) -> dict:
-    now = time.monotonic()
-    if not refresh and _cache["data"] and now - _cache["at"] < CACHE_TTL:
-        data = dict(_cache["data"])
-        data["cached"] = True
-        return data
-    async with _LOCK:
-        now = time.monotonic()
-        if not refresh and _cache["data"] and now - _cache["at"] < CACHE_TTL:
-            data = dict(_cache["data"])
-            data["cached"] = True
-            return data
-        data = await asyncio.to_thread(_collect, _self_unit_name())
-        _cache["at"] = now
-        _cache["data"] = data
-        out = dict(data)
-        out["cached"] = False
-        return out
+    """带 TTL 的探测入口；并发与连点合并成一轮 /proc + lsof 扫描（见 app/probe.py）。"""
+    return await probe.read(_cache, _LOCK, _reprobe, refresh=refresh, ttl=CACHE_TTL)
+
+
+async def _reprobe() -> dict:
+    return await asyncio.to_thread(_collect, _self_unit_name())
 
 
 def reset_cache() -> None:
-    _cache["at"] = 0.0
-    _cache["data"] = None
+    probe.reset(_cache)
 
 
 def doctor_item(data: dict) -> dict:

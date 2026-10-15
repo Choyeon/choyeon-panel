@@ -174,15 +174,9 @@ async def _sync_timer(b: dict):
                 os.unlink(f)
         await run("systemctl", ["daemon-reload"])
         return
-    tz = None
-    # /etc/timezone 在 RHEL 系与容器里常不存在，读不到属于正常情况
-    with suppress(OSError):
-        tz = Path("/etc/timezone").read_text().strip() or None
-    if not tz:
-        link = os.path.realpath("/etc/localtime")
-        if "/zoneinfo/" in link:
-            tz = link.split("/zoneinfo/")[1]
-    tz = tz or "UTC"
+    # 时区名和 cron 任务定时器共用一个出处（systemd_ops.timezone_name）：两处各推一遍，
+    # 同一台机器上的两类定时器早晚会一个按本地时间、一个按 UTC 跑。
+    tz = systemd_ops.timezone_name()
     cal = f"{'Mon ' if b['schedule'] == 'weekly' else ''}{int(b['hour']):02d}:{int(b['minute']):02d} {tz}"
     data = config.DATA_DIR
     # 生成 unit 时的三处转义，都是沙箱真 systemd 实测出来的问题（CP_* 路径来自 .env / 环境变量，

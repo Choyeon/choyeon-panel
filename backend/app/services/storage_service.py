@@ -29,8 +29,9 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .. import config
-from ..util import run, tallied
+from .. import config, probe
+from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
+from ..util import human_bytes, run, tallied
 from . import alerts_service
 
 CACHE_TTL = 300.0
@@ -65,11 +66,6 @@ SNAPSHOT_FSTYPES = frozenset({"squashfs", "iso9660", "udf", "cdfs"})
 RAM_FSTYPES = frozenset({"tmpfs"})
 
 
-SEV_RISK = "risk"
-SEV_WARN = "warn"
-SEV_INFO = "info"
-SEV_LABEL = {SEV_RISK: "要紧", SEV_WARN: "值得处理", SEV_INFO: "知道就好"}
-
 NOTES = (
     f"每个目录最多扫 {ROOT_BUDGET_SEC:.0f} 秒、{MAX_DEPTH} 层，标了「未扫完」的给出的是下界而不是全量。",
     "不跟随符号链接、不跨文件系统计数；备份产物只统计不删除。",
@@ -84,7 +80,7 @@ _UNITS = {"bytes": 1, "b": 1, "k": 1024, "m": _GIB // 1024, "g": _GIB, "t": _GIB
 _JOURNAL_RE = re.compile(r"([\d.]+)\s*(bytes|[bkmtgp])i?b?", re.IGNORECASE)
 
 _LOCK = asyncio.Lock()
-_cache: dict = {"at": 0.0, "data": None}
+_cache: dict = probe.new_cache()
 
 
 def _entry_size(st) -> int:
@@ -188,15 +184,6 @@ def _walk(root: str, budget: float = ROOT_BUDGET_SEC, max_depth: int = MAX_DEPTH
     return out
 
 
-def _human(n) -> str:
-    val = float(max(int(n or 0), 0))
-    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
-        if val < 1024 or unit == "PB":
-            return f"{val:.0f}B" if unit == "B" else f"{val:.1f}{unit}"
-        val /= 1024
-    return f"{val:.1f}PB"
-
-
 def _parse_journal(text: str) -> int | None:
     """解析 `journalctl --disk-usage` 里那句 "take up 1.3G in the file system"。
 
@@ -278,9 +265,9 @@ def _disk_info() -> dict:
         "ok": True,
         "path": config.DATA_DIR,
         "total": u.total,
-        "total_human": _human(u.total),
+        "total_human": human_bytes(u.total),
         "free": u.free,
-        "free_human": _human(u.free),
+        "free_human": human_bytes(u.free),
         "used_pct": used_pct,
     }
 
@@ -397,11 +384,11 @@ def _mounts(raw: str | None = None) -> dict:
         rec.update({
             "unknown": False,
             "total": total,
-            "total_human": _human(total),
+            "total_human": human_bytes(total),
             "used": used,
-            "used_human": _human(used),
+            "used_human": human_bytes(used),
             "free": avail,
-            "free_human": _human(avail),
+            "free_human": human_bytes(avail),
             "used_pct": round(used * 100 / total) if total else None,
             "inode_pct": round((int(s.f_files) - int(s.f_ffree)) * 100 / int(s.f_files)) if s.f_files else None,
         })
@@ -434,7 +421,7 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
         out.append({
             "id": "journal",
             "severity": SEV_WARN,
-            "title": f"systemd 日志已占 {_human(jb)}",
+            "title": f"systemd 日志已占 {human_bytes(jb)}",
             "detail": "journal 本来就按时间滚动，占这么多通常不代表还要留着排障。"
                       "先收上限，别去删当前文件：vacuum 只会裁掉最老的那部分。",
             "fix": "journalctl --vacuum-size=500M",
@@ -446,7 +433,7 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
         out.append({
             "id": "backups",
             "severity": SEV_WARN,
-            "title": f"备份目录累计 {_human(int(backup['bytes']))}",
+            "title": f"备份目录累计 {human_bytes(int(backup['bytes']))}",
             "detail": f"共 {bs.get('count', 0)} 份产物，最早 {bs.get('oldest') or '—'}、最新 "
                       f"{bs.get('newest') or '—'}。每个任务各有 keep 名额，超了名额还留着"
                       "一般是任务被停用或改过名字。面板不代删，先核对再动手。",
@@ -457,7 +444,7 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
         out.append({
             "id": "tight",
             "severity": SEV_RISK if disk["used_pct"] >= dt["crit"] else SEV_WARN,
-            "title": f"分区已用 {disk['used_pct']}%，只剩 {_human(int(disk['free']))}",
+            "title": f"分区已用 {disk['used_pct']}%，只剩 {human_bytes(int(disk['free']))}",
             "detail": "备份、数据库写入和构建缓存都落在这一块的盘上。接近满的时候最先出事的"
                       "往往是备份，而备份失败不会有任何提示音。这条线取自设置页的磁盘阈值"
                       f"（警戒线 {dt['warn']}%，要紧线 {dt['crit']}%），改一次各处一起跟着变。",
@@ -533,7 +520,7 @@ def _findings(roots: list[dict], journal: dict, disk: dict, big_files: list[dict
         out.append({
             "id": "bigfile:" + f["path"],
             "severity": SEV_INFO,
-            "title": f"单个文件 {_human(int(f['bytes']))}：{f['path']}",
+            "title": f"单个文件 {human_bytes(int(f['bytes']))}：{f['path']}",
             "detail": "只点出来，不替你判断它还需不需要。确认要清理的话请回到备份或应用页面"
                       "按流程处理，不要直接 rm。",
             "fix": "",
@@ -561,9 +548,9 @@ def _collect() -> dict:
                 rec["backups"] = _backup_stats(spec["path"])
         else:
             rec["note"] = "路径不存在或不是目录"
-        rec["bytes_human"] = _human(rec["bytes"])
+        rec["bytes_human"] = human_bytes(rec["bytes"])
         for sd in rec["subdirs"]:
-            sd["bytes_human"] = _human(sd["bytes"])
+            sd["bytes_human"] = human_bytes(sd["bytes"])
         roots.append(rec)
 
     # 登记的根会互相包含：DATA_DIR 就落在 FILE_ROOTS 的 /root/www 里面。逐行数字都各自
@@ -587,7 +574,7 @@ def _collect() -> dict:
         if bf["path"] in seen:
             continue
         seen.add(bf["path"])
-        bf["bytes_human"] = _human(int(bf["bytes"]))
+        bf["bytes_human"] = human_bytes(int(bf["bytes"]))
         big_files.append(bf)
     return {"roots": roots, "disk": disk, "big_files": big_files[:TOP_FILES], "mounts": _mounts()}
 
@@ -601,71 +588,58 @@ async def _journal_bytes() -> tuple[int | None, str]:
 
 
 async def audit(refresh: bool = False) -> dict:
-    """带 TTL 缓存的对账：自检页反复刷新不该反复走盘（同 exposure_service 的理由）。"""
+    """带 TTL 缓存的对账：自检页反复刷新不该反复走盘（合并规则见 app/probe.py）。"""
+    return await probe.read(_cache, _LOCK, _reprobe, refresh=refresh, ttl=CACHE_TTL)
 
-    def cached() -> dict:
-        data = dict(_cache["data"])
-        data["cached"] = True
-        return data
 
-    now = time.monotonic()
-    if not refresh and _cache["data"] and now - float(_cache["at"]) < CACHE_TTL:
-        return cached()
-    async with _LOCK:
-        now = time.monotonic()
-        if not refresh and _cache["data"] and now - float(_cache["at"]) < CACHE_TTL:
-            return cached()
-        jb, jraw = await _journal_bytes()
-        picked = await asyncio.to_thread(_collect)
-        roots, disk = picked["roots"], picked["disk"]
-        # 一轮扫描只读一次配置线，判词和载荷用的是同一个值。
-        dt = alerts_service.disk_thresholds()
-        journal = {
-            "bytes": jb,
-            "bytes_human": _human(jb) if isinstance(jb, int) else None,
-            "raw": jraw[:200],
-        }
-        findings = _findings(roots, journal, disk, picked["big_files"],
-                             picked["mounts"]["items"], thresholds=dt)
-        total = sum(int(r.get("bytes") or 0) for r in roots if not r.get("nested_in"))
-        counts = {
-            "risk": sum(1 for f in findings if f["severity"] == SEV_RISK),
-            "warn": sum(1 for f in findings if f["severity"] == SEV_WARN),
-            "info": sum(1 for f in findings if f["severity"] == SEV_INFO),
-            "bytes_total": total,
-            "bytes_total_human": _human(total),
-            "roots": len([r for r in roots if r.get("exists")]),
-            "mounts": len(picked["mounts"]["items"]),
-        }
-        data = {
-            "as_of": datetime.now(UTC).isoformat(timespec="seconds"),
-            "cached": False,
-            "disk": disk,
-            "mounts": picked["mounts"],
-            "journal": journal,
-            "roots": roots,
-            "big_files": picked["big_files"],
-            "findings": findings,
-            "counts": counts,
-            "notes": list(NOTES),
-            # 阈值只有一个出处：要紧线取自设置页那条配置（见 alerts_service.disk_thresholds），
-            # 这里只是把它随载荷带出去。过去前端自己写死 90、inode 又写死 90，后端把配置
-            # 调到 85 的话，同一条"分区已用 87%"在自检里是要紧项、在页签上是绿灯，
-            # 而 inode 那一列的"紧"和判词用的还不是同一条线。
-            # 注意要放在这个函数上——/api/storage 返回的是 audit()，放在 _collect() 里前端读不到。
-            "tight_pct": dt["warn"],
-            "crit_pct": dt["crit"],
-            "inode_warn_pct": INODE_WARN_PCT,
-            "inode_risk_pct": INODE_RISK_PCT,
-        }
-        _cache["at"] = time.monotonic()
-        _cache["data"] = data
-        return data
+async def _reprobe() -> dict:
+    jb, jraw = await _journal_bytes()
+    picked = await asyncio.to_thread(_collect)
+    roots, disk = picked["roots"], picked["disk"]
+    # 一轮扫描只读一次配置线，判词和载荷用的是同一个值。
+    dt = alerts_service.disk_thresholds()
+    journal = {
+        "bytes": jb,
+        "bytes_human": human_bytes(jb) if isinstance(jb, int) else None,
+        "raw": jraw[:200],
+    }
+    findings = _findings(roots, journal, disk, picked["big_files"],
+                         picked["mounts"]["items"], thresholds=dt)
+    total = sum(int(r.get("bytes") or 0) for r in roots if not r.get("nested_in"))
+    counts = {
+        "risk": sum(1 for f in findings if f["severity"] == SEV_RISK),
+        "warn": sum(1 for f in findings if f["severity"] == SEV_WARN),
+        "info": sum(1 for f in findings if f["severity"] == SEV_INFO),
+        "bytes_total": total,
+        "bytes_total_human": human_bytes(total),
+        "roots": len([r for r in roots if r.get("exists")]),
+        "mounts": len(picked["mounts"]["items"]),
+    }
+    return {
+        "as_of": datetime.now(UTC).isoformat(timespec="seconds"),
+        "cached": False,
+        "disk": disk,
+        "mounts": picked["mounts"],
+        "journal": journal,
+        "roots": roots,
+        "big_files": picked["big_files"],
+        "findings": findings,
+        "counts": counts,
+        "notes": list(NOTES),
+        # 阈值只有一个出处：要紧线取自设置页那条配置（见 alerts_service.disk_thresholds），
+        # 这里只是把它随载荷带出去。过去前端自己写死 90、inode 又写死 90，后端把配置
+        # 调到 85 的话，同一条"分区已用 87%"在自检里是要紧项、在页签上是绿灯，
+        # 而 inode 那一列的"紧"和判词用的还不是同一条线。
+        # 注意要放在这个函数上——/api/storage 返回的是 audit()，放在 _collect() 里前端读不到。
+        "tight_pct": dt["warn"],
+        "crit_pct": dt["crit"],
+        "inode_warn_pct": INODE_WARN_PCT,
+        "inode_risk_pct": INODE_RISK_PCT,
+    }
 
 
 def reset_cache() -> None:
-    _cache["at"] = 0.0
-    _cache["data"] = None
+    probe.reset(_cache)
 
 
 def doctor_item(data: dict) -> dict:
@@ -692,7 +666,7 @@ def doctor_item(data: dict) -> dict:
         }
     info = int(counts.get("info") or 0)
     detail = (
-        f"盘点了 {counts.get('roots')} 个目录，合计 {_human(counts.get('bytes_total'))}，没有异常占用{used}"
+        f"盘点了 {counts.get('roots')} 个目录，合计 {human_bytes(counts.get('bytes_total'))}，没有异常占用{used}"
     )
     if info:
         detail += f"（另有 {info} 条只是让你知道）"

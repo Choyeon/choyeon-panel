@@ -275,14 +275,17 @@ class WalkTreeTests(unittest.TestCase):
 
 class HumanTests(unittest.TestCase):
     def test_units(self):
-        self.assertEqual(ss._human(0), "0B")
-        self.assertEqual(ss._human(1023), "1023B")
-        self.assertEqual(ss._human(2 * KIB), "2.0KB")
-        self.assertEqual(ss._human(5 * GIB), "5.0GB")
+        self.assertEqual(ss.human_bytes(0), "0B")
+        self.assertEqual(ss.human_bytes(1023), "1023B")
+        self.assertEqual(ss.human_bytes(2 * KIB), "2.0KB")
+        self.assertEqual(ss.human_bytes(5 * GIB), "5.0GB")
 
     def test_none_and_negative(self):
-        self.assertEqual(ss._human(None), "0B")
-        self.assertEqual(ss._human(-5), "0B")
+        # 批次㉞把换算收进 app.util.human_bytes：读不到（None）显示成 "—"，
+        # 因为 "0B" 是一个结论——"这里没有东西占地方"，而实际情况是"这一项没核对成"。
+        self.assertEqual(ss.human_bytes(None), "—")
+        self.assertEqual(ss.human_bytes(""), "—")
+        self.assertEqual(ss.human_bytes(-5), "0B")
 
 
 class JournalParseTests(unittest.TestCase):
@@ -449,12 +452,12 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(baks["subdirs"][0]["name"], "manual")
         # 每个根、每个一级子目录、分区都自带 human 值：CLI 与网页都只读这些字段，不各自换算。
         for r in picked["roots"]:
-            self.assertEqual(r["bytes_human"], ss._human(r["bytes"]))
+            self.assertEqual(r["bytes_human"], ss.human_bytes(r["bytes"]))
             for sd in r["subdirs"]:
-                self.assertEqual(sd["bytes_human"], ss._human(sd["bytes"]))
+                self.assertEqual(sd["bytes_human"], ss.human_bytes(sd["bytes"]))
         self.assertTrue(picked["disk"]["ok"])
-        self.assertEqual(picked["disk"]["total_human"], ss._human(picked["disk"]["total"]))
-        self.assertEqual(picked["disk"]["free_human"], ss._human(picked["disk"]["free"]))
+        self.assertEqual(picked["disk"]["total_human"], ss.human_bytes(picked["disk"]["total"]))
+        self.assertEqual(picked["disk"]["free_human"], ss.human_bytes(picked["disk"]["free"]))
 
     def test_big_files_from_the_same_path_are_listed_once(self):
         """线上真实形态：DATA_DIR 就落在 FILE_ROOTS 的 /root/www 里面。

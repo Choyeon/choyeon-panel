@@ -34,6 +34,8 @@ import os
 import time
 from datetime import UTC, datetime
 
+from .. import probe
+from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
 from ..util import tallied
 
 CACHE_TTL = 60.0
@@ -54,11 +56,6 @@ STEAL_RISK = 20.0
 PSI_CPU_WARN = 10.0           # some avg10，单位 %
 THROTTLE_WARN = 15.0          # 窗口内被限流的周期占比 %
 THROTTLE_RISK = 40.0
-
-SEV_RISK = "risk"
-SEV_WARN = "warn"
-SEV_INFO = "info"
-SEV_LABEL = {SEV_RISK: "要紧", SEV_WARN: "值得处理", SEV_INFO: "知道就好"}
 
 CG_ROOT = "/sys/fs/cgroup"
 PROC_STAT = "/proc/stat"
@@ -386,14 +383,14 @@ def _findings(load: dict, cpu: dict, psi: dict, procs: dict,
         blk = blocked_now
         if per_core >= LOAD_RISK_PER_CORE and blk:
             d_pids = [str(b["pid"]) for b in (procs.get("blocked") or []) if b["state"] == "D"][:5]
-            probe = ("pidstat -d 1 5 -p " + ",".join(d_pids)) if d_pids else "pidstat -d 1 5"
+            io_cmd = ("pidstat -d 1 5 -p " + ",".join(d_pids)) if d_pids else "pidstat -d 1 5"
             out.append({"id": "load-io", "severity": SEV_RISK,
                         "title": f"每核排队 {per_core}（整机 load {load['one']}，{cores} 核），"
                                  f"且 {blk} 个任务正卡在等 IO",
                         "detail": "Linux 的 load 把 D 状态（等 IO、不可中断）也算进去，所以这个数高不一定是 CPU 不够。"
                                   "这时候加核、改配额都没用，要看是谁在等哪块盘。"
                                   + (f"这一秒里 iowait 占 {split.get('iowait')}%。" if split.get("iowait") else ""),
-                        "fix": probe + "   # 看哪几个进程在读写在堵；再看设备本身：sar -d 1 3"})
+                        "fix": io_cmd + "   # 看哪几个进程在读写在堵；再看设备本身：sar -d 1 3"})
         elif per_core >= LOAD_RISK_PER_CORE:
             out.append({"id": "load-cpu", "severity": SEV_RISK,
                         "title": f"每核排队 {per_core}（整机 load {load['one']}，{cores} 核）",
@@ -603,33 +600,21 @@ def _collect() -> dict:
     }
 
 
-_cache = {"at": 0.0, "data": None}
+_cache = probe.new_cache()
 _LOCK = asyncio.Lock()
 
 
 async def audit(refresh: bool = False) -> dict:
-    now = time.monotonic()
-    if not refresh and _cache["data"] and now - _cache["at"] < CACHE_TTL:
-        data = dict(_cache["data"])
-        data["cached"] = True
-        return data
-    async with _LOCK:
-        now = time.monotonic()
-        if not refresh and _cache["data"] and now - _cache["at"] < CACHE_TTL:
-            data = dict(_cache["data"])
-            data["cached"] = True
-            return data
-        data = await asyncio.to_thread(_collect)
-        _cache["at"] = now
-        _cache["data"] = data
-        out = dict(data)
-        out["cached"] = False
-        return out
+    """带 TTL 的探测入口；并发与连点合并成一轮 1 秒采样（见 app/probe.py）。"""
+    return await probe.read(_cache, _LOCK, _reprobe, refresh=refresh, ttl=CACHE_TTL)
+
+
+async def _reprobe() -> dict:
+    return await asyncio.to_thread(_collect)
 
 
 def reset_cache() -> None:
-    _cache["at"] = 0.0
-    _cache["data"] = None
+    probe.reset(_cache)
 
 
 def doctor_item(data: dict) -> dict:

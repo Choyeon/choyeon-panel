@@ -34,10 +34,11 @@ os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch14a_root
 import unittest  # noqa: E402
 
 import cli  # noqa: E402
-from app import aio_db, main, security  # noqa: E402
+from app import aio_db, main, security, severity  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.routers import meta  # noqa: E402
 from app.services import memory_service as ms  # noqa: E402
+from app.util import human_bytes  # noqa: E402
 
 KIB = 1024
 MIB = 1024**2
@@ -202,18 +203,18 @@ def _run(coro, json_mode=False):
 
 class HumanTests(unittest.TestCase):
     def test_units_match_storage_page(self):
-        self.assertEqual(ms._human(0), "0B")
-        self.assertEqual(ms._human(1023), "1023B")
-        self.assertEqual(ms._human(2 * MIB), "2.0MB")
-        self.assertEqual(ms._human(49 * GIB), "49.0GB")
+        self.assertEqual(human_bytes(0), "0B")
+        self.assertEqual(human_bytes(1023), "1023B")
+        self.assertEqual(human_bytes(2 * MIB), "2.0MB")
+        self.assertEqual(human_bytes(49 * GIB), "49.0GB")
 
     def test_production_swap_size(self):
-        self.assertEqual(ms._human(355188 * KIB), "346.9MB")
+        self.assertEqual(human_bytes(355188 * KIB), "346.9MB")
 
     def test_none_and_negative_and_garbage(self):
-        self.assertEqual(ms._human(None), "—")
-        self.assertEqual(ms._human(-5), "0B")
-        self.assertEqual(ms._human("x"), "—")
+        self.assertEqual(human_bytes(None), "—")
+        self.assertEqual(human_bytes(-5), "0B")
+        self.assertEqual(human_bytes("x"), "—")
 
 
 class MeminfoTests(unittest.TestCase):
@@ -845,7 +846,7 @@ class FindingsTests(unittest.TestCase):
         for one in f:
             self.assertTrue(one["detail"], one["id"])
             self.assertTrue(one["fix"], one["id"])
-            self.assertIn(one["severity"], ms.SEV_LABEL)
+            self.assertIn(one["severity"], severity.SEV_LABEL)
 
     def test_no_finding_suggests_a_write(self):
         """这一页严格只读：判词里不许出现 kill、sysctl -w、systemctl restart、改上限的命令。"""

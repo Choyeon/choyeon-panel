@@ -20,6 +20,9 @@ VERBS = {"start", "stop", "restart", "reload", "enable", "disable"}
 # 所以这里给出两个判词，调用点不再各自比较字符串。
 RUNNING_STATES = ("active", "reloading")
 BUSY_STATES = RUNNING_STATES + ("activating", "deactivating")
+# BUSY_STATES 减 RUNNING_STATES：正在起立或正在收，既不能说"运行中"，也不能按已停处理
+# （此刻 restart 打断的是它自己）。调用点用这个集合，不要再抄一遍元组。
+TRANSITION_STATES = ("activating", "deactivating")
 # unit 被删过、机器迁移过、名字写错了：systemd 报 LoadState=not-found，而 ActiveState 只是
 # inactive。只看后者会把"这台机器上从来没有这个服务"显示成"服务已停止，点启动即可"，
 # 而点下去只会得到一句 systemctl 的 "not loaded"。
@@ -38,6 +41,28 @@ def has_systemd() -> bool:
     于是直接往活着的服务写的文件上盖备份。
     """
     return bool(shutil.which("systemctl")) and os.path.isdir("/run/systemd/system")
+
+
+def timezone_name() -> str:
+    """本机时区名，给 unit 的 OnCalendar 用——避免"面板说本地时间、timer 按 UTC 跑"的错位。
+
+    /etc/timezone 在 RHEL 系与容器里常不存在，读不到属于正常情况，退回 /etc/localtime 的
+    zoneinfo 软链目标。两条都拿不到就回 UTC：unit 里写错时区不是"不起作用"，而是"每天在另一个
+    钟点起作用"，这类错最难查，所以宁可落回一个明确说得出名字的默认值，也不要空串（空串的
+    OnCalendar 会直接被 systemd 拒掉，或者按 UTC 跑，两种都比 UTC 更难看）。
+    """
+    try:
+        with open("/etc/timezone", encoding="utf-8") as fh:
+            tz = fh.read().strip()
+        if tz:
+            return tz
+    except OSError:
+        pass
+    try:
+        link = os.path.realpath("/etc/localtime")
+    except OSError:
+        return "UTC"
+    return link.split("/zoneinfo/")[1] if "/zoneinfo/" in link else "UTC"
 
 
 async def reset_failed(unit: str) -> None:
@@ -162,18 +187,37 @@ async def unit_states(units: list) -> dict:
     当作单元名。实测 `systemctl status -ping.service` 返回 0 并打印整机状态——少了这道标记，
     面板就把"选项解析成功"读成"这个服务在跑"。本机已验证 start/stop/restart/reload/
     enable/disable/is-active/show/reset-failed 都接受 `--`。
+
+    返回值只按**请求时给的名字**建键，且每个名字对应自己一份状态表。这里必须按 systemd 回显的
+    `Names`（含 alias）和 Id 反查，不能拿 Id 当键：本机上 `systemctl show -p Id -- sshd` 回的是
+    `Id=ssh.service`（sshd 是 alias），`-- fail2ban` 回 `Id=fail2ban.service` 而请求写的是不带
+    后缀的 `fail2ban`。以前按 Id 建键、再对请求名 setdefault 一份"未知"，这两个请求都拿到 UNKNOWN，
+    于是登录安全自检把"正在跑的 sshd"读成"查不到"，把在跑爆破防护的判断直接判死。
     """
     if not units:
         return {}
     r = await run(
         "systemctl",
-        ["show", "-p", "Id", "-p", "LoadState", "-p", "ActiveState", "-p", "MainPID", "--", *units],
+        ["show", "-p", "Id", "-p", "Names", "-p", "LoadState", "-p", "ActiveState", "-p", "MainPID",
+         "--", *units],
         timeout=10,
     )
-    out = {p["Id"]: derive_state(p) for p in parse_show(r["out"])}
+    by_name: dict[str, dict] = {}
+    for props in parse_show(r["out"]):
+        state = derive_state(props)
+        for name in [props["Id"], *(props.get("Names") or "").split()]:
+            if name:
+                by_name.setdefault(name, state)
+                # 无后缀的 unit（模板实例、socket、被省略的 .service）也挂上带后缀的形式
+                if "." not in name:
+                    by_name.setdefault(f"{name}.service", state)
+    out: dict[str, dict] = {}
     for u in units:
         # systemctl 没给这一条（查失败、超时、本机没有 systemd）就是"未知"，不是"已停止"
-        out.setdefault(u, dict(UNKNOWN_STATE))
+        st = by_name.get(u)
+        if st is None and "." not in u:
+            st = by_name.get(f"{u}.service")
+        out[u] = dict(st) if st is not None else dict(UNKNOWN_STATE)
     return out
 
 

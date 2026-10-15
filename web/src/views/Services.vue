@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, h } from 'vue';
 import { NDataTable, NInput, NSelect, NAlert, NTag, NText, useMessage, NIcon } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, stateLabel } from '../ui';
 import { api, getRole } from '../api';
 import { icon, icons } from '../icons';
 import LogStream from '../components/LogStream.vue';
@@ -148,14 +148,12 @@ const onlyFlagged = ref(true);
 const shownSettings = computed(() => (onlyFlagged.value ? flaggedSettings.value : loginSettings.value));
 const keyFiles = computed<any[]>(() => loginData.value?.keys?.files ?? []);
 const loginAttempts = computed<any>(() => loginData.value?.attempts ?? {});
-const guardRunning = computed(() => (loginData.value?.guard ?? []).some((g: any) => g.active));
-const guardLine = computed(() => {
-  const g = loginData.value?.guard ?? [];
-  const on = g.filter((u: any) => u.active).map((u: any) => u.name);
-  if (on.length) return `${on.join('、')} 在跑`;
-  if (g.some((u: any) => u.installed)) return '装了但没在跑';
-  return '都没在跑';
-});
+// 「爆破防护」这一格的说法整句来自服务端：它才知道 systemctl 到底有没有回话。
+// 前端原来自己按 active/installed 拼句子，于是探测失败与"这台机器没装"都写成"都没在跑"——
+// 而 installed 那一列判的是 `which fail2ban`，fail2ban 装的可执行文件其实叫 fail2ban-client。
+const guardInfo = computed<any>(() => loginData.value?.guard ?? {});
+const guardRunning = computed(() => guardInfo.value.status === 'guarded');
+const guardLine = computed(() => guardInfo.value.phrase || '这一项没核对成');
 const acceptedLine = computed(() => {
   const list = loginAttempts.value.accepted ?? [];
   return list.length ? list.map((a: any) => `${a.method} ${a.count}`).join('、') : '无成功记录';
@@ -1549,16 +1547,15 @@ const tabs = computed(() => [
   ...(isAdmin ? [{ key: 'logs', label: '单元日志', badge: !!logUnit.value }] : []),
 ]);
 
-// 选项从实际返回的 active 值里取，systemd 状态枚举（如 reloading）出现也不至于漏
-const STATE_LABELS: Record<string, string> = {
-  active: '运行中', inactive: '已停止', failed: '异常', activating: '启动中', deactivating: '停止中',
-  reloading: '重新加载中', maintenance: '维护中',
-};
-const statusLabel = (s: string) => STATE_LABELS[s] || s;
+// 说法与 ui.ts 的 UNIT_STATE_LABELS 同一份：这一页原来自己写着 `failed: '异常'`、
+// `activating: '启动中'`，应用列表却是「启动失败」「正在启动」，同一个 unit 在两个页签里
+// 长两种说法，用户会当成两种状态。masked 另有专门一句（见 statusText）。
+const statusLabel = stateLabel;
 // masked（被 systemctl mask 掉）在 list-units 里 ACTIVE 也是 inactive，照原样翻译就成了
 // 「已停止」——那是"能启动但没启动"，而 masked 是"根本不许启动"，得区分开。
 const isMasked = (r: any) => r.load === 'masked' || enabledOf(r.unit) === 'masked';
 const statusText = (r: any) => (isMasked(r) ? '已屏蔽' : statusLabel(r.active));
+// 选项从实际返回的 active 值里取，systemd 状态枚举（如 reloading）出现也不至于漏
 const statusOptions = computed(() =>
   [...new Set(services.value.map((r) => r.active))].sort().map((v) => ({ label: statusLabel(v), value: v })),
 );

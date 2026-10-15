@@ -238,8 +238,13 @@ class TestRiskBranchesStillSpeak(unittest.TestCase):
         self.assertEqual(item["detail"], "2 项要紧的负载问题（另有 1 项）：每核排队 4.0")
 
     def test_login_merged_verdict(self):
+        """补数跟着量词走，不把前半句的名词再念一遍（load 那行就是这么写的）。
+
+        登录项原先把"项要紧"整个当成量词传给 `tallied`，于是写成「2 项要紧（另有 1 项要紧）」——
+        括号里那半句是「不止这一条」的唯一凭证，念成复读机就没人再看它。
+        """
         item = login_audit_service.doctor_item(login_data(["甲要紧", "乙要紧"], "risk")[1])
-        self.assertEqual(item["detail"], "登录方式有 2 项要紧（另有 1 项要紧）、1 项值得处理：甲要紧")
+        self.assertEqual(item["detail"], "登录方式有 2 项要紧（另有 1 项）、1 项值得处理：甲要紧")
 
     def test_memory_oom_fail_lists_the_other_verdicts(self):
         """OOM 那一条原先也只点第一个判词：判词是「为什么被杀」，藏在第二条里就等于没说。"""

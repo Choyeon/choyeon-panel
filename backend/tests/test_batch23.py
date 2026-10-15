@@ -500,7 +500,9 @@ class TestLoginAuditFinding(unittest.TestCase):
     ACC = {"login_shells": ["root"], "login_count": 1, "uid0_extra": [], "empty_password": [],
            "shadow_unreadable": False, "sudo_groups": {}, "notes": []}
     ATT = {"ok": True, "window": "24h", "failed": 0, "distinct_ips": 0, "top": [], "accepted": [], "note": ""}
-    GUARD = {"units": [], "any_active": True, "note": ""}
+    GUARD = {"units": [{"name": "fail2ban", "state": "active", "active": True, "busy": True,
+                        "missing": False, "unknown": False, "desc": "在跑"}],
+             "status": "guarded", "note": ""}
     EXP = {"port": 22, "reachable": False, "verdict": "", "reason": ""}
 
     @staticmethod

@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cli  # noqa: E402
 from app.routers import meta  # noqa: E402
 from app.services import login_audit_service as svc  # noqa: E402
+from app.services import systemd_ops
 
 BACKEND = Path(__file__).resolve().parents[1]
 REPO = BACKEND.parent
@@ -79,8 +80,35 @@ def _att(**kw):
     return base
 
 
-def _guard(active=False):
-    return {"units": [], "any_active": active, "note": ""}
+def _guard(active=False, status=None):
+    """guard 块的形状见 _guard_status：一个状态词 + 每个候选单元一行 + 一句判词。
+
+    状态词（guarded/unguarded/absent/pending/unknown/no-systemd）是判词的出处，`_findings`、
+    自检项和 CLI 读的都是它，不再是原来的 any_active 布尔——布尔会把"没查到"
+    和"没在跑"压成同一个 False。
+    """
+    if status is None:
+        status = "guarded" if active else "unguarded"
+    if status == "no-systemd":
+        # 没有 systemd 就没有单元可列，真实 payload 的 units 也是空的。
+        payload = {"units": [], "status": status, "note": "本机没有可管理的 systemd"}
+        payload["phrase"] = svc._guard_phrase(payload)
+        return payload
+    state = "active" if status == "guarded" else "inactive"
+    units = []
+    for name in svc.GUARD_UNITS:
+        st = systemd_ops.derive_state({
+            "Id": f"{name}.service",
+            "LoadState": "not-found" if status == "absent" else "loaded",
+            "ActiveState": "" if status == "unknown" else state,
+            "MainPID": "0",
+        })
+        units.append({"name": name, "state": st["state"], "active": st["active"],
+                      "busy": st["busy"], "missing": st["missing"],
+                      "unknown": st["state"] == "unknown", "desc": svc._unit_desc(st)})
+    payload = {"units": units, "status": status, "note": ""}
+    payload["phrase"] = svc._guard_phrase(payload)
+    return payload
 
 
 def _exp(reachable=True):
@@ -204,7 +232,10 @@ class TestReadOnlyPledge(unittest.TestCase):
             seen.append([str(x) for x in [cmd, *args]])
             return {"code": 0, "out": ""}
 
-        with mock.patch.object(svc, "run", spy), mock.patch.object(svc.shutil, "which", lambda _n: True):
+        with mock.patch.object(svc, "run", spy), \
+             mock.patch.object(svc.systemd_ops, "run", spy), \
+             mock.patch.object(svc.shutil, "which", lambda _n: True), \
+             mock.patch.object(svc.systemd_ops, "has_systemd", lambda: True):
             asyncio.run(svc._attempts())
             asyncio.run(svc._guard_status())
         self.assertTrue(seen)
@@ -270,7 +301,9 @@ class TestBlobMeta(unittest.TestCase):
 
 class TestSettingRows(unittest.TestCase):
     def rows(self, values, reachable=True, guarded=False):
-        return {r["key"]: r for r in svc._setting_rows(values, reachable, guarded)}
+        # 第三个参数是状态词，不是布尔：见 _setting_rows 里 no_guard 的取值范围。
+        status = "guarded" if guarded else "unguarded"
+        return {r["key"]: r for r in svc._setting_rows(values, reachable, status)}
 
     def test_root_plus_password_plus_reachable_is_risk(self):
         r = self.rows({**HARDENED, "passwordauthentication": ["yes"], "permitrootlogin": ["yes"]})
@@ -815,33 +848,76 @@ class TestAttempts(unittest.TestCase):
 
 
 class TestGuardStatus(unittest.TestCase):
-    def collect(self, out, which=True):
-        async def run(cmd, args, **kw):
-            return {"code": 0, "out": out}
+    """爆破防护：判词必须先分清「没查到」「没在跑」「这台机器没装」三种。
 
-        with mock.patch.object(svc, "run", run), mock.patch.object(svc.shutil, "which",
-                                                                  lambda n: "/usr/sbin/" + n if which else None):
+    以前这里喂的是 `systemctl is-active` 的退出码切词，三者长一个样；批次㉞换成
+    systemd_ops.unit_states 之后，测试也跟着按状态表喂，不再测命令输出。
+    """
+
+    def collect(self, states, has_systemd=True):
+        async def unit_states(units):
+            return {u: dict(states.get(u) or systemd_ops.UNKNOWN_STATE) for u in units}
+
+        with mock.patch.object(svc.systemd_ops, "has_systemd", lambda: has_systemd), \
+             mock.patch.object(svc.systemd_ops, "unit_states", unit_states):
             return asyncio.run(svc._guard_status())
 
-    def test_active_unit_is_detected(self):
-        got = self.collect("active\ninactive\n")
-        self.assertTrue(got["any_active"])
+    @staticmethod
+    def st(state, load="loaded"):
+        return systemd_ops.derive_state({"Id": "x.service", "LoadState": load,
+                                         "ActiveState": state, "MainPID": "0"})
+
+    def test_active_unit_is_guarded(self):
+        got = self.collect({"fail2ban": self.st("active")})
+        self.assertEqual(got["status"], "guarded")
         self.assertEqual(got["units"][0]["state"], "active")
+        self.assertEqual(got["units"][0]["desc"], "在跑")
+        self.assertEqual(svc._guard_phrase(got), "fail2ban 正在跑")
 
-    def test_nothing_running(self):
-        got = self.collect("inactive\ninactive\n")
-        self.assertFalse(got["any_active"])
-        self.assertTrue(all(u["installed"] for u in got["units"]))
+    def test_nothing_running_is_unguarded(self):
+        got = self.collect({n: self.st("inactive") for n in svc.GUARD_UNITS})
+        self.assertEqual(got["status"], "unguarded")
+        self.assertTrue(all(not u["active"] for u in got["units"]))
+        self.assertIn("没在跑", svc._guard_phrase(got))
 
-    def test_missing_systemctl_is_declared(self):
-        with mock.patch.object(svc.shutil, "which", lambda _n: None):
-            got = asyncio.run(svc._guard_status())
-        self.assertFalse(got["any_active"])
-        self.assertIn("systemctl", got["note"])
+    def test_missing_units_are_called_absent_not_stopped(self):
+        """LoadState=not-found 是「这台机器没装」，与「装了但停着」的修复动作完全不同。"""
+        got = self.collect({n: self.st("inactive", "not-found") for n in svc.GUARD_UNITS})
+        self.assertEqual(got["status"], "absent")
+        self.assertTrue(all(u["missing"] for u in got["units"]))
+        self.assertIn("没装", svc._guard_phrase(got))
 
-    def test_short_output_does_not_index_error(self):
-        got = self.collect("active")
-        self.assertEqual(got["units"][1]["state"], "unknown")
+    def test_activating_counts_as_pending_not_guarded(self):
+        got = self.collect({"fail2ban": self.st("activating")})
+        self.assertEqual(got["status"], "pending")
+        self.assertEqual(got["units"][0]["desc"], "正在启动")
+        self.assertIn("正在", svc._guard_phrase(got))
+
+    def test_probe_failure_is_not_reported_as_no_protection(self):
+        """systemctl 没回话就说「没核对成」：把探测失败写成安全结论是最坏的一种假话。"""
+        got = self.collect({})
+        self.assertEqual(got["status"], "unknown")
+        self.assertTrue(all(u["unknown"] for u in got["units"]))
+        self.assertIn("没回话", got["note"])
+        self.assertIn("没核对成", svc._guard_phrase(got))
+
+    def test_one_confirmed_stopped_unit_is_enough_for_verdict(self):
+        """另一个查失败不该让核对到的那条闭嘴：一个确定没在跑、没有在跑的，「没防护」就是核对过的。"""
+        got = self.collect({"fail2ban": self.st("inactive"), "sshguard": None})
+        self.assertEqual(got["status"], "unguarded")
+        self.assertFalse(got["units"][0]["unknown"])
+        self.assertTrue(got["units"][1]["unknown"])
+
+    def test_failed_unit_is_not_guarded(self):
+        got = self.collect({"fail2ban": self.st("failed")})
+        self.assertEqual(got["status"], "unguarded")
+        self.assertEqual(got["units"][0]["desc"], "上次启动失败")
+
+    def test_no_systemd_is_declared(self):
+        got = self.collect({}, has_systemd=False)
+        self.assertEqual(got["status"], "no-systemd")
+        self.assertIn("systemd", got["note"])
+        self.assertEqual(got["units"], [])
 
 
 class TestAuditCache(unittest.TestCase):
@@ -849,7 +925,7 @@ class TestAuditCache(unittest.TestCase):
         return {"ok": True, "checked_at": "t", "as_root": True, "counts": {"risk": n, "warn": 0, "note": 0},
                 "sshd": {"source": "sshd -T", "port": 22, "reachable": True, "effective": True,
                          "verdict": "expected", "reason": ""},
-                "settings": [], "guard": [], "keys": _keys([]), "accounts": _acc(), "attempts": _att(),
+                "settings": [], "guard": _guard(), "keys": _keys([]), "accounts": _acc(), "attempts": _att(),
                 "findings": [], "notes": []}
 
     def go(self, collect, calls=None):
@@ -980,6 +1056,7 @@ class TestDoctorItem(unittest.TestCase):
     def data(self, **kw):
         base = {"as_root": True, "sshd": {"source": "sshd -T", "port": 22, "reachable": True},
                 "counts": {"risk": 0, "warn": 0, "note": 0}, "findings": [], "notes": ["说明"],
+                "guard": _guard(status="guarded"),
                 "accounts": _acc(), "attempts": _att(failed=3)}
         base.update(kw)
         return base
@@ -1001,6 +1078,16 @@ class TestDoctorItem(unittest.TestCase):
         self.assertEqual(got["status"], "warn")
         self.assertIn("2 项要紧", got["detail"])
         self.assertIn("口令认证开着", got["detail"])
+        # 「另有」那半句用量词，不把"项要紧"再念一遍：窄屏那一列放不下重复的两遍措辞
+        self.assertIn("（另有 1 项）", got["detail"])
+        self.assertNotIn("项要紧）", got["detail"])
+
+    def test_zero_warn_is_not_counted_out_loud(self):
+        """没有值得处理的那一档就不写"0 项"：这句是在陈述一件不存在的事。"""
+        got = svc.doctor_item(self.data(
+            counts={"risk": 1, "warn": 0, "note": 0},
+            findings=[{"id": "x", "severity": "risk", "title": "口令认证开着", "detail": "", "fix": ""}]))
+        self.assertEqual(got["detail"], "登录方式有 1 项要紧：口令认证开着")
 
     def test_warn_only_wording(self):
         got = svc.doctor_item(self.data(counts={"risk": 0, "warn": 3, "note": 0}))
@@ -1012,6 +1099,20 @@ class TestDoctorItem(unittest.TestCase):
         self.assertEqual(got["status"], "pass")
         self.assertIn("22", got["detail"])
         self.assertEqual(got["fix"], "")
+
+    def test_guard_not_verified_downgrades_the_pass(self):
+        """登录方式没有要紧项，但爆破防护到底在不在跑没核对成：绿灯只说核对过的那一半。
+
+        「没人撞库也不怕」这句话里，防护是唯一还没验证的那一半，把它写成 pass 等于
+        用一次探测失败换来一条好消息。
+        """
+        for status in ("unknown", "no-systemd"):
+            guard = _guard(status=status)
+            got = svc.doctor_item(self.data(guard=guard))
+            self.assertEqual(got["status"], "warn", status)
+            self.assertIn("爆破防护", got["detail"])
+            # 判词原样带进自检那一行：页面、CLI 和 doctor 说的是同一句话。
+            self.assertIn(guard["phrase"], got["detail"])
 
     def test_non_root_pass_says_what_was_not_checked(self):
         self.assertIn("非 root", svc.doctor_item(self.data(as_root=False))["detail"])
@@ -1035,7 +1136,7 @@ class TestCli(unittest.TestCase):
                               "flag": "risk", "fix": "改成 prohibit-password"},
                              {"key": "pubkeyauthentication", "label": "公钥认证", "value": "yes",
                               "flag": "", "fix": ""}],
-                "guard": [{"name": "fail2ban", "state": "inactive", "active": False, "installed": False}],
+                "guard": _guard(),
                 "keys": _keys([_file_entry(user="root", keys=[_key(comment="laptop")])]),
                 "accounts": _acc(login_shells=["root"], login_count=1, sudo_groups={"sudo": []}),
                 "attempts": _att(failed=1234, distinct_ips=9, top=[{"ip": "1.1.1.1", "count": 900}],
