@@ -1125,6 +1125,12 @@
   在解压两处、打包一处、恢复一处）、打包预检不再拿 `shutil.disk_usage().free` 当额度、恢复的
   检查顺序排在 `_stop_for_overwrite` 与 `extractall` 之前，以及 `.cp-break`/`.cp-prose` 的
   双类名打法（单类名回到 0-1-0 会被 `.cell-sub` 自己的 nowrap 压回去）。
+- 备份执行器从「全文零判据」变成只问同一个读者：`backup_runner.main` 的应用 tar 分支与
+  `sqlite_snapshot` 现在都先问 `write_budget()`（出处仍是设置页那条 `alert_disk_pct`）。tar 的
+  尺寸上界按 tar 自己那份 `EXCLUDES` 算——实测 `/root/www/Rosetta` 里 992.4M 有 942M 是
+  `node_modules`，排除后 50.2M，走一遍目录 21.7ms（`frontend` 759.3M→14M/16.2ms、
+  `choyeon-video` 748.2M→61.5M/20ms）；把被排除的内容算进尺寸，等于用预检挡死正当备份。
+  `_estimate_archive_bytes` 因此多了 `skip` 参数，文件页打包不受影响。
 - 线上复验（375px 同源 iframe 实测，非构建通过即交付）：备份页「产物」列 2 个格子
   `white-space: normal`、226px 内容装进 226px 盒子、2 个行框、`title` 齐；概览两组段选
   48x44 与 44/44/45/44x44，页面 `documentElement.scrollWidth` 仍是 375（无新增横向溢出）；
@@ -1138,6 +1144,44 @@
   安全更新、24 小时内 18894 次失败认证来自 33 个地址、5.4% steal（后两条是这台机器的公网处境，
   不是面板缺陷）；唯一 fail 是「改动未生效」项点名的 `unattended-upgrades.service`——安全库装了
   新版而进程还踩着换掉之前的那份映射，需要人工挑时间重启，面板不代做。
+- 快照的上界取 2× 源库：中间库是未压缩的整份副本（≈ 源库），gz 产物在数据本来就压不动时
+  ≈ 中间库，而中间库要等 gz 写完才删，峰值是两份同时在盘上。183MB 的库按 367,065,600 字节请求。
+- 预算一律判在**占名之前**：`_free_path` 是 `O_CREAT|O_EXCL` 原子占名，判晚了会留下一个
+  0 字节的 `bk<id>-<时间戳>.tar.gz`——它长得像一份备份，还会被 `prune` 认成 keep 名额里的一份。
+  只有 `sqlite_snapshot` 把这句放在 `try` 里，因为它的调用方可能已经占了名，被拒时得走自己
+  那条清理分支把占名一起删掉；实测 1MiB 假盘上三份产物（真 gz、尾部撒谎的 gz、183MB 库的快照）
+  全部被拒后 `os.listdir()` 是空的。
+- SQLite 恢复的解压（`_gunzip_to`）补了两道界，它是这批里最尖的一个口子：落点不是面板自己的
+  备份目录，而是**目标库所在的应用目录**（暂存必须与真库同目录才能 `os.replace`），而产物受
+  上传上限（默认 8MB）约束、gzip 压缩比能到上千倍。开头按 gzip 尾部的声明值（ISIZE）判一次，
+  再边解边数真实字节：3.6MB 的展开量在 1MiB 假盘上被开头挡掉（暂存文件根本没被创建），而把
+  尾部声明改成 1024 字节的同一份产物会越过开头那道、被边写边数停在恰好 1MiB（落地 1048576
+  字节，不多写一位）。声明值不能当上界：4GiB 以上的正当库会把它绕回小数字。旧写法是
+  `shutil.copyfileobj` 一把梭，一个字节都没数。
+- 应用目录不存在时先点名「应用目录不存在：…」，而不是让尺寸预检数出 0 字节、毫无阻拦地放行，
+  再由 tar 回一句没人看得懂的退出码 2。
+- 判定不改的一处，理由留在这里：pg 的 `pg_dump`/`pg_dumpall` 产物尺寸由库本身决定，要预取得
+  多跑一次 `pg_database_size` 查询；而 `dump_cmd` 已经 pipefail + 删半成品 + 原样传退出码，
+  `_restore_pg` 的覆盖前留档失败就抛在 `dropdb` 之前。这里剩下的是"注定失败的那一次写入会把盘
+  顶到 ENOSPC"，不是"按别人给的尺寸无界地写"。
+- 新增回归测试：`backend/tests/test_batch38.py`（15 条）。行为守卫用假 `statvfs`（100GiB 盘、
+  线 80%）把余量钉成任意值：界内放行且展开量分毫不差、越界一位就拒、撒谎的尾部停在恰好余量、
+  被拒后不留占名产物也不留 `.tmp`；快照那条断言请求量正是 `2 × 源库`。静态形状守卫盯住
+  `backup_runner` 只剩两处 `assert_write_budget` 且全文不许出现 `disk_usage`、`_gunzip_to` 里
+  不许出现 `copyfileobj`/`statvfs`（statvfs 的口径只有 `write_budget()` 一处）、tar 分支的预算
+  排在 `_free_path` 之前、`_restore_sqlite` 的解压排在 `_stop_for_overwrite` 之前。
+- 线上复验拿部署中的代码跑真实数据，不是只看单测：`/root/backups/panel` 实测
+  `line 80 / avail 38.1GB / room 28.3GB` 下，3.6MB 展开、183MB 库快照、61.5MB 应用 tar 全部
+  放行（快照 gz 2,735,651 字节、中间库删净）；真实任务 `python -m app.backup_runner 2`
+  （chyeon-video 的 sqlite 备份）0.06s 出 28482 字节产物、keep=7 按设计轮替掉最旧那份，
+  应用 tar 那次用 `keep=0` 跑完即清，备份目录条目数前后一致。`pytest` 2521 passed /
+  1245 subtests，`ruff` All checks passed，`web` 构建 1m1s、产物 2198KB → gzip 672KB（-69.4%），
+  `choyeonctl upgrade --no-pull --json` 返回 `{"ok": true, "healthy": true}`（本批 0 个前端文件
+  改动，`git status` 只有 4 个后端文件）。`choyeonctl doctor --json` 两次实测分别是
+  `{'pass': 17, 'warn': 2, 'fail': 1}` 与 `{'pass': 16, 'warn': 3, 'fail': 1}`：warn 是 3 个待装
+  安全更新、24 小时内 20395 次失败认证来自 34 个地址、5.4% steal（后两条是这台机器的公网处境，
+  不是面板缺陷）；唯一 fail 仍是「改动未生效」项点名的 `unattended-upgrades.service`——安全库
+  装了新版而进程还踩着换掉之前的那份映射，需要人工挑时间重启，面板不代做。
 
 ## [1.1.10] - 2026-10-12
 

@@ -17,9 +17,18 @@ from starlette.concurrency import run_in_threadpool
 from .. import backup_runner, config, locks
 from .. import database as dbm
 from ..log import warn
-from ..util import is_name, redact_creds, run, sh_escape, unit_env_value, unit_pct_escape, write_secret_atomic
+from ..util import (
+    human_bytes,
+    is_name,
+    redact_creds,
+    run,
+    sh_escape,
+    unit_env_value,
+    unit_pct_escape,
+    write_secret_atomic,
+)
 from . import systemd_ops
-from .files_service import assert_write_budget, iso_ms
+from .files_service import assert_write_budget, iso_ms, write_budget
 from .pg_service import is_ident, psql
 
 BACKUP_DIR = config.BACKUP_DIR
@@ -533,9 +542,53 @@ async def _pg_preflight(src_file: str) -> tuple[int, int, str | None]:
     return len(_PG_TOC_ENTRY.findall(out)), len(_PG_TOC_DATA.findall(out)), None
 
 
+def _gzip_isize(p: str) -> int:
+    """gzip 末尾 4 字节声明的原始尺寸（模 2^32）；读不到或为 0 视为"没有声明"。
+
+    这是**声明值**，不是保证：伪造的尾部会让它偏小，所以真实字节还得边解边数；
+    反过来，超过 4GiB 的正当库会把它绕回一个小数字，所以它只能用来做开头那道拒绝，
+    不能当解压上界（拿它当上界会把 5GiB 的库恢复判成 1GiB、在写到 1GiB 时误杀）。
+    """
+    try:
+        with open(p, "rb") as f:
+            f.seek(-4, os.SEEK_END)
+            raw = f.read(4)
+    except OSError:
+        return 0
+    return int.from_bytes(raw, "little") if len(raw) == 4 else 0
+
+
 def _gunzip_to(src_file: str, dest: str) -> None:
+    """把 gz 解到 dest，落盘字节按 `write_budget()` 设两道界。
+
+    产物本身受上传上限（`CP_MAX_UPLOAD_MB`，默认 8MB）约束，而 gzip 压缩比能到上千倍：
+    一个 8MB 的包可以解出 8GB。落点更不是面板自己的备份目录，而是**目标库所在的那个
+    应用目录**（暂存与真库同目录才能 `os.replace`）——root 进程把那块盘写满，代价是
+    这台机器上所有业务一起写不进去。所以两道都要：
+    - 开头按 gzip 声明值判一次：明显塞不下就一个字节都不写（挡住"这盘本来就快满了"）。
+    - 边解边数真实字节，超过余量就停手：声明值可以是假的（挡住压缩炸弹）。
+    中途停下是安全的：`dest` 是本次恢复的暂存文件，`_restore_sqlite` 收到异常就删掉它，
+    而目标库还没被换、服务还没被停（`_stop_for_overwrite` 在更后面）。
+    """
+    d = os.path.dirname(dest)
+    declared = _gzip_isize(src_file)
+    if declared:
+        assert_write_budget(d, declared, "解压这份备份")
+    b = write_budget(d)
+    written = 0
     with gzip.open(src_file, "rb") as g, open(dest, "wb") as f:
-        shutil.copyfileobj(g, f, 1024 * 1024)
+        while True:
+            chunk = g.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > b["room"]:
+                raise RuntimeError(
+                    f"解压这份备份已经写了 {human_bytes(written)}，超过 {d} 所在分区按磁盘警戒线 "
+                    f"{b['line']}% 只能再容纳的 {human_bytes(b['room'])}（实际剩余 {human_bytes(b['avail'])}）："
+                    "产物声明的尺寸与实际不符（疑似压缩炸弹），已中止；暂存文件会被删除，目标库未被改动"
+                )
+            f.write(chunk)
         # 目标是线上库文件，os.replace 只保证"重命名"这一步原子，不保证内容已经
         # 离开页缓存：中间断电的话库里留下的就是一个截断文件，而面板已经报了成功。
         f.flush()

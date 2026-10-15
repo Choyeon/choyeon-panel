@@ -13,6 +13,7 @@ import time
 from . import config, locks
 from . import database as dbm
 from .config import BACKUP_DIR
+from .services.files_service import _estimate_archive_bytes, assert_write_budget, write_budget
 from .util import sh_escape
 
 EXCLUDES = ["node_modules", ".venv", ".next", ".output"]
@@ -146,6 +147,13 @@ def sqlite_snapshot(src: str, dest: str) -> None:
     """
     tmp = f"{dest}.tmp"
     try:
+        # 这份快照要写多少字节由**源库**决定，而不是由谁给的尺寸决定，所以判据还是
+        # 落盘余量（`write_budget`，出处是设置页的磁盘警戒线）。上界取 2× 源库：中间库
+        # 是未压缩整份副本（≈ 源库），gz 产物在数据本来就压不动时≈ 中间库，而中间库要
+        # 等 gz 写完才删——峰值是两份同时在盘上。
+        # 它放在 try 里面而不是外面：调用方可能已经用 `_free_path` 占了名（0 字节的 dest
+        # 就在盘上了），被拒时得走下面那条清理分支，别留一个长得像备份的空文件占 keep 名额。
+        assert_write_budget(os.path.dirname(dest), os.path.getsize(src) * 2, "给这份 SQLite 快照留的位置")
         src_conn = sqlite3.connect(src, timeout=15)
         try:
             dst_conn = sqlite3.connect(tmp)
@@ -193,6 +201,18 @@ def main(bk: dict):
         app = dbm.query_one("SELECT path FROM apps WHERE name=?", (bk["target"],))
         if not app:
             raise SystemExit(f"应用 {bk['target']} 不存在")
+        if not os.path.isdir(app["path"]):
+            # 先说清目录不在：否则下面 tar 的退出码 2 只能报"应用备份失败（退出码 2）"，
+            # 而尺寸预检在这种情形会数出 0 字节、毫无阻拦地放行。
+            raise SystemExit(f"应用目录不存在：{app['path']}")
+        # 归档要写多少字节由目录内容决定，判据还是落盘余量（keep 份旧归档本来就在这块盘上，
+        # statvfs 早已把它们算成"已用"，所以这里不用再自己扣一遍）。排除名单与 tar 传同一份：
+        # node_modules 不进归档，把它们算进尺寸会把正当备份挡在门外。
+        # 顺序要紧：这句必须在 `_free_path` 之前。`_free_path` 是原子占名，会留下一个
+        # 0 字节的 `bk<id>-<时间戳>.tar.gz`——它长得像一份备份、会被 prune 认成 keep 名额
+        # 里的一份，而这次其实一个字节都没写。
+        need = _estimate_archive_bytes([app["path"]], write_budget(BACKUP_DIR)["room"], skip=tuple(EXCLUDES))
+        assert_write_budget(BACKUP_DIR, need, f"给应用 {bk['target']} 的备份留的位置")
         file = _free_path(bk["id"], ts, ".tar.gz", BACKUP_DIR)
         excl = " ".join(f"--exclude={e}" for e in EXCLUDES)
         producer = f"tar -C {sh_escape(app['path'])} {excl} -cf - ."

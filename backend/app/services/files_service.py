@@ -372,11 +372,14 @@ def extract_archive(p: str, into: str | None = None) -> dict:
     return {"ok": True, "dest": dest, "files": len(names), "names": names[:50]}
 
 
-def _estimate_archive_bytes(paths: list, stop_after: int) -> int:
+def _estimate_archive_bytes(paths: list, stop_after: int, skip: tuple = ()) -> int:
     """待打包内容的字节数，给 tar.gz 的落盘量一个上界。
 
     数到 stop_after 就返：这趟 walk 只回答"装不装得下"，既然已经确定装不下，
     就没必要把几百万个 inode 数完。不跟随符号链接——tar 存的是链接本身而不是内容。
+    `skip` 是打包方排除掉的目录名（tar 的 `--exclude=node_modules` 按路径分量匹配，
+    这里同口径）：被排除的内容不会进归档，把它们算进尺寸会让一个装着 5GB
+    `node_modules` 的应用目录被估成"这份备份要写 5GB"，正当备份被自己的预检挡死。
     """
     total = 0
     for x in paths:
@@ -385,7 +388,9 @@ def _estimate_archive_bytes(paths: list, stop_after: int) -> int:
         except OSError:
             continue
         if stat.S_ISDIR(st.st_mode):
-            for root, _dirs, files in os.walk(x, followlinks=False):
+            for root, dirs, files in os.walk(x, followlinks=False):
+                if skip:
+                    dirs[:] = [d for d in dirs if d not in skip]
                 for f in files:
                     try:
                         total += os.lstat(os.path.join(root, f)).st_size
