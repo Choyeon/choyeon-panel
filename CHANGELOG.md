@@ -1182,6 +1182,49 @@
   安全更新、24 小时内 20395 次失败认证来自 34 个地址、5.4% steal（后两条是这台机器的公网处境，
   不是面板缺陷）；唯一 fail 仍是「改动未生效」项点名的 `unattended-upgrades.service`——安全库
   装了新版而进程还踩着换掉之前的那份映射，需要人工挑时间重启，面板不代做。
+- 全站 42 处表格的 `scroll-x` 从写死像素改成 `'auto'`。根因不在"表格太宽"，在宽度加错了层：
+  naive-ui 把 `formatLength(scrollX)` 当成 `.n-data-table-base-table` 的 `min-width`
+  （`use-scroll.mjs` 的 `styleScrollXRef`），容器被这条 min-width 撑到 1030/1040px 之后，
+  里面真正该滚的那层（`.n-data-table-base-table-header`，虚拟滚动那张表是
+  `.n-scrollbar-container`）的 clientWidth 跟着变成同一个数，`scrollWidth - clientWidth`
+  归零，横溢被推到页面级的 `.cp-scroll` 上——而 `.cp-main` 是 `overflow-x: hidden`，
+  所以右边那一段不是"能滚到"，是被裁掉。线上 375×667 拿同一份 DOM 只换 min-width 做 A/B
+  （页面横溢 / 表内可滚 / 右固定操作列）：`/apps` 714px→0px、0→440px、不可达→可见；
+  `/users` 698→0、0→537；`/services` 714→0、0→530；`/audit` 706→0、0→424；
+  `/alerts` 补改后 375px 页面 0 溢、表内可滚 695px。宽度从此归每列的 `minWidth` 管
+  （补丁表包名 240、两列版本各给足），表级不再抄一个桌面时代凑出来的总数。
+- 这是一次知情取舍，代价写进用例里：`use-scroll.mjs:112` 用 `Number(props.scrollX)` 算右固定列的
+  激活边界，`'auto'` 进去是 `NaN`，任何 `x < NaN` 都假，于是 `deriveActiveRightFixedColumn`
+  永不激活、右固定列那道投影没了。列的 sticky 定位是 CSS 出的，不受这一句影响；而投影本来要表达的
+  「右边还有内容被压住」，在窄屏下改由表内那条横向滚动条自己说，操作列则从"滚出视口看不见"变成
+  实测一直落在 375px 里。
+- 两处 420px 的日志盒最小高在 667px 的屏上吃掉 63% 竖向空间：应用详情的 `.dep-log` 在既有
+  900px 断点里降到 200px 并加 `max-height: 50vh`（线上实测点开「部署记录」页签后实高 200px、
+  maxHeight 333.5px，桌面档那句 420px 原样留着）；服务管理页的 `.svc-log` 新增 640px 断点覆盖成
+  `min-height: 160px; height: auto !important`，因为桌面档那只带 `height: calc(-320px + 100vh) !important`，
+  在 667px 高的屏上算出 347px，光改 min-height 压不住。CSSOM 实测覆盖的选择器与桌面档一字不差
+  （`.svc-log[data-v-fa9f47cb] .log-view`）且排在它后面，所以 scoped 那一层没失效。
+- 日志检索页的快捷入口按钮从 `tiny` 升到 `small`：375px 实测按钮高 44px，够触屏下限；`tiny` 档只有
+  24px，按十次错三次。
+- 新增回归测试：`backend/tests/test_batch39.py`（6 条）。全站扫 `:scroll-x` 必须全是 `'auto'`、
+  且条数 ≥40（少一条用例就是空转），配一条反证：把 `'auto'` 换成 `1040` 必须被同一条判据认出来。
+  这条守卫当场抓出第一轮上传漏掉的 `Alerts.vue`（1030）与 `Files.vue`（900）——人工数文件数出来的是
+  13 只，正则扫出来是 15 只 42 处。两条媒体查询归属守卫按「needle 之前最近的一只 `@media` 且花括号
+  尚未闭合」判定，防的是"覆盖写了但落在断点外"这种构建全绿而线上无效的形态；再加一条
+  `size="tiny"` 不许回来。
+- 后端 24 处 async 端点里的同步 `dbm.query/execute/query_one` 判定不改，理由与批次⑰A 同一条判据：
+  它们全是走索引的常数级读，SQLite 在 GIL + WAL + busy_timeout 下由单连接串行，把它们塞进
+  `run_in_threadpool` 只是让三只 router 文件白 churn 一遍，而 `/api/system/info` 的 p50 4ms 里
+  没有任何人在这段上排队。真正会占住事件循环的重 IO（tar/gzip、目录扫描、SQLite 快照）已经在
+  `run_in_threadpool` / `asyncio.to_thread` 里，本批逐处核过。
+- 线上复验（同一份 DOM 的 A/B，不是只看构建）：`web` 构建 53.5s、45 个文件 2199KB → gzip 672KB
+  （-69.4%），`choyeonctl upgrade --no-pull --json` 返回 `{"ok": true, "healthy": true}`，
+  `pytest` 2527 passed / 1246 subtests，`ruff` All checks passed。1440×900 档 `/apps` 1170px、
+  `/services` 1162px、`/db` 1186px、`/files` 1220px，页面横溢全为 0、单元格截断 0 处——改成
+  `'auto'` 没有把桌面档挤坏，宽度由列自己决定。`choyeonctl doctor --json` 收尾实测
+  `{'pass': 16, 'warn': 3, 'fail': 1}`：warn 是 3 个待装安全更新、24 小时内 15548 次失败认证来自
+  29 个地址、每核排队 1.61 偏高（跑全量 pytest 与两次前端构建留下的负载，收尾已回落成 warn），
+  唯一 fail 仍是「改动未生效」点名的 `unattended-upgrades.service`——要人工挑时机重启，面板不代做。
 
 ## [1.1.10] - 2026-10-12
 

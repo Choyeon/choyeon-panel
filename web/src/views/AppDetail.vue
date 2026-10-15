@@ -708,5 +708,6 @@ watch(
   .split-view { flex-direction: column; }
   .dep-list, .ngx-list { width: 100%; border-right: 0; padding-right: 0; margin-bottom: var(--space-2); }
   .ad-head-right { justify-content: flex-start; }
+  .dep-log { min-height: 200px; max-height: 50vh; }
 }
 </style>

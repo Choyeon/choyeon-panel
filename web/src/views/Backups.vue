@@ -315,7 +315,7 @@ async function submit() {
       <NDataTable
         ref="tableAnchor"
         :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading"
-        :scroll-x="1230" :max-height="tableH" :row-key="(r: any) => r.id"
+        :scroll-x="'auto'" :max-height="tableH" :row-key="(r: any) => r.id"
       >
         <template #empty>
           <EmptyBox :text="error ? '备份任务获取失败，点上方「刷新」重试' : (isAdmin ? '还没有备份任务，点左上方「新建备份任务」' : '还没有备份任务')" />

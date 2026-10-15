@@ -298,7 +298,7 @@ const rangeHint = computed(() => {
         :loading="loading"
         :bordered="false"
         size="small"
-        :scroll-x="860"
+        :scroll-x="'auto'"
         :row-key="(r: any) => r.num"
       >
         <template #empty>

@@ -407,7 +407,7 @@ const rowSelection = computed(() => ({
       ref="tableAnchor"
       :columns="columns" :data="entries" size="small" :bordered="false" :loading="listing"
       :row-selection="rowSelection"
-      :scroll-x="900" :max-height="tableH" :min-row-height="40" virtual-scroll :pagination="false"
+      :scroll-x="'auto'" :max-height="tableH" :min-row-height="40" virtual-scroll :pagination="false"
       :row-key="(e: any) => e.name"
     >
       <!-- 拉取失败不能显示成「空目录」：那是"这个目录没有条目"，而实际是"没读到"，

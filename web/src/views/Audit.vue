@@ -96,7 +96,7 @@ const cols: any[] = [
       </NText>
       <NDataTable
         ref="tableAnchor"
-        size="small" :bordered="false" :loading="loading" :scroll-x="800"
+        size="small" :bordered="false" :loading="loading" :scroll-x="'auto'"
         :max-height="tableH" :min-row-height="40" virtual-scroll :pagination="false"
         :columns="cols" :data="filtered"
         :row-key="(r: any) => r.id"

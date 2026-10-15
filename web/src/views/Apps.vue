@@ -441,7 +441,7 @@ onMounted(() => {
         <NButton size="small" tertiary round :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
       </template>
 
-      <NDataTable :columns="visColumns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="1040" class="cp-tbl tbl-apps" :max-height="'var(--table-h)'">
+      <NDataTable :columns="visColumns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="'auto'" class="cp-tbl tbl-apps" :max-height="'var(--table-h)'">
         <template #empty>
           <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
         </template>

@@ -347,7 +347,7 @@ onMounted(refresh);
         :loading="loadingSites"
         :bordered="false"
         size="small"
-        :scroll-x="1120"
+        :scroll-x="'auto'"
         :row-key="(r: any) => r.domain"
       >
         <template #empty>
@@ -389,7 +389,7 @@ onMounted(refresh);
           :loading="loadingCerts"
           :bordered="false"
           size="small"
-          :scroll-x="960"
+          :scroll-x="'auto'"
           :row-key="(c: any) => c.name"
         >
           <template #empty>

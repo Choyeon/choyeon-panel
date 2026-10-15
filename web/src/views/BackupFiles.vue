@@ -359,7 +359,7 @@ onMounted(() => {
         size="small"
         :bordered="false"
         :loading="loading"
-        :scroll-x="1150"
+        :scroll-x="'auto'"
         :max-height="tableH"
         :row-key="(f: any) => f.name"
       >

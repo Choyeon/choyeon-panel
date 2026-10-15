@@ -241,7 +241,7 @@ onMounted(load);
         <NDataTable
           ref="tableAnchor"
           :columns="columns" :data="shown" size="small" :bordered="false" :row-key="(i: Item) => i.id"
-          :scroll-x="510" :max-height="tableH" class="cp-tbl"
+          :scroll-x="'auto'" :max-height="tableH" class="cp-tbl"
         >
           <template #empty>
             <EmptyBox :text="filter === 'all' ? '暂无检查结果' : `没有${filter === 'fail' ? '异常' : '注意'}项，切换筛选查看其他`" />

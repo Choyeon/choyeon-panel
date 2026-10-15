@@ -233,7 +233,7 @@ async function saveTtl() {
 
       <template v-else-if="isMember">
         <NDataTable
-          size="small" :bordered="false" :max-height="300" :scroll-x="520"
+          size="small" :bordered="false" :max-height="300" :scroll-x="'auto'"
           :columns="memberCols" :data="memberData" :row-key="(r: any) => `${r.i ?? ''}|${r.field ?? ''}|${r.v ?? ''}`"
         >
           <template #empty><EmptyBox text="这个 key 里还没有条目" /></template>

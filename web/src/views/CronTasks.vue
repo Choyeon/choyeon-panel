@@ -438,7 +438,7 @@ const cols: any[] = [
       <NDataTable
         ref="tableAnchor"
         :columns="cols" :data="rows" size="small" :bordered="false" :loading="loading"
-        :scroll-x="1220" :max-height="tableH"
+        :scroll-x="'auto'" :max-height="tableH"
         :row-key="(r: Task) => r.id" class="tbl-cron"
       >
         <template #empty>

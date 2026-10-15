@@ -261,7 +261,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
         </NSpace>
         <NSpace :size="8" wrap style="margin-bottom: var(--space-3)">
           <NText class="cell-sub" style="font-size: var(--fs-xs); align-self: center">快捷入口：</NText>
-          <NButton v-for="p in PRESETS" :key="p.label" size="tiny" tertiary :icon="icon('DocumentTextOutline', 12)" @click="applyPreset(p)">{{ p.label }}</NButton>
+          <NButton v-for="p in PRESETS" :key="p.label" size="small" tertiary :icon="icon('DocumentTextOutline', 12)" @click="applyPreset(p)">{{ p.label }}</NButton>
         </NSpace>
         <div v-if="jResult" class="cp-help" style="margin-bottom: var(--space-2)">
           命中 {{ jResult.count }} 行{{ jResult.truncated ? '（已达上限，结果从新到旧截断，请缩小时间窗或加关键词）' : '' }}；
@@ -270,7 +270,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
         <NDataTable
           ref="tableAnchor"
           :columns="jCols" :data="jRows" size="small" :bordered="false" :loading="jLoading"
-          :scroll-x="900" :max-height="tableH" :virtual-scroll="true"
+          :scroll-x="'auto'" :max-height="tableH" :virtual-scroll="true"
           :row-key="(r: any) => r.i"
         >
           <template #empty><EmptyBox :text="jResult ? '这一轮检索没有命中，试试放宽时间窗或去掉关键词' : '设置条件后点「检索」'" /></template>
@@ -302,7 +302,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
         </div>
         <NDataTable
           :columns="nCols" :data="nRows" size="small" :bordered="false" :loading="nLoading"
-          :scroll-x="900" :max-height="tableH" :virtual-scroll="true" class="cp-tbl tbl-log"
+          :scroll-x="'auto'" :max-height="tableH" :virtual-scroll="true" class="cp-tbl tbl-log"
           :row-key="(r: { i: number }) => r.i"
         >
           <template #empty><EmptyBox :text="nResult ? '这段日志里没有命中行（换个过滤词，或加大尾读行数）' : '点「读取末尾」取一份日志'" /></template>

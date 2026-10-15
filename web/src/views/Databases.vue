@@ -451,7 +451,7 @@ async function delKeys(keys: string[]) {
               </NSpace>
             </NSpace>
             <!-- 两个列表同屏，这里不用 --table-h 撑满视口（角色表已有 320 固定上限），保持自然高度 -->
-            <NDataTable size="small" :bordered="false" :columns="dbColsV" :data="Array.isArray(dbs) ? dbs : []" :row-key="(r: any) => r.name" :scroll-x="520">
+            <NDataTable size="small" :bordered="false" :columns="dbColsV" :data="Array.isArray(dbs) ? dbs : []" :row-key="(r: any) => r.name" :scroll-x="'auto'">
               <template #empty><EmptyBox text="无法读取数据库列表（PostgreSQL 未运行？）" /></template>
             </NDataTable>
 
@@ -459,7 +459,7 @@ async function delKeys(keys: string[]) {
               <span class="section-title"><NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-warn)" /> 用户 / 角色</span>
               <NButton v-if="isAdmin" size="small" :icon="ico('AddOutline')" @click="showRole = true">新建用户</NButton>
             </NSpace>
-            <NDataTable size="small" :bordered="false" :columns="roleColsV" :data="Array.isArray(roles) ? roles : []" :row-key="(r: any) => r.name" :max-height="320" :scroll-x="520">
+            <NDataTable size="small" :bordered="false" :columns="roleColsV" :data="Array.isArray(roles) ? roles : []" :row-key="(r: any) => r.name" :max-height="320" :scroll-x="'auto'">
               <template #empty><EmptyBox text="没有可读取的角色（PostgreSQL 未运行？）" /></template>
             </NDataTable>
           </NSpace>
@@ -493,7 +493,7 @@ async function delKeys(keys: string[]) {
               <NSelect v-model:value="brDb" :options="dbOptions" size="small" style="width: 200px; max-width: 100%" placeholder="选择数据库" aria-label="浏览的数据库" @update:value="loadTables" />
               <NText depth="3" style="font-size: var(--fs-xs)">共 {{ tables.length }} 张表</NText>
             </NSpace>
-            <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" :row-key="(r: any) => `${r.schema}.${r.name}`" class="cp-tbl tbl-dbs-browse" max-height="var(--table-h)" :scroll-x="560">
+            <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" :row-key="(r: any) => `${r.schema}.${r.name}`" class="cp-tbl tbl-dbs-browse" max-height="var(--table-h)" :scroll-x="'auto'">
               <template #empty><EmptyBox :text="brDb ? (tablesBusy ? '加载中…' : '这个库里没有表') : '先选择一个数据库'" /></template>
             </NDataTable>
             <template v-else>
@@ -505,7 +505,7 @@ async function delKeys(keys: string[]) {
                 <NButton v-if="isAdmin" size="tiny" type="primary" tertiary :icon="ico('AddOutline')" :disabled="!tColMeta.length" @click="openRow(null, true)">新增行</NButton>
                 <NPagination v-model:page="tPage" :page-count="Math.max(1, Math.ceil(tTotal / tSize))" :page-size="tSize" size="small" :show-quick-jumper="false" @update:page="onPage" />
               </NSpace>
-              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" class="cp-tbl tbl-dbs-data" :max-height="'var(--table-h)'" :row-key="(r: any) => r._ctid" :row-props="rowProps" :scroll-x="Math.max(560, 78 + tCols.length * 180)">
+              <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" class="cp-tbl tbl-dbs-data" :max-height="'var(--table-h)'" :row-key="(r: any) => r._ctid" :row-props="rowProps" :scroll-x="'auto'">
                 <template #empty><EmptyBox text="这张表没有数据" /></template>
               </NDataTable>
             </template>
@@ -538,7 +538,7 @@ async function delKeys(keys: string[]) {
                   :row-props="keyRowProps"
                   :row-class-name="(r: any) => (r.k === rDetail?.key ? 'row-active' : '')"
                   :max-height="380"
-                  :scroll-x="440"
+                  :scroll-x="'auto'"
                 >
                   <template #empty><EmptyBox :text="rBusy ? '扫描中…' : '没有匹配的 key（SCAN 从 0 开始，可换模式再试）'" /></template>
                 </NDataTable>

@@ -1800,7 +1800,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       <NDataTable
         ref="tableAnchor"
         :columns="columns" :data="filtered" size="small" :bordered="false" :loading="loading"
-        :scroll-x="810" :max-height="tableH" :pagination="pager(filtered.length, paging)" :row-key="(r: any) => r.unit"
+        :scroll-x="'auto'" :max-height="tableH" :pagination="pager(filtered.length, paging)" :row-key="(r: any) => r.unit"
         class="cp-tbl tbl-services"
       >
         <!-- 拉取失败不能显示成「没有匹配的服务」：那是"数据是空的"，而实际是"没拿到数据" -->
@@ -1876,7 +1876,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 
       <NDataTable
         :columns="patchColumns" :data="patches?.packages || []" size="small" :bordered="false"
-        :loading="patchBusy && !patches" :scroll-x="620"
+        :loading="patchBusy && !patches" :scroll-x="'auto'"
         :max-height="(patches?.packages || []).length ? tableH : undefined" :pagination="pager((patches?.packages || []).length, patchPaging)"
         :row-key="(r: any) => r.name" class="cp-tbl tbl-patches"
       >
@@ -1939,7 +1939,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 
       <NDataTable
         :columns="portColumns" :data="shownPorts" size="small" :bordered="false"
-        :loading="portBusy && !portData" :scroll-x="842"
+        :loading="portBusy && !portData" :scroll-x="'auto'"
         :max-height="shownPorts.length ? tableH : undefined" :pagination="pager(shownPorts.length, portPaging)"
         :row-key="(r: any) => r.port" class="cp-tbl tbl-ports"
       >
@@ -1995,7 +1995,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 
       <NDataTable
         :columns="findingColumns" :data="loginFindings" size="small" :bordered="false"
-        :loading="loginBusy && !loginData" :scroll-x="760" :pagination="pager(loginFindings.length, loginPaging)"
+        :loading="loginBusy && !loginData" :scroll-x="'auto'" :pagination="pager(loginFindings.length, loginPaging)"
         :row-key="(r: any) => r.id" class="cp-tbl tbl-findings"
       >
         <template #empty>
@@ -2020,7 +2020,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         :columns="settingColumns" :data="shownSettings" size="small" :bordered="false"
-        :loading="loginBusy && !loginData" :scroll-x="780" :pagination="pager(shownSettings.length, loginPaging)"
+        :loading="loginBusy && !loginData" :scroll-x="'auto'" :pagination="pager(shownSettings.length, loginPaging)"
         :row-key="(r: any) => r.key" class="cp-tbl tbl-settings"
       >
         <template #empty>
@@ -2036,7 +2036,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         :columns="keyColumns" :data="keyFiles" size="small" :bordered="false"
-        :loading="loginBusy && !loginData" :scroll-x="740"
+        :loading="loginBusy && !loginData" :scroll-x="'auto'"
         :row-key="(r: any) => r.path" class="cp-tbl tbl-keys"
       >
         <template #empty>
@@ -2104,7 +2104,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 
       <NDataTable
         :columns="rootColumns" :data="storageRoots" size="small" :bordered="false"
-        :loading="storageBusy && !storageData" :scroll-x="876"
+        :loading="storageBusy && !storageData" :scroll-x="'auto'"
         :max-height="storageRoots.length ? tableH : undefined" :pagination="false"
         :row-key="(r: any) => r.path" class="cp-tbl tbl-roots"
       >
@@ -2125,7 +2125,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="storageData" :columns="mountColumns" :data="mountRows" size="small" :bordered="false"
-        :loading="storageBusy && !storageData" :scroll-x="654" :pagination="false"
+        :loading="storageBusy && !storageData" :scroll-x="'auto'" :pagination="false"
         :row-key="(r: any) => r.path" class="cp-tbl tbl-mounts"
       >
         <template #empty>
@@ -2147,7 +2147,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         :columns="storageFindingColumns" :data="shownFindings" size="small" :bordered="false"
-        :loading="storageBusy && !storageData" :scroll-x="696" :pagination="pager(shownFindings.length, storagePaging)"
+        :loading="storageBusy && !storageData" :scroll-x="'auto'" :pagination="pager(shownFindings.length, storagePaging)"
         :row-key="(r: any) => r.id" class="cp-tbl tbl-findings"
       >
         <template #empty>
@@ -2164,7 +2164,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="bigFiles.length" :columns="bigFileColumns" :data="bigFiles" size="small" :bordered="false"
-        :scroll-x="450" :pagination="pager(bigFiles.length, storagePaging)" :row-key="(r: any) => r.path" class="cp-tbl tbl-bigfiles"
+        :scroll-x="'auto'" :pagination="pager(bigFiles.length, storagePaging)" :row-key="(r: any) => r.path" class="cp-tbl tbl-bigfiles"
       />
     </CpToolbarCard>
     <CpToolbarCard v-else-if="tab === 'memory'" title="内存压力" style="margin-top: 10px">
@@ -2241,7 +2241,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         :columns="memFindingColumns" :data="memShownFindings" size="small" :bordered="false"
-        :loading="memBusy && !memData" :scroll-x="696" :pagination="pager(memShownFindings.length, memPaging)"
+        :loading="memBusy && !memData" :scroll-x="'auto'" :pagination="pager(memShownFindings.length, memPaging)"
         :row-key="(r: any) => r.id" class="cp-tbl tbl-mem-findings"
       >
         <template #empty>
@@ -2262,7 +2262,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="memData" :columns="unitColumns" :data="unitRows" size="small" :bordered="false"
-        :loading="memBusy && !memData" :scroll-x="1046" :pagination="false"
+        :loading="memBusy && !memData" :scroll-x="'auto'" :pagination="false"
         :max-height="unitRows.length ? tableH : undefined" :row-key="(r: any) => r.unit"
         class="cp-tbl tbl-mem-units"
       >
@@ -2284,7 +2284,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="memData" :columns="procColumns" :data="procRows" size="small" :bordered="false"
-        :loading="memBusy && !memData" :scroll-x="620" :pagination="false"
+        :loading="memBusy && !memData" :scroll-x="'auto'" :pagination="false"
         :max-height="procRows.length ? tableH : undefined" :row-key="(r: any) => r.pid"
         class="cp-tbl tbl-mem-procs"
       >
@@ -2304,7 +2304,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="memKilled && oomRows.length" :columns="oomColumns" :data="oomRows" size="small" :bordered="false"
-        :scroll-x="660" :pagination="false" :row-key="(r: any) => r.line" class="cp-tbl tbl-mem-oom"
+        :scroll-x="'auto'" :pagination="false" :row-key="(r: any) => r.line" class="cp-tbl tbl-mem-oom"
       />
 
       <div v-if="swapDevs.length" class="mm-block">
@@ -2315,7 +2315,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="swapDevs.length" :columns="swapColumns" :data="swapDevs" size="small" :bordered="false"
-        :scroll-x="490" :pagination="false" :row-key="(r: any) => r.name" class="cp-tbl tbl-mem-swaps"
+        :scroll-x="'auto'" :pagination="false" :row-key="(r: any) => r.name" class="cp-tbl tbl-mem-swaps"
       />
     </CpToolbarCard>
     <CpToolbarCard v-else-if="tab === 'pending'" title="改动未生效" style="margin-top: 10px">
@@ -2395,7 +2395,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         :columns="pendFindingColumns" :data="pendShownFindings" size="small" :bordered="false"
-        :loading="pendBusy && !pendData" :scroll-x="696" :pagination="pager(pendShownFindings.length, pendPaging)"
+        :loading="pendBusy && !pendData" :scroll-x="'auto'" :pagination="pager(pendShownFindings.length, pendPaging)"
         :row-key="(r: any) => r.id" class="cp-tbl tbl-pend-findings"
       >
         <template #empty>
@@ -2416,7 +2416,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="pendData" :columns="staleUnitColumns" :data="staleRows" size="small" :bordered="false"
-        :loading="pendBusy && !pendData" :scroll-x="900" :pagination="false"
+        :loading="pendBusy && !pendData" :scroll-x="'auto'" :pagination="false"
         :max-height="staleRows.length ? tableH : undefined" :row-key="(r: any) => `${r.unit}|${r.cmd}`"
         class="cp-tbl tbl-pend-units"
       >
@@ -2435,7 +2435,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="pendData" :columns="reloadColumns" :data="reloadRows" size="small" :bordered="false"
-        :scroll-x="1010" :pagination="false" :row-key="(r: any) => r.kind" class="cp-tbl tbl-pend-reloads"
+        :scroll-x="'auto'" :pagination="false" :row-key="(r: any) => r.kind" class="cp-tbl tbl-pend-reloads"
       />
     </CpToolbarCard>
     <CpToolbarCard v-else-if="tab === 'load'" title="负载与 CPU 归因" style="margin-top: 10px">
@@ -2521,7 +2521,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         :columns="ldFindingColumns" :data="ldShownFindings" size="small" :bordered="false"
-        :loading="ldBusy && !ldData" :scroll-x="696" :pagination="pager(ldShownFindings.length, ldPaging)"
+        :loading="ldBusy && !ldData" :scroll-x="'auto'" :pagination="pager(ldShownFindings.length, ldPaging)"
         :row-key="(r: any) => r.id" class="cp-tbl tbl-ld-findings"
       >
         <template #empty>
@@ -2543,7 +2543,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="ldData" :columns="busyColumns" :data="busyRows" size="small" :bordered="false"
-        :loading="ldBusy && !ldData" :scroll-x="830" :pagination="false"
+        :loading="ldBusy && !ldData" :scroll-x="'auto'" :pagination="false"
         :max-height="busyRows.length ? tableH : undefined" :row-key="(r: any) => r.pid"
         class="cp-tbl tbl-ld-busy"
       >
@@ -2562,7 +2562,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="ldData && (procInfo.blocked_total ?? 0) > 0" :columns="stateColumns" :data="stateRows" size="small" :bordered="false"
-        :scroll-x="950" :pagination="false" :max-height="stateRows.length ? tableH : undefined"
+        :scroll-x="'auto'" :pagination="false" :max-height="stateRows.length ? tableH : undefined"
         :row-key="(r: any) => `${r.pid}|${r.state}`" class="cp-tbl tbl-ld-states"
       />
 
@@ -2580,7 +2580,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NDataTable
         v-if="ldData" :columns="quotaColumns" :data="quotaRows" size="small" :bordered="false"
-        :loading="ldBusy && !ldData" :scroll-x="1090" :pagination="false"
+        :loading="ldBusy && !ldData" :scroll-x="'auto'" :pagination="false"
         :max-height="quotaRows.length ? tableH : undefined" :row-key="(r: any) => r.unit"
         class="cp-tbl tbl-ld-quota"
       >
@@ -2795,5 +2795,9 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
   height: calc(100vh - 320px) !important;
   min-height: 420px;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+/* 移动端日志盒：420px 最小高在 667px 屏上吃掉 63% 竖向空间，降到 160px 仍可滚动。 */
+@media (max-width: 640px) {
+  .svc-log :deep(.log-view) { min-height: 160px; height: auto !important; }
 }
 </style>

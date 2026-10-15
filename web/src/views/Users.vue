@@ -199,7 +199,7 @@ const filtered = computed(() => {
     </PageHeader>
 
     <NCard size="small">
-      <NDataTable size="small" :bordered="false" :loading="loading" :scroll-x="1180" :row-key="(u: any) => u.id" :pagination="paging" :columns="cols" :data="filtered">
+      <NDataTable size="small" :bordered="false" :loading="loading" :scroll-x="'auto'" :row-key="(u: any) => u.id" :pagination="paging" :columns="cols" :data="filtered">
         <template #empty><EmptyBox text="暂无用户" /></template>
       </NDataTable>
     </NCard>

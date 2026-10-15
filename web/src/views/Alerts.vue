@@ -253,7 +253,7 @@ async function runRound(kind: 'run' | 'probe') {
 
       <NDataTable
         ref="tableAnchor"
-        size="small" :bordered="false" :loading="loading" :scroll-x="1030"
+        size="small" :bordered="false" :loading="loading" :scroll-x="'auto'"
         :max-height="tableH"
         :columns="cols" :data="rows"
         :row-key="(r: AlertRow) => r.id"
