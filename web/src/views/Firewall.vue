@@ -53,6 +53,65 @@ const ACTION_META: Record<string, { type: any; text: string }> = {
   limit: { type: 'warning', text: '限速放行' },
 };
 
+/**
+ * 「读不到」是第三种状态，既不能画成「未运行」，也不能画成「0 条规则」。
+ * 判定与后端 firewall_service.unread / rules_unread 用同一套条件：active 为 null 表示
+ * 状态探测本身失败（退出码非 0、超时、正文读不懂），rules_ok 为 false 表示那份放行表没拿到。
+ * tool 为 none 时两者都留空——没有防火墙这件事本来就是个确定的答案，不是探测失败。
+ */
+const stateBad = computed(() => {
+  const s = st.value;
+  if (!s || !s.tool || s.tool === 'none') return '';
+  return s.active === null ? String(s.reason || '状态没读到') : '';
+});
+const rulesBad = computed(() => {
+  const s = st.value;
+  if (!s || !s.tool || s.tool === 'none') return '';
+  return s.rules_ok === false ? String(s.reason || '规则表没读到') : '';
+});
+const blindNote = computed(() => {
+  if (stateBad.value) {
+    return `防火墙现在到底开没开，面板读不出来（${stateBad.value}）。这种情况下页面不会给你「未运行」的绿灯，`
+      + '也不会替你按下启用或停用——一个读不到状态的防火墙，停它和开它都可能把 SSH 关在门外。';
+  }
+  if (rulesBad.value) {
+    return `放行规则这一份表没读到（${rulesBad.value}）。表里没有行不等于机器上没有放行规则，`
+      + '所以删除、按编号操作一律拒绝：编号无从核对，删完还剩谁在保护 22 也判不了。';
+  }
+  return '';
+});
+// 启用 ufw 前，后端要拿这份表确认 22 与面板入口仍在放行；表没读到时它一定拒绝，
+// 按钮就跟着一起置灰，别让人点一次才知道。firewalld 的启用看的是 permanent 那份表，
+// 与运行期表无关，所以只有 ufw 需要在这里跟着 rulesBad 走。
+const toggleBlocked = computed(() => {
+  const s = st.value;
+  if (!s || !s.tool || s.tool === 'none') return true;
+  if (s.active === null) return true;
+  return s.active === false && s.tool === 'ufw' && rulesBad.value !== '';
+});
+const toggleBlockedWhy = computed(() => {
+  if (stateBad.value) return `状态没读到（${stateBad.value}），面板判不了按下之后 SSH 还进不进得来。`;
+  if (rulesBad.value) return `放行表没读到（${rulesBad.value}），启用之前没法确认 22 和面板入口端口还在放行名单里。`;
+  return '';
+});
+const headStatus = computed(() => {
+  const s = st.value;
+  if (!s || !s.tool || s.tool === 'none') return '';
+  if (s.active === null) return '状态没读到';
+  return s.active ? '运行中' : '未运行';
+});
+const headType = computed(() => {
+  if (stateBad.value) return 'warning';
+  return st.value?.active ? 'success' : 'default';
+});
+const stateText = computed(() => {
+  const s = st.value;
+  if (!s) return '检测中…';
+  if (!s.tool || s.tool === 'none') return '未检测到工具';
+  if (s.active === null) return '状态没读到';
+  return s.active ? '已启用' : '未启用';
+});
+
 const toolLabel = computed(() => ({ ufw: 'ufw', firewalld: 'firewalld', none: '未检测到防火墙' }[st.value?.tool] || '检测中…'));
 const rules = computed<any[]>(() => st.value?.rules || []);
 const isFirewalld = computed(() => st.value?.tool === 'firewalld');
@@ -226,11 +285,12 @@ const rangeHint = computed(() => {
   <div>
     <PageHeader title="防火墙" sub="直接管理本机的 ufw / firewalld 规则。面板会守住 SSH、面板自己的入口端口和你当前正在使用的端口，删掉它们会立刻把自己关在门外，这类操作一律被拒绝。">
       <template #actions>
-        <NTag v-if="st" size="small" :bordered="false" :type="st.active ? 'success' : 'default'">
-          {{ toolLabel }} · {{ st.active ? '运行中' : '未运行' }}
+        <NTag v-if="st" size="small" :bordered="false" :type="headType">
+          {{ headStatus ? `${toolLabel} · ${headStatus}` : toolLabel }}
         </NTag>
         <NButton size="small" tertiary :disabled="!st" @click="showRaw = true">原始输出</NButton>
-        <NButton v-if="isAdmin" size="small" type="primary" :icon="ico('AddOutline')" :disabled="!!busy" @click="showAdd = true">新增规则</NButton>
+        <NButton v-if="isAdmin" size="small" type="primary" :icon="ico('AddOutline')"
+                 :disabled="!!busy || !st || st.tool === 'none'" @click="showAdd = true">新增规则</NButton>
         <NButton size="small" tertiary :loading="loading" :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
       </template>
     </PageHeader>
@@ -241,6 +301,13 @@ const rangeHint = computed(() => {
     <NAlert v-else-if="st && st.tool === 'none'" type="warning" :bordered="false" style="margin-bottom: var(--space-4)">
       这台机器上既没有 ufw 也没有 firewalld，面板不做自动安装：装防火墙属于会改变主机可达性的操作，请你自己选包、配默认策略再回来。
     </NAlert>
+    <NAlert v-else-if="blindNote" type="warning" :bordered="false" style="margin-bottom: var(--space-4)">
+      <div class="blind-title">{{ stateBad ? '防火墙状态读不到' : '放行规则表读不到' }}</div>
+      <div class="blind-body cp-break">{{ blindNote }}</div>
+      <div class="blind-body cp-break">原因：{{ stateBad || rulesBad }}</div>
+      <NButton size="tiny" tertiary style="margin-top: var(--space-3)" :loading="loading"
+               :icon="ico('RefreshOutline')" @click="load">重新读取</NButton>
+    </NAlert>
 
     <NCard size="small" style="margin-bottom: var(--space-4)">
       <template #header>
@@ -250,11 +317,11 @@ const rangeHint = computed(() => {
       </template>
       <NSpace :size="20" wrap>
         <div class="kv"><span class="k">工具</span><span class="v mono">{{ st?.tool || '—' }}</span></div>
-        <div class="kv"><span class="k">运行状态</span><span class="v">{{ st ? (st.active ? '已启用' : '未启用') : '检测中…' }}</span></div>
+        <div class="kv"><span class="k">运行状态</span><span class="v" :class="{ 'v-unknown': stateBad }">{{ stateText }}</span></div>
         <div v-if="st?.default_incoming" class="kv"><span class="k">默认入站</span><span class="v mono">{{ st.default_incoming }}</span></div>
         <div v-if="st?.zone" class="kv"><span class="k">默认区域</span><span class="v mono">{{ st.zone }}</span></div>
         <div v-if="st?.logging" class="kv"><span class="k">日志</span><span class="v mono">{{ st.logging }}</span></div>
-        <div class="kv"><span class="k">规则条数</span><span class="v">{{ rules.length }}</span></div>
+        <div class="kv"><span class="k">规则条数</span><span class="v" :class="{ 'v-unknown': rulesBad }">{{ rulesBad ? '没读到' : rules.length }}</span></div>
       </NSpace>
       <div v-if="protectedList.length" class="prot-row">
         <NText depth="3" style="font-size: var(--fs-xs)">受保护端口（面板不会删除或拒绝这些端口的放行）：</NText>
@@ -265,7 +332,7 @@ const rangeHint = computed(() => {
         </NSpace>
       </div>
       <div v-if="isAdmin && st && st.tool !== 'none'" style="margin-top: var(--space-4)">
-        <NPopconfirm @positive-click="toggle(!st.active)">
+        <NPopconfirm v-if="!toggleBlocked" @positive-click="toggle(!st.active)">
           <template #trigger>
             <NButton size="small" :type="st.active ? 'error' : 'success'" tertiary :loading="busy === 'state'" :disabled="!!busy">
               {{ st.active ? `停用 ${toolLabel}` : `启用 ${toolLabel}` }}
@@ -279,6 +346,12 @@ const rangeHint = computed(() => {
             启用会立刻按当前规则拦接入站连接。SSH 端口与面板入口端口必须已经在放行列表里，否则面板会拒绝执行并把缺哪个端口告诉你。
           </div>
         </NPopconfirm>
+        <template v-else>
+          <NButton size="small" tertiary disabled>
+            {{ st.active ? `停用 ${toolLabel}` : `启用 ${toolLabel}` }}
+          </NButton>
+          <div class="cell-sub cp-break" style="margin-top: var(--space-2)">{{ toggleBlockedWhy }}</div>
+        </template>
       </div>
     </NCard>
 
@@ -287,7 +360,8 @@ const rangeHint = computed(() => {
         <span class="section-title">
           <NIcon :component="icons.LayersOutline" :size="15" color="var(--cp-ok)" /> 规则
           <NText depth="3" style="font-size: var(--fs-2xs); margin-left: 6px">
-            {{ isFirewalld ? '运行期配置；新增会同时写入 permanent 并重载' : '来自 ufw 的编号表，编号会随删除前移' }}
+            {{ rulesBad ? '这一份表没读到，空表不等于「机器上没有放行规则」'
+               : (isFirewalld ? '运行期配置；新增会同时写入 permanent 并重载' : '来自 ufw 的编号表，编号会随删除前移') }}
           </NText>
         </span>
       </template>
@@ -302,7 +376,9 @@ const rangeHint = computed(() => {
         :row-key="(r: any) => r.num"
       >
         <template #empty>
-          <EmptyBox :text="st?.tool === 'none' ? '这台机器上没有可管理的防火墙' : '还没有任何入站规则；默认入站策略为拒绝时，新端口需要显式放行'" />
+          <EmptyBox v-if="rulesBad" text="规则表没读到，这里列不出来"
+                    :hint="rulesBad" />
+          <EmptyBox v-else :text="st?.tool === 'none' ? '这台机器上没有可管理的防火墙' : '还没有任何入站规则；默认入站策略为拒绝时，新端口需要显式放行'" />
         </template>
       </NDataTable>
       <NSpace v-else vertical :size="8">
@@ -320,7 +396,8 @@ const rangeHint = computed(() => {
                     :loading="busy === `del-${r.num}`" :disabled="!!busy" @click="removeRule(r)">删除</NButton>
           </div>
         </div>
-        <EmptyBox v-if="!rules.length && !loading" text="当前没有入站规则" />
+        <EmptyBox v-if="!rules.length && !loading && rulesBad" text="规则表没读到，这里列不出来" :hint="rulesBad" />
+        <EmptyBox v-else-if="!rules.length && !loading" text="当前没有入站规则" />
       </NSpace>
     </NCard>
 
@@ -329,6 +406,7 @@ const rangeHint = computed(() => {
         <NAlert type="info" :bordered="false" size="small">
           面板只执行不会把你关在门外的操作：拒绝 SSH / 面板入口端口的放行、删掉这些端口唯一的放行来源，都会被直接拒绝。
         </NAlert>
+        <NAlert v-if="blindNote" type="warning" :bordered="false" size="small">{{ blindNote }}</NAlert>
         <div class="field">
           <span class="lab">端口</span>
           <NSpace :size="8" align="center">
@@ -382,6 +460,9 @@ const rangeHint = computed(() => {
 
     <NModal v-model:show="showRaw" preset="card" :title="`${toolLabel} 原始输出`" style="width: 640px; max-width: 94vw">
       <div class="log-view" style="max-height: 420px">{{ st?.output || '（无输出）' }}</div>
+      <NText v-if="blindNote" depth="3" style="font-size: var(--fs-2xs); display: block; margin-top: var(--space-2)">
+        这份原文不完整：命令没跑成的那几次不会留下任何正文，空白不等于防火墙里没有内容。
+      </NText>
       <NText depth="3" style="font-size: var(--fs-2xs); display: block; margin-top: var(--space-2)">
         原文来自 {{ toolLabel }} 自身，用于排障对照；规则操作请看上表，编号在两次刷新之间会变。
       </NText>
@@ -398,6 +479,9 @@ const rangeHint = computed(() => {
 .kv { display: flex; flex-direction: column; gap: 2px; min-width: 92px; }
 .kv .k { font-size: var(--fs-2xs); color: var(--cp-text-mute); }
 .kv .v { font-size: var(--fs-sm); color: var(--cp-text); }
+.v-unknown { color: var(--cp-warn); }
+.blind-title { font-size: var(--fs-sm); font-weight: 600; }
+.blind-body { margin-top: 4px; font-size: var(--fs-xs); line-height: 1.6; }
 .prot-row {
   margin-top: var(--space-4);
   padding-top: var(--space-3);

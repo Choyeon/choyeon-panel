@@ -1419,6 +1419,7 @@ const riskyPorts = computed(() => allPorts.value.filter((p) => p.verdict !== 'in
 const shownPorts = computed(() => (showAllPorts.value ? allPorts.value : riskyPorts.value));
 const countOf = (v: string) => Number(portData.value?.counts?.[v]) || 0;
 const exposedCount = computed(() => countOf('exposed'));
+const unknownCount = computed(() => countOf('unknown'));
 const blockedCount = computed(() => countOf('blocked'));
 const silentApps = computed(() => (portData.value?.apps ?? []).filter((a: any) => a.port && !a.listening));
 const silentLine = computed(() => silentApps.value.map((a: any) => `${a.name}:${a.port}`).join('、'));
@@ -1445,17 +1446,28 @@ const SCOPE_LABELS: Record<string, string> = {
 };
 const VERDICTS: Record<string, { text: string; type: any; note: string }> = {
   exposed: { text: '对外可达', type: 'error', note: '外部能连上，且不在预期清单里' },
+  unknown: { text: '判不了', type: 'warning', note: '防火墙那份事实没读到，这个端口能否从外面进来无法确认' },
   blocked: { text: '防火墙挡住', type: 'warning', note: '绑在全网，但入站规则没放行' },
   expected: { text: '预期内', type: 'info', note: '面板或反代自己声明的对外端口' },
   internal: { text: '仅本机', type: 'default', note: '只有这台机器自己能连' },
 };
-// 一页只说一件事：exposed 优先于 blocked，别让"还有个端口被挡着"稀释了真正的口子。
+// 一页只说一件事：exposed 优先于 unknown，unknown 优先于 blocked——
+// "读不到防火墙"这件事必须挡住"都挡着呢"这句绿灯，但不能挡住真正的口子。
 const portAlert = computed(() => {
   const d = portData.value;
   if (!d || portError.value) return null;
   if (!d.ports) return { type: 'error' as const, text: '读不到监听端口表（ss 不可用或退出码非 0），下面的判定都不可信。' };
   if (exposedCount.value) {
     return { type: 'error' as const, text: `${exposedCount.value} 个端口外部可达且不在预期内（共 ${d.counts.total} 个监听端口）。这是最该先看的一行。` };
+  }
+  if (unknownCount.value) {
+    const why = d.firewall?.unread || '防火墙那份放行表没读到';
+    return {
+      type: 'warning' as const,
+      text: `${unknownCount.value} 个端口的外部可达性判不了：${why}。`
+        + '面板不会把"读不到"写成"被防火墙挡住"——那正是最容易被当成已经安全的一句话。'
+        + '先把防火墙读出来（choyeonctl firewall list），这一页才给得出结论。',
+    };
   }
   if (blockedCount.value) {
     return { type: 'warning' as const, text: `没有对外多开的口子，另有 ${blockedCount.value} 个端口绑在全网、只是被防火墙挡住——改绑 127.0.0.1 才算真的关死。` };
@@ -1533,8 +1545,9 @@ const tabs = computed(() => [
   // 有待装安全更新时页签上点一颗红点：这一页平时没人看，而它恰恰是最需要被看见的。
   // 读不到清单和索引过期同样点亮：这一页此刻给不出「干净」的证明，别让它安静地待着。
   { key: 'patches', label: '系统补丁', badge: (secCount.value ?? 0) > 0 || !!patches.value?.probe_error || !!patches.value?.index_stale },
-  // 端口同理，且门槛更高：只有"外部可达且不在预期内"才点亮，被防火墙挡住的用告警说话。
-  { key: 'ports', label: '端口暴露面', badge: exposedCount.value > 0 },
+  // 端口同理：外部可达、以及"防火墙读不到所以判不了"都点亮——后者给不出「没有多开口子」的证明，
+  // 让它安静地待着就等于替面板撒了一个没人核对过的绿灯。被防火墙挡住的仍用页内告警说话。
+  { key: 'ports', label: '端口暴露面', badge: exposedCount.value > 0 || unknownCount.value > 0 },
   // 登录这道的红点门槛和端口一致：只有"要紧"才点，加固建议用页内告警说话。
   { key: 'login', label: '登录安全', badge: loginCounts.value.risk > 0 },
   // 存储这层的红点只认「要紧」（分区快满），值得处理的占用用页内告警说话：日志偏大、备份偏多天天都有，长期亮着就等于没亮。
@@ -1710,7 +1723,11 @@ const advisoryLine = computed(() => (patches.value?.advisories || []).slice(0, 8
 // 端口表：一个端口一行，判定和它的理由必须同屏——只给"对外可达"三个字，
 // 管理员下一步还是得回 SSH 里手敲 ss + ufw status 才知道该拿它怎么办。
 const VERDICT_ICON: Record<string, string> = {
-  exposed: 'ShieldOutline', blocked: 'ShieldCheckmarkOutline', expected: 'GlobeOutline', internal: 'ServerOutline',
+  exposed: 'ShieldOutline', unknown: 'AlertCircleOutline', blocked: 'ShieldCheckmarkOutline',
+  expected: 'GlobeOutline', internal: 'ServerOutline',
+};
+const VERDICT_TONE: Record<string, string> = {
+  exposed: 'var(--cp-err)', unknown: 'var(--cp-warn)', blocked: 'var(--cp-warn)',
 };
 const portColumns: any[] = [
   {
@@ -1721,7 +1738,7 @@ const portColumns: any[] = [
           h(NIcon, {
             component: icons[VERDICT_ICON[r.verdict]] || icons.InformationCircleOutline,
             size: 17,
-            color: r.verdict === 'exposed' ? 'var(--cp-err)' : r.verdict === 'blocked' ? 'var(--cp-warn)' : 'var(--cp-text-mute)',
+            color: VERDICT_TONE[r.verdict] || 'var(--cp-text-mute)',
           }),
         ]),
         h('div', { class: 'cell-txt' }, [
@@ -1914,12 +1931,14 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       <div v-if="portData" class="px-chips">
         <span class="px-chip"><i>监听端口</i>{{ countOf('total') }} 个</span>
         <span class="px-chip" :class="{ err: exposedCount > 0 }"><i>外部可达</i>{{ exposedCount }} 个</span>
+        <span v-if="unknownCount > 0" class="px-chip warn"><i>判不了</i>{{ unknownCount }} 个</span>
         <span class="px-chip" :class="{ warn: blockedCount > 0 }"><i>被防火墙挡住</i>{{ blockedCount }} 个</span>
         <span class="px-chip"><i>预期内</i>{{ countOf('expected') }} 个</span>
         <span class="px-chip"><i>仅本机</i>{{ countOf('internal') }} 个</span>
-        <span class="px-chip">
+        <span class="px-chip" :class="{ warn: portData.firewall.unread }">
           <i>防火墙</i>
           <template v-if="portData.firewall.tool === 'none'">未安装</template>
+          <template v-else-if="portData.firewall.unread">{{ portData.firewall.tool }} 读不到</template>
           <template v-else>{{ portData.firewall.tool }}{{ portData.firewall.active ? ' 已启用' : ' 未启用' }}</template>
         </span>
         <span v-if="portData.firewall.default_incoming" class="px-chip">

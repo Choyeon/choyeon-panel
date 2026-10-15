@@ -203,8 +203,10 @@ class FirewalldMachine:
             return {"code": 0, "out": self._render(self.rt)}
         if args == ["--permanent", "--list-all"]:
             return {"code": 0, "out": self._render(self.pm)}
-        if args and args[0].startswith("--info-service="):
-            port = {"ssh": "22/tcp", "cockpit": "9090/tcp"}.get(args[0].split("=", 1)[1], "")
+        if args and args[-1].startswith("--info-service="):
+            # permanent 那份表也要问 service 开哪些端口：`["--permanent", "--info-service=ssh"]`
+            # 走的是同一条分支，否则替身会把它当成一次 --permanent 写操作，把 ssh 从配置里抹掉。
+            port = {"ssh": "22/tcp", "cockpit": "9090/tcp"}.get(args[-1].split("=", 1)[1], "")
             return {"code": 0, "out": f"  service\n  port: {port}\n"}
         if args == ["--reload"]:
             if self.reload_after:
@@ -732,22 +734,30 @@ class FirewalldWriteCase(unittest.IsolatedAsyncioTestCase):
         _pin_protected(self)
 
     async def test_add_plain_port_reloads_after_writing_permanent(self):
+        """reload 排在写之后。
+
+        位置不能按下标取：add 与 reload 之间现在夹着 permanent 那份表的读取与逐条
+        `--info-service`（批次㊷：reload 之前要确认重载之后 SSH 还在放行里），
+        按 `calls[-2]` 取到的是探测，不是那条写命令。
+        """
         m = _use_firewalld(self)
         await fw.add_rule({"port": 8000}, fw.FIREWALLD)
-        self.assertEqual(m.calls[-2], ("firewall-cmd", ["--permanent", "--add-port=8000/tcp"]))
+        write = ("firewall-cmd", ["--permanent", "--add-port=8000/tcp"])
+        self.assertIn(write, m.calls)
         self.assertEqual(m.calls[-1], ("firewall-cmd", ["--reload"]))
+        self.assertLess(m.calls.index(write), len(m.calls) - 1)
         self.assertIn("8000/tcp", m.pm["ports"])
 
     async def test_range_uses_firewalld_dash_syntax(self):
         m = _use_firewalld(self)
         await fw.add_rule({"port": 8000, "port_to": 8100, "proto": "udp"}, fw.FIREWALLD)
-        self.assertEqual(m.calls[-2][1], ["--permanent", "--add-port=8000-8100/udp"])
+        self.assertIn(["--permanent", "--add-port=8000-8100/udp"], [c[1] for c in m.calls])
 
     async def test_sourced_rule_becomes_a_rich_rule(self):
         m = _use_firewalld(self)
         await fw.add_rule({"port": 8443, "source": "10.0.0.0/8"}, fw.FIREWALLD)
         self.assertEqual(m.pm["rich"], [RICH_V4])
-        self.assertIn(f"--add-rich-rule={RICH_V4}", m.calls[-2][1])
+        self.assertIn(f"--add-rich-rule={RICH_V4}", [arg for _c in m.calls for arg in _c[1]])
 
     async def test_v6_source_becomes_an_ipv6_rich_rule(self):
         m = _use_firewalld(self)

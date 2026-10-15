@@ -1,5 +1,5 @@
 <script setup lang="ts">
-defineProps<{ text?: string }>();
+defineProps<{ text?: string; hint?: string }>();
 </script>
 
 <template>
@@ -9,6 +9,7 @@ defineProps<{ text?: string }>();
       <path d="M6 18h36M14 27h10" />
     </svg>
     <p>{{ text || '暂无数据' }}</p>
+    <p v-if="hint" class="eb-hint cp-break">{{ hint }}</p>
     <slot />
   </div>
 </template>
@@ -28,5 +29,10 @@ defineProps<{ text?: string }>();
   margin: 0;
   max-width: 42em;
   line-height: 1.6;
+}
+.eb-hint {
+  font-size: var(--fs-2xs);
+  line-height: 1.5;
+  opacity: 0.8;
 }
 </style>

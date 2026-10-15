@@ -36,6 +36,11 @@ INTERNAL = "internal"
 EXPECTED = "expected"
 BLOCKED = "blocked"
 EXPOSED = "exposed"
+# 第五档：防火墙那一份事实没读到，所以这个端口外面进不进得来**判不了**。
+# 有了它才不必在"假绿灯（blocked）"和"假警报（exposed）"之间二选一——原来 `ufw status`
+# 一超时，面板就把 rules=[] 当成"防火墙没放行"，把每个绑全网、其实被 ufw 拦得死死的端口
+# 都盖章成安全，而这一页存在的意义就是揪出这种端口。
+UNKNOWN = "unknown"
 
 # 天生就要对外提供服务的进程 + 端口：web/反代监听 80/443 不是"多开的口子"，
 # 把它算成风险会让这一页第一条就是噪音，之后没人再看。
@@ -74,7 +79,7 @@ def _bind_scope(host: str) -> str:
 
 
 _SCOPE_RANK = {"loopback": 0, "link-local": 1, "public-ip": 2, "wildcard": 3}
-_VERDICT_RANK = {EXPOSED: 0, BLOCKED: 1, EXPECTED: 2, INTERNAL: 3}
+_VERDICT_RANK = {EXPOSED: 0, UNKNOWN: 1, BLOCKED: 2, EXPECTED: 3, INTERNAL: 4}
 
 
 def parse_ss(text: str) -> list[dict]:
@@ -140,30 +145,47 @@ async def _firewall() -> tuple[dict, object]:
 
     未启用防火墙时答案是"全都进得来"，不是"不知道"——ufw 关掉就是没有过滤，
     把这种机器上的每个对外端口都标成 unknown，等于把最该看的那台机器标成看不了。
+    但"没读到"是第三件事：那句判据只能是"判不了"（返回 None），既不能说可达也不能说不通。
     """
     fw = await firewall_service.read()
     rules = fw.get("rules") or []
-    active = bool(fw.get("active"))
+    active = fw.get("active")
+    bad = firewall_service.unread(fw)
+    blind = firewall_service.blind_allow_rules(rules)
     default_in = str(fw.get("default_incoming") or "").lower()
 
-    def reachable(port: int, names: list[str]) -> tuple[bool, str]:
+    def reachable(port: int, names: list[str]) -> tuple[bool | None, str]:
         if any(n in DOCKER_PROXIES for n in names):
             return True, "容器发布端口走 docker 的 DNAT，不经过 ufw 的放行表"
-        if not active:
+        if bad:
+            return None, f"防火墙现状没读到（{bad}），这个端口能否从外面进来判不了"
+        if active is not True:
             return True, "防火墙未启用，非回环地址上的端口都可达"
         if default_in == "allow":
             return True, "防火墙默认放行入站"
         if any(firewall_service.covers(r, port) for r in rules):
             return True, "有放行规则覆盖该端口"
+        if blind:
+            return (
+                None,
+                f"{len(blind)} 条 service 规则读不到它开哪些端口，这个端口是否被它们放行判不了",
+            )
         return False, "防火墙没有放行该端口"
 
     return fw, reachable
 
 
-def _verdict(row: dict, reachable: bool, why: str, expected: dict[int, str], app_by_port: dict) -> tuple[str, str, str]:
+def _verdict(
+    row: dict,
+    reachable: bool | None,
+    why: str,
+    expected: dict[int, str],
+    app_by_port: dict,
+) -> tuple[str, str, str]:
     """给一个监听端口下判词，并返回（判词，理由，修复命令）。
 
-    判词只有四种，边界写死在这里，网页、CLI 和自检项才不会各说一套。
+    判词只有五种，边界写死在这里，网页、CLI 和自检项才不会各说一套。
+    `reachable` 是三态：True 可达、False 被挡、None 判不了（防火墙那份事实没读到）。
     """
     port = row["port"]
     names = row["processes"]
@@ -188,6 +210,15 @@ def _verdict(row: dict, reachable: bool, why: str, expected: dict[int, str], app
         return EXPECTED, f"{expected[port]}，对外监听符合预期", ""
     if any(n in PUBLIC_DAEMONS for n in names) and port in WEB_PORTS:
         return EXPECTED, "web/反代服务的对外端口", ""
+    if reachable is None:
+        # 判不了就说判不了。这一档排在 blocked 前面是整批修复的落点：原来防火墙探测一失败，
+        # rules 是空的、active 是 False，于是这些端口全被盖成"防火墙没放行"——那是本页最坏的
+        # 一种错，因为它把一个可能正对着公网的口子报成安全。
+        return (
+            UNKNOWN,
+            f"{who} 监听在 {row['addrs'][0]}，{why}",
+            "先把防火墙状态读出来（choyeonctl firewall list），这一页才判得了外部可达性",
+        )
     if not reachable:
         return (
             BLOCKED,
@@ -208,7 +239,7 @@ def _verdict(row: dict, reachable: bool, why: str, expected: dict[int, str], app
 
 
 def _summary(ports: list[dict]) -> dict:
-    out = {"total": len(ports), INTERNAL: 0, EXPECTED: 0, BLOCKED: 0, EXPOSED: 0}
+    out = {"total": len(ports), INTERNAL: 0, EXPECTED: 0, BLOCKED: 0, EXPOSED: 0, UNKNOWN: 0}
     for p in ports:
         out[p["verdict"]] = out.get(p["verdict"], 0) + 1
     return out
@@ -230,7 +261,10 @@ async def _collect() -> dict:
         notes.append("这台机器上没有 ss（iproute2），无法给出监听表")
 
     fw, reachable = await _firewall()
-    if not fw.get("active"):
+    fw_bad = firewall_service.unread(fw)
+    if fw_bad:
+        notes.append(f"防火墙现状没读到（{fw_bad}）：这一轮所有要看放行表才能判的端口都标成未确认，不判 blocked")
+    elif fw.get("active") is not True:
         notes.append(f"防火墙{'未安装' if fw.get('tool') == 'none' else '未启用'}，按全部可达判定")
     notes.append("判定只看本机防火墙；云上安全组、上游 NAT 与别的机器上的白名单都不在本机视野内")
 
@@ -272,7 +306,10 @@ async def _collect() -> dict:
         "as_root": as_root,
         "firewall": {
             "tool": fw.get("tool"),
-            "active": bool(fw.get("active")),
+            "active": fw.get("active"),
+            "state_ok": bool(fw.get("state_ok")),
+            "rules_ok": bool(fw.get("rules_ok")),
+            "unread": fw_bad,
             "default_incoming": fw.get("default_incoming") or "",
         },
         "counts": _summary(ports),
@@ -294,6 +331,7 @@ def doctor_item(data: dict) -> dict:
     ports = data.get("ports") or []
     exposed = [p for p in ports if p["verdict"] == EXPOSED]
     blocked = [p for p in ports if p["verdict"] == BLOCKED]
+    unknown = [p for p in ports if p["verdict"] == UNKNOWN]
     if not ports:
         return {"status": "warn", "detail": "读不到监听端口表（缺 ss 或 ss 失败），无法判断暴露面", "fix": ""}
     if exposed:
@@ -303,6 +341,15 @@ def doctor_item(data: dict) -> dict:
             "status": "warn",
             "detail": f"{len(exposed)} 个端口绑在非回环地址且外部可达：{names}{more}",
             "fix": "choyeonctl ports",
+        }
+    if unknown:
+        # 「一个都没暴露」和「一个都没判成」在绿灯上长得一模一样，而后者才是这台机器上的
+        # 真实情况时，这一页就不能再报"没有对外多开的口子"——那句话把人引去干别的事了。
+        why = (data.get("firewall") or {}).get("unread") or "防火墙状态没读到"
+        return {
+            "status": "warn",
+            "detail": f"{len(unknown)} 个绑在非回环地址的端口判不了外部可达性（{why}）",
+            "fix": "choyeonctl firewall list",
         }
     detail = f"{counts.get('total', 0)} 个监听端口，没有对外多开的口子"
     if blocked:

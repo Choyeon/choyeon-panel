@@ -55,7 +55,7 @@ os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_batch41_data_")
 os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch41_roots_"))
 
 from app import backup_runner as BR
-from app.services import systemd_ops
+from app.services import firewall_service, systemd_ops
 from app.util import CTRL_TIMEOUT, PROBE_TIMEOUT, run, timeout_note
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -436,17 +436,32 @@ class TestFailureIsNotData(unittest.IsolatedAsyncioTestCase):
 
 
 class TestDoctorHonesty(unittest.IsolatedAsyncioTestCase):
-    """自检项：查不到就是查不到，尤其防火墙那一项。"""
+    """自检项：查不到就是查不到，尤其防火墙那一项。
 
-    async def _firewall(self, ret, tool="ufw"):
+    批次㊷之后 `_check_firewall()` 不再自己起子进程，只渲染 `firewall_service.read()` 那一份
+    事实，所以这里喂的是 `read()` 的产出形态（三态 `active` + `state_ok`/`rules_ok`/`reason`），
+    判词本身由 service 层的用例盯。
+    """
+
+    async def _firewall(self, **over):
         from app.routers import meta
 
-        async def fake_run(cmd, args, **kw):
-            return ret
-        with mock.patch.object(meta, "run", fake_run), \
-                mock.patch.object(meta.shutil, "which",
-                                  lambda x: "/usr/bin/" + x if x == tool else None):
+        base = {
+            "tool": "ufw", "active": True, "state_ok": True, "rules_ok": True, "reason": "",
+            "rules": [], "protected": [22], "protected_reasons": {"22": "sshd 监听端口"},
+        }
+        base.update(over)
+
+        async def fake_read(*a, **kw):
+            return dict(base)
+
+        with mock.patch.object(firewall_service, "read", fake_read):
             return await meta._check_firewall()
+
+    @staticmethod
+    def _why(label: str, code: int, text: str = "") -> str:
+        """reason 串由 service 层生成，这里只借用同一句，免得测试里的措辞和线上对不上。"""
+        return firewall_service._not_read(label, code, text)
 
     async def _nginx(self, ret):
         from app.routers import meta
@@ -458,29 +473,48 @@ class TestDoctorHonesty(unittest.IsolatedAsyncioTestCase):
             return await meta._check_nginx()
 
     async def test_ufw_timeout_is_not_enabled(self):
-        item = await self._firewall({"code": 124, "out": timeout_note("ufw", CTRL_TIMEOUT)})
+        item = await self._firewall(active=None, state_ok=False, rules_ok=False,
+                                    reason=self._why("ufw status verbose", 124, timeout_note("ufw", CTRL_TIMEOUT)))
         self.assertEqual(item["status"], "warn", "超时报成 pass 就是安全项上的假绿灯")
         self.assertIn("无法确认", item["detail"])
 
     async def test_ufw_query_failure_carries_exit_code(self):
-        item = await self._firewall({"code": 2, "out": ""})
+        item = await self._firewall(active=None, state_ok=False, rules_ok=False,
+                                    reason=self._why("ufw status verbose", 2))
         self.assertEqual(item["status"], "warn")
         self.assertIn("退出码 2", item["detail"])
 
     async def test_ufw_inactive_still_warn(self):
-        item = await self._firewall({"code": 0, "out": "Status: inactive"})
+        item = await self._firewall(active=False)
         self.assertEqual(item["status"], "warn")
         self.assertIn("未启用", item["detail"])
 
+    async def test_rules_table_not_read_is_not_zero_rules(self):
+        """状态读到了、规则表没读到：这一项不能说"已启用，0 条入站规则"。"""
+        item = await self._firewall(rules_ok=False, reason=self._why("ufw status numbered", 6))
+        self.assertEqual(item["status"], "warn")
+        self.assertNotIn("0 条", item["detail"])
+
     async def test_ufw_active_pass(self):
-        item = await self._firewall({"code": 0, "out": "Status: active\nAnywhere -> Anywhere  ALLOW"})
+        item = await self._firewall(rules=[{"num": 1}, {"num": 2}])
         self.assertEqual(item["status"], "pass")
+        self.assertIn("2 条入站规则", item["detail"])
 
     async def test_firewalld_query_failure_is_not_running(self):
-        item = await self._firewall({"code": 124, "out": timeout_note("firewall-cmd", CTRL_TIMEOUT)},
-                                    tool="firewall-cmd")
+        item = await self._firewall(tool="firewalld", active=None, state_ok=False, rules_ok=False,
+                                    reason=self._why("firewall-cmd --state", 124, timeout_note("firewall-cmd", CTRL_TIMEOUT)))
         self.assertEqual(item["status"], "warn")
-        self.assertIn("退出码", item["detail"], "查失败和「确实没在运行」要分得开")
+        self.assertIn("无法确认", item["detail"], "查失败和「确实没在运行」要分得开")
+
+    async def test_firewalld_confirmed_stopped_names_the_unit(self):
+        item = await self._firewall(tool="firewalld", active=False, rules_ok=False)
+        self.assertEqual(item["status"], "warn")
+        self.assertIn("未在运行", item["detail"])
+
+    async def test_no_firewall_tool_is_its_own_answer(self):
+        item = await self._firewall(tool="none", active=False)
+        self.assertEqual(item["status"], "warn")
+        self.assertIn("未检测到", item["detail"])
 
     async def test_nginx_timeout_is_not_config_error(self):
         item = await self._nginx({"code": 124, "out": timeout_note("nginx", CTRL_TIMEOUT)})

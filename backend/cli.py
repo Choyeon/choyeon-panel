@@ -724,10 +724,19 @@ async def cmd_firewall(a: argparse.Namespace) -> dict:
 
 def _firewall_table(data: dict) -> str:
     """`firewall list` 的人类可读形态：与表格页同样的列，另把 sig 印出来——
-    remove 需要它，而让人再去跑一次 --json 只会多一次可被删错的时间窗。"""
+    remove 需要它，而让人再去跑一次 --json 只会多一次可被删错的时间窗。
+
+    三态照实打印：`active` 为 None 时说"状态没读到"并附原因，最后一行也不写「共 0 条」——
+    终端上那两个字看起来跟"这台机器没有任何放行规则"一模一样，而它真正的意思是没读到。
+    """
     rules = data.get("rules") or []
     reasons = data.get("protected_reasons") or {}
-    head = f"{data.get('tool', 'none')} · " + ("已启用" if data.get("active") else "未启用")
+    active = data.get("active")
+    bad = firewall_service.unread(data)
+    state = "已启用" if active is True else ("未启用" if active is False else "状态没读到")
+    head = f"{data.get('tool', 'none')} · " + state
+    if bad:
+        head += f"（{bad}）"
     if data.get("default_incoming"):
         head += f" · 默认入站 {data['default_incoming']}"
     if data.get("zone"):
@@ -744,7 +753,11 @@ def _firewall_table(data: dict) -> str:
                 "IPv6" if r.get("family") == "ipv6" else "IPv4",
                 "受保护" if r.get("protected") else ""]
         lines.append("  ".join(cols).rstrip() + f"  sig={r.get('sig', '')}")
-    lines.append(f"共 {len(rules)} 条")
+    bad_rules = firewall_service.rules_unread(data)
+    if bad_rules:
+        lines.append(f"规则表没读到，这一条不等于「没有放行规则」（{bad_rules}）")
+    else:
+        lines.append(f"共 {len(rules)} 条")
     return "\n".join(lines)
 
 
@@ -922,13 +935,17 @@ def _ports_text(d: dict) -> str:
     c = d.get("counts") or {}
     fw = d.get("firewall") or {}
     lines = [
-        f"监听端口 {c.get('total', 0)} 个：外部可达 {c.get('exposed', 0)}、被防火墙挡住 {c.get('blocked', 0)}、"
-        f"预期内 {c.get('expected', 0)}、仅本机 {c.get('internal', 0)}"
+        f"监听端口 {c.get('total', 0)} 个：外部可达 {c.get('exposed', 0)}、判不了 {c.get('unknown', 0)}、"
+        f"被防火墙挡住 {c.get('blocked', 0)}、预期内 {c.get('expected', 0)}、仅本机 {c.get('internal', 0)}"
     ]
-    lines.append(
-        f"防火墙 {fw.get('tool')}{'：已启用' if fw.get('active') else '：未启用/未安装'}，"
-        f"默认入站 {fw.get('default_incoming') or '未知'}"
-    )
+    if fw.get("unread"):
+        fw_line = f"防火墙 {fw.get('tool')} 状态没读到（{fw['unread']}）：依赖放行表的判定全部标未确认"
+    else:
+        fw_line = (
+            f"防火墙 {fw.get('tool')}{'：已启用' if fw.get('active') is True else '：未启用/未安装'}，"
+            f"默认入站 {fw.get('default_incoming') or '未知'}"
+        )
+    lines.append(fw_line)
     for n in d.get("notes") or []:
         lines.append(f"[note] {n}")
     risky = [p for p in d.get("ports") or [] if p["verdict"] != exposure_service.INTERNAL]
@@ -1454,9 +1471,11 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "supported=false 时退出码 3（前置条件不满足）"]},
             {"name": "ports", "args": ["--refresh"],
              "desc": "监听端口与对外可达性对账（只读：不改绑定、不动防火墙）",
-             "notes": ["判词四档：internal 仅本机、expected 预期对外、blocked 绑在全网但防火墙未放行、"
-                       "exposed 外部可达且不在预期清单（含配了域名反代却绑全网的源站）",
-                       "未启用防火墙时按\"非回环端口全都可达\"判定，不给 unknown——关掉 ufw 就是没有过滤",
+             "notes": ["判词五档：internal 仅本机、expected 预期对外、blocked 绑在全网但防火墙未放行、"
+                       "exposed 外部可达且不在预期清单（含配了域名反代却绑全网的源站）、"
+                       "unknown 防火墙现状没读到所以判不了",
+                       "未启用防火墙时按\"非回环端口全都可达\"判定，不给 unknown——关掉 ufw 就是没有过滤；"
+                       "但\"没读到\"与\"没启用\"是两件事，探测失败只会给 unknown，不会给 blocked",
                        "只看本机视野：云上安全组、上游 NAT 不在判定范围内，这一条写在 notes 里",
                        "非 root 时 ss 不给进程名，as_root=false，判定只按端口号给",
                        "读不到监听表时退出码 3"]},

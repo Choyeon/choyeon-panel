@@ -23,6 +23,7 @@ from ..services import (
     alerts_service,
     cert_ops,
     exposure_service,
+    firewall_service,
     load_service,
     login_audit_service,
     memory_service,
@@ -159,33 +160,36 @@ async def _check_nginx() -> dict:
 
 
 async def _check_firewall() -> dict:
-    if shutil.which("ufw"):
-        r = await run("ufw", ["status"])
-        out = r["out"] or ""
-        if r["code"] != 0:
-            # 少了这道判断，`ufw status` 超时或被拒时正文里根本没有 "inactive"，
-            # 下面的分支会把"没查到"报成"ufw 已启用"——安全项上的假绿灯。
-            return {"status": "warn",
-                    "detail": f"ufw status 查询失败（退出码 {r['code']}），防火墙状态无法确认",
-                    "fix": "手动执行 ufw status verbose 查看"}
-        if "inactive" in out.lower():
+    """防火墙自检项：只渲染 `firewall_service.read()` 那一份事实，不再自己判一遍。
+
+    这里原来站着一个**独立的读者**：`shutil.which` 找工具、`ufw status` 的正文里找 inactive
+    字样，于是同一台机器可以同时出现"自检说 ufw 已启用、防火墙页说未启用"。更要命的是两个
+    读者都把探测失败当成了答案：`read()` 丢掉退出码，一次卡住的 `ufw status verbose` 读来就是
+    "未启用 + 零条规则"；这一位反过来，正文里没有 inactive 就报"已启用"。防火墙是这台机器上
+    最不能猜的一项——判错的下一步就是照着它点启停，而启停直接决定 SSH 还进不进得来。
+    """
+    fw = await firewall_service.read()
+    tool = fw.get("tool") or "none"
+    if tool == "none":
+        return {"status": "warn", "detail": "未检测到 ufw/firewalld", "fix": "建议启用一种防火墙并只放行 80/443"}
+    label = "ufw" if tool == firewall_service.UFW else "firewalld"
+    if bad := firewall_service.unread(fw):
+        return {"status": "warn", "detail": f"{label} 状态无法确认：{bad}", "fix": "choyeonctl firewall list --json"}
+    if fw.get("active") is not True:
+        if label == "ufw":
             return {
                 "status": "warn",
                 "detail": "ufw 未启用",
                 "fix": "ufw allow 80/tcp && ufw allow 443/tcp && ufw enable",
             }
-        return {"status": "pass", "detail": "ufw 已启用", "fix": ""}
-    if shutil.which("firewall-cmd"):
-        r = await run("firewall-cmd", ["--state"])
-        if r["code"] != 0:
-            return {
-                "status": "warn",
-                "detail": f"firewall-cmd --state 未通过（退出码 {r['code']}），firewalld 可能未运行",
-                "fix": "systemctl enable --now firewalld"
-                       " && firewall-cmd --add-service=http --add-service=https --permanent",
-            }
-        return {"status": "pass", "detail": "firewalld 运行中", "fix": ""}
-    return {"status": "warn", "detail": "未检测到 ufw/firewalld", "fix": "建议启用一种防火墙并只放行 80/443"}
+        return {
+            "status": "warn",
+            "detail": "firewalld 未在运行",
+            "fix": "systemctl enable --now firewalld"
+                   " && firewall-cmd --add-service=http --add-service=https --permanent",
+        }
+    n = len(fw.get("rules") or [])
+    return {"status": "pass", "detail": f"{label} 已启用，{n} 条入站规则", "fix": ""}
 
 
 async def _check_backup() -> dict:

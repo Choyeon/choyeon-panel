@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .. import config
 from ..errors import BadInput, ExecFailed, Forbidden
-from ..util import PROBE_TIMEOUT, run
+from ..util import CTRL_TIMEOUT, PROBE_TIMEOUT, run
 
 UFW = "ufw"
 FIREWALLD = "firewalld"
@@ -42,6 +42,72 @@ async def detect() -> str | None:
         if (await run("which", [probe], timeout=PROBE_TIMEOUT))["code"] == 0:
             return tool
     return None
+
+
+# --------------------------------------------------------------------- 探测判读
+# 防火墙状态只有三种可能：已启用、确认没启用、没读到。前两种来自正文，第三种来自
+# "正文里根本没有可辨认的答案"。原来这里只有前两种，因为判据是「正文里有没有某个词」，
+# 而 `util.run` 把超时、命令不存在、权限不足都当成**正文**返回（`{code, out}`，stderr 已合并），
+# 退出码没人看。于是一次卡住的 `ufw status verbose` 读来就是 active=False + 零条规则，
+# 面板在一台防火墙正拦着 SSH 的机器上报"ufw 未启用"，还在暴露面对账里把每个绑全网的
+# 端口判成"防火墙没放行"（假绿灯）。工具的约定退出码在这里也不全是失败：
+# `firewall-cmd --state` 用 252 表示"没在跑"，所以判据只能是"正文认不认得出来"，
+# 认不出来才说没读到——这与批次㉜ 给 `systemctl is-enabled` 立的规矩是同一件事。
+def _ufw_state(text: str) -> bool | None:
+    m = re.search(r"Status:\s*(active|inactive)", text or "")
+    if m is None:
+        return None
+    return m.group(1) == "active"
+
+
+def _firewalld_state(text: str) -> bool | None:
+    s = (text or "").strip().lower()
+    if s == "running":
+        return True
+    if s == "not running":
+        return False
+    return None
+
+
+def _not_read(label: str, code: int, text: str = "") -> str:
+    """一句「这条探测没读到」的判词，进 `read()` 的 `reason`，也进写操作的拒绝理由。
+
+    只报命令名和退出码：ufw/firewall-cmd 的报错正文带链名、表名和文件路径，
+    `_tool_message` 已经为此拒绝把原文透给浏览器，同一份克制用在这里。
+    超时那句由 `util.run` 生成（`timeout_note`），本身不含路径，原样带过去信息最多。
+    """
+    if code == 124:
+        return text or f"{label} 超时"
+    return f"{label} 退出码 {code}"
+
+
+def rules_unread(fw: dict) -> str:
+    """规则表这一份读没读到：空串＝读到了（可以是 0 条），非空＝没读到（附原因）。
+
+    页脚与「共 N 条」只问规则表这一件事，不能借用 `unread()`：状态没读到但表读到了的时候，
+    「共 2 条」依然成立，而 `unread()` 会因为它整份读数不可信而给出原因。
+    """
+    if fw.get("tool") in (None, "none"):
+        return ""
+    if fw.get("rules_ok") is False:
+        return str(fw.get("reason") or "规则表没读到")
+    return ""
+
+
+def unread(fw: dict) -> str:
+    """这份读数能不能用来判"某个端口外面进得来吗"：空串＝判得了，非空＝判不了（附原因）。
+
+    和 `rules_unread()` 只在一件事上分道：防火墙**确认没在运行**时，运行期规则表确实不存在
+    （firewalld 一停，`--list-all` 必然失败），可达性这一题却有明确答案——没有过滤，端口全进得来。
+    把两件事合成一个判词，就会给一台明确没设防的机器打上 unknown，而那台机器最该看到的是
+    "可达，请把它改绑回环"。
+    反过来，删除/启用/reload 吃的就是那张表，它们必须问 `rules_unread()`。
+    """
+    if fw.get("active") is None:
+        return str(fw.get("reason") or "状态没读到")
+    if fw.get("active") is not True:
+        return ""
+    return rules_unread(fw)
 
 
 def _loopback(host: str) -> bool:
@@ -361,17 +427,32 @@ def parse_firewalld(list_all: str, scope: str = "runtime") -> list[dict]:
     return rules
 
 
-async def _enrich_service_ports(rules: list[dict]) -> None:
-    """把 firewalld 的 service 规则翻译成它实际开放的端口。
+async def _enrich_service_ports(rules: list[dict], permanent: bool = False) -> str:
+    """把 firewalld 的 service 规则翻译成它实际开放的端口；返回没读到的原因（空串＝全读到了）。
 
     `services: ssh` 才是这类机器上 22 端口的主要放行方式，自锁判定若不认识它，"删除 ssh
-    service"看上去就毫无风险。查不到端口定义时标 ports_known=False——宁可少保护一条，也不
-    能把所有删除都挡死（前端会把它单独标出来）。
+    service"看上去就毫无风险。所以这里分三种结果，绝不合成两种：
+    读到端口定义 → `ports_known=True`；命令跑成了但定义里没有 port 行 → `ports_known=False`
+    （这个 service 确实不直接开端口）；命令本身没回来 → `ports_known=None`，
+    也就是"不知道"。「不知道」在可达性判定上不能装成放行，在删除判定上更不能装成安全，
+    见 `covers` 与 `might_protect` 的分工。
+
+    `permanent=True` 是给 daemon 没在跑的那条路用的（启用防火墙前只能查离线配置）：
+    不带 `--permanent` 时 `--info-service` 会连着 daemon 一起失败，那样一道明明写好了
+    ssh 放行的机器会被"读不到"挡在启用外面。
     """
+    fails: list[str] = []
     for r in rules[:12]:
         if r.get("kind") != "service":
             continue
-        info = await run("firewall-cmd", [f"--info-service={r['token']}"], timeout=20)
+        args = (["--permanent"] if permanent else []) + [f"--info-service={r['token']}"]
+        info = await run("firewall-cmd", args, timeout=CTRL_TIMEOUT)
+        if info["code"] != 0:
+            # 252 之类"daemon 没在跑"的约定码也算读不到：这条规则的端口定义此刻无从得知。
+            r["ports_known"] = None
+            label = "firewall-cmd --permanent --info-service" if permanent else "firewall-cmd --info-service"
+            fails.append(_not_read(label, info["code"], info["out"]))
+            continue
         vals: list[str] = []
         for line in (info["out"] or "").splitlines():
             s = line.strip()
@@ -385,23 +466,58 @@ async def _enrich_service_ports(rules: list[dict]) -> None:
         r["port_specs"] = specs
         r["port"], r["port_to"], r["proto"] = specs[0]
         r["ports_known"] = True
+    return "；".join(fails[:2])
+
+
+def _service_ports_unread(rule: dict) -> bool:
+    """firewalld 的 service 规则，且这次没读到它的端口定义（`ports_known` 是 None）。"""
+    return rule.get("kind") == "service" and rule.get("ports_known") is None
 
 
 def covers(rule: dict, port: int) -> bool:
-    """这条规则是否让 `port` 从外部进得来（自锁判定用它，不看端口是否"重要"）。
+    """这条规则是否**确定**让 `port` 从外部进得来（可达性判定用它）。
 
     limit 也算放行：ufw 的 limit 是"带限速的 accept"，删掉它 SSH 就真的不通了。
+    端口定义没读到的 service 在这里算 False：不能拿一次没成的探测去宣布"这端口外面进得来"。
     """
     if rule.get("action") not in ("allow", "limit") or rule.get("direction") != "in":
         return False
     if str(rule.get("source", "")).lower() not in ("anywhere", "any", ""):
         return False
-    if rule.get("ports_known") is False:
+    if rule.get("ports_known") is False or _service_ports_unread(rule):
         return False  # 查不到端口定义的 service，不能假装它覆盖了全部端口
     specs = rule.get("port_specs") or [(rule.get("port"), rule.get("port_to"), rule.get("proto", "both"))]
     return any(
         (lo is None or lo <= port <= (hi or lo)) and pr in ("both", "tcp") for lo, hi, pr in specs
     )
+
+
+def might_protect(rule: dict, port: int) -> bool:
+    """这条规则**有可能**正在保护 `port`——要删它的那一方用这个判据。
+
+    与 `covers` 的分工是一道刻意的不对称：
+    · 待删的这条规则，端口定义没读到就当它还在保护（宁可拒绝一次删除，也不能把人锁在门外）。
+      原来这里是反的——`_enrich_service_ports` 那句"宁可少保护一条"说的正是把 ssh service
+      当成不保护 22，于是唯一放行 SSH 的那条规则变成了最好删的那条，删完 firewalld 一 reload
+      就锁死，而这台机器上根本没有第二条通往 22 的放行。
+    · 删完之后"还剩谁在保护"必须用 `covers` 确定地读到才算数，不能拿"也许还有一条"顶岗。
+    """
+    if _service_ports_unread(rule):
+        return rule.get("action") in ("allow", "limit") and rule.get("direction") != "out"
+    return covers(rule, port)
+
+
+def blind_allow_rules(rules: list[dict]) -> list[dict]:
+    """看着像放行、却读不到它到底开了哪些端口的规则（firewalld 的 service 探测没回来）。
+
+    两侧都不许把"没读到"当成"没有"：删除侧交给 `might_protect` 按最坏情况拒绝，可达性侧交给
+    暴露面对账——那里不能因为"没有别的规则覆盖 22"就宣布 22 被防火墙挡住，那等于给一个
+    其实开着的端口发一张"外部进不来"的假条。
+    """
+    return [
+        r for r in rules
+        if _service_ports_unread(r) and r.get("action") in ("allow", "limit") and r.get("direction") != "out"
+    ]
 
 
 def hits_port(rule: dict, port: int) -> bool:
@@ -483,24 +599,62 @@ def validate_rule(body: dict) -> dict:
 
 # --------------------------------------------------------------------- 自锁判定
 def lockout_hit(rules: list[dict], protected: set[int], target: dict) -> set[int]:
-    """删掉 target 之后就不再有任何规则放行的受保护端口。
+    """删掉 target 之后就不再有任何规则**确定**放行的受保护端口。
 
     只看"这条规则覆盖了受保护端口"会过度拦截：ssh service 与 22/tcp 同时存在时，删掉其中一条
     另一条还开着，面板不该拒绝。同族才算数——ufw 的 `22/tcp` 与 `22/tcp (v6)` 是两条规则，
     删掉 v4 那条之后 v6 仍然"覆盖 22"，但管理员大概率走的是 IPv4，所以孪生规则不能顶岗。
+    待删的那条用 `might_protect`（读不到端口定义也算它在保护），剩下那些用 `covers`
+    （必须确定读到才算它还挡着）——两个方向不对称是故意的，见 `might_protect`。
     """
     family = target.get("family") or "ipv4"
     rest = [r for r in rules if r is not target and (r.get("family") or "ipv4") == family]
-    return {p for p in protected if covers(target, p) and not any(covers(r, p) for r in rest)}
+    return {p for p in protected if might_protect(target, p) and not any(covers(r, p) for r in rest)}
 
 
-def lockout_reasons(rules: list[dict], protected: set[int], *, intent: str, target: dict | None = None) -> list[str]:
+def unread_refusal(why: str) -> str:
+    """「这次没读到防火墙现状，所以危险操作一律拒绝」的那句话——只有这一处措辞。
+
+    写路径（删除规则、启用防火墙、reload）和 `lockout_reasons` 都调它，
+    这样网页、CLI 与审计日志里看到的是同一句话。
+    """
+    return (
+        f"防火墙现状没读到（{why}），这次操作判不了会不会把你锁在门外，已拒绝执行。"
+        "请先用 SSH 执行 ufw status verbose / firewall-cmd --state --list-all 确认，"
+        "或把这条探测命令修好再回来点。"
+    )
+
+
+def unread_reload_refusal(why: str) -> str:
+    """写已经落盘、只有 reload 被扣下的那句话。
+
+    不能复用 `unread_refusal()`：那一句话说的是"这次操作拒绝执行"，而这里的 add/remove 真的
+    执行成功了，只是没替用户按 reload。把两者混成一句，管理员会再去点一次"添加"，
+    于是同一条规则落进 permanent 两份。
+    """
+    return (
+        f"规则已写入，但没有执行 --reload：permanent 那份表没读到（{why}），"
+        "面板判不了重载之后 SSH 还放不放行。请先用 SSH 确认 firewall-cmd --permanent --list-all，"
+        "再自己决定什么时候重载。"
+    )
+
+
+def lockout_reasons(
+    rules: list[dict], protected: set[int], *, intent: str, target: dict | None = None, table_bad: str = ""
+) -> list[str]:
     """执行前替管理员想清楚的那一步：这条操作会不会把他自己关在门外。
 
     intent 取 'add' | 'remove' | 'enable' | 'reload'。返回拒绝理由列表，空列表表示放行。
     这里没有"我已确认，继续执行"的参数——能被绕过的保护等于没有保护，而 SSH 一旦锁死
     只能靠云控制台恢复，面板手里没有那个权限。
+
+    `table_bad` 是调用方那次读取"没读到"的原因（`rules_unread()` 或直接来自 `_permanent_rules()`）。
+    非空就先拒绝：规则表是空的和规则表没读到，在删除/启用/reload 这三类操作上后果完全不同，
+    前者可以放行、后者一律不行——启用一道看不见的防火墙，或者删掉一条看不见全貌的规则，
+    判据都不在面板手里。
     """
+    if table_bad and intent in ("enable", "reload", "remove"):
+        return [unread_refusal(unread)]
     if intent == "enable":
         missing = sorted(p for p in protected if not any(covers(r, p) for r in rules))
         if missing:
@@ -543,12 +697,34 @@ def _reason_words(request, ports: set[int]) -> str:
 
 
 # --------------------------------------------------------------------- 读取
+async def _permanent_rules() -> tuple[list[dict], str]:
+    """firewalld 的 permanent 规则表 + 「这次没读到」的原因（空串＝这份表可信）。
+
+    这是"重载或启用之后还剩什么"的唯一读者：daemon 没跑的时候运行期表根本读不到，
+    而 `--permanent --list-all` 照样读得到——启用防火墙那条路上的判定必须用它。
+    """
+    r = await run("firewall-cmd", ["--permanent", "--list-all"], timeout=CTRL_TIMEOUT)
+    if r["code"] != 0:
+        return [], _not_read("firewall-cmd --permanent --list-all", r["code"], r["out"])
+    rules = parse_firewalld(r["out"], "permanent")
+    return rules, await _enrich_service_ports(rules, permanent=True)
+
+
 async def read(tool: str | None = None, request=None) -> dict:
-    """结构化 + 原文的防火墙状态（保留 `output` 原文：设置页与既有测试都靠它）。"""
+    """结构化 + 原文的防火墙状态，外加这份状态**到底读没读到**。
+
+    `active` 是三态（True 已启用 / False 确认没启用 / None 没读到），配 `state_ok`、`rules_ok`、
+    `reason` 一起构成这一层对外的唯一契约：想知道"这台机器的防火墙什么样"只能问这里，
+    下游（防火墙页、自检项、暴露面对账、写操作前的自锁判定）不许再自己拼一遍判据。
+    `output` 原文照旧保留（设置页与既有测试都靠它）。
+    """
     tool = tool or await detect()
     base: dict = {
         "tool": tool or "none",
-        "active": False,
+        "active": None,
+        "state_ok": False,
+        "rules_ok": False,
+        "reason": "",
         "rules": [],
         "protected": [],
         "protected_reasons": {},
@@ -556,34 +732,65 @@ async def read(tool: str | None = None, request=None) -> dict:
         "default_incoming": "",
         "logging": "",
     }
+    fails: list[str] = []
     if tool == UFW:
-        st = await run("ufw", ["status", "verbose"], timeout=20)
-        num = await run("ufw", ["status", "numbered"], timeout=20)
+        st = await run("ufw", ["status", "verbose"], timeout=CTRL_TIMEOUT)
+        num = await run("ufw", ["status", "numbered"], timeout=CTRL_TIMEOUT)
         text = st["out"] or num["out"] or ""
         base["output"] = "\n".join((num["out"] or "").splitlines()[:120])
-        base["active"] = bool(re.search(r"Status:\s*active", text))
+        # 两份读数里任何一份认得出 "Status: active/inactive" 都算读到了状态：verbose 卡住时
+        # numbered 那份表头同样带这句，不必因此把整次读取判死。
+        base["active"] = _ufw_state(text)
+        base["state_ok"] = base["active"] is not None
+        if not base["state_ok"]:
+            fails.append(_not_read("ufw status verbose", st["code"], st["out"]))
         m = re.search(r"Default:\s*(\w+)\s*\(incoming\)", text)
         base["default_incoming"] = m.group(1) if m else ""
         lm = re.search(r"Logging:\s*(.+)", text)
         base["logging"] = lm.group(1).strip() if lm else ""
-        base["rules"] = parse_ufw(num["out"])
+        if num["code"] != 0:
+            fails.append(_not_read("ufw status numbered", num["code"], num["out"]))
+        else:
+            base["rules"] = parse_ufw(num["out"])
+        base["rules_ok"] = num["code"] == 0 and base["state_ok"]
     elif tool == FIREWALLD:
-        st = await run("firewall-cmd", ["--state"], timeout=20)
-        base["active"] = (st["out"] or "").strip() == "running"
+        st = await run("firewall-cmd", ["--state"], timeout=CTRL_TIMEOUT)
+        base["active"] = _firewalld_state(st["out"])
+        base["state_ok"] = base["active"] is not None
         base["output"] = (st["out"] or "").strip()
-        zone = await run("firewall-cmd", ["--get-default-zone"], timeout=20)
-        base["zone"] = (zone["out"] or "").strip()
-        listed = await run("firewall-cmd", ["--list-all"], timeout=20)
-        perm = await run("firewall-cmd", ["--permanent", "--list-all"], timeout=20)
-        perm_rules = parse_firewalld(perm["out"], "permanent")
-        perm_sigs = {r["sig"] for r in perm_rules}
-        rules = parse_firewalld(listed["out"], "runtime")
-        await _enrich_service_ports(rules)
-        for r in rules:
-            r["persisted"] = r["sig"] in perm_sigs
-        base["rules"] = rules
+        if not base["state_ok"]:
+            fails.append(_not_read("firewall-cmd --state", st["code"], st["out"]))
+        zone = await run("firewall-cmd", ["--get-default-zone"], timeout=CTRL_TIMEOUT)
+        base["zone"] = (zone["out"] or "").strip() if zone["code"] == 0 else ""
+        listed = await run("firewall-cmd", ["--list-all"], timeout=CTRL_TIMEOUT)
+        if base["active"] is not True:
+            # 未运行/读不到时 `--list-all` 必然退 252，那是状态的**结果**，不该报成探测失败；
+            # 判词按状态给，运行期规则一律是"没有这份表"，不是"这台机器零条放行"。
+            if base["active"] is False:
+                fails.append("firewalld 未运行，运行期规则表读不到")
+            base["rules_ok"] = False
+        elif listed["code"] != 0:
+            fails.append(_not_read("firewall-cmd --list-all", listed["code"], listed["out"]))
+            base["rules_ok"] = False
+        else:
+            base["rules"] = parse_firewalld(listed["out"], "runtime")
+            base["rules_ok"] = True
+            perm, perm_bad = await _permanent_rules()
+            if perm_bad:
+                fails.append(perm_bad)
+            # "已持久化"那一列的判据来自 permanent 那份表；它没读到时标 None（前端显示"—"），
+            # 不能全标 False——那等于把八条已经写进配置的规则报成"重载以后会丢"。
+            perm_sigs = {r["sig"] for r in perm}
+            for r in base["rules"]:
+                r["persisted"] = None if perm_bad else (r["sig"] in perm_sigs)
+            fails.append(await _enrich_service_ports(base["rules"]))
     else:
+        # 没装防火墙是一台机器**确定**的状态（没有过滤、端口全都进得来），不是"没读到"。
+        base["active"] = False
+        base["state_ok"] = True
+        base["rules_ok"] = True
         base["output"] = "未安装 ufw 或 firewalld"
+    base["reason"] = "；".join(f[:110] for f in fails if f)[:260]
     ports, reasons = protected_ports(request)
     base["protected"] = sorted(ports)
     base["protected_reasons"] = {str(k): v for k, v in reasons.items()}
@@ -677,6 +884,20 @@ async def add_rule(body: dict, tool: str, request=None) -> dict:
             argv = ["--permanent", f"--add-port={spec}/{proto}"]
         r = await run("firewall-cmd", argv, timeout=60)
         if r["code"] == 0:
+            # 这一路也会 `--reload`，而 reload 会丢掉只存在于运行期的规则：管理员常在 SSH 里
+            # `firewall-cmd --add-service=ssh`（不带 --permanent）应急，然后在面板加一条 8080
+            # 的放行——面板替他 reload，就把他自己的应急放行冲掉了，包括 SSH 那条。
+            # 所以 reload 之前要用与删除同一道判定：permanent 那份表里没有的受保护端口，
+            # 一旦 reload 就没了。permanent 已经写进去的新规则保留，只是不替用户按那个开关。
+            perm_rules, perm_bad = await _permanent_rules()
+            why2 = lockout_reasons(perm_rules, ports, intent="reload", table_bad=perm_bad)
+            if why2:
+                return {
+                    "ok": True,
+                    "added": True,
+                    "reloaded": False,
+                    "detail": unread_reload_refusal(perm_bad) if perm_bad else why2[0],
+                }
             rl = await run("firewall-cmd", ["--reload"], timeout=60)
             r = {"code": rl["code"], "out": (r.get("out") or "") + (rl.get("out") or "")}
     if r["code"] != 0:
@@ -694,6 +915,11 @@ async def remove_rule(num: int, expect: str, tool: str, request=None) -> dict:
     if not isinstance(num, int) or not 1 <= num <= 9999:
         raise BadInput("规则编号不合法")
     current = await read(tool, request)
+    bad = rules_unread(current)
+    if bad:
+        # 先说"这份表没读到"，再谈编号——没有这份表，编号无从比对，报"表已经变化"会把人引去
+        # 反复刷新一个刷新不好的东西。
+        raise Forbidden(unread_refusal(bad))
     target = next((r for r in current["rules"] if r["num"] == num), None)
     if target is None:
         raise BadInput("规则表已经变化（该编号不存在），请刷新后重试")
@@ -717,11 +943,8 @@ async def remove_rule(num: int, expect: str, tool: str, request=None) -> dict:
         token = target["raw"] if kind == "rich" else target["token"]
         r = await run("firewall-cmd", ["--permanent", f"{flag}{token}"], timeout=60)
         if r["code"] == 0:
-            perm_rules = parse_firewalld(
-                (await run("firewall-cmd", ["--permanent", "--list-all"], timeout=20))["out"], "permanent"
-            )
-            await _enrich_service_ports(perm_rules)
-            why2 = lockout_reasons(perm_rules, ports, intent="reload")
+            perm_rules, perm_bad = await _permanent_rules()
+            why2 = lockout_reasons(perm_rules, ports, intent="reload", table_bad=perm_bad)
             if why2:
                 # permanent 已经改完，运行期还留着旧规则；此时 reload 才是危险的。
                 # 不 reload 的话改动要等重启生效，两害相权：告知用户，交由他决定何时重载。
@@ -729,7 +952,7 @@ async def remove_rule(num: int, expect: str, tool: str, request=None) -> dict:
                     "ok": True,
                     "removed": target["raw"],
                     "reloaded": False,
-                    "detail": why2[0],
+                    "detail": unread_reload_refusal(perm_bad) if perm_bad else why2[0],
                 }
             rl = await run("firewall-cmd", ["--reload"], timeout=60)
             r = {"code": rl["code"], "out": (r.get("out") or "") + (rl.get("out") or "")}
@@ -771,7 +994,7 @@ async def set_enabled(active: bool, tool: str, request=None) -> dict:
     if tool == UFW:
         if active:
             current = await read(tool, request)
-            why = lockout_reasons(current["rules"], ports, intent="enable")
+            why = lockout_reasons(current["rules"], ports, intent="enable", table_bad=rules_unread(current))
             if why:
                 raise Forbidden(why[0])
             r = await run("ufw", ["--force", "enable"], timeout=90)
@@ -779,11 +1002,8 @@ async def set_enabled(active: bool, tool: str, request=None) -> dict:
             r = await run("ufw", ["--force", "disable"], timeout=90)
     else:
         if active:
-            perm_rules = parse_firewalld(
-                (await run("firewall-cmd", ["--permanent", "--list-all"], timeout=20))["out"], "permanent"
-            )
-            await _enrich_service_ports(perm_rules)
-            why = lockout_reasons(perm_rules, ports, intent="enable")
+            perm_rules, perm_bad = await _permanent_rules()
+            why = lockout_reasons(perm_rules, ports, intent="enable", table_bad=perm_bad)
             if why:
                 raise Forbidden(why[0])
             r = await run("systemctl", ["enable", "--now", "firewalld"], timeout=90)
