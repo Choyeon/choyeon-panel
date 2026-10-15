@@ -13,7 +13,7 @@ defineProps<{ items: InfoItem[] }>();
   <dl class="infolist">
     <div v-for="it in items" :key="it.k" class="info-row">
       <dt class="info-k">{{ it.k }}</dt>
-      <dd class="info-v" :class="{ mono: it.mono }" :title="it.v">{{ it.v || '—' }}</dd>
+      <dd class="info-v cp-prose" :class="{ mono: it.mono }" :title="it.v">{{ it.v || '—' }}</dd>
     </div>
   </dl>
 </template>
@@ -32,9 +32,12 @@ defineProps<{ items: InfoItem[] }>();
   flex-shrink: 0; min-width: 5.5em; font-size: var(--fs-md); font-weight: 400;
   color: var(--cp-text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0;
 }
+/* 取值那一列不写 nowrap：组件的 scoped 样式排在 style.css 之后，同特异度时它会打赢
+   .cp-prose.cp-prose，于是「放开到三行封顶」的声明在这里等于没写。留空的那几行由
+   cp-prose 自己管（值是一句话，例如「仅监听回环 127.0.0.1:3210」，一行 ellipsis 等于
+   把结论丢掉，而 title 只在桌面 hover 得出，手机上没有 hover）。 */
 .info-v {
   margin: 0; min-width: 0; flex: 1; font-size: var(--fs-sm); color: var(--cp-text);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .info-v.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
 </style>

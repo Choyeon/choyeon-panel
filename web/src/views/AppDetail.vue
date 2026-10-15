@@ -401,7 +401,7 @@ watch(
     <div class="ad-head">
       <div class="ad-head-left">
         <NButton size="small" quaternary :icon="ico('ArrowBackOutline', 16)" @click="router.push('/apps')">返回列表</NButton>
-        <h2 class="ad-title" :title="app.name">{{ app.name }}</h2>
+        <h2 class="ad-title cp-prose" :title="app.name">{{ app.name }}</h2>
         <CpStatusTag :status="appStatus.status" :text="appStatus.text" class="ad-status" />
       </div>
       <div v-if="isAdmin" class="ad-head-right">
@@ -534,7 +534,7 @@ watch(
                  role="button" tabindex="0" :aria-label="`查看部署记录 #${d.id}`"
                  @click="viewDep(d.id)" @keyup.enter="viewDep(d.id)" @keyup.space.prevent="viewDep(d.id)">
               <NSpace align="center" justify="space-between" style="width: 100%">
-                <NText depth="3" style="font-size: var(--fs-xs)">#{{ d.id }} · {{ d.started_at }}</NText>
+                <NText depth="3" class="cp-break" style="font-size: var(--fs-xs)">#{{ d.id }} · {{ d.started_at }}</NText>
                 <CpStatusTag :status="d.status === 'running' ? 'installing' : d.status" :text="d.status" />
               </NSpace>
             </div>
@@ -562,8 +562,8 @@ watch(
             >
               <NIcon :component="icons.GlobeOutline" :size="15" :color="c.analysis.ssl ? 'var(--cp-ok)' : 'var(--cp-text-mute)'" />
               <div style="min-width: 0">
-                <div class="ngx-name">{{ c.name }}</div>
-                <div class="ngx-dom">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}</div>
+                <div class="ngx-name cp-prose">{{ c.name }}</div>
+                <div class="ngx-dom cp-prose">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}</div>
               </div>
             </div>
             <div v-if="ngxFile" style="margin-top: var(--space-3); display: flex; flex-wrap: wrap; gap: var(--space-2)">
@@ -648,10 +648,14 @@ watch(
 .ad-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; min-width: 0; }
 .ad-head-left { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .ad-head-right { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; justify-content: flex-end; }
-/* .d-name .name 实测 18px/500 + clamp 宽度省略，长应用名不会把右侧按钮挤没 */
+/* 长应用名交给全局 .cp-prose（三行封顶）：原先 nowrap + ellipsis，而应用名常带模板后缀与
+   环境名（"ocr-api-staging"），手机上没有 hover，title 那条退路等于不存在，半个名字无法对应
+   到具体应用。这里只保留 max-width —— 它防的是右侧操作按钮被标题挤出屏幕，窄屏下靠 .ad-head
+   的 flex-wrap 换行；折行方式不能再在这里写一遍，组件 scoped 样式排在 style.css 之后、
+   同特异度时会把 .cp-prose 的声明按回去。 */
 .ad-title {
   margin: 0; font-size: var(--fs-title); font-weight: 500; color: var(--cp-text-strong);
-  min-width: 0; max-width: clamp(140px, 22vw, 320px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; max-width: clamp(140px, 22vw, 320px);
 }
 .ad-status { margin-left: var(--space-1); flex-shrink: 0; }
 .ad-sub { margin: var(--space-1) 0 var(--space-4); font-size: var(--fs-xs); color: var(--cp-text-mute); overflow-wrap: anywhere; }
@@ -661,9 +665,12 @@ watch(
 .dep-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
 .dep-item { padding: var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
 /* 部署记录行是 space-between 的两段文字：时间戳比列宽长时先收缩自己，
-   不然右侧状态标签会被挤出 300px 的列表外（裁半截的老症状） */
+   不然右侧状态标签会被挤出 300px 的列表外（裁半截的老症状）。
+   收缩保留、折行交给文本上的 .cp-break：这条 :deep 的权重压过全局类，
+   所以 nowrap 必须从这里删干净，否则「#7 · 2026-10-11T09:」这种半截时间戳
+   既读不全也没有 title 可看。 */
 .dep-item :deep(.n-space) { min-width: 0; }
-.dep-item :deep(.n-space > *:first-child) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dep-item :deep(.n-space > *:first-child) { min-width: 0; }
 .dep-item :deep(.cp-status) { flex-shrink: 0; }
 .dep-item:hover { background: var(--cp-hover); }
 .dep-item.active { background: var(--cp-selected); }
@@ -674,8 +681,11 @@ watch(
 .ngx-item:hover { background: var(--cp-hover); }
 .ngx-item.active { background: var(--cp-selected); }
 .ngx-item > div { min-width: 0; }
-.ngx-name { font-size: var(--fs-xs); color: var(--cp-text); font-weight: 550; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ngx-dom { font-size: var(--fs-2xs); color: var(--cp-text-mute); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* nginx 列表的两行文字（配置名 + server_name）在 260px 侧栏里，原先各裁一行、且没有 title：
+   一个 vhost 挂两个域名时第二个永远看不见，而这一列正是"哪个配置文件管哪个域名"的判据。
+   折行方式统一交 .cp-prose（三行封顶），本地只留字号与颜色。 */
+.ngx-name { font-size: var(--fs-xs); color: var(--cp-text); font-weight: 550; }
+.ngx-dom { font-size: var(--fs-2xs); color: var(--cp-text-mute); }
 @media (max-width: 900px) {
   .split-view { flex-direction: column; }
   .dep-list, .ngx-list { width: 100%; border-right: 0; padding-right: 0; margin-bottom: var(--space-2); }

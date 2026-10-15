@@ -531,7 +531,7 @@ const cols: any[] = [
             ]"
           />
           <NAlert type="warning" :bordered="false" size="small">服务端已对口令/连接串做脱敏；面板手动执行的记录只保留最后 {{ keepBytes }} 字节，定时器那一轮读的是 journald。</NAlert>
-          <pre class="cr-log mono">{{ logLoading ? '读取中…' : (logData?.log || '（无输出）') }}</pre>
+          <pre class="log-view log-drawer">{{ logLoading ? '读取中…' : (logData?.log || '（无输出）') }}</pre>
         </NSpace>
       </NDrawerContent>
     </NDrawer>
@@ -549,12 +549,5 @@ const cols: any[] = [
   display: flex; flex-direction: column; gap: 4px; min-height: 44px;
   padding: var(--space-3); border: 1px solid var(--cp-border); border-radius: 8px;
   background: var(--cp-code-bg);
-}
-/* 1Panel LogFile：calc(100vh - 420px)、14px/16px、padding 5px、深色代码底 */
-.cr-log {
-  margin: 0; height: calc(100vh - 420px); overflow: auto; padding: 5px;
-  background: var(--cp-code-bg); color: var(--cp-code-text);
-  border: 1px solid var(--cp-border); border-radius: 8px;
-  font-size: 14px; line-height: 16px; white-space: pre-wrap; word-break: break-all;
 }
 </style>

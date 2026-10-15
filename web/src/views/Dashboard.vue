@@ -450,7 +450,7 @@ onBeforeUnmount(() => {
         <div class="hero-greet">{{ greet }}，欢迎回到 <b>choyeon panel</b></div>
         <div class="hero-host">
           <NIcon :component="icons.ServerOutline" :size="15" color="var(--cp-brand-soft)" />
-          <span class="hero-host-text">{{ info.hostname || '本机' }} · {{ info.prettyName || info.platform || '加载中' }}</span>
+          <span class="cp-prose">{{ info.hostname || '本机' }} · {{ info.prettyName || info.platform || '加载中' }}</span>
         </div>
       </div>
       <NSpace align="center" :size="8">
@@ -480,7 +480,7 @@ onBeforeUnmount(() => {
             >
               <div class="ov-label">{{ it.label }}</div>
               <div class="ov-num">{{ it.value ?? '—' }}</div>
-              <div class="ov-note">{{ ov ? it.note : (ovError || '读取中') }}</div>
+              <div class="ov-note cp-prose">{{ ov ? it.note : (ovError || '读取中') }}</div>
             </div>
           </div>
           <EmptyBox v-if="ovError" :text="`概览计数获取失败：${ovError}，30 秒轮询会自动重试`" />
@@ -544,7 +544,7 @@ onBeforeUnmount(() => {
                :aria-label="`查看应用 ${a.name}`"
                @click="router.push(`/apps/${a.id}`)" @keyup.enter="router.push(`/apps/${a.id}`)" @keyup.space.prevent="router.push(`/apps/${a.id}`)">
             <NIcon :component="a.type === 'node' ? icons.LogoElectron : icons.LogoPython" :size="18" :color="a.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)'" />
-            <span class="app-name">{{ a.name }}</span>
+            <span class="app-name cp-prose">{{ a.name }}</span>
             <span class="dot" :class="a.running ? 'ok' : 'idle'"></span>
             <NText depth="3" style="font-size: var(--fs-xs)">{{ a.running ? '运行中' : a.deploying ? '部署中' : '已停止' }}</NText>
           </div>
@@ -563,7 +563,7 @@ onBeforeUnmount(() => {
                  :aria-label="`查看异常服务 ${u}`"
                  @click="router.push('/services')" @keyup.enter="router.push('/services')" @keyup.space.prevent="router.push('/services')">
               <NIcon :component="icons.AlertCircleOutline" :size="18" color="var(--cp-err)" />
-              <span class="app-name">{{ u }}</span>
+              <span class="app-name cp-prose">{{ u }}</span>
               <span class="st err"><span class="dot err"></span>failed</span>
             </div>
           </div>
@@ -649,7 +649,7 @@ onBeforeUnmount(() => {
             </div>
             <div v-for="p in procs" :key="p.pid" class="proc-row">
               <span class="proc-pid">{{ p.pid }}</span>
-              <span class="proc-name">{{ p.name }}</span>
+              <span class="proc-name cp-break">{{ p.name }}</span>
               <span class="proc-user">{{ p.user }}</span>
               <span class="num">{{ p.cpu }}%</span>
               <span class="num">{{ p.memMb }} MB</span>
@@ -677,7 +677,7 @@ onBeforeUnmount(() => {
           <template v-else>
             <div v-for="(a, ai) in openAlerts" :key="a.id" class="alert-row cp-rise" :style="`--i:${ai}`" :title="a.message">
               <span class="dot" :class="a.level === 'crit' ? 'err' : a.level === 'warn' ? 'warn' : 'ok'"></span>
-              <span class="alert-msg">{{ a.message }}</span>
+              <span class="alert-msg cp-prose">{{ a.message }}</span>
               <NText depth="3" class="alert-ts">{{ fmtAgo(a.ts) }}</NText>
             </div>
             <EmptyBox v-if="!openAlerts.length" text="没有未确认告警，一切正常" />
@@ -706,7 +706,6 @@ onBeforeUnmount(() => {
 .hero-greet { font-size: var(--fs-md); color: var(--cp-text); }
 .hero-greet b { color: var(--cp-brand-soft); }
 .hero-host { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: var(--space-1); }
-.hero-host-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sfoot { font-size: var(--fs-2xs); color: var(--cp-text-mute); margin-top: var(--space-1); }
 
 /* ---------- 概览条（1Panel：卡片 166px 高，标签在上、数字在下、数字是 link 按钮） ---------- */
@@ -745,7 +744,7 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 .ov-item.danger .ov-num { color: var(--cp-err); }
-.ov-note { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-note { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: 2px; }
 
 /* ---------- 状态仪表 + 监控 / 侧栏 两列（1Panel 首页是 el-col 16/8 = 2fr/1fr） ---------- */
 .home-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
@@ -790,12 +789,21 @@ onBeforeUnmount(() => {
 }
 .app-row + .app-row { margin-top: var(--space-2); }
 .app-row:hover { border-color: var(--cp-brand); background: var(--cp-hover); }
-.app-name { font-size: var(--fs-md); font-weight: 600; color: var(--cp-text-strong); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 应用名 / failed 单元名交给 .cp-prose：这一格原先写着 overflow:hidden + text-overflow:ellipsis
+   却没有 nowrap，所以它一直是「自然折行、永远裁不到」——那两条声明是死的，却会在下一次有人
+   补上 nowrap 时立刻生效，把长单元名（unattended-upgrades.service）切成读不懂的半截。
+   现在折行方式由全局类唯一决定，三行封顶，行高靠 .app-row 的 min-height 托住。 */
+.app-name { font-size: var(--fs-md); font-weight: 600; color: var(--cp-text-strong); flex: 1; }
 .alert-row {
   display: flex; align-items: center; gap: var(--space-3);
   padding: var(--space-2); border-radius: var(--radius);
 }
-.alert-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--cp-text); }
+/* 告警内容与进程名都交给全局的 .cp-prose / .cp-break：这两格原先是 nowrap + ellipsis，
+   而告警判词整句就在这一行里（「磁盘 / 已用 92%（阈值 90%）」），手机上没有 hover，
+   title 那条退路等于不存在；进程名原先连 title 都没有，截半截就再也读不到全名。
+   本地规则因此只留布局，不再声明折行方式——组件 scoped 样式排在 style.css 之后，
+   同特异度时它赢，写在这里的 nowrap 会把全局那两条直接按回去。 */
+.alert-msg { flex: 1; min-width: 0; font-size: var(--fs-sm); color: var(--cp-text); }
 .alert-ts { font-size: var(--fs-2xs); flex-shrink: 0; }
 .alert-more { display: block; margin-top: var(--space-2); font-size: var(--fs-2xs); }
 .proc-row {
@@ -807,7 +815,7 @@ onBeforeUnmount(() => {
 .proc-row .num { text-align: right; }
 .proc-head { color: var(--cp-text-mute); font-size: var(--fs-2xs); border-bottom: 1px solid var(--cp-line); }
 .proc-pid { color: var(--cp-text-mute); }
-.proc-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proc-name { min-width: 0; }
 /* 手机档五列硬挤：固定四列 264px + 4×8 gap 后，进程名只剩 ~20px，整列白搭。
    ≤640px 藏掉「用户」列（PID 已能定位进程），把 72px+gap 还给进程名。 */
 @media (max-width: 640px) {

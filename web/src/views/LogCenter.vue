@@ -309,5 +309,5 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
 必须从模板上的类走 :deep。 这两条一旦失效，日志会丢掉 pre-wrap（缩进与换行被折叠成一行）、
    grep 命中也变成看不见的高亮——两个都是静默的。 */
 :deep(.lg-text) { font-size: var(--fs-2xs); line-height: 1.65; word-break: break-all; white-space: pre-wrap; }
-:deep(.lg-hit) { background: var(--cp-warn-soft, rgba(250, 200, 80, .28)); color: inherit; border-radius: 3px; padding: 0 1px; }
+:deep(.lg-hit) { background: var(--cp-code-hl); color: inherit; border-radius: 3px; padding: 0 1px; }
 </style>

@@ -386,20 +386,10 @@ async function submit() {
 
     <NDrawer v-model:show="logShow" :width="drawerW">
       <NDrawerContent :title="`执行日志 - ${logTitle}`" closable>
-        <pre class="cr-log mono">{{ logText || '（无输出）' }}</pre>
+        <pre class="log-view log-drawer">{{ logText || '（无输出）' }}</pre>
       </NDrawerContent>
     </NDrawer>
 
     <ConfirmActionDialog ref="delDialog" />
   </div>
 </template>
-
-<style scoped>
-/* 1Panel LogFile：calc(100vh - 420px)、14px/16px、padding 5px、深色代码底 */
-.cr-log {
-  margin: 0; height: calc(100vh - 420px); overflow: auto; padding: 5px;
-  background: var(--cp-code-bg); color: var(--cp-code-text);
-  border: 1px solid var(--cp-border); border-radius: 8px;
-  font-size: 14px; line-height: 16px; white-space: pre-wrap; word-break: break-all;
-}
-</style>

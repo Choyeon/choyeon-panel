@@ -44,7 +44,7 @@ defineExpose({ acceptParams });
 </script>
 
 <template>
-  <NModal v-model:show="show" preset="card" :title="p?.title || ''" class="cp-opd" :style="{ width: '480px', maxWidth: '92vw' }">
+  <NModal v-model:show="show" preset="card" :title="p?.title || ''" class="cp-opd" :style="{ width: '480px', maxWidth: '94vw' }">
     <NAlert type="warning" :bordered="false" show-icon>
       <p class="cp-opd-msg">{{ p?.msg }}</p>
       <ul v-if="p?.names?.length" class="cp-opd-names">

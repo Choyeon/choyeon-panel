@@ -506,7 +506,7 @@ const settingColumns: any[] = [
   },
   {
     title: '此刻生效值', key: 'value', width: 180,
-    render: (r: any) => h('span', { class: 'mono ls-value', title: r.value }, r.value || '—'),
+    render: (r: any) => h('span', { class: 'mono cp-break ls-value', title: r.value }, r.value || '—'),
   },
   {
     title: '判定', key: 'flag', width: 96,
@@ -535,7 +535,7 @@ const keyColumns: any[] = [
         r.keys.length
           ? r.keys.map((k: any) =>
               h('div', { class: 'ls-key' }, [
-                h('span', { class: 'mono ls-fp', title: k.fp }, k.fp),
+                h('span', { class: 'mono cp-break ls-fp', title: k.fp }, k.fp),
                 h('span', { class: 'ls-key-name' }, k.comment || '无备注'),
                 k.weak ? h(NTag, { size: 'tiny', type: 'warning', bordered: false }, () => '算法偏弱') : null,
                 k.unparsed ? h(NTag, { size: 'tiny', bordered: false }, () => '无法解析') : null,
@@ -2643,9 +2643,12 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 .cp-tbl :deep(.ls-wrap) { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.6; }
 .cp-tbl :deep(.px-reason) { font-size: var(--fs-sm); color: var(--cp-text); line-height: 1.6; }
 .cp-tbl :deep(.px-fix) { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.6; }
-.cp-tbl :deep(.ls-value) { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+/* 生效值那一格交给全局 .cp-break：这一列就是判词引用的证据本身，裁掉后半截就无法对着值
+   核一遍结论。下面这条 :deep 的权重（0-3-0）压过 .cp-break.cp-break（0-2-0），所以它只写布局，
+   不再写 nowrap/ellipsis——折行方式必须只有一个出处。 */
+.cp-tbl :deep(.ls-value) { display: block; max-width: 100%; }
 .cp-tbl :deep(.ls-key) { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-xs); line-height: 1.8; }
-.cp-tbl :deep(.ls-fp) { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-tbl :deep(.ls-fp) { min-width: 0; flex: 0 1 auto; }
 .cp-tbl :deep(.ls-key-name) { color: var(--cp-text-dim); flex: 0 1 auto; }
 .cp-tbl :deep(.ls-flag) { font-size: var(--fs-xs); color: var(--cp-warn); line-height: 1.7; }
 .ls-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -2674,9 +2677,6 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 @media (max-width: 767px) {
   .ls-toolbar { justify-content: flex-start; }
   .ls-acc-line i { min-width: 0; }
-  /* 窄屏上一行 SHA256 截掉尾巴就没法比对（指纹的全部意义是两边对得上），
-     所以这里放开 ellipsis，让它折成两行完整显示。 */
-  .cp-tbl :deep(.ls-fp) { max-width: none; white-space: normal; word-break: break-all; overflow: visible; text-overflow: clip; }
 }
 @media (max-width: 767px) {
   .px-toolbar { justify-content: flex-start; }
