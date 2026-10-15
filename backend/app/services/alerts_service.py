@@ -33,14 +33,16 @@ from contextlib import suppress
 from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
-from ..util import disk_usage_pct, is_http_url, is_unit, run
+from ..util import PROBE_TIMEOUT, disk_usage_pct, is_http_url, is_unit, run
 from . import system_metrics
 from .load_service import LOAD_RISK_PER_CORE
 
 # 存活探测只打本机：面板只监听 127.0.0.1，应用端口也绑回环，
 # 探测目标写死回环地址可以避免"设置里填个外网 URL 就把面板变成端口扫描器"。
 PROBE_HOST = "127.0.0.1"
-PROBE_TIMEOUT = 3.0
+# 一次 HTTP 探活的网络预算。名字里带上 HTTP：util 里那个 PROBE_TIMEOUT 管的是本机命令，
+# 两者都叫"探针超时"但量的是不同的东西，同名会让读代码的人把 3.0 当成命令预算。
+HTTP_PROBE_TIMEOUT = 3.0
 PROBE_DEFAULT_EXPECT = "2xx/3xx"
 LEVELS = ("ok", "warn", "crit")
 
@@ -384,7 +386,8 @@ async def run_checks():
                      ok_message=f"磁盘使用率正常（阈值 {disk_pct}%）",
                      meta=_meta(pct=pct, threshold=disk_pct, crit=dth["crit"]))
 
-    failed = await run("systemctl", ["list-units", "--state=failed", "--no-legend", "--plain"])
+    failed = await run("systemctl", ["list-units", "--state=failed", "--no-legend", "--plain"],
+                       timeout=PROBE_TIMEOUT)
     if failed["code"] == 0:
         units = _failed_units(failed["out"])
         await _check("failed-units", bool(units), f"存在 failed 状态服务: {', '.join(units)}",
@@ -522,13 +525,13 @@ async def _probe_target(port: int) -> tuple[bool, int | None, str]:
         "User-Agent: choyeon-panel-probe/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
     )
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(PROBE_HOST, port), PROBE_TIMEOUT)
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(PROBE_HOST, port), HTTP_PROBE_TIMEOUT)
     except Exception as e:  # noqa: BLE001  # 拒连/超时/DNS 都算"无应答"，不带原文外泄
         return False, None, type(e).__name__
     try:
         writer.write(request.encode())
-        await asyncio.wait_for(writer.drain(), PROBE_TIMEOUT)
-        head = await asyncio.wait_for(reader.readline(), PROBE_TIMEOUT)
+        await asyncio.wait_for(writer.drain(), HTTP_PROBE_TIMEOUT)
+        head = await asyncio.wait_for(reader.readline(), HTTP_PROBE_TIMEOUT)
     except Exception as e:  # noqa: BLE001
         return True, None, f"{type(e).__name__}（连接建立但未取到状态行）"
     finally:

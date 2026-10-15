@@ -32,7 +32,7 @@ from ..services import (
     updates_service,
 )
 from ..templates import list_templates
-from ..util import disk_usage_pct, run
+from ..util import CTRL_TIMEOUT, disk_usage_pct, run
 
 router = APIRouter()
 
@@ -146,7 +146,13 @@ async def _check_nginx() -> dict:
             "detail": "未安装 nginx，面板只能本机访问",
             "fix": "apt install nginx（RHEL: dnf install nginx）",
         }
-    r = await run("nginx", ["-t"], timeout=10)
+    r = await run("nginx", ["-t"])
+    if r["code"] == 124:
+        # 超时不是"配置有误"：这句指控会把人引去翻一份本来正确的 nginx 配置。
+        # nginx -t 卡住通常是磁盘/进程表的问题，判词要如实说"没查成"。
+        return {"status": "warn",
+                "detail": f"nginx -t 在 {CTRL_TIMEOUT} 秒内没有返回，配置状态未确认",
+                "fix": "手动执行 nginx -t 看它卡在哪一步"}
     if r["code"] != 0:
         return {"status": "fail", "detail": "nginx -t 未通过，配置有误", "fix": "nginx -t 查看报错后修正"}
     return {"status": "pass", "detail": "nginx 配置校验通过", "fix": ""}
@@ -154,8 +160,14 @@ async def _check_nginx() -> dict:
 
 async def _check_firewall() -> dict:
     if shutil.which("ufw"):
-        r = await run("ufw", ["status"], timeout=10)
+        r = await run("ufw", ["status"])
         out = r["out"] or ""
+        if r["code"] != 0:
+            # 少了这道判断，`ufw status` 超时或被拒时正文里根本没有 "inactive"，
+            # 下面的分支会把"没查到"报成"ufw 已启用"——安全项上的假绿灯。
+            return {"status": "warn",
+                    "detail": f"ufw status 查询失败（退出码 {r['code']}），防火墙状态无法确认",
+                    "fix": "手动执行 ufw status verbose 查看"}
         if "inactive" in out.lower():
             return {
                 "status": "warn",
@@ -164,11 +176,11 @@ async def _check_firewall() -> dict:
             }
         return {"status": "pass", "detail": "ufw 已启用", "fix": ""}
     if shutil.which("firewall-cmd"):
-        r = await run("firewall-cmd", ["--state"], timeout=10)
+        r = await run("firewall-cmd", ["--state"])
         if r["code"] != 0:
             return {
                 "status": "warn",
-                "detail": "firewalld 未运行",
+                "detail": f"firewall-cmd --state 未通过（退出码 {r['code']}），firewalld 可能未运行",
                 "fix": "systemctl enable --now firewalld"
                        " && firewall-cmd --add-service=http --add-service=https --permanent",
             }

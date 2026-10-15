@@ -516,8 +516,13 @@ def _sqlite_app(target):
     return app
 
 
-async def _sh_script(script: str, timeout: int = 1800) -> dict:
-    """bash + pipefail 执行整段脚本，返回 {code, out}（pipefail 才不会吞管道左侧失败）。"""
+async def _sh_script(script: str, timeout: int = backup_runner.JOB_TIMEOUT_SEC) -> dict:
+    """bash + pipefail 执行整段脚本，返回 {code, out}（pipefail 才不会吞管道左侧失败）。
+
+    默认值是备份任务的时间预算（backup_runner.JOB_TIMEOUT_SEC），和 timer 那条路同源：
+    这里以前是个孤立的 1800，runner 里的 `run_sh` 却是"没有超时"，同一个 pg_dump
+    从网页点和从夜里跑，一个最多等 30 分钟、一个可以等到天荒地老。
+    """
     return await run("/bin/bash", ["-o", "pipefail", "-c", script], timeout=timeout)
 
 
@@ -1253,7 +1258,10 @@ async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict
 
 
 async def run_backup_now(bid: int) -> dict:
-    r = await run(PYTHON_BIN, ["-m", "app.backup_runner", str(bid)], cwd=BACKEND_DIR, timeout=1800)
+    # 预算与 runner 内部同源（JOB_TIMEOUT_SEC）：runner 里的单条命令按 CMD_TIMEOUT_SEC
+    # 先收，这层拿到的是一个干净的失败退出码，而不是把整个进程连它的清理一起 SIGKILL。
+    r = await run(PYTHON_BIN, ["-m", "app.backup_runner", str(bid)],
+                  cwd=BACKEND_DIR, timeout=backup_runner.JOB_TIMEOUT_SEC)
     return {"code": r["code"], "out": r["out"]}
 
 

@@ -4,7 +4,7 @@ import shutil
 import time
 from contextlib import suppress
 
-from ..util import run
+from ..util import PROBE_TIMEOUT, run
 
 VERBS = {"start", "stop", "restart", "reload", "enable", "disable"}
 
@@ -116,12 +116,25 @@ _uf_cache: tuple[float, dict] = (0.0, {})
 
 
 async def list_services() -> list:
-    r = await run("systemctl", ["list-units", "--type=service", "--all", "--no-legend", "--plain", "--no-pager"])
+    r = await run(
+        "systemctl",
+        ["list-units", "--type=service", "--all", "--no-legend", "--plain", "--no-pager"],
+        timeout=PROBE_TIMEOUT,
+    )
+    if r["code"] != 0:
+        # 失败正文不能当表格数据往下解析。正常输出每行是 UNIT/LOAD/ACTIVE/SUB/DESCRIPTION
+        # 五列，`run()` 在超时或命令不存在时返回的却是一句短正文（"systemctl 超时（5s，…）"），
+        # 直接喂给下面的 `f[3]` 就是 IndexError；把它吞成空列表更糟——"这台机器一个服务都没有"
+        # 会被读成绿灯。口径与 unit_files() 一致：查不到就如实报错。
+        raise RuntimeError(f"systemctl list-units 失败（退出码 {r['code']}）：{r['out'][:200]}")
     out = []
     for line in r["out"].split("\n"):
         if not line.strip():
             continue
         f = re.split(r"\s+", line.strip())
+        # 列数不够的行不是服务行（systemd 偶尔在 --no-legend 之间夹一行提示），跳过而不是 IndexError。
+        if len(f) < 4:
+            continue
         out.append({"unit": f[0], "load": f[1], "active": f[2], "sub": f[3], "desc": " ".join(f[4:])})
     return out
 
@@ -200,7 +213,7 @@ async def unit_states(units: list) -> dict:
         "systemctl",
         ["show", "-p", "Id", "-p", "Names", "-p", "LoadState", "-p", "ActiveState", "-p", "MainPID",
          "--", *units],
-        timeout=10,
+        timeout=PROBE_TIMEOUT,
     )
     by_name: dict[str, dict] = {}
     for props in parse_show(r["out"]):

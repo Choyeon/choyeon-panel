@@ -1263,6 +1263,48 @@
   目录里没有 `.tmp` 残留，符号链接指向的文件一个字节没被动过。全部用例对着改之前的 HEAD 做过 A/B：
   20 条在旧代码上失败，不是空转。
 
+- 本机子进程的超时只有一个出处。`util.run()` 的默认值原来是 120 秒，而 app/ 下 109 个 `run()` 调用点里
+  25 个根本没传：`systemctl daemon-reload` 11 处（生产机实测 1.17s）、`nginx -t` 3 处（0.088s）、
+  `systemctl reload nginx` 4 处、`nginx -v`、`systemctl list-units`（0.052s）、failed 单位表、
+  `redis-cli INFO`/`DBSIZE`、`ln -sf`、`chmod`——本机一秒内就回来的命令，全按"两分钟"记账。而
+  `nginx -t`/`reload nginx` 在 `_nginx_section()` 的全局锁里、`list-units` 在服务页加载路径上，
+  卡住一个就钉住一串。剩下 84 个各自写了数，同一条命令几个答案：`nginx -t` 自检 10 而 nginx_ops 三处不传、
+  `nginx -T` 一处 30 一处 20、`firewall-cmd --state` 一处 20 一处 10、`systemctl is-enabled` 写 15 而
+  同族的 `systemctl show` 写 5 和写 10 的都有、`ss -tlnp` 一处 4 一处 20。现在 `CTRL_TIMEOUT = 20`
+  （按最慢的常态本机命令留十倍余量）与 `PROBE_TIMEOUT = 5`（只看一眼状态的探针）是仅有的两个出处；
+  扫日志的 `journalctl -k`/`--since` 与 certbot、git、npm 仍必须在调用点自己声明更大的数。
+  `run_shell()` 原本压根没有超时、`run_shell_async()` 自带另一份 10 秒，三个入口三种口径，现在一并落齐。
+- 夜间备份那条 shell 更是没有预算：`backup_runner.run_sh` 不传 timeout，而 systemd 侧
+  `systemctl show panel-backup-1.service -p TimeoutStartUSec --value` 回的是 **infinity**（oneshot 没有
+  起停超时），面板 API 那个 1800 秒在这条路上根本不参与。于是卡死的 pg_dump（等长事务的锁、写一块卡住的
+  盘）就永远以 root 身份挂着，并按 flock 语义一直攥着 `locks.key_backup(bid)`——flock 只在进程死亡时由
+  内核释放。之后每次 timer 到点都打印一句 "backup skipped" 返回 0，journal 和面板一片祥和，直到真要恢复
+  那天才发现磁盘上最近一份归档是三周前的。现在 `JOB_TIMEOUT_SEC = 1800` 是唯一预算，
+  `CMD_TIMEOUT_SEC = JOB - 120` 给归档和上传留出口，service 侧两处引用常量而不是各抄一个 1800。
+- 超时之后还剩两个坑，一起收：`dump_cmd` 里那道 `|| { rm -f …; }` 在 SIGKILL 下没机会运行，截断的归档
+  必须我们自己删（`list_files()` 会把半份 gz 当可恢复备份端上来，还占 keep 名额一格）；只 kill bash 会
+  留下 `pg_dump`/`gzip` 两个孩子继续往没人认领的文件里写字，所以按整个进程组杀。
+- 顺手修掉三处"把命令失败当数据读"：`systemd_ops.list_services()` 直接按下标解析 `run()` 的正文，
+  拿到超时那句短正文就 IndexError；`_check_firewall()` 在 `ufw status` 失败时正文里自然没有 "inactive"，
+  于是把"没查到"报成"ufw 已启用"——安全项上的假绿灯；`updates_service._auto_updates()` 在循环外落一份
+  "disabled"，超时那句正文因此变成"这台机器没开自动安全更新"，而 `is-enabled` 对真的 disabled 单元本来就
+  退 1，所以判据只能看正文、只有读不到时才说 unknown。自检里的 `nginx -t` 超时也不再被当成"配置有语法错"。
+- 一个常量名不许有两份含义：`alerts_service` 原来自己也写着 `PROBE_TIMEOUT = 3.0`（一次 HTTP 探活的网络
+  预算），从 util 导入同名常量后那个 3.0 会被静静地换成 5——HTTP 探活、TCP 探活和 `systemctl list-units`
+  按另一个预算等，而两份代码读起来都"没错"；它现在叫 `HTTP_PROBE_TIMEOUT`。`exposure_service` 那份
+  `SS_TIMEOUT = 20`、`storage_service` 那份 `JOURNAL_TIMEOUT = 15` 是同一个毛病的另一面：值就是共享常量的
+  值（或夹在两个常量中间的一个自定数），名字却是私有的，于是同一条 `ss -tlnp` 在两个模块里各有出处。
+- 超时判词的措辞也只有一个出处：`util.timeout_note(程序名, 秒数)`，服务侧 `run()`、备份 runner、CLI 的
+  `sh()` 与安装/升级脚本说的是同一句话。只报程序名、不报整条命令行——argv 里可能带口令与连接串，
+  而这句会进 journal、也会端 to 页面。
+- 新增回归测试：`backend/tests/test_batch41.py`（31 条）。用 AST 扫全仓 `run()`/`run_shell*()`/
+  `subprocess.run` 调用点，钉住"不传超时的调用必须全在本机读白名单里"（以后谁给 git/certbot 少写一个
+  timeout 直接红，而不是让那条远程命令悄悄按 20 秒死掉）、"本机读命令不许超过 CTRL_TIMEOUT"、
+  "同一族命令不许出现第三个数"、"模块里不许再立一份与共享常量同值的私有超时名"；`run()` 真的杀掉了
+  sleep 30 且正文不泄露 argv；`run_sh` 用 `sh -c` 把父子两个 PID 写进文件，证明两个都死、返回 124、
+  半份产物被删、15 秒内回来。A/B：把改前的 HEAD 服务层文件覆盖回来跑，14 条失败；整棵旧树连导入都过不去
+  （`cannot import name 'CTRL_TIMEOUT' from 'app.util'`），不是空转。
+
 ## [1.1.10] - 2026-10-12
 
 本轮的改动集中在三处：认证与会话的安全边界、移动端触控与窄屏版式、仓库门面（品牌资产与 README）。

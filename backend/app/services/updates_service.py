@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import probe
-from ..util import run
+from ..util import PROBE_TIMEOUT, run
 from . import pending_service
 
 CACHE_TTL = 1800.0
@@ -87,6 +87,11 @@ AUTO_UNITS_BY_FAMILY = {
     RHEL: ("dnf-automatic-install.timer", "dnf-automatic.timer", "yum-cron.service"),
     SUSE: ("zypp-update.timer",),
 }
+
+# `systemctl is-enabled` 打印的三种能定论的状态。masked 与 disabled 归成同一个结论
+# （都是"自动更新没有开着"），其余一律判不出：static/alias/generated 说的是单元类型，
+# 不是开没开，把它们折成 disabled 就是替管理员下结论。
+_ENABLED_STATES = {"enabled": "enabled", "disabled": "disabled", "masked": "disabled"}
 
 _FAMILY_TOKENS = (
     (DEBIAN, ("debian", "ubuntu")),
@@ -308,11 +313,18 @@ async def _auto_updates(family: str) -> dict:
     if not units:
         return {"state": "unknown", "unit": None}
     for unit in units:
-        r = await run("systemctl", ["is-enabled", unit], timeout=15)
-        head = ((r.get("out") or "").strip().splitlines() or [""])[0]
-        if head == "enabled":
-            return {"state": "enabled", "unit": unit}
-    return {"state": "disabled", "unit": None}
+        # 探针预算：`systemctl is-enabled` 本机毫秒级返回，卡住就是 systemd 出问题了。
+        # 判据看的是正文而不是退出码：`is-enabled` 对 disabled 单元本来就退 1，
+        # 拿"非 0 即跳过"当失败处理，会把一个真的没开自动更新的机器读成"不知道"，
+        # 自检那句「且自动安全更新未开启」就此消失。反过来，超时那句正文是命令自己写的，
+        # 它既不是 enabled 也不是 disabled，旧代码让它落到循环外的 "disabled"——
+        # 于是 systemd 卡住时面板断言"这台机器没开自动安全更新"。现在读不到就 unknown。
+        r = await run("systemctl", ["is-enabled", unit], timeout=PROBE_TIMEOUT)
+        state = _ENABLED_STATES.get(((r.get("out") or "").strip().splitlines() or [""])[0])
+        if r["code"] == 124 or state is None:
+            continue
+        return {"state": state, "unit": unit}
+    return {"state": "unknown", "unit": None}
 
 
 def _apt_cache_age() -> float | None:

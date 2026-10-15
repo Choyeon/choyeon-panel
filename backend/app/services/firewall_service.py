@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .. import config
 from ..errors import BadInput, ExecFailed, Forbidden
-from ..util import run
+from ..util import PROBE_TIMEOUT, run
 
 UFW = "ufw"
 FIREWALLD = "firewalld"
@@ -39,7 +39,7 @@ _LISTEN_PORT_RE = re.compile(r"(?:^|[:\]])(\d{1,5})$")
 # --------------------------------------------------------------------- 检测
 async def detect() -> str | None:
     for tool, probe in ((UFW, "ufw"), (FIREWALLD, "firewall-cmd")):
-        if (await run("which", [probe], timeout=10))["code"] == 0:
+        if (await run("which", [probe], timeout=PROBE_TIMEOUT))["code"] == 0:
             return tool
     return None
 

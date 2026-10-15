@@ -14,16 +14,54 @@ from . import config, locks
 from . import database as dbm
 from .config import BACKUP_DIR
 from .services.files_service import _estimate_archive_bytes, assert_write_budget, write_budget
-from .util import sh_escape
+from .util import kill_group, sh_escape, timeout_note
 
 EXCLUDES = ["node_modules", ".venv", ".next", ".output"]
 _SQLITE_EXTS = (".db", ".sqlite", ".sqlite3")
 _SQLITE_SKIP = set(EXCLUDES) | {"__pycache__", ".git", "dist", "build", ".cache"}
 
+# 一次备份任务的时间预算只有一个出处：runner 里的每条命令和面板 API 等这个子进程的方式
+# 都从这里取。改这一行之前先看清这三层原来各是什么：
+# - `run_sh` 原来压根没有超时（`subprocess.run(...)` 不带 timeout），一条卡死的 pg_dump
+#   就永远以 root 身份挂着；
+# - 面板 API 那条路写死 1800 秒，只有走网页"立即备份"时才有上层来掐；
+# - systemd timer 是第三条入口（`ExecStart=… -m app.backup_runner <id>`），本机实测
+#   `systemctl show panel-backup-1.service -p TimeoutStartUSec --value` 回的是
+#   **infinity**——oneshot 没有起停超时。
+# 于是夜间定时备份卡住时没有任何一层管得住：flock 是在进程死亡时才由内核释放的，
+# 活着的那一条把它一直攥着，之后每次 timer 到点都打印一句 "backup skipped" 并返回 0，
+# journal 与面板一片祥和，直到真要恢复那天才发现磁盘上最近一份归档是三周前的。
+JOB_TIMEOUT_SEC = 1800
+# 单条命令比整场任务先收，才轮得到我们自己删半成品、把原因写进 stderr（外部 SIGKILL
+# 做不到这两件事）。让出来的那 120 秒是给 sqlite 快照、prune 与审计记账的。
+CMD_TIMEOUT_SEC = JOB_TIMEOUT_SEC - 120
 
-def run_sh(cmd: str) -> int:
-    """bash + pipefail 执行，返回退出码（不抛异常，由调用方判定严重程度）。"""
-    return subprocess.run(["/bin/bash", "-o", "pipefail", "-c", cmd], stdout=subprocess.DEVNULL).returncode
+
+def run_sh(cmd: str, out_file: str | None = None, timeout: float = CMD_TIMEOUT_SEC) -> int:
+    """bash + pipefail 执行，返回退出码（不抛异常，由调用方判定严重程度）。
+
+    超时按**整个进程组**杀：`producer | gzip > f` 是 bash 再生出来的两个孩子，只 kill bash
+    会留下 pg_dump 继续往一个已经没人认领的文件里写字，而 stdout 是 DEVNULL，那份写入
+    从此无人过问。stderr 必须保持继承——pg_dump 的报错正文就是靠它进 journal 的，
+    `_fail` 那句"详见 journalctl"指的就是这里。
+    被 SIGKILL 时 `dump_cmd` 里那道 `|| { rm -f …; }` 没机会运行，半成品只能在这儿删：
+    留着它，`list_files()` 会把一份截断的归档当"可恢复的备份"端上来，还要占掉 keep 名额
+    里的一格（批次㊵同一条理由）。返回 124 与 util.run 同口径，调用方的 `code != 0`
+    与 `code > 1` 分支因此照旧判失败。
+    """
+    proc = subprocess.Popen(["/bin/bash", "-o", "pipefail", "-c", cmd],
+                            stdout=subprocess.DEVNULL, start_new_session=True)
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group(proc)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=10)
+        print(f"backup: {timeout_note('备份命令', timeout)}", file=sys.stderr)
+        if out_file:
+            _cleanup(out_file)
+            print(f"backup: 已删除未完成的产物 {out_file}", file=sys.stderr)
+        return 124
 
 
 def dump_cmd(producer: str, out_file: str) -> str:
@@ -193,7 +231,7 @@ def main(bk: dict):
             file = _free_path(bk["id"], ts, ".dump.gz", BACKUP_DIR)
             producer = f"su -s /bin/sh postgres -c 'pg_dump -Fc {bk['target']}'"
         # pg_dump/pg_dumpall 非 0 即数据不完整，必须判失败
-        code = run_sh(dump_cmd(producer, file))
+        code = run_sh(dump_cmd(producer, file), file)
         if code != 0:
             _fail("PG 备份", code)
         dbm.audit("system", "backup:pg", bk["target"])
@@ -216,7 +254,7 @@ def main(bk: dict):
         file = _free_path(bk["id"], ts, ".tar.gz", BACKUP_DIR)
         excl = " ".join(f"--exclude={e}" for e in EXCLUDES)
         producer = f"tar -C {sh_escape(app['path'])} {excl} -cf - ."
-        code = run_sh(dump_cmd(producer, file))
+        code = run_sh(dump_cmd(producer, file), file)
         if code > 1:
             # tar 的 1 只是"读取期间文件有变动/权限不足跳过部分文件"，归档仍可用；
             # 2 及以上才是致命错误。这里若不区分，活跃应用目录的备份会被全部误删。

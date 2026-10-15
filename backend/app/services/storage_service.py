@@ -31,7 +31,7 @@ from pathlib import Path
 
 from .. import config, probe
 from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
-from ..util import human_bytes, run, tallied
+from ..util import PROBE_TIMEOUT, human_bytes, run, tallied
 from . import alerts_service
 
 CACHE_TTL = 300.0
@@ -39,7 +39,6 @@ ROOT_BUDGET_SEC = 2.0
 MAX_DEPTH = 4
 TOP_FILES = 8
 TOP_SUBDIRS = 6
-JOURNAL_TIMEOUT = 15
 
 JOURNAL_WARN = 2 * 1024**3
 BACKUP_WARN = 4 * 1024**3
@@ -580,7 +579,10 @@ def _collect() -> dict:
 
 
 async def _journal_bytes() -> tuple[int | None, str]:
-    r = await run("journalctl", ["--disk-usage"], timeout=JOURNAL_TIMEOUT)
+    # `--disk-usage` 只 stat journal 目录，不扫日志、也不找 journald 说话，所以它是探针而不是
+    # 预算另立门面的扫描命令（memory_service 的 `-k -b -n 3000`、login_audit_service 的
+    # `--since "24 hours ago"` 才要各自在调用点声明更大的数）。
+    r = await run("journalctl", ["--disk-usage"], timeout=PROBE_TIMEOUT)
     text = str(r.get("out") or "")
     if int(r.get("code") or 0) != 0:
         return None, text

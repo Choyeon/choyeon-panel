@@ -32,6 +32,7 @@ from ..log import warn
 from ..util import (
     CLI_LOG_LINES_MAX,
     LOG_LINES_DEFAULT,
+    PROBE_TIMEOUT,
     kill_group,
     reap,
     redact_creds,
@@ -609,7 +610,7 @@ async def _unit_results(bases: list[str]) -> dict[str, dict]:
         "systemctl",
         ["show", "-p", "Id", "-p", "ActiveState", "-p", "ExecMainStartTimestamp",
          "-p", "ExecMainStatus", "-p", "Result", *[f"{b}.service" for b in bases]],
-        timeout=10,
+        timeout=PROBE_TIMEOUT,
     )
     out: dict[str, dict] = {}
     for block in _parse_show(r["out"]):
@@ -641,7 +642,7 @@ async def _timer_states(units: list[str]) -> dict:
     r = await run(
         "systemctl",
         ["show", "-p", "Id", "-p", "ActiveState", "-p", "UnitFileState", "-p", "NextElapseUSecRealtime", *units],
-        timeout=10,
+        timeout=PROBE_TIMEOUT,
     )
     out: dict[str, dict] = {}
     for block in _parse_show(r["out"]):

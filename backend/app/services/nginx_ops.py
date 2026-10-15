@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .. import config
 from ..log import warn
-from ..util import is_domain, is_email, run
+from ..util import PROBE_TIMEOUT, is_domain, is_email, run
 
 CONF_DIR = config.NGINX_CONF_DIRS[0]
 TLS_DIR = config.TLS_DIR
@@ -72,7 +72,7 @@ async def nginx_version() -> tuple | None:
     global _ver_cache
     if _ver_cache is not None:
         return _ver_cache
-    r = await run("nginx", ["-v"])
+    r = await run("nginx", ["-v"], timeout=PROBE_TIMEOUT)
     m = re.search(r"nginx/(\d+)\.(\d+)\.(\d+)", r["out"] or "")
     if m:
         _ver_cache = tuple(int(x) for x in m.groups())
@@ -228,7 +228,7 @@ async def loaded_conf_paths() -> set | None:
     with _loaded_lock:
         if _loaded_cache and now - _loaded_cache[0] < _LOADED_TTL:
             return _loaded_cache[1]
-    r = await run("nginx", ["-T"], timeout=30)
+    r = await run("nginx", ["-T"])
     if r["code"] != 0:
         return None
     paths = {

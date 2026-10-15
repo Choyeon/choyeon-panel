@@ -217,7 +217,33 @@ def unit_env_value(v) -> str:
     return unit_pct_escape(s)
 
 
-async def run(cmd: str, args: list, cwd=None, timeout=120, env=None) -> dict:
+# 本地子进程的超时只有一个出处。之前 `run()` 的默认是 120 秒，而 app/ 下 109 个调用点里
+# 25 个根本没传：`systemctl daemon-reload` 11 处（本机实测 1.17s）、`nginx -t` 3 处（0.088s）、
+# `systemctl reload nginx` 4 处、`nginx -v`、`systemctl list-units`（0.052s）、failed 单位表、
+# `redis-cli INFO`/`DBSIZE`、`ln -sf`、`chmod`——这些本机一秒内就回来的命令，全都按
+# "两分钟"记账。剩下 84 个各自写了数，同一条命令在不同地方拿到不同答案：`nginx -t` 在
+# nginx_ops 里三处不传（于是按 120 等）、在自检里写 10；`nginx -T` 一处 30、一处 20；
+# `firewall-cmd --state` 一处 20、一处 10；`systemctl is-enabled` 写 15、`systemctl show`
+# 写 5 的和写 10 的都有；`ss -tlnp` 一处 4、一处 20。等于同一件事两个答案。
+# 默认值是没人传参数时的答案，所以它得按最慢的**常态**本机命令来定：`nginx -t` 要读全部
+# include、`systemctl daemon-reload` 要等 systemd 重扫 unit，正常机器都在秒级，20 秒已经是
+# 这台机器出了问题的信号，再等下去只会把调用方（页面加载、告警轮询、带全局锁的 nginx
+# 配置区）一起钉住。远端命令（certbot、git clone、npm install）必须在调用点自己传更大的值。
+CTRL_TIMEOUT = 20
+# 瞬时探针：结果只用来"显示一行状态"，卡住时宁可立刻报告超时，也不能拖住一次页面加载。
+PROBE_TIMEOUT = 5
+
+
+def timeout_note(what: str, timeout) -> str:
+    """超时判词的措辞只有一个出处：服务侧 util.run、备份 runner、CLI 的 sh() 说的是同一件事。
+
+    `what` 传命令名而不是整条命令行：argv 里可能带口令与连接串，而这句会进 journal、
+    进自检判词、最后进浏览器；名字够定位了。
+    """
+    return f"{what} 超时（{timeout:g}s，已终止整个进程组）"
+
+
+async def run(cmd: str, args: list, cwd=None, timeout=CTRL_TIMEOUT, env=None) -> dict:
     r"""异步子进程执行，返回 {code, out}。
 
     **这个函数返回时，它起的子进程组一定已经没了。** 三条出去的路都要兑现这一句：
@@ -247,7 +273,7 @@ async def run(cmd: str, args: list, cwd=None, timeout=120, env=None) -> dict:
         except TimeoutError:
             kill_group(proc)
             await reap(proc)
-            return {"code": 124, "out": f"timeout after {timeout}s"}
+            return {"code": 124, "out": timeout_note(os.path.basename(str(cmd)), timeout)}
         return {"code": proc.returncode or 0, "out": out.decode(errors="replace").strip()}
     except Exception as e:  # noqa: BLE001
         kill_group(proc)
@@ -282,8 +308,12 @@ def with_subprocess(proc) -> None:
         proc.kill()
 
 
-def run_shell(cmd: str, timeout=None) -> subprocess.CompletedProcess:
-    """同步 shell 执行（backup runner / CLI 场景）。"""
+def run_shell(cmd: str, timeout: float = CTRL_TIMEOUT) -> subprocess.CompletedProcess:
+    """同步 shell 执行（backup runner / CLI 场景）。
+
+    默认值与 util.run 同一条线：同步路径原来写的是 `timeout=None`，也就是"这条命令可以
+    永远不返回"，而它跑在 to_thread 里，没人会去掐。真正需要长预算的调用方自己传数。
+    """
     return subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True, timeout=timeout)
 
 
@@ -420,8 +450,13 @@ def tallied(names, noun: str, unit: str = "项", total: int | None = None,
     return f"{head}：{ts[0]}" if ts else head
 
 
-async def run_shell_async(cmd: str, timeout: float | None = 10) -> str:
-    """在事件循环中安全地执行 shell 命令（避免阻塞）。返回 stdout；失败返回空串。"""
+async def run_shell_async(cmd: str, timeout: float = CTRL_TIMEOUT) -> str:
+    """在事件循环中安全地执行 shell 命令（避免阻塞）。返回 stdout；失败返回空串。
+
+    预算与 run()/run_shell 同一个出处（CTRL_TIMEOUT），原来这里是另一份 10 秒。
+    要注意它的既有取舍：非 0 退出与超时都折成空串，调用方分不清"没有监听端口"和
+    "ss 没跑成"——detect_port 因此只会把端口显示成"未检测到"，不会报错。
+    """
     def _sync() -> str:
         try:
             return run_shell(cmd, timeout=timeout).stdout

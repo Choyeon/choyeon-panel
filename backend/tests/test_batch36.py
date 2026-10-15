@@ -126,7 +126,7 @@ class RunDiesWithTheCall(unittest.IsolatedAsyncioTestCase):
             self._tasks.append(task)
             r = await task
             self.assertEqual(r["code"], 124)
-            self.assertIn("timeout", r["out"])
+            self.assertIn("超时", r["out"])
             pid = int(pidfile.read_text().strip())
             self._pids.append(pid)
             # reap 的意义就在这：不 await proc.wait() 的话这里会是个 Z

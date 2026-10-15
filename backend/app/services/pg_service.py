@@ -6,7 +6,7 @@ import time
 
 from .. import aio_db, config
 from .. import database as dbm
-from ..util import kill_group, run
+from ..util import CTRL_TIMEOUT, kill_group, run
 from . import redis_client
 
 # 标识符白名单。放开大小写是必须的：Prisma/TypeORM/Jira 这类应用建的就是
@@ -360,11 +360,20 @@ def _redis_auth_text(rep, pass_: str | None) -> str:
 
 
 async def _redis_info_cli(pass_: str | None) -> dict:
-    """redis-cli 子进程路线，仅作 RESP 连不上 TCP 时的回退。口令只进环境变量。"""
+    """redis-cli 子进程路线，仅作 RESP 连不上 TCP 时的回退。口令只进环境变量。
+
+    两次调用都按 CTRL_TIMEOUT 记账，不是随手一个数：走回退的原因正是"套接字建不起来"
+    （Redis 只开 unix socket、强制 TLS、换了 bind 地址），而 redis-cli 不带 --connect-timeout
+    时对黑洞地址要等内核那整套 SYN 重试——本机 net.ipv4.tcp_syn_retries=6，按 1/2/4/8/16/32/64
+    秒的退避要 127 秒才报错，实测 `redis-cli -h 10.255.255.1 PING` 25 秒仍未返回。原来这两条
+    沿用 util.run 的 120 秒默认，等于数据浏览页一发请求可以把这个 root 进程钉住两分钟。
+    RESP 那条快路的上限是 CONNECT_TIMEOUT 3 秒 + READ_TIMEOUT 10 秒，这条慢路取 20 秒，
+    两条路线的最坏情况同量级。
+    """
     env = dict(os.environ)
     if pass_:
         env["REDISCLI_AUTH"] = pass_
-    r = await run("redis-cli", ["INFO"], env=env)
+    r = await run("redis-cli", ["INFO"], env=env, timeout=CTRL_TIMEOUT)
     if r["code"] != 0 or r["out"].startswith("NOAUTH"):
         if r["out"].startswith("NOAUTH"):
             raise RuntimeError("Redis 需要密码，请在下方设置")
@@ -377,7 +386,7 @@ async def _redis_info_cli(pass_: str | None) -> dict:
         i = line.find(":")
         if i > 0 and not line.startswith("#"):
             info[line[:i]] = line[i + 1:].strip()
-    keys = await run("redis-cli", ["DBSIZE"], env=env)
+    keys = await run("redis-cli", ["DBSIZE"], env=env, timeout=CTRL_TIMEOUT)
     return {"info": info, "dbsize": keys["out"] if keys["code"] == 0 else None,
             "authed": bool(pass_)}
 

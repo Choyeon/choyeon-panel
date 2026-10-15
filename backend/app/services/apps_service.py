@@ -10,6 +10,7 @@ from pathlib import Path
 from .. import aio_db, config, locks
 from .. import database as dbm
 from ..util import (
+    PROBE_TIMEOUT,
     clean_abs_path,
     human_bytes,
     is_branch,
@@ -313,13 +314,13 @@ async def _listen_lines(force: bool = False) -> list[str]:
     global _ss_cache
     if not force and _ss_cache and time.time() - _ss_cache[0] < 5:
         return _ss_cache[1]
-    out = await run_shell_async("ss -tlnp", timeout=4)
+    out = await run_shell_async("ss -tlnp", timeout=PROBE_TIMEOUT)
     _ss_cache = (time.time(), out.split("\n"))
     return _ss_cache[1]
 
 
 async def detect_port(unit: str, force: bool = False):
-    r = await run("systemctl", ["show", unit, "-p", "MainPID", "--value"], timeout=5)
+    r = await run("systemctl", ["show", unit, "-p", "MainPID", "--value"], timeout=PROBE_TIMEOUT)
     try:
         main = int(r["out"].strip())
     except ValueError:

@@ -25,11 +25,10 @@ from datetime import UTC, datetime
 
 from .. import database as dbm
 from .. import probe
-from ..util import run
+from ..util import CTRL_TIMEOUT, run
 from . import firewall_service
 
 CACHE_TTL = 300.0
-SS_TIMEOUT = 20
 MAX_PORTS = 300
 MAX_LIST_DETAIL = 6
 
@@ -221,7 +220,7 @@ async def audit(refresh: bool = False) -> dict:
 
 
 async def _collect() -> dict:
-    ss = await run("ss", ["-tlnp"], timeout=SS_TIMEOUT)
+    ss = await run("ss", ["-tlnp"], timeout=CTRL_TIMEOUT)
     # ss -p 只有 root 才给进程名；这不是失败，但结论的可信度必须跟着降。
     as_root = bool(shutil.which("ss")) and "users:(" in (ss["out"] or "")
     notes: list[str] = []

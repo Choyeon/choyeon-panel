@@ -52,7 +52,7 @@ from app.services import (  # noqa: E402
     storage_service,
     updates_service,
 )
-from app.util import CLI_LOG_LINES_MAX, human_bytes  # noqa: E402
+from app.util import CLI_LOG_LINES_MAX, human_bytes, timeout_note  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -112,7 +112,7 @@ async def sh(cmd: list[str], timeout: int = 60, env: dict | None = None,
             os.killpg(os.getpgid(p.pid), signal.SIGKILL)
         with contextlib.suppress(Exception):
             await p.wait()
-        return {"code": 124, "out": "", "err": f"超时 {timeout}s（已终止整个进程组）"}
+        return {"code": 124, "out": "", "err": timeout_note(str(cmd[0]), timeout)}
     return {
         "code": p.returncode,
         "out": out.decode(errors="replace").strip(),
@@ -232,7 +232,7 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
         if r["err"]:
             print(r["err"], file=sys.stderr)
     if r["code"] == 124:
-        Out.error(f"安装脚本超时（>{DEPLOY_TIMEOUT_SEC}s），已终止整个进程组；"
+        Out.error(f"{timeout_note(Path(script).name, DEPLOY_TIMEOUT_SEC)}；"
                   f"可手工执行 bash {script} 看卡在哪一步", EXIT_FAIL)
     if r["code"] != 0:
         Out.error(f"安装脚本退出码 {r['code']}", EXIT_FAIL)
@@ -650,7 +650,7 @@ async def cmd_upgrade(a: argparse.Namespace) -> dict:
         cmd.append("--no-pull")
     r = await sh(cmd, timeout=DEPLOY_TIMEOUT_SEC, stdin_devnull=True)
     if r["code"] == 124:
-        Out.error(f"升级脚本超时（>{DEPLOY_TIMEOUT_SEC}s），已终止整个进程组；"
+        Out.error(f"{timeout_note(Path(script).name, DEPLOY_TIMEOUT_SEC)}；"
                   "升级失败时脚本本应自动回滚，请先 choyeonctl status 确认现场", EXIT_FAIL)
     if r["code"] != 0:
         Out.error(r["err"] or "升级失败（脚本已尝试自动回滚）", EXIT_FAIL)
