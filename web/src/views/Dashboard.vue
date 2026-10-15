@@ -15,8 +15,10 @@ import InfoList, { type InfoItem } from '../components/InfoList.vue';
 const router = useRouter();
 const isAdmin = getRole() === 'admin';
 const info = ref<any>({});
+const infoError = ref('');
 const stat = ref<any>({});
 const apps = ref<any[]>([]);
+const appsError = ref('');
 const failedUnits = ref<string[]>([]);
 const sideError = ref('');
 const rtLoading = ref(true);
@@ -244,6 +246,14 @@ const hist = ref<any>(null);
 const histLoading = ref(true);
 const histError = ref('');
 const mstat = ref<any>(null);
+const mstatError = ref('');
+const samplerTag = computed(() => {
+  // 探针失败时不能拿上一帧的 samplerAlive 画成绿色"运行中"，也不能反过来
+  // 断言"未运行"——那一刻我们对采样器一无所知，就照实说未知。
+  if (mstatError.value) return { type: 'warning' as const, text: '采样器状态未知' };
+  if (mstat.value?.samplerAlive) return { type: 'success' as const, text: '采样器运行中' };
+  return { type: 'warning' as const, text: '采样器未运行' };
+});
 let histSeq = 0;
 const histPoints = computed<number>(() => hist.value?.meta?.points ?? 0);
 const histEmpty = computed(() => !histError.value && !histLoading.value && histPoints.value === 0);
@@ -331,21 +341,27 @@ async function loadHistory() {
   const seq = ++histSeq;
   histLoading.value = true;
   histError.value = '';
-  try {
-    const [d, st] = await Promise.all([
-      req(`/system/history?range=${histRange.value}`),
-      req('/system/metrics-status'),
-    ]);
-    if (disposed || seq !== histSeq) return;
-    hist.value = d;
-    mstat.value = st;
-  } catch (e: any) {
-    if (disposed || seq !== histSeq) return;
+  // history 和 metrics-status 是两个不相干的请求，过去捆在一个 Promise.all 里共享同一个
+  // catch：采样器状态探针（只喂右上角一行小字）失败时会把已经到手的历史曲线整段抹掉，
+  // 并让四张曲线卡一起喊"历史数据获取失败"——它在指责一个其实成功了的请求。
+  // allSettled 分开落账，谁失败谁自己解释。
+  const [h, s] = await Promise.allSettled([
+    req(`/system/history?range=${histRange.value}`),
+    req('/system/metrics-status'),
+  ]);
+  if (disposed || seq !== histSeq) return;
+  if (h.status === 'fulfilled') hist.value = h.value;
+  else {
     hist.value = null;
-    histError.value = e?.message || '历史数据获取失败';
-  } finally {
-    if (!disposed && seq === histSeq) histLoading.value = false;
+    histError.value = h.reason?.message || '历史数据获取失败';
   }
+  if (s.status === 'fulfilled') {
+    mstat.value = s.value;
+    mstatError.value = '';
+  } else {
+    mstatError.value = s.reason?.message || '采样器状态获取失败';
+  }
+  histLoading.value = false;
 }
 
 function pickRange(r: RangeKey) {
@@ -355,18 +371,39 @@ function pickRange(r: RangeKey) {
 }
 
 async function loadSide() {
-  try {
-    const [list, svc] = await Promise.all([api.apps(), api.services()]);
-    if (disposed) return;
-    apps.value = list;
-    failedUnits.value = svc.filter((s: any) => s.active === 'failed').map((s: any) => s.unit);
+  // 同 loadHistory：应用列表和服务列表是两张卡片，Promise.all 让 /system/services
+  // 的超时把已经拿到的 apps 一起丢掉，"应用"卡片转而说「应用列表获取失败」。
+  const [a, sv] = await Promise.allSettled([api.apps(), api.services()]);
+  if (disposed) return;
+  if (a.status === 'fulfilled') {
+    apps.value = a.value;
+    appsError.value = '';
+  } else {
+    apps.value = [];
+    appsError.value = a.reason?.message || '应用列表获取失败';
+  }
+  if (sv.status === 'fulfilled') {
+    failedUnits.value = sv.value.filter((x: any) => x.active === 'failed').map((x: any) => x.unit);
     sideError.value = '';
-  } catch (e: any) {
-    if (disposed) return;
+  } else {
     // 拉不到就必须显式说"未知"：failedUnits 留空会被渲染成绿色"服务正常"，
     // 等于把 /system/services 的 500 或超时读成一切正常。
     failedUnits.value = [];
-    sideError.value = e?.message || '状态获取失败';
+    sideError.value = sv.reason?.message || '服务状态获取失败';
+  }
+}
+
+async function loadInfo() {
+  try {
+    const d = await api.info();
+    if (disposed) return;
+    info.value = d;
+    infoError.value = '';
+  } catch (e: any) {
+    if (disposed) return;
+    // 过去这里只有一个空 catch，hero 那行会永远停在"加载中"——一个早失败的请求
+    // 装作还在飞，而且没有任何东西会再试它。
+    infoError.value = e?.message || '系统信息获取失败';
   }
 }
 
@@ -396,11 +433,13 @@ const refreshing = ref(false);
 async function refresh() {
   refreshing.value = true;
   try {
-    await Promise.all([tickSingleton(), loadHistory(), loadSide(), loadProcs(), probeAlerts(), loadOverview()]);
+    await Promise.all([tickSingleton(), loadHistory(), loadSide(), loadProcs(), probeAlerts(), loadOverview(), loadInfo()]);
   } finally {
     if (!disposed) refreshing.value = false;
   }
 }
+
+const appCardTitle = computed(() => (appsError.value ? '应用' : `应用（${runningApps.value}/${apps.value.length} 运行中）`));
 
 const quickOpts = [
   { label: '部署新应用', key: 'deploy', icon: 'AddOutline', to: '/apps' },
@@ -424,6 +463,9 @@ let n = 0;
 const poll = useVisiblePoll(() => {
   tickSingleton();
   if (++n % 5 === 0) { loadSide(); loadProcs(); }   // 侧栏/进程 15s，随 tick 自动重试失败态
+  // 主机信息只在挂载时取过一次：它平时不用轮（都是文件读），但一次失败过去就永久停在
+  // "加载中"，连刷新按钮都不管它。失败态才重试，成功之后不再花这个请求。
+  if (infoError.value && n % 5 === 0) loadInfo();
   // 概览"未确认告警"计数 30s 一跳，但"最近告警"列表过去只在挂载时拉过一次：
   // 挂着页面时新告警进来，计数 +1 而列表不出新行，两个口径互相打脸。同频一起刷。
   if (n % 10 === 0) { loadHistory(); loadOverview(); probeAlerts(); }
@@ -431,7 +473,7 @@ const poll = useVisiblePoll(() => {
 
 onMounted(() => {
   // 挂载期全部并发取数，不再串行瀑布
-  api.info().then((d) => { if (!disposed) info.value = d; }).catch(() => { /* 降级为未知主机信息 */ });
+  loadInfo();
   Promise.all([tickSingleton(), loadHistory(), loadSide(), loadProcs(), probeAlerts(), loadOverview()]);
   poll.start();
 });
@@ -450,7 +492,7 @@ onBeforeUnmount(() => {
         <div class="hero-greet">{{ greet }}，欢迎回到 <b>choyeon panel</b></div>
         <div class="hero-host">
           <NIcon :component="icons.ServerOutline" :size="15" color="var(--cp-brand-soft)" />
-          <span class="cp-prose">{{ info.hostname || '本机' }} · {{ info.prettyName || info.platform || '加载中' }}</span>
+          <span class="cp-prose">{{ info.hostname || '本机' }} · {{ info.prettyName || info.platform || (infoError || '加载中') }}</span>
         </div>
       </div>
       <NSpace align="center" :size="8">
@@ -533,10 +575,11 @@ onBeforeUnmount(() => {
         <NCard size="small">
           <template #header><span class="section-title">系统信息</span></template>
           <InfoList :items="sysItems" />
+          <div v-if="infoError" class="cp-help">系统信息获取失败：{{ infoError }}——上面几行为空是因为没取到，不是这台机器没有该项</div>
         </NCard>
 
         <NCard size="small">
-          <template #header><span class="section-title">应用（{{ runningApps }}/{{ apps.length }} 运行中）</span></template>
+          <template #header><span class="section-title">{{ appCardTitle }}</span></template>
           <template #header-extra>
             <NButton text type="primary" size="tiny" aria-label="查看全部应用" @click="router.push('/apps')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
           </template>
@@ -548,7 +591,8 @@ onBeforeUnmount(() => {
             <span class="dot" :class="a.running ? 'ok' : 'idle'"></span>
             <NText depth="3" style="font-size: var(--fs-xs)">{{ a.running ? '运行中' : a.deploying ? '部署中' : '已停止' }}</NText>
           </div>
-          <EmptyBox v-if="!apps.length" :text="sideError ? '应用列表获取失败，下个刷新周期自动重试' : '暂无应用，去应用页创建第一个'" />
+          <EmptyBox v-if="!apps.length" :text="appsError ? `${appsError}，下个刷新周期自动重试` : '暂无应用，去应用页创建第一个'" />
+          <div v-else-if="appsError" class="cp-help">应用列表最近一次获取失败：{{ appsError }}——上面是上一轮取到的结果</div>
         </NCard>
 
         <NCard size="small">
@@ -582,10 +626,8 @@ onBeforeUnmount(() => {
     <div class="hist-head">
       <span class="section-title">历史曲线 · 网络 / 磁盘 / 负载</span>
       <NSpace align="center" :size="8">
-        <span v-if="mstat?.lastSampleTs" class="sfoot">最近采样 {{ new Date(mstat.lastSampleTs * 1000).toLocaleTimeString() }}</span>
-        <NTag size="small" :bordered="false" :type="mstat?.samplerAlive ? 'success' : 'warning'">
-          {{ mstat?.samplerAlive ? '采样器运行中' : '采样器未运行' }}
-        </NTag>
+        <span v-if="mstat?.lastSampleTs && !mstatError" class="sfoot">最近采样 {{ new Date(mstat.lastSampleTs * 1000).toLocaleTimeString() }}</span>
+        <NTag size="small" :bordered="false" :type="samplerTag.type">{{ samplerTag.text }}</NTag>
         <div class="cp-seg" role="group" aria-label="历史区间">
           <button v-for="r in RANGES" :key="r" type="button" :aria-pressed="histRange === r" @click="pickRange(r)">{{ r }}</button>
         </div>

@@ -335,6 +335,11 @@ _STATUS_RE = re.compile(r"\((VALID|INVALID)[^)]*\)")
 _DAYS_RE = re.compile(r"(\d+)\s*day")
 _HOUR_RE = re.compile(r"(\d+)\s*hour")
 
+# `certbot certificates` 最多占多久。巡检（本文件）与证书总览（cert_ops）跑的是同一条命令，
+# 过去一个用 60、一个吃 run() 的默认 120：同一件事两个答案，而它俩都在串行循环里——
+# certbot 卡住时后者会把整轮巡检连带证书页一起按住两分钟。
+CERTBOT_TIMEOUT = 60
+
 
 def parse_certbot(output: str) -> list[dict]:
     """把 certbot certificates 的文本切成 [{name, days, invalid}]。
@@ -390,7 +395,7 @@ async def run_checks():
 
     ssl_days = setting_int("alert_ssl_days")  # 0 = 关闭证书巡检
     if ssl_days > 0:
-        certs = await run("certbot", ["certificates"])
+        certs = await run("certbot", ["certificates"], timeout=CERTBOT_TIMEOUT)
         if certs["code"] != 0:
             warn("certbot 不可用，跳过证书巡检:", certs["out"][:120])
         else:

@@ -40,10 +40,23 @@ const FOLLOW_MS = 5000;
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 260 });
 
 // unit 候选直接取自系统服务页那份列表：本机有什么 unit 由 systemd 说，前端不写死名单。
-const { data: svcData } = useCachedFetch<any[]>({
+// 两份清单都是后台取的（缓存命中时不会重打），失败只会让选择器变短、不会挡检索，
+// 所以它们不进 err（err 说的是"这一次检索怎么了"），而是合成一句"这一页现在是降级态"。
+const { data: svcData, error: svcError } = useCachedFetch<any[]>({
   key: () => 'services:list',
   loader: () => req('/system/services'),
   maxAge: 60000,
+});
+const { data: logOpts, error: logOptsError } = useCachedFetch<LogOpts>({
+  key: () => 'system:logopts',
+  loader: () => req('/system/log-options'),
+  maxAge: 300000,
+});
+const degraded = computed(() => {
+  const parts: string[] = [];
+  if (svcError.value) parts.push(`unit 清单没取到（${(svcError.value as Error).message || '请求失败'}），unit 选择器只剩「全部 unit」，检索仍可按当前条件进行`);
+  if (logOptsError.value) parts.push(`行数档位没取到（${(logOptsError.value as Error).message || '请求失败'}），「多少行」由服务端按默认值决定`);
+  return parts.join('；');
 });
 const unitOpts = computed(() => {
   const list = (svcData.value || []).map((s: any) => ({ label: s.unit, value: s.unit }));
@@ -71,11 +84,7 @@ const nginxFileOpts = computed(() =>
 // （backend/app/util.py 的 LOG_LINES_DEFAULT / HTTP_LOG_LINES_MAX 与 system.py 的 TAIL_BYTES）。
 // 页面此前抄的是 200/500/1000/2000 + 默认 500 + 「512KB」，三个数字没有一个是自己算的，
 // 上限一改就整体失真，而且失真很安静：下拉里那一档还在，服务端已经截断了。
-const { data: logOpts } = useCachedFetch<LogOpts>({
-  key: () => 'system:logopts',
-  loader: () => req('/system/log-options'),
-  maxAge: 300000,
-});
+// 这份清单的声明在上面（和 unit 清单一起，两份失败合成同一条降级提示）。
 const ladder = computed(() => (logOpts.value?.ladder || []).filter((n) => Number.isInteger(n) && n >= 1));
 const lineOpts = computed(() => ladder.value.map((n) => ({ label: `${n} 行`, value: n })));
 const defaultLines = computed(() => {
@@ -221,6 +230,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
     </PageHeader>
 
     <NAlert v-if="err" type="error" :bordered="false" size="small" role="alert" style="margin-bottom: var(--space-3)">{{ err }}</NAlert>
+    <NAlert v-if="degraded" type="warning" :bordered="false" size="small" role="status" style="margin-bottom: var(--space-3)">{{ degraded }}</NAlert>
 
     <NTabs v-model:value="tab" type="line" size="small" display-directive="show:lazy" class="lg-tabs">
       <NTabPane name="journal" tab="系统日志检索">
@@ -253,10 +263,10 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
           <NText class="cell-sub" style="font-size: var(--fs-xs); align-self: center">快捷入口：</NText>
           <NButton v-for="p in PRESETS" :key="p.label" size="tiny" tertiary :icon="icon('DocumentTextOutline', 12)" @click="applyPreset(p)">{{ p.label }}</NButton>
         </NSpace>
-        <NText v-if="jResult" class="cell-sub" style="display: block; margin-bottom: var(--space-2); font-size: var(--fs-xs)">
+        <div v-if="jResult" class="cp-help" style="margin-bottom: var(--space-2)">
           命中 {{ jResult.count }} 行{{ jResult.truncated ? '（已达上限，结果从新到旧截断，请缩小时间窗或加关键词）' : '' }}；
           时间写法支持 30min / 6h / 2d 或 2026-10-09 10:00:00，按服务器本地时区解析。
-        </NText>
+        </div>
         <NDataTable
           ref="tableAnchor"
           :columns="jCols" :data="jRows" size="small" :bordered="false" :loading="jLoading"
@@ -286,10 +296,10 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
           <NButton size="small" type="primary" :loading="nLoading" :disabled="nLoading" :icon="icon('SearchOutline', 14)" @click="tailNginx">读取末尾</NButton>
         </NSpace>
         <NAlert v-if="nResult?.hint" type="info" :bordered="false" size="small">{{ nResult.hint }}</NAlert>
-        <NText v-else-if="nResult" class="cell-sub" style="display: block; margin-bottom: var(--space-2); font-size: var(--fs-xs)">
+        <div v-else-if="nResult" class="cp-help" style="margin-bottom: var(--space-2)">
           {{ nResult.source }} · 返回 {{ nResult.count }} 行{{ nResult.truncated ? '（已到上限）' : '' }}；
           {{ tailNote }}
-        </NText>
+        </div>
         <NDataTable
           :columns="nCols" :data="nRows" size="small" :bordered="false" :loading="nLoading"
           :scroll-x="900" :max-height="tableH" :virtual-scroll="true" class="cp-tbl tbl-log"

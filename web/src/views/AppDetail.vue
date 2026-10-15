@@ -47,12 +47,16 @@ const ngxContent = ref('');
 const ngxSaving = ref(false);
 const bodySizeVal = ref('50m');
 const pgOptions = ref<any[]>([]);
+// 清单没取到时下拉是空的，而空的下拉和"这台机器没有数据库"长得一模一样
+const pgErr = ref('');
 const dbSel = ref<string[]>([]);
 
 const unitInfo = ref<any>(null);
 const unitContent = ref('');
 const unitSaving = ref(false);
 const proc = ref<any>(null);
+// 同上：读不到进程读数时，卡片要说的是"这一次没取到"，不是"systemd 没给读数"
+const procErr = ref('');
 
 // 仓库外链：只认 https，且 URL 里的 user:token@ 凭据段已在 repoHref 中剥掉，
 // 密钥既不会显示在页面上，也不会进地址栏和新标签页。
@@ -151,7 +155,11 @@ function restoreDefaultTpl() {
 async function loadProc() {
   try {
     proc.value = await api.appProc(id);
-  } catch {}
+    procErr.value = '';
+  } catch (e: any) {
+    // 不弹 toast：卡片就在这一页上，就地写清"这一次没取到"比刷屏强
+    procErr.value = e?.message || '进程读数获取失败';
+  }
 }
 async function loadNginx() {
   try {
@@ -196,8 +204,14 @@ async function quick(kind: string) {
 async function loadPg() {
   try {
     const dbs = await api.pgDbs();
-    if (Array.isArray(dbs)) pgOptions.value = dbs.map((d: any) => ({ label: d.name, value: d.name }));
-  } catch {}
+    if (Array.isArray(dbs)) {
+      pgOptions.value = dbs.map((d: any) => ({ label: d.name, value: d.name }));
+      pgErr.value = '';
+    }
+  } catch (e: any) {
+    // 这里也不弹 toast：没装 PostgreSQL 的机器上，每一次进详情页都会失败一次。
+    pgErr.value = e?.message || '数据库清单获取失败';
+  }
 }
 
 const ico = (name: string, size = 14) => icon(name, size);
@@ -444,7 +458,8 @@ watch(
             </div>
           </template>
           <DescriptionsCard v-if="resItems.length" :items="resItems" />
-          <EmptyBox v-else text="未获取到进程信息（systemd 未返回该 unit 的读数）" />
+          <EmptyBox v-else :text="procErr || '未获取到进程信息（systemd 未返回该 unit 的读数）'" />
+          <div v-if="procErr && resItems.length" class="cp-help">最近一次获取失败：{{ procErr }}——上面是上一轮取到的读数</div>
         </NCard>
       </NGridItem>
     </NGrid>
@@ -481,6 +496,9 @@ watch(
             <NFormItem label="域名"><NInput v-model:value="edit.domain" :readonly="!isAdmin" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
             <NFormItem label="关联数据库">
               <NSelect v-model:value="dbSel" :disabled="!isAdmin" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" aria-label="关联数据库" style="width: 100%" />
+              <template #feedback>
+                <span v-if="pgErr">数据库清单没取到（{{ pgErr }}）——下拉可能是空的，仍可直接输入库名后回车</span>
+              </template>
             </NFormItem>
             <NButton v-if="isAdmin" type="primary" size="small" round :loading="saving" :disabled="saving" :icon="ico('SaveOutline')" @click="save">保存配置</NButton>
           </NSpace>
@@ -601,7 +619,7 @@ watch(
               该应用为纳管模式（unit {{ app.unit }} 由外部管理），面板只读展示，不会写入该文件。
             </NAlert>
             <div class="cp-help">
-              文件：<span class="mono-dim">{{ unitInfo?.path }}</span>。保存流程：写入 → systemd-analyze verify 校验 → daemon-reload，任一步失败自动回滚。修改后需重启服务才生效；面板生成模式下保存会同步更新部署模板，后续部署按此模板渲染。占位符 <code v-pre>{{name}} {{path}} {{start_cmd}} {{port}}</code> 可在模板中使用。
+              文件：<span class="mono-dim cp-break">{{ unitInfo?.path }}</span>。保存流程：写入 → systemd-analyze verify 校验 → daemon-reload，任一步失败自动回滚。修改后需重启服务才生效；面板生成模式下保存会同步更新部署模板，后续部署按此模板渲染。占位符 <code v-pre>{{name}} {{path}} {{start_cmd}} {{port}}</code> 可在模板中使用。
             </div>
             <NInput
               v-model:value="unitContent"

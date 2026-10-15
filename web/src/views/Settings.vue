@@ -416,7 +416,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           开启与关闭都要再输一次本账号口令，关闭还要一枚当前有效的动态口令——只攥着一枚偷来的令牌的人不该能顺手把主人的第二因子关掉。
           密钥在服务端只有 totp_secret 这一列，任何页面与审计都不会再回显它；生成一次就要当场扫完，关掉这个抽屉密钥即失效。
           管理员在「用户管理」页只看得到有没有开、不能替别人关：验证器丢了，请由 root 在服务器上执行
-          <span class="mono-dim">choyeonctl user 2fa-disable &lt;用户名&gt; --yes</span>，它会同时吊销该账号的全部会话。
+          <span class="mono-dim cp-break">choyeonctl user 2fa-disable &lt;用户名&gt; --yes</span>，它会同时吊销该账号的全部会话。
         </span>
         <NSpace vertical :size="8" style="margin-top: var(--space-3)">
           <NText v-if="twofa?.enabled" depth="3" style="font-size: var(--fs-xs)">

@@ -134,13 +134,17 @@ async def _sse_journal(unit: str, lines: int, user: str = "", exp: float = 0.0):
     _RECHECK_SEC 复验一次，对不上就收尾。留空表示"不复核"，只给单测用——两个路由
     都必须把 request.state 里的值传进来。
     """
+    # 身份基线赶在起进程之前取。原来这两句是反的：create_subprocess_exec 与 try 之间
+    # 夹着一个 await（session_identity 走 SQLite），它一抛——库锁、任务被取消都算——
+    # journalctl -f 就成了没人认领的长命进程，finally 根本轮不到执行，而浏览器端
+    # EventSource 断了就自动重连，每一次重连多留一个，直到把面板的 fd 吃光。
+    base = await asyncio.to_thread(security.session_identity, user) if user else None
+    until = time.monotonic() + _RECHECK_SEC
     proc = await asyncio.create_subprocess_exec(
         "journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "short-iso", "-f",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
-    base = await asyncio.to_thread(security.session_identity, user) if user else None
-    until = time.monotonic() + _RECHECK_SEC
     try:
         stdout = proc.stdout
         if stdout is None:  # stdout 未接管时直接结束，避免 AttributeError 打断 SSE 流

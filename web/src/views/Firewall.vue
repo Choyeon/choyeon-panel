@@ -309,7 +309,7 @@ const rangeHint = computed(() => {
         <div v-for="r in rules" :key="r.num" class="rule-card">
           <div class="rule-main">
             <div class="mono rule-to">{{ portText(r) }}</div>
-            <div class="cell-sub">{{ r.source || '任意地址' }}{{ r.comment ? ` · ${r.comment}` : '' }}</div>
+            <div class="cell-sub cp-break">{{ r.source || '任意地址' }}{{ r.comment ? ` · ${r.comment}` : '' }}</div>
           </div>
           <div class="rule-side">
             <NTag size="small" :bordered="false" :type="ACTION_META[r.action]?.type || 'default'">

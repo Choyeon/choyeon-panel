@@ -33,6 +33,7 @@ from ..util import (
     CLI_LOG_LINES_MAX,
     LOG_LINES_DEFAULT,
     kill_group,
+    reap,
     redact_creds,
     run,
     unit_env_value,
@@ -808,7 +809,14 @@ async def _exec_task(tid: int, row: dict, argv: list[str], actor: str) -> dict:
             code = proc.returncode if proc.returncode is not None else 1
         except TimeoutError:
             kill_group(proc)
+            await reap(proc)
             code, timed_out = 124, True
+        except BaseException:
+            # 与 util.run 同一条规矩：面板停机或这一轮被取消时，先收掉进程组再往上抛。
+            # 这里跑的是白名单命令，但身份是 root，留一个遗孤就等于留一个没人管的
+            # 长跑进程，下一轮定时器还会再起一个。
+            kill_group(proc)
+            raise
     except FileNotFoundError as e:
         code, raw = 127, str(e).encode()
     # 先脱敏再截断：截断点会切掉 user: 前缀，先截就可能让口令漏出去

@@ -218,9 +218,16 @@ def unit_env_value(v) -> str:
 
 
 async def run(cmd: str, args: list, cwd=None, timeout=120, env=None) -> dict:
-    """异步子进程执行，返回 {code, out}。
+    r"""异步子进程执行，返回 {code, out}。
 
-    超时时终止整个进程组（避免 npm/pip 子进程残留）；命令不存在返回 code=127。
+    **这个函数返回时，它起的子进程组一定已经没了。** 三条出去的路都要兑现这一句：
+    正常退出、超时（code=124）、以及调用方被取消。第三条过去是漏的：命令按
+    `start_new_session=True` 起在独立进程组里，而 CancelledError 从 3.8 起不再继承
+    Exception，原来那层 `except Exception` 抓不到它，于是"关掉标签页 / nginx
+    proxy_read_timeout 掐断这条请求 / 面板自己重启"都会把一个 root 身份的
+    certbot、git fetch 或 npm run build 留在身后继续跑，管道没人读、退出码没人收，
+    下一轮再来一次。面板以 root 运行，这些遗孤就是别人接管这台机器的入口。
+    命令不存在返回 code=127。
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -230,16 +237,37 @@ async def run(cmd: str, args: list, cwd=None, timeout=120, env=None) -> dict:
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except TimeoutError:
-            kill_group(proc)
-            return {"code": 124, "out": f"timeout after {timeout}s"}
-        return {"code": proc.returncode or 0, "out": out.decode(errors="replace").strip()}
     except FileNotFoundError as e:
         return {"code": 127, "out": str(e)}
     except Exception as e:  # noqa: BLE001
         return {"code": 1, "out": str(e)}
+    try:
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except TimeoutError:
+            kill_group(proc)
+            await reap(proc)
+            return {"code": 124, "out": f"timeout after {timeout}s"}
+        return {"code": proc.returncode or 0, "out": out.decode(errors="replace").strip()}
+    except Exception as e:  # noqa: BLE001
+        kill_group(proc)
+        return {"code": 1, "out": str(e)}
+    except BaseException:
+        # 被取消（含面板优雅停机时 uvicorn 撤销在飞的请求任务）：先把孩子收掉，
+        # 再把原异常抛回去——这里不 reap，因为 await 可能再次被取消，
+        # kill_group 是同步的，信号一定发得出去。
+        kill_group(proc)
+        raise
+
+
+async def reap(proc) -> None:
+    """kill_group 之后等它真退出，把退出码和管道一起结掉。
+
+    只在还能安全 await 的路径上调用（超时支）。`communicate()` 被取消过还不 wait，
+    子进程就成了僵尸/孤儿，Transport 也不会关——这正是上面那三条路不能共用的原因。
+    """
+    with suppress(Exception):
+        await asyncio.wait_for(proc.wait(), timeout=5)
 
 
 def kill_group(proc) -> None:

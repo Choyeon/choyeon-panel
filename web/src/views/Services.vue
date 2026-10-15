@@ -40,11 +40,16 @@ watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 // 「自启」状态不在 list-units 的输出里（那五个列是 UNIT/LOAD/ACTIVE/SUB/DESCRIPTION），
 // 得单独走 list-unit-files。没有它之前，页面上那颗「自启」按钮既显示不出当前是否
 // 已启用、也点不出"取消自启"，用户只能反复盲按 enable。
-const { data: unitFiles } = useCachedFetch<Record<string, string>>({
+// 这一份 error 必须说出来：取不到时 enabledOf 对每个 unit 都回空串，于是已经开了自启的
+// 服务在整张表上显示成"没开"，按钮也只剩「自启」——点了是幂等成功，人看不出任何异常，
+// 只会以为上一次没生效再点一遍。useCachedFetch 已经把 rejection 吞进 error ref，
+// 这里不接，就等于这条请求没有失败路径。
+const { data: unitFiles, error: unitFilesError } = useCachedFetch<Record<string, string>>({
   key: () => 'unit-files',
   loader: () => api.unitFiles(),
   maxAge: 30000,
 });
+watch(unitFilesError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 // enable/disable 的响应里带服务端强制回读的新状态，先在本地生效；
 // reload() 拿回整张表（服务端那份 30s 缓存已被同一次调用刷新）就让位给服务端值。
 const enabledPatch = ref<Record<string, string>>({});

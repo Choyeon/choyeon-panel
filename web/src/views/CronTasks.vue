@@ -82,11 +82,17 @@ const form = ref<{ name: string; expr: string; preset: number; unit: string; lin
 
 // 列表与白名单都取一次就够（白名单只在打开表单时才用得上），但写操作后必须作废，
 // 否则新建的任务要等 maxAge 才出现，人会以为没保存上。
-const { data, loading, busy, refresh } = useCachedFetch<{ items: Task[] }>({
+// error 必须接住：挂载那第一次装载是 composable 自己发的，rejection 被它吞进 error ref，
+// 完全不经 reload() 的那句 catch。自动刷新默认是关的，于是过去列表取不到时 err 仍是空，
+// 页面把"没取到"显示成"还没有定时任务，点「新建任务」加一条"。
+const { data, error: listError, loading, busy, refresh } = useCachedFetch<{ items: Task[] }>({
   key: () => 'cron:list',
   loader: () => req('/cron'),
   maxAge: 20000,
 });
+const listErr = computed(() => (listError.value
+  ? `定时任务列表获取失败：${(listError.value as Error).message || '请求失败'}`
+  : ''));
 const { load: loadOptions } = useCachedFetch<Options>({
   key: () => 'cron:options',
   loader: () => req('/cron/options'),
@@ -413,7 +419,7 @@ const cols: any[] = [
 
 <template>
   <div>
-    <NAlert v-if="err" type="error" :bordered="false" size="small" role="alert" style="margin-bottom: var(--space-3)">{{ err }}</NAlert>
+    <NAlert v-if="err || listErr" type="error" :bordered="false" size="small" role="alert" style="margin-bottom: var(--space-3)">{{ err || listErr }}</NAlert>
 
     <CpToolbarCard title="定时任务">
       <template #left>
@@ -436,7 +442,7 @@ const cols: any[] = [
         :row-key="(r: Task) => r.id" class="tbl-cron"
       >
         <template #empty>
-          <EmptyBox :text="err ? '定时任务获取失败，点上方「刷新」重试' : (isAdmin ? '还没有定时任务，点「新建任务」加一条' : '还没有定时任务')" />
+          <EmptyBox :text="(err || listErr) ? '定时任务获取失败，点上方「刷新」重试' : (isAdmin ? '还没有定时任务，点「新建任务」加一条' : '还没有定时任务')" />
         </template>
       </NDataTable>
     </CpToolbarCard>
@@ -506,7 +512,7 @@ const cols: any[] = [
                 </NSpace>
               </NFormItem>
             </template>
-            <span class="cp-help">将执行：<span class="mono-dim">{{ buildArgv().join(' ') || '（命令不完整）' }}</span></span>
+            <span class="cp-help">将执行：<span class="mono-dim cp-break">{{ buildArgv().join(' ') || '（命令不完整）' }}</span></span>
           </NCard>
         </NForm>
         <NSpace justify="end" :size="8">

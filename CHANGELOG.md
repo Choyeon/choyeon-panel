@@ -1039,6 +1039,53 @@
   两个抽屉都写 `class="log-view log-drawer"`、外观七项只在 `.log-view` 定义、`.log-drawer` 的属性表
   恰好是 height + margin；`var()` 引用与定义双向对齐（引用未定义会静默走兜底，定义未引用纯粹误导）；
   vw 只认 94、分页 44px、以及这批删掉的死变量与从没接上的 `.cp-masked` 不许回来。
+- 子进程跟着这一次调用死。`util.run()` 是面板里绝大多数 root 命令的入口，另外四处自己 spawn：
+  `pg_service.psql()`（su → sh → psql 一整组）、`_rcli_raw()`、`cron_service._exec_task()`、
+  `system.py` 的 journal SSE。它们原来的清理都挂在 `except Exception` 上，而 asyncio 的
+  CancelledError 自 3.8 起继承 BaseException——于是"取消"这一类一条清理都走不到：客户端断开 SSE、
+  nginx 的 `proxy_read_timeout` 掐断长请求、停机时撤销在飞任务，都会把一个 root 身份的
+  certbot / git fetch / psql / `journalctl -f` 留在身后继续跑，管道没人读、退出码没人收，下一轮
+  再来一个。面板这台机器上还跑着别的业务应用，这些遗孤就是别人接管它的入口。现在三个出口都收：
+  超时 `kill_group` + `reap` 后照常返回 124，异常 `kill_group` 后返回 1，被取消 `kill_group` 后
+  原样抛出（那条路径上不再 await，`reap` 自己就可能被二次取消）；SSE 把会话基线与计时起点挪到
+  spawn 之前，避免建流失败时留下一个没人收的 `-f`；certbot 的 60 秒上界由 `CERTBOT_TIMEOUT`
+  一个出处供巡检与证书页共用。
+- 每个请求都要有自己的失败说法。概览页原来用 `Promise.all` 并排取 history 与 metrics-status，
+  两个失败共用一个 catch，采样器读不到时角标写「采样器未运行」——那是把"没取到"说成"坏了"，
+  而它旁边 应用卡片会因为同一个 catch 显示成"0/0 运行中"。现在改 `Promise.allSettled` 分别落账
+  （`appsError` / `sideError` / `mstatError` / `infoError`），系统信息不再由一个空 catch 永远停在
+  「加载中」，读不到时就地一行说明并参与轮询重试。日志检索、日志流、服务器管理、备份、定时任务、
+  应用详情六处同一类：取数失败原先只闪一下顶部进度条，页面本体照常渲染空态，现在各自绑定自己的
+  error（`svcError` / `logOptsError` / `optsError` / `unitFilesError` / `appsError` / `listError` /
+  `procErr`），空盒与降级条说的是这一次没取到，而不是这台机器上没有。
+- 375px 逐页签走查量到的两处裁切。应用详情七个页签各自在 375px 里量一遍：`DescriptionsCard` 的
+  label 列是 40%（约 102px），而「仓库 / 分支（monorepo 子目录）」这类要到 153px——手机上没有
+  hover 也就没有 title 可补，等于这个字段没有名字；折行写在组件里而不是挂 `.cp-prose`，因为
+  scoped 的 `.dsc-k[data-v-*]` 与 `.cp-prose.cp-prose` 权重同为 0-2-0，谁赢取决于注入顺序。
+  另一处是 `.mono-dim` / `.cell-sub` 被抄出表格之外的五个上下文：应用详情 systemd 页签说明句里的
+  unit 文件路径（实测 323px 内容压进 301px 的盒子）、设置页两步验证说明里的
+  `choyeonctl user 2fa-disable` 命令、定时任务弹窗的「将执行」命令行、防火墙窄屏卡片的
+  来源·备注、日志中心两条 `display:block` 的结果说明。这两个类都写着 nowrap + ellipsis，那是表格
+  单元格的设计（列宽所限，全文另有触发器）；说明句与卡片没有这个约束，前四处补共享触发器
+  `.cp-break`，日志中心那两条改用 `.cp-help`（同一条说明本来就该只有这一档，顺手去掉手写的
+  `font-size` 与 `display:block`）。
+- 新增回归测试：`backend/tests/test_batch36.py`（17 条 + 4 子用例）。行为守卫是真的：起一个
+  `exec sleep 300` 的慢子进程、取消这次调用、再去 `/proc` 确认它连同进程组都没了，超时路径同样
+  确认。静态形状守卫盯住这五处 spawn 的分支形状、SSE 的"基线先于 spawn 且中间不 await"、
+  certbot 上界的共用出处，以及前端两处：六个取数点必须各自绑定 error、概览不许再把两个请求写进
+  同一个 catch；模板标记里出现 `.mono-dim` / `.cell-sub` / `.mono-1l` 必须同时挂折行触发器，例外
+  只有三条量过的短标签（144px 与 170px，都在盒子里），新增一处不挂就红。
+- 线上复验（375px，逐页签与逐弹窗实测，非构建通过即交付）：应用详情七个页签 24 个格子 0 处裁切
+  （改前 systemd 页签 1 处 323/301）；设置页 2fa 命令行现在占两个行框（267px + 7px），外层
+  `.cp-help` 285 == 285；日志中心真检索一次「命中 200 行（已达上限…）；时间写法支持 30min / 6h / 2d…」
+  335 == 335；定时任务弹窗「将执行」计算样式为 `pre-wrap`、容器 271 == 271、弹窗 343px 仍在 94vw 内。
+  `pytest` 2494 passed / 1243 subtests，`ruff` All checks passed，`web` 构建 54.27s、产物
+  2198KB → gzip 672KB（-69.4%），`choyeonctl upgrade --no-pull --json` 返回
+  `{"ok": true, "healthy": true}`。`choyeonctl doctor --json` 两次实测分别是
+  `{'pass': 17, 'warn': 2, 'fail': 1}` 与 `{'pass': 16, 'warn': 3, 'fail': 1}`：warn 是 3 个待装
+  安全更新、24 小时内 18931 次失败认证来自 34 个地址、5.5% steal（后两条是这台机器的公网处境，
+  不是面板缺陷）；唯一 fail 是「改动未生效」项点名的 `unattended-upgrades.service`——安全库装了
+  新版而进程还踩着旧映射，需要人工挑时间重启，面板不代做。
 
 ## [1.1.10] - 2026-10-12
 

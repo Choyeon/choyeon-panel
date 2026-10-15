@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .. import config
 from ..util import run
-from .alerts_service import parse_certbot, setting_int
+from .alerts_service import CERTBOT_TIMEOUT, parse_certbot, setting_int
 
 # 「还剩几天算快到期」这条线不在这里定义，见 status_of()：它读的是告警配置 alert_ssl_days。
 # 只用于切分 certbot 的输出块；到期天数/无效标记仍然复用 alerts_service.parse_certbot，
@@ -161,7 +161,7 @@ def _issuer_label(raw: str) -> str | None:
 
 async def _from_certbot(now: datetime, threshold: int) -> tuple[list | None, str | None]:
     """(certs, reason)；certs 为 None 表示 certbot 这条来源不可用，[] 表示可用但确实没证书。"""
-    r = await run("certbot", ["certificates"], timeout=60)
+    r = await run("certbot", ["certificates"], timeout=CERTBOT_TIMEOUT)
     if r["code"] != 0:
         # 只带退出码与一小段摘要：certbot 的报错正文里满是 /etc/letsencrypt/... 绝对路径
         return None, f"certbot 不可用（exit {r['code']}）"

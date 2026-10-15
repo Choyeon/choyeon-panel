@@ -76,7 +76,12 @@ const { copy } = useCopy();
 .dsc-row + .dsc-row { border-top: 1px solid var(--cp-border); }
 .dsc-k {
   background: var(--cp-bg-soft); color: var(--cp-text-dim); font-size: var(--fs-xs);
-  padding: var(--space-2) var(--space-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding: var(--space-2) var(--space-3);
+  /* label 一 ellipsis 就等于这个值没有名字：窄屏那列是 40%（约 102px），而「构建产物目录
+     （monorepo 子目录）」这类要到 153px，手机上没 hover、也就没有 title 可看。
+     折行放在这里而不是挂 .cp-prose，是因为 scoped 的 .dsc-k[data-v-*] 与
+     .cp-prose.cp-prose 权重同为 0-2-0，谁赢取决于注入顺序（InfoList 里已经踩过一次）。 */
+  white-space: normal; word-break: break-word; min-width: 0;
   display: flex; align-items: center;
 }
 .dsc-v-cell {

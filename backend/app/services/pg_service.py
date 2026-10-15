@@ -143,18 +143,25 @@ async def psql(sql: str, db: str | None = None, quiet: bool = False) -> str:
         return out, err
 
     try:
-        out, err = await asyncio.wait_for(_collect(), timeout=psql_wall_timeout())
-    except TimeoutError:
-        kill_group(proc)
-        # from None：超时原因已经明确，不需要把 TimeoutError 的上下文再叠加上去
-        raise RuntimeError("psql 超时") from None
-    if proc.returncode == 0:
-        return out.decode(errors="replace").strip()
-    text = err.decode(errors="replace").strip()
-    if proc.returncode == 3:
-        # ON_ERROR_STOP 触发：把出错那条语句说清楚，别只甩一段 SQLSTATE
-        raise RuntimeError(text.split("\n")[0] or "SQL 执行出错，后续语句已中止")
-    raise RuntimeError(text or f"psql exit {proc.returncode}")
+        try:
+            out, err = await asyncio.wait_for(_collect(), timeout=psql_wall_timeout())
+        except TimeoutError:
+            # from None：超时原因已经明确，不需要把 TimeoutError 的上下文再叠加上去
+            raise RuntimeError("psql 超时") from None
+        if proc.returncode == 0:
+            return out.decode(errors="replace").strip()
+        text = err.decode(errors="replace").strip()
+        if proc.returncode == 3:
+            # ON_ERROR_STOP 触发：把出错那条语句说清楚，别只甩一段 SQLSTATE
+            raise RuntimeError(text.split("\n")[0] or "SQL 执行出错，后续语句已中止")
+        raise RuntimeError(text or f"psql exit {proc.returncode}")
+    finally:
+        # 和 util.run 同一条规矩：离开这个函数时孩子不能还活着。这里的路径比超时段
+        # 里那条多——被取消（关掉查询页）、_drain 报"输出过大"都会从这里出去，而这条
+        # 命令是 su → sh → psql 一整组，只收前台那个会留下还挂在 postgres 上的组。
+        # returncode 不是 None 就说明它已经自己走完了，不必再碰。
+        if proc.returncode is None:
+            kill_group(proc)
 
 
 async def psql_json(sql: str, db: str | None = None) -> list:
@@ -645,6 +652,9 @@ async def _rcli_raw(args: list) -> tuple[int, str]:
         kill_group(proc)
         raise RuntimeError("redis-cli 超时") from None
     finally:
+        # 同一个口径：被取消时也要先把孩子收掉再等它退出（上面那条超时就属于这一类）。
+        if proc.returncode is None:
+            kill_group(proc)
         await proc.wait()
     return proc.returncode or 0, out.decode(errors="replace")
 

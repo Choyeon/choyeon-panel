@@ -16,7 +16,9 @@ const lines = ref<string[]>([]);
 // null 表示"不传 lines，按服务端自己的默认来"。过去 200 与 2000 在这里各抄了一份，
 // 服务端把上限一改，输入框还允许填到旧数字，请求被静悄悄截断，画面看着像日志少了。
 const linesCount = ref<number | null>(null);
-const { data: logOpts } = useCachedFetch<{ lines_default: number; lines_max: number }>({
+// optsError 要说出来：清单没取到时 :max 是 undefined，输入框回到"随便填"，
+// 填超了的数字会被服务端悄悄截掉，画面看着就像日志少了一段。
+const { data: logOpts, error: optsError } = useCachedFetch<{ lines_default: number; lines_max: number }>({
   key: () => 'system:logopts',
   loader: () => req('/system/log-options'),
   maxAge: 300000,
@@ -133,6 +135,9 @@ onBeforeUnmount(() => {
       <NText depth="3" style="font-size: var(--fs-xs)">初始行数</NText>
       <NInputNumber v-model:value="linesCount" size="tiny" style="width: 92px; max-width: 100%" :min="10" :max="maxLines"
                     placeholder="默认" :input-props="{ 'aria-label': '初始加载日志行数' }" @update:value="onCountChange" />
+      <NText v-if="optsError" class="st warn" style="font-size: var(--fs-xs)" role="status">
+        <span class="dot warn"></span>行数上限没取到，超出服务端上限的部分会被截断
+      </NText>
       <NText depth="3" id="ls-autoscroll-label" style="font-size: var(--fs-xs)">自动滚动</NText>
       <NSwitch v-model:value="autoScroll" size="small" aria-labelledby="ls-autoscroll-label" />
       <span class="st" style="font-size: var(--fs-xs)" :class="streamState === 'live' ? 'ok' : streamState === 'retry' ? 'warn' : 'err'">

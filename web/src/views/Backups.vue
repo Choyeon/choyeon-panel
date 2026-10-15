@@ -45,12 +45,15 @@ const { data, error, loading, refreshing, refresh } = useCachedFetch<any[]>({
   loader: () => api.backups(),
   maxAge: 30000,
 });
-const { data: appsData, load: loadApps } = useCachedFetch<any[]>({
+const { data: appsData, error: appsError, load: loadApps } = useCachedFetch<any[]>({
   key: () => 'apps',
   loader: () => api.apps(),
   maxAge: 60000,
 });
 watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+// 这一份失败只影响下拉建议与目标名展示，不拦任何操作，所以是 warning 不是 error；
+// 但不说就成了另一回事：下拉空着，人只会以为这台机器上没有应用。
+watch(appsError, (e) => { if (e) msg.warning(`应用列表没取到，新建备份任务的下拉不会给建议：${(e as Error).message || String(e)}`); });
 // 原实现在 onMounted 里吞掉应用列表的错误（列表只影响下拉建议），保持一致
 void loadApps().catch(() => undefined);
 
