@@ -11,6 +11,7 @@ from .. import aio_db, config, locks
 from .. import database as dbm
 from ..util import (
     clean_abs_path,
+    human_bytes,
     is_branch,
     is_domain,
     is_git_url,
@@ -25,6 +26,7 @@ from ..util import (
     write_secret_atomic,
 )
 from . import nginx_ops, systemd_ops
+from .files_service import write_budget
 from .systemd_ops import is_active, service_action
 
 APP_ROOT = config.APP_ROOT
@@ -530,6 +532,67 @@ def _ensure_app_dir(i: dict, path: str) -> None:
     if i.get("repo_url") or os.path.isdir(path):
         return
     Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def _budget_probe_dir(path: str) -> str:
+    """落盘余量要问的是分区，而 clone 的目标目录此刻往往还不存在。
+
+    `os.statvfs` 只能问已经存在的路径，所以往上退到最近的真目录——分区是同一块。
+    """
+    d = os.path.abspath(path)
+    while d != os.path.dirname(d) and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    return d
+
+
+_MIN_DEPLOY_ROOM = 64 * 1024 * 1024
+
+
+def _assert_disk_room(dest: str, what: str) -> dict:
+    """clone / 装依赖这种"要写多少只有它自己知道"的步骤，动手前问同一个读者。
+
+    和备份、解包那些入口比的是同一个数：`write_budget()`，出处仍是设置页的
+    `alert_disk_pct`。这里没有声明值可比（仓库多大、npm 依赖装多大是外部决定的），
+    所以判的是余量本身：room 归零说明这块盘已经压过警戒线，再往下写就是把它顶穿；
+    room 只剩一点点同样要拒——半路的 ENOSPC 会把 node_modules 留在半份状态，
+    下一次的失败原因从"盘满了"变成"依赖装不上"，比原地拒绝更难查。所以另外要求
+    一个下限 `_MIN_DEPLOY_ROOM`：任何一次真实的 install（venv + 几个包 / npm 依赖）
+    都不止 64MB，够不到这个数就不是"这次部署小所以可以通融"。
+    面板以 root 运行，顶穿的第一现场往往是它自己的 SQLite，后果不是"这一次部署
+    失败"，是这台机器上所有业务一起停摆。
+    """
+    b = write_budget(dest)
+    if b["room"] < _MIN_DEPLOY_ROOM:
+        raise RuntimeError(
+            f"{what}要往 {dest} 所在分区写字节量未定的内容，而按磁盘警戒线 {b['line']}% "
+            f"只排得出 {human_bytes(b['room'])}（实际剩余 {human_bytes(b['avail'])}），"
+            f"低于一次安装至少需要的 {human_bytes(_MIN_DEPLOY_ROOM)}："
+            "先清理这块盘，或在设置页把磁盘告警阈值调到更贴近 100%；已拒绝，未写入任何文件"
+        )
+    return b
+
+
+def _discard_partial_checkout(path: str, dep_id: int, preserve: bool) -> None:
+    """这一次没拉成的目录，如果它在这之前根本不存在、而且连代码都没拉完，就删掉它。
+
+    留着比删掉更糟：下一次部署会对"已存在且非空"的目录执行 git clone 而当场失败
+    （那个拒绝本身是有意义的，见 `_ensure_app_dir` 的注释），用户只能先手工删目录，
+    而面板上看到的是一句看不出根因的失败。
+    `preserve` 是调用方给出的两种"不许动"：目录事先存在（里面可能是别人的工作区），
+    或者这一次代码已经完整拉到手（此时失败在装依赖/重启，盘上是可用的一份代码；
+    删掉它等于把用户已经等了几分钟的 clone 也一起扔掉）。
+    判据放在参数里而不是两条 except 各自记得，是因为漏一次就等于给"别人的目录"
+    装了删除路径。
+    """
+    if preserve:
+        return
+    try:
+        _check_not_protected(path)
+    except RuntimeError:
+        return
+    with suppress(OSError):
+        shutil.rmtree(path)
+        _append_log(dep_id, "==> 已删除这次没拉成的目录，下次部署从空目录重新开始")
 
 
 def create_app(i: dict) -> dict:
@@ -1348,13 +1411,25 @@ async def _deployment_body(app: dict, dep_id: int):
     # 这个应用的删除/回滚/改配置（批次⑤G 修的就是这个）。
     repo_dir = None
     before = None
+    # 失败收尾时判断"这个目录能不能删"的两个状态。初值取不许删那一侧：
+    # 在真值还没取到之前就出事，删掉别人工作区的代价远大于留一份半份代码。
+    path_existed = True
+    pulled = True
     try:
+        # 本次部署是不是这个目录的创建者（见 _discard_partial_checkout）。
+        # 必须在任何写盘动作之前取，clone 之后它就变成 True 了。
+        path_existed = os.path.isdir(app["path"])
         repo_dir = await resolve_repo_dir(app["path"])
         before = await _current_sha(repo_dir) if repo_dir else None
+        pulled = False  # 从现在起，这个目录里的内容可能只有这次没拉完的一半
         if app["repo_url"]:
             if repo_dir:
                 if repo_dir != app["path"]:
                     _append_log(dep_id, f"==> 仓库根 {repo_dir}（应用目录是其子目录，本次会更新整个仓库）")
+                # 已在盘的仓库走增量 fetch，写入量同样由上游决定（一次 rebase 能把对象撑大几倍）。
+                # 这一处也要问：拒在这里比拒在安装依赖更干净——一个字节都还没落，工作区和
+                # 跑着的服务都还是上一版，用户看到的失败没有"盘上已是新代码"这个尾巴。
+                _assert_disk_room(repo_dir, "拉取这个仓库的更新")
                 _append_log(dep_id, f"==> git fetch/checkout {app['branch']}")
                 r = await run("git", ["fetch", "origin", app["branch"]], cwd=repo_dir, timeout=GIT_FETCH_T)
                 if r["code"] != 0:
@@ -1369,6 +1444,8 @@ async def _deployment_body(app: dict, dep_id: int):
                     raise RuntimeError(r["out"])
                 _append_log(dep_id, r["out"])
             else:
+                # clone 之前目标目录通常还不存在，所以问分区要往上退到最近的真目录。
+                _assert_disk_room(_budget_probe_dir(app["path"]), "克隆这个仓库")
                 _append_log(dep_id, f"==> git clone -b {app['branch']} {app['repo_url']} -> {app['path']}")
                 r = await run(
                     "git",
@@ -1382,8 +1459,16 @@ async def _deployment_body(app: dict, dep_id: int):
             _append_log(dep_id, f"==> 跳过拉取（未配置仓库，使用现有目录 {app['path']}）")
         if not os.path.exists(app["path"]):
             raise RuntimeError(f"目录不存在: {app['path']}")
+        pulled = True  # 到这里代码是完整的一份（或这一趟根本没拉取），盘上的目录已经值得留下
 
-        _append_log(dep_id, f"==> 安装依赖 ({app['type']})")
+        # 装依赖是这一趟里真正能写几 GB 的一步（node_modules / venv），量级仍由外部决定：
+        # package.json 里有多少个包不由面板说了算。判不过就当场拒，此时工作区只是拉好了代码，
+        # 目录里没有半份依赖，下一次改完盘重跑是干净的。
+        _budget = _assert_disk_room(app["path"], "安装依赖")
+        _append_log(
+            dep_id,
+            f"==> 安装依赖 ({app['type']})（分区按警戒线 {_budget['line']}% 还能写 {human_bytes(_budget['room'])}）",
+        )
         default_install = (
             "npm install"
             if app["type"] == "node"
@@ -1436,6 +1521,7 @@ async def _deployment_body(app: dict, dep_id: int):
         with suppress(Exception):
             _append_log(dep_id, "!!! 部署任务被取消（调用方退出或面板关闭）")
             finish(False)
+            _discard_partial_checkout(app["path"], dep_id, path_existed or pulled)
         raise
     except Exception as e:  # noqa: BLE001
         _append_log(dep_id, f"!!! 部署失败: {e}")
@@ -1452,6 +1538,10 @@ async def _deployment_body(app: dict, dep_id: int):
             )
             _append_log(dep_id, "    如需回到部署前的版本，用「回滚」或 choyeonctl app rollback --id 部署记录")
         finish(False)
+        # 半份 clone 留在盘上只会把下一次部署变成一句看不出根因的"目录已存在且非空"。
+        # 放在最后一行：上面那段 before/after 判词依赖 repo_dir（目录事先存在才有），
+        # 而那正是这里不许删的情况，两者不会互相把对方的现场抹掉。
+        _discard_partial_checkout(app["path"], dep_id, path_existed or pulled)
 
 
 async def attach_ssl(app_id: int, email: str | None = None) -> str:

@@ -1,4 +1,3 @@
-import errno
 import gzip
 import json
 import os
@@ -422,19 +421,35 @@ def save_upload(bid: int, filename: str, data: bytes, overwrite: bool = False) -
     os.makedirs(BACKUP_DIR, exist_ok=True)
     dest = os.path.join(BACKUP_DIR, name)
     existed = os.path.lexists(dest)
-    if os.path.islink(dest) and not overwrite:
-        raise RuntimeError("目标是符号链接，拒绝覆盖")
+    if os.path.islink(dest):
+        # 一律拒绝。旧写法靠 O_NOFOLLOW 打开链接时得到 ELOOP 来兑现这句拒绝；
+        # 改成先写临时文件再 rename 之后必须显式挡在这里——replace 会把链接换成一个
+        # 真文件，等于替用户把"这份备份其实躺在别处"的线索抹掉。
+        raise RuntimeError("目标是符号链接，为避免写到别处已拒绝")
     if existed and not overwrite:
         raise RuntimeError(f"同名文件已存在：{name}")
-    # 与 files_service.write_text 同一套理由：检查与写入之间换一个链接就能把内容写到目录外
+    # 落盘余量：这是面板里最大宗的按声明值写入（整库 dump 常有几百 MB），
+    # 线仍是设置页那条 alert_disk_pct（同一个 write_budget 读者）。
+    assert_write_budget(BACKUP_DIR, len(data), "上传这份备份产物")
+    # 同目录临时文件 + os.replace：旧写法是 O_TRUNC 就地改写，一次中途失败（盘满、
+    # 进程被取消）会把上一份完好的备份改成半份，而半份文件的名字照样带 `bk<id>-` 前缀，
+    # 列表列得出来、恢复按钮点得动——用户是在"以为这里有一份好备份"的状态下点恢复的。
+    fd, tmp = tempfile.mkstemp(dir=BACKUP_DIR, prefix=f".{name}.", suffix=".tmp")
     try:
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o640)
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            raise RuntimeError("目标是符号链接，为避免写到别处已拒绝") from None
-        raise RuntimeError(f"写入失败：{e.strerror or e}") from e
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
+        try:
+            os.fchmod(fd, 0o640)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, dest)
+        except OSError as e:
+            raise RuntimeError(f"写入失败：{e.strerror or e}") from None
+    finally:
+        # replace 成功后这个 unlink 只会碰到"路径已经不在了"，suppress 掉即可；
+        # 真正的残留只发生在进程被 SIGKILL 掐在两步之间，那点字节由下一次清理目录的人处理。
+        with suppress(OSError):
+            os.unlink(tmp)
     return {"name": name, "size": len(data), "overwrote": existed}
 
 
