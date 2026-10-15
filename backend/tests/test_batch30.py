@@ -100,17 +100,23 @@ class TestListDirCap(_TmpRoot):
 
 
 class TestArchiveSpacePrecheck(_TmpRoot):
-    def test_refuses_when_free_space_is_below_the_source_size(self):
+    def test_refuses_when_the_alert_line_leaves_no_room(self):
         self._mk("app/index.js", b"z" * 4096)
         self._mk("app/big.js", b"z" * 8192)
-        # free 只有 1KB，源内容 12KB：必须在写下第一个字节之前就判掉
-        usage = type(shutil.disk_usage(self.root))  # 与真实返回值同一个 namedtuple
-        with mock.patch.object(
-            files_service.shutil, "disk_usage", return_value=usage(10**9, 10**9, 1024)
-        ):
+        # 1GB 的分区只剩 102MB（已用 931MB），而默认磁盘警戒线是已用量 80%（820MB）：
+        # 已经越过告警线，按警戒线算出的额度是 0，源内容 12KB 必须在写下第一个字节之前
+        # 就被判掉。批次㊲ 起这条界来自 alerts_service.disk_thresholds()，不再拿整块盘的
+        # 空闲当额度——后者允许 root 进程把盘写到只剩 1KB，第一个撞墙的是面板自己的 SQLite。
+        class _Vfs:
+            f_frsize = 4096
+            f_blocks = 262_144
+            f_bavail = 26_214
+
+        with mock.patch.object(files_service.os, "statvfs", lambda *_a: _Vfs()):
             with self.assertRaises(RuntimeError) as ctx:
                 files_service.make_archive([self._p("app", "index.js"), self._p("app", "big.js")])
-        self.assertIn("磁盘只剩", str(ctx.exception))
+        self.assertIn("警戒线", str(ctx.exception))
+        self.assertIn("未写入任何文件", str(ctx.exception))
         # 拒绝要留得干净：目录里不能剩下临时文件或半个产物
         left = [n for n in os.listdir(self._p("app")) if n.startswith(".") or n.endswith(".gz")]
         self.assertEqual(left, [], f"预检失败后仍留下了打包残留：{left}")

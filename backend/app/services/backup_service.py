@@ -19,7 +19,7 @@ from .. import database as dbm
 from ..log import warn
 from ..util import is_name, redact_creds, run, sh_escape, unit_env_value, unit_pct_escape, write_secret_atomic
 from . import systemd_ops
-from .files_service import iso_ms
+from .files_service import assert_write_budget, iso_ms
 from .pg_service import is_ident, psql
 
 BACKUP_DIR = config.BACKUP_DIR
@@ -866,6 +866,11 @@ async def _restore_app(bk: dict, src_file: str, log: list) -> None:
             )
         # 落点检查必须在停服务之前：拒绝一份穿越软链的归档不该顺带把线上服务停掉。
         await run_in_threadpool(_reject_symlink_ancestors, dest, members)
+        # 余量检查同样必须在停服务之前。恢复用的是「还能往这块盘写多少」这条界
+        # （出处：设置页的磁盘警戒线），而不是文件页那对固定上限 —— 这台机器上真实应用
+        # 目录就是 992M/上万文件，CP_MAX_EXTRACT_MB=512 与 5000 条会把正当恢复全挡在
+        # 门外；但一份声明要写 40GB 的归档在快满的盘上解包，代价是整机业务一起停。
+        assert_write_budget(dest, sum(m.size for m in members if m.isfile()), "恢复这份归档")
         stopped = restart = False
         restored = False
         try:

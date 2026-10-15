@@ -342,9 +342,15 @@ class TestAppArchiveMustHaveMembers(_Tmp):
 
         log: list[str] = []
         with ExitStack() as st:
-            st.enter_context(mock.patch.object(dbm, "query_one", return_value=self._app(9)))
-            # query_one 在这里无条件返回 app，恢复新增的"部署进行中"闸会把那条 running
-            # 部署的查询读成命中。闸本身由 test_batch28 覆盖，本用例只测 0 条目硬挡。
+            st.enter_context(
+                mock.patch.object(
+                    dbm, "query_one", lambda sql, *a: self._app(9) if "FROM apps" in str(sql) else None
+                )
+            )
+            # query_one 按 SQL 分流而不是无条件返回 app：恢复除了查应用还会查 settings
+            # （批次㊲ 的落盘余量要读磁盘警戒线），"什么都返回 app"的替身会让那次读取变成
+            # KeyError。同理，那条 running 部署的查询会被读成命中——闸本身由 test_batch28
+            # 覆盖，本用例只测 0 条目硬挡。
             st.enter_context(
                 mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None)
             )
@@ -367,7 +373,11 @@ class TestAppArchiveMustHaveMembers(_Tmp):
         tf.close()
         log: list[str] = []
         with ExitStack() as st:
-            st.enter_context(mock.patch.object(dbm, "query_one", return_value=self._app(10)))
+            st.enter_context(
+                mock.patch.object(
+                    dbm, "query_one", lambda sql, *a: self._app(10) if "FROM apps" in str(sql) else None
+                )
+            )
             st.enter_context(
                 mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None)
             )

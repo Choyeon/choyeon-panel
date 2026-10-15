@@ -154,13 +154,17 @@ const columns: any[] = [
   { title: '保留', key: 'keep', width: 70, render: (r: any) => h('span', { class: 'mono-dim' }, `${r.keep} 份`) },
   {
     title: '产物', key: 'files', width: 250,
-    render: (r: any) =>
-      r.files.length
-        ? h('div', { class: 'cell-txt' }, [
-            h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files.length} 份`),
-            h('div', { class: 'cell-sub' }, `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)} UTC`),
-          ])
-        : h('span', { class: 'cell-sub' }, '—'),
+    render: (r: any) => {
+      if (!r.files.length) return h('span', { class: 'cell-sub' }, '—');
+      // 这一行是一句带空格的话，不是一个词：375px 实测内容 249px、格子只有 226px，
+      // 而 .cell-sub 自带 nowrap+ellipsis，于是最近一次备份的时间被切成「合计 188.6 K… UTC」
+      // 这种谁都读不出来的形状。列上没有第二个入口（原来连 title 都没写），所以直接折行。
+      const sub = `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)} UTC`;
+      return h('div', { class: 'cell-txt' }, [
+        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files.length} 份`),
+        h('div', { class: 'cell-sub cp-prose', title: sub }, sub),
+      ]);
+    },
   },
   {
     title: '操作', key: 'ops', width: 230, align: 'center', fixed: 'right' as const,

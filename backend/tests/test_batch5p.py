@@ -264,10 +264,13 @@ class TestAppRestoreEnvHonesty(_Tmp):
             f.write('PW="current"\n')
         app = {"id": 7, "name": "p5p", "path": self.appdir, "unit_override": None}
         for p in (
-            mock.patch.object(dbm, "query_one", return_value=app),
-            # 这里的 query_one 是无条件返回 app，恢复新增的"部署进行中"闸会把 app 字典
-            # 误读成一条 running 部署记录。本用例测的是 .panel.env 的回写口径，闸本身
-            # 由批次㉘（test_batch28）单独覆盖。
+            # query_one 按 SQL 分流而不是无条件返回 app：恢复除了查应用还会查 settings
+            # （批次㊲ 的落盘余量要读磁盘警戒线），一个"什么都返回 app"的替身会让那次读取
+            # 变成 KeyError。同理，"部署进行中"闸会把 app 字典误读成一条 running 部署记录——
+            # 本用例测的是 .panel.env 的回写口径，闸本身由批次㉘（test_batch28）单独覆盖。
+            mock.patch.object(
+                dbm, "query_one", lambda sql, *a: app if "FROM apps" in str(sql) else None
+            ),
             mock.patch.object(apps_service, "_ensure_no_deployment", lambda *_a, **_kw: None),
             mock.patch.object(systemd_ops, "has_systemd", lambda: True),
             mock.patch.object(systemd_ops, "unit_state", _idle),

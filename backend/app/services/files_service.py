@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 from .. import config
+from ..util import human_bytes
 
 # 白名单要在源头归一成真实路径：CP_FILE_ROOTS 写 /root/www 而 www 本身是指向
 # /data/www 的符号链接时，safe_path 解析出的真实路径永远不可能以 /root/www 开头，
@@ -258,6 +259,48 @@ def _limit(total: int, count: int) -> None:
         )
 
 
+def write_budget(dest: str) -> dict:
+    """还能往 dest 所在分区写多少字节，以及这条线是谁划的。
+
+    线不是这里新造的：出处是设置页的 `alert_disk_pct`（alerts_service.disk_thresholds()["warn"]），
+    自检、存储占用对账、巡检告警用的都是它。面板以 root 运行，写满磁盘的代价是这台机器上
+    所有业务一起停摆（第一个写不进去的往往还是面板自己的 SQLite），所以任何"按别人给的
+    尺寸往盘上写"的入口都得先问这一句。
+    余量按 `f_bavail` 算（写不进去的都算已用，含 ext4 给 root 预留的那 5%），与
+    util.disk_usage_pct 同口径；用 `f_bfree` 会凭空多出一块永远写不了的地板。
+    """
+    from .alerts_service import disk_thresholds
+
+    line = disk_thresholds()["warn"]
+    try:
+        st = os.statvfs(dest)
+    except OSError as exc:
+        raise RuntimeError(f"读不到 {dest} 所在分区的剩余空间（{exc.strerror or exc}），无法确认落盘上限") from None
+    total = st.f_blocks * st.f_frsize
+    avail = st.f_bavail * st.f_frsize
+    if total <= 0:
+        raise RuntimeError(f"{dest} 所在分区报出的容量是 0，无法确认落盘上限")
+    # 警戒线是「已用量」的百分比（80 = 用到 80% 就该告警），所以能写到的上界是总量的
+    # line%，不是剩下的 (100-line)%。写成 (100 - line) 会把方向反掉：一块用了 51% 的
+    # 78GB 盘会算出 room=0，于是 992MB 的正当恢复和文件页打包全被自己的预检挡死。
+    ceiling = total * line // 100
+    return {"dest": dest, "line": line, "avail": avail, "room": max(0, ceiling - (total - avail))}
+
+
+def assert_write_budget(dest: str, need: int, what: str) -> None:
+    """`need` 字节写不进 {dest} 所在分区的余量就直接拒绝，一个字节都不落。
+
+    必须在动手之前判：解包中途失败留下"半份目录"比拒绝更糟（应用目录恢复没有整份快照可退）。
+    """
+    b = write_budget(dest)
+    if need > b["room"]:
+        raise RuntimeError(
+            f"{what}最多要写 {human_bytes(need)}，而 {dest} 所在分区按磁盘警戒线 {b['line']}% "
+            f"只能再容纳 {human_bytes(b['room'])}（实际剩余 {human_bytes(b['avail'])}）："
+            "先清理这块盘，或在设置页把磁盘告警阈值调到更贴近 100%；已拒绝，未写入任何文件"
+        )
+
+
 def extract_archive(p: str, into: str | None = None) -> dict:
     """解压 zip/tar(.gz/.bz2/.xz) 到目标目录，只接受落在目标内的常规文件。
 
@@ -265,6 +308,8 @@ def extract_archive(p: str, into: str | None = None) -> dict:
     用户看到失败却以为目录还是干净的。
     总量与条目数另有一道闸：包体受上传上限约束，但压缩比可以做到几千倍，
     一个 8MB 的包就能把 root 进程写满整块盘。
+    落盘余量是第三道闸（`assert_write_budget`）：固定上限挡的是"离谱的声明值"，
+    而一块本来就快满的盘需要的判据是"还能写多少"，两条都要有。
     """
     src = safe_path(p)
     if not os.path.isfile(src):
@@ -278,7 +323,9 @@ def extract_archive(p: str, into: str | None = None) -> dict:
 
         with zipfile.ZipFile(src) as z:
             infos = [i for i in z.infolist() if not i.is_dir()]
-            _limit(sum(i.file_size for i in infos), len(infos))
+            declared = sum(i.file_size for i in infos)
+            _limit(declared, len(infos))
+            assert_write_budget(real_dest, declared, "解压这个包")
             for info in infos:
                 mode = info.external_attr >> 16
                 if stat.S_ISLNK(mode):
@@ -312,7 +359,9 @@ def extract_archive(p: str, into: str | None = None) -> dict:
             raise RuntimeError("只支持 .zip 与 .tar/.tar.gz/.tar.bz2/.tar.xz") from None
         with tf:
             members = tf.getmembers()
-            _limit(sum(m.size for m in members if m.isfile()), len(members))
+            declared = sum(m.size for m in members if m.isfile())
+            _limit(declared, len(members))
+            assert_write_budget(real_dest, declared, "解压这个包")
             for m in members:
                 if not (m.isfile() or m.isdir()):
                     raise RuntimeError(f"压缩包内含特殊文件（链接/设备），已拒绝：{m.name[:60]}")
@@ -365,13 +414,10 @@ def make_archive(paths: list[str], out_name: str = "archive.tar.gz") -> dict:
     # 的代价是这台机器上所有业务一起停摆，而不是这一次请求失败。gzip 产物不会大于源
     # 内容，所以源尺寸就是上界；真的算漏了（比如中途别人写满）由下面的 OSError 分支
     # 兜住——它会删掉临时文件并把 ENOSPC 原样报出来。
-    free = shutil.disk_usage(common).free
-    need = _estimate_archive_bytes(picked, free)
-    if need > free:
-        raise RuntimeError(
-            f"磁盘只剩 {free // 1024 // 1024}MB，打包这些内容最多还要写约 "
-            f"{need // 1024 // 1024}MB：先清理，或者少选一些条目"
-        )
+    # 界从 write_budget 取，不再拿"整块盘的空闲"当额度：写到警戒线以下就该停手，
+    # 而不是把盘写到只剩 1KB 才撞到 ENOSPC（那时面板自己的 SQLite 也写不进去了）。
+    need = _estimate_archive_bytes(picked, write_budget(common)["room"])
+    assert_write_budget(common, need, "打包这些内容")
     # 带线程号：打包跑在线程池里，两个并发请求选中同一个目录时只用 pid 会撞在
     # 同一个临时文件上，tar 互相截断，两边都"成功"，产物却都是坏的。
     tmp = os.path.join(common, f".{safe_name(out_name)}.{os.getpid()}.{threading.get_ident()}.tmp")

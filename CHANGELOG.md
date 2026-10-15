@@ -1087,6 +1087,58 @@
   不是面板缺陷）；唯一 fail 是「改动未生效」项点名的 `unattended-upgrades.service`——安全库装了
   新版而进程还踩着旧映射，需要人工挑时间重启，面板不代做。
 
+- 后端：`files_service.write_budget()` / `assert_write_budget()` 成为「这块盘按管理员自己划的
+  警戒线还能写多少」的唯一读者，打包、解压（zip 与 tar 两条分支）、应用目录恢复三个写入者
+  共用它。此前只有前两个有界：恢复走 `backup_service._restore_app` → `_tar_checked` →
+  `extractall`，只验条目类型与路径，一份头部声明要写 40GB 的归档会以 root 身份一路解到底，
+  代价不是这次请求失败而是整机业务一起写不进去（第一个撞墙的是面板自己的 SQLite）。
+  没有把文件页那对固定上限搬到恢复上：这台机器真实应用目录就是 992M / 上万文件
+  （`du` 实测 Rosetta 992M、frontend 759M、choyeon-video 748M），`CP_MAX_EXTRACT_MB=512` 与
+  `CP_MAX_EXTRACT_FILES=5000` 会把正当恢复全挡在门外——恢复要的判据是"还能写多少"而不是
+  "包有多大"。余量按 `f_bavail` 算（与 `util.disk_usage_pct` 同口径，含 ext4 给 root 预留的
+  那 5%），用 `f_bfree` 会凭空多出一块永远写不到的地板；分区读不到剩余空间时直接拒，
+  不粉饰成"检查通过"。三个检查全部排在停服务之前：半份目录比拒绝更糟，而应用目录恢复
+  没有整份快照可退。
+- 这条界的方向错过一次，如实记下：`alert_disk_pct=80` 读作"已用量到 80% 才告警"，可写的上界
+  是总量的 80%；第一版写成 `total * (100 - line) // 100`，线上这块 49GB、已用约 11GB 的盘当场
+  算出 `room=0B`——不报错，只是把打包、解压、恢复三个入口一起静默封死。测试用例通过不代表
+  方向对（断言里用的是同一个表达式），是拿真实应用目录复验才看见的；现在方向钉成具体字节数
+  （假 statvfs 造一块"100GiB 总量、已用 51%"的盘，要求 `room` 恰为 29GiB），线上再复验一次。
+- 前端：备份任务「产物」列在 375px 下内容 249px 压进 226px 的格子，`.cell-sub` 自带
+  nowrap+ellipsis，最近一次备份时间被切成「合计 188.6 K… UTC」，列上连 `title` 都没写、
+  手机上也没有第二个入口；改用 `cell-sub cp-prose` 折行并把整句挂进 `title`。
+- 前端守卫的覆盖面补上渲染函数形态：㊱B 那条"nowrap 类必须挂换行触发器"只扫模板里的
+  `class="…"`，而表格格子大量写在 `h()` 里、形态是 `class: '…'`——414 处渲染函数 class 属性里
+  170 处带 nowrap 类，其中 112 处既没触发器也没 `title`，整批在闸外。这 112 处绝大多数是
+  结构上短的值（'—'、'NULL'、`pid 1234`、一个时间戳），折行对它们没有意义，所以不一刀切改名，
+  而是把 112 打成只能收紧的棘轮。同一轮扫描顺带把"用了却没有任何规则命中的 class token"
+  点成封闭集合（28 个，全是标在 naive 组件根节点上的命名钩子），下次再写出
+  `class="cell-sub ls-wrap2"` 这种"以为是触发器"的死名字会直接失败。
+- 段选（概览的指标与历史区间）在窄屏只补了高度，375px 实测 `1h/6h/24h/7d` 宽 38~39px，
+  拇指落在两档中间就会选错区间；`.cp-seg > button` 的窄屏规则一并补 `min-width: 44px`。
+- 三处旧测试的 `dbm.query_one` 替身按 SQL 分流（`test_batch30` / `test_batch5p` / `test_batch5q`）：
+  它们无条件返回 app 字典，恢复新增的 settings 读取（取磁盘警戒线）因此变成 `KeyError: 'value'`。
+  改成只在 `FROM apps` 时命中，其余返回 `None` 走默认值。
+- 新增回归测试：`backend/tests/test_batch37.py`（11 条）。行为守卫是真的：界内正好放行、越界一位
+  就拒；真造一份 8192 字节的 tar.gz 读索引后拒绝，目标目录 `os.listdir()` 仍是空；分区读不到
+  剩余空间时报错而不是放行。静态形状守卫盯住三个写入者只剩一个读者（`assert_write_budget`
+  在解压两处、打包一处、恢复一处）、打包预检不再拿 `shutil.disk_usage().free` 当额度、恢复的
+  检查顺序排在 `_stop_for_overwrite` 与 `extractall` 之前，以及 `.cp-break`/`.cp-prose` 的
+  双类名打法（单类名回到 0-1-0 会被 `.cell-sub` 自己的 nowrap 压回去）。
+- 线上复验（375px 同源 iframe 实测，非构建通过即交付）：备份页「产物」列 2 个格子
+  `white-space: normal`、226px 内容装进 226px 盒子、2 个行框、`title` 齐；概览两组段选
+  48x44 与 44/44/45/44x44，页面 `documentElement.scrollWidth` 仍是 375（无新增横向溢出）；
+  自检页 0 个小于 44px 的按钮。后端以部署后的代码对真实应用目录复验：
+  `/root/www/Rosetta` 得 `line 80 / avail 38.1GB / room 28.3GB`，992MB 的正当恢复放行，
+  40GB 的声明值拒绝并点名「磁盘告警阈值」这个可调旋钮。
+  `pytest` 2506 passed / 1244 subtests，`ruff` All checks passed，`web` 构建 58.69s、产物
+  2198KB → gzip 672KB（-69.4%），`choyeonctl upgrade --no-pull --json` 返回
+  `{"ok": true, "healthy": true}`。`choyeonctl doctor --json` 两次实测分别是
+  `{'pass': 17, 'warn': 2, 'fail': 1}` 与 `{'pass': 16, 'warn': 3, 'fail': 1}`：warn 是 3 个待装
+  安全更新、24 小时内 18894 次失败认证来自 33 个地址、5.4% steal（后两条是这台机器的公网处境，
+  不是面板缺陷）；唯一 fail 是「改动未生效」项点名的 `unattended-upgrades.service`——安全库装了
+  新版而进程还踩着换掉之前的那份映射，需要人工挑时间重启，面板不代做。
+
 ## [1.1.10] - 2026-10-12
 
 本轮的改动集中在三处：认证与会话的安全边界、移动端触控与窄屏版式、仓库门面（品牌资产与 README）。

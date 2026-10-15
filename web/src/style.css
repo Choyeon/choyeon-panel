@@ -624,8 +624,11 @@ html.cp-vt *::after {
   /* 抽屉里的导航行本来就是给手指用的 */
   .n-drawer .n-menu-item-content { min-height: 48px; }
   /* 段选（流量 / 磁盘 IO、历史区间）是这批里剩下最小的自绘控件，实测 25px 高。
-     它装在卡片头部的 header-extra 里，标题行本身有余量，补到 44 只是把卡片头撑高一点。 */
-  .cp-seg > button { min-height: 44px; }
+     它装在卡片头部的 header-extra 里，标题行本身有余量，补到 44 只是把卡片头撑高一点。
+     宽度同补：375px 实测概览的「流量/磁盘 IO」是 48/65px 宽、「1h/6h/24h/7d」是 38~39px 宽，
+     拇指落在两个档中间就会选错指标或选错区间；四档一共只多 24px，而 header-extra 已经允许换行。
+     （线上复验：375px 下概览两组段选实测 48x44 / 65x44 与 44x44 ×4，页面 scrollWidth 仍是 375。） */
+  .cp-seg > button { min-height: 44px; min-width: 44px; }
   /* 二级页签桌面档 35px。PageTabBar 的 scoped 样式只设 padding/min-width，没设 min-height，
      所以这里的全局规则不会和它抢；.ptb-tabs 本身 flex-wrap，补高不产生横向溢出。 */
   .ptb-tab { min-height: 44px; }
