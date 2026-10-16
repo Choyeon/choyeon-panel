@@ -120,10 +120,8 @@ FILE_ROOTS = _paths("CP_FILE_ROOTS", "/root/www,/etc/nginx,/root/backups/panel")
 LOG_ROOTS = _paths("CP_LOG_ROOTS", "/var/log/nginx")
 WEB_DIST = BASE / "web" / "dist"
 AVATAR_DIR = str(Path(DATA_DIR) / "avatars")
-SYS_HELPER = BASE / "backend" / "python" / "sys_helper.py"
 
 # ---------- 外部命令 ----------
-PYTHON = os.environ.get("CP_PYTHON", "python3").strip() or "python3"
 UNIT_DIR = _path("CP_UNIT_DIR", "/etc/systemd/system")
 NGINX_CONF_DIRS = _paths("CP_NGINX_CONF_DIRS", "/etc/nginx/conf.d,/etc/nginx/sites-available")
 TLS_DIR = _path("CP_TLS_DIR", "/etc/letsencrypt/live")
@@ -176,32 +174,3 @@ CLOUD_PROBE_TIMEOUT_SEC = _int("CP_CLOUD_PROBE_TIMEOUT_SEC", 20, 3, 300)
 HSTS = _bool("CP_HSTS")
 
 VERSION = "1.1.10"
-
-
-def as_dict() -> dict:
-    """用于 /api/health 与排障：仅暴露非敏感配置。"""
-    return {
-        "version": VERSION,
-        "host": HOST,
-        "port": PORT,
-        "trustProxy": TRUST_PROXY,
-        "trustedProxies": TRUSTED_PROXIES,
-        "log": LOG,
-        "dataDir": DATA_DIR,
-        "appRoot": APP_ROOT,
-        "backupDir": BACKUP_DIR,
-        "fileRoots": FILE_ROOTS,
-        "logRoots": LOG_ROOTS,
-        # 前端上传前先按这个额度拦一道，免得用户传完 300MB 才被服务端拒绝
-        "maxUploadBytes": MAX_UPLOAD_BYTES,
-        "maxBodyBytes": MAX_BODY_BYTES,
-        "terminalMaxSessions": TERMINAL_MAX_SESSIONS,
-        "unitDir": UNIT_DIR,
-        "python": PYTHON,
-        "webDist": str(WEB_DIST),
-        "webBuilt": WEB_DIST.exists(),
-        "tokenTtlHours": TOKEN_TTL_HOURS,
-        # 备份页要说清"推送最多等多久"，也让前端能在超过单文件上限前就拦住一次注定失败的上传
-        "cloudPushTimeoutSec": CLOUD_PUSH_TIMEOUT_SEC,
-        "cloudProbeTimeoutSec": CLOUD_PROBE_TIMEOUT_SEC,
-    }

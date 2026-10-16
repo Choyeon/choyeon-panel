@@ -244,29 +244,13 @@ a:focus-visible,
    和 <pre> 的默认外边距。备份页与定时任务页原先各抄了一份完整定义，
    连 14px/16px 的紧凑行高也一起抄了两遍——现在六块日志区是同一个形态。 */
 .log-drawer { margin: 0; height: max(220px, calc(100vh - 420px)); }
-.stat-num {
-  font-size: 24px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
 .mono {
   font-family: var(--font-mono);
 }
 
-/* 表格/列表行里只占一行的等宽值（文件名、命令、commit）：给一个可复用的截断类，
-   避免各处再手写 nowrap 时漏掉 overflow，最后一列被 td 裁半截。 */
-.mono-1l {
-  font-family: var(--font-mono);
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* 长等宽串（哈希、URL、cron 表达式、命令行）换行而不是裁掉：nowrap 会撑破 td，
    不给 break-all 就只能看到一个截半截的字符串。
-   两个类名是刻意的，不是笔误：`.mono-dim`、`.cell-sub`、`.mono-1l` 都写着
+   两个类名是刻意的，不是笔误：`.mono-dim`、`.cell-sub` 都写着
    `white-space: nowrap`，同权重的规则靠先后顺序决胜——`.cp-break` 原本写在它们前面，
    于是线上实测五处「声明了要换行、其实一个字都没换」的格子（cron 的命令与表达式、
    日志页的 unit 名、设置页的单元名、告警页的来源码）。写在后面也一样会死：下一次有人
@@ -477,16 +461,10 @@ button.cell-name > .n-button__content {
 }
 .tbl-apps { --chrome-extra: 0px; }
 .tbl-services { --chrome-extra: 44px; }
-.tbl-users { --chrome-extra: 44px; }
-.tbl-files { --chrome-extra: 144px; }
-.tbl-backup-files { --chrome-extra: 108px; }
-.tbl-audit { --chrome-extra: 72px; }
-/* 数据库页的表格在 NCard + NTabs 里：页签条与 pane 内边距要扣，三个层级的表格
-   之上还各有工具行，所以给三档。 */
-.tbl-dbs-list { --chrome-extra: 96px; }
+/* 数据库页的表格在 NCard + NTabs 里：页签条与 pane 内边距要扣，两张表
+   之上还各有工具行，所以给两档（列表与键那张改走 useTableHeight() 量真实高度，档位删了）。 */
 .tbl-dbs-browse { --chrome-extra: 136px; }
 .tbl-dbs-data { --chrome-extra: 176px; }
-.tbl-dbs-keys { --chrome-extra: 136px; }
 
 /* 页面切换动效（Shell 中 transition name="page"） */
 .page-enter-active,

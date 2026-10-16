@@ -615,9 +615,9 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         return {"ok": True, "file": latest}
 
     if a.backup_cmd == "list":
-        # 与 doctor 的 _recent_backups 保持同一套后缀，
+        # 后缀的唯一出处在 backup_service：自检项与这里必须数同一批文件，
         # 否则 `backup list` 只列 tar 包，定时跑出来的 PG 备份在 CLI 里像不存在一样。
-        suffixes = (".tar.gz", ".sql.gz", ".dump.gz", ".sql", ".dump", ".gz")
+        suffixes = backup_service.ARTIFACT_SUFFIXES
         files = [
             f
             for f in Path(config.BACKUP_DIR).glob("**/*")

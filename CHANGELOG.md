@@ -1556,6 +1556,24 @@
   让固定列退回普通单元格跟着横向滚动一起走并清掉吸边阴影，一处改掉全站 12 个视图 15 个固定列；
   桌面档行为不变，按钮仍在手边。
 
+- 清掉一批「构建全绿但其实没人调用」的死代码（批次㊼C 的静态审计结论）：
+  `backend/python/sys_helper.py` 是⑰A 把指标采集改成进程内 psutil + 读 `/proc` 之后留下的第二套解析器，
+  生产里再没有一处 fork 它，只有两个测试文件还在给它续命（`_cpu_total` 跳过 guest 这条真规则由
+  `test_batch17a` 的活体用例守着，删掉的是对着死代码的那两条）；`config.as_dict()` 的 docstring 写着
+  「用于 /api/health」，而 health 早就自己拼返回体了，于是那条「as_dict 不许泄密」的守卫保护的是一台
+  没人开的机器；`util.is_ident` 与 `pg_service.is_ident` 同名不同规（前者不收大写），生产五个调用点全部
+  走 pg_service，util 那份只剩测试引用；`web/src/api.ts` 的 `overview` 包装零调用（概览页直接 `req`）；
+  `style.css` 里六条 `.tbl-*` 的 `--chrome-extra` 没有任何模板再挂它——那几张表后来都改走
+  `useTableHeight()` 量真实高度，留着只会让人以为调数值有效果，`.stat-num`/`.mono-1l` 同理。
+- 顺手把两处靠注释维持的一致收成一处：备份产物后缀原先在 `cli.py` 与 `routers/meta.py` 各写一份字面量
+  （注释里还写着「与 doctor 保持同一套后缀」），现在只有 `backup_service.ARTIFACT_SUFFIXES`；
+  没用的 `CP_PYTHON` 旋钮一并从 `.env.example`、unit 模板与 README 的环境变量表里撤掉——
+  它唯一的读者就是上面那个死掉的 `as_dict()`，而备份真正用的是 `backup_service.PYTHON_BIN`（venv 优先）。
+- `backend/tests/test_batch48.py`（8 条）钉住这次审计发现的两个守卫盲区：死类名守卫原本只查「代码用了、
+  CSS 没定义」，不查「CSS 定义了、代码没人挂」，所以那六条 `--chrome-extra` 才能无声沉淀；`api.ts` 的包装
+  有没有人调用此前完全没人查（端点活着不等于包装活着）。再加一条「同一份字面量只许出现一次」与一条
+  「删掉的死代码不许被重新引用」。
+
 ## [1.1.10] - 2026-10-12
 
 本轮的改动集中在三处：认证与会话的安全边界、移动端触控与窄屏版式、仓库门面（品牌资产与 README）。

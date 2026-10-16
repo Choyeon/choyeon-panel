@@ -15,7 +15,6 @@ Environment=CP_PORT=3210
 Environment=CP_TRUST_PROXY=1
 Environment=CP_DATA_DIR=/root/choyeon-panel/data
 Environment=CP_FILE_ROOTS=/root/www,/etc/nginx,/root/backups/panel
-Environment=CP_PYTHON=/root/choyeon-panel/backend/.venv/bin/python
 ExecStart=/root/choyeon-panel/backend/.venv/bin/python -m app.main
 Restart=always
 RestartSec=3

@@ -180,7 +180,6 @@ export const api = {
     request('/auth/avatar', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/octet-stream' }), body: blob }, 60000).then(parse),
   info: () => req('/system/info'),
   stats: () => req('/system/stats'),
-  overview: () => req('/system/overview'),
   services: () => req('/system/services'),
   // 开机自启状态：list-units 的输出里没有这一列，只能单独走 list-unit-files（服务端 30s 缓存）
   unitFiles: () => req('/system/unit-files'),

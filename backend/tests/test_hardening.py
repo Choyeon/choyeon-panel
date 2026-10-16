@@ -273,21 +273,6 @@ class TestConfigParsers(unittest.TestCase):
         got = config._paths("CP_TEST_PATHS", "/root/www")
         self.assertEqual(got, ["/srv/a", "/srv/b"], "相对路径应被丢弃且结果去重")
 
-    def test_as_dict_leaks_no_secret(self):
-        allowed = {
-            "version", "host", "port", "trustProxy", "log", "dataDir", "appRoot",
-            "backupDir", "fileRoots", "logRoots", "unitDir", "python", "webDist", "webBuilt",
-            "tokenTtlHours", "maxUploadBytes", "maxBodyBytes", "terminalMaxSessions",
-            # ⑤R：可信任反代列表。它是"哪些源 IP 的 X-Forwarded-For 可以采信"的开关，
-            # 不是密钥；doctor/设置页要展示它才知道限速现在认不认头。
-            "trustedProxies",
-            # ㊸：异地推送的两条时限。备份页要说清"推送最多等多久"，这个数字只能有一个
-            # 出处（config.py），写死在前端就会和 .env 改过的值对不上；两个都是秒数，不是凭据。
-            "cloudPushTimeoutSec", "cloudProbeTimeoutSec",
-        }
-        self.assertEqual(set(config.as_dict()) - allowed, set(), "as_dict 出现了未登记的配置项")
-        self.assertTrue(config.VERSION, "版本号不应为空")
-
 
 # ---------------------------------------------------------------- 令牌吊销
 class TestTokenRevocation(unittest.TestCase):

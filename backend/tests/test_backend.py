@@ -10,9 +10,9 @@ os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_ut_"))
 os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_backend_roots_"))
 
 from app import config, security  # noqa: E402
-from app.services import apps_service, nginx_ops  # noqa: E402
+from app.services import apps_service, nginx_ops, pg_service  # noqa: E402
 from app.services.files_service import safe_path  # noqa: E402
-from app.util import is_domain, is_git_url, is_ident, is_name, is_port, is_unit, sh_escape  # noqa: E402
+from app.util import is_domain, is_git_url, is_name, is_port, is_unit, sh_escape  # noqa: E402
 
 APP = {
     "id": 1,
@@ -48,8 +48,9 @@ class TestValidators(unittest.TestCase):
     def test_unit_ident_giturl(self):
         self.assertTrue(is_unit("nginx.service"))
         self.assertTrue(is_unit("panel-demo-app.service"))
-        self.assertTrue(is_ident("rosetta"))
-        self.assertFalse(is_ident("Ro-setta"))
+        # 标识符规则只有 pg_service 一份出处（util 那份不接受大写，与生产用的那条不一致，已删）
+        self.assertTrue(pg_service.is_ident("rosetta"))
+        self.assertFalse(pg_service.is_ident("Ro-setta"))
         self.assertTrue(is_git_url("https://github.com/a/b.git"))
         self.assertTrue(is_git_url("git@github.com:a/b.git"))
         self.assertTrue(is_git_url("/srv/local-repo"))

@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import inspect
 import os
-import sys
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -42,10 +41,6 @@ os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_batch17a_"))
 os.environ.setdefault("CP_FILE_ROOTS", tempfile.mkdtemp(prefix="cp_batch17a_roots_"))
 
 import unittest  # noqa: E402
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-
-import sys_helper  # noqa: E402
 
 import cli  # noqa: E402
 from app.services import exposure_service as ex  # noqa: E402
@@ -283,16 +278,7 @@ class _Times:
 
 
 class GuestTimeTests(unittest.TestCase):
-    STAT_WITH_GUEST = "cpu  100 10 50 800 20 5 15 30 40 8\n"
     # 前八项之和 = 1030；把 guest(40)/guest_nice(8) 再加一遍会得到 1078。
-
-    def test_sys_helper_excludes_guest_from_total(self):
-        got = sys_helper.parse_stat(self.STAT_WITH_GUEST)
-        self.assertEqual(got["total"], 1030)
-        self.assertEqual(got["idle"], 820)
-
-    def test_sys_helper_short_line_unchanged(self):
-        self.assertEqual(sys_helper.parse_stat("cpu  1 2 3 4\n")["total"], 10)
 
     def test_metrics_cpu_total_skips_guest_fields(self):
         t = _Times(user=100, nice=10, system=50, idle=800, iowait=20,

@@ -38,6 +38,11 @@ PYTHON_BIN = _VENV_PY if os.path.exists(_VENV_PY) else sys.executable
 # 与 backups.kind 的 CHECK 约束保持一致（database.py 建表 + 迁移都按这份）
 KINDS = ("pg", "app", "sqlite")
 
+# 备份产物的后缀（唯一出处）：backup_runner 真正写出的三类，加上早年直接扔进目录的裸文件。
+# `choyeonctl backup list` 与自检项「备份」都读这一个常量：各写一份字面量时，CLI 只列 tar 包，
+# 定时跑出来的 PG 备份在终端里像不存在一样。
+ARTIFACT_SUFFIXES = (".tar.gz", ".sql.gz", ".dump.gz", ".sql", ".dump", ".gz")
+
 # 手工上传产物时各类型接受的扩展名，必须与 _restoreable 一一对齐：
 # 传了恢复不了的文件只会躺在备份目录里占名额，前端只能把按钮置灰。
 _UPLOAD_SUFFIXES = {

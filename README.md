@@ -201,7 +201,6 @@ backend/
   cli.py               choyeonctl：命令行部署/账号/应用/备份/自检，全命令支持 --json
   backup_runner.py     备份 CLI（systemd timer 调用）
   run_tests.py         测试入口（隔离数据目录 + 退出清理；make test 与 CI 都走它）
-  python/sys_helper.py 系统指标采集（仅标准库）
   tests/               unittest 套件（依赖见 requirements-dev.txt，测试专用）
   requirements-dev.txt 测试/开发依赖（不进生产 requirements.txt，别用 venv_create 装）
 bin/choyeonctl         命令行入口（安装后软链到 /usr/local/bin）
@@ -247,7 +246,6 @@ LICENSE                MIT
 | `CP_SQLITE_SCAN_BUDGET_SEC` | `20` | 同一次扫描的时间上界 |
 | `CP_TERMINAL_MAX_SESSIONS` | `4` | 并发终端会话上限 |
 | `CP_AUDIT_KEEP` | `5000` | 审计日志保留条数 |
-| `CP_PYTHON` | `python3` | 系统指标采集解释器 |
 
 > 优先级：内置默认 < `.env` < 进程环境变量（systemd 的 `Environment=`）。
 

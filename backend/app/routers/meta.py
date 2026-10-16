@@ -21,6 +21,7 @@ from .. import database as dbm
 from ..log import warn
 from ..services import (
     alerts_service,
+    backup_service,
     cert_ops,
     exposure_service,
     firewall_service,
@@ -74,7 +75,7 @@ def _recent_backups() -> tuple[int, float | None]:
     会被判成"还没有备份"，而且"最近一次备份是几天前"是按 tar 包算的，
     刚跑完的 PG 备份不算数，容易误报陈旧。
     """
-    suffixes = (".tar.gz", ".sql.gz", ".dump.gz", ".sql", ".dump", ".gz")
+    suffixes = backup_service.ARTIFACT_SUFFIXES
     files: list[str] = []
     for p in glob.iglob(f"{config.BACKUP_DIR}/**/*", recursive=True):
         if p.endswith(suffixes) and os.path.isfile(p):
