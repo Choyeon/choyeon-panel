@@ -7,6 +7,7 @@ import { NButton } from '../ui';
 import { getRole, req, siteHref } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
+import CopyButton from '../components/CopyButton.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import { fmtDateTime } from '../composables/useFormat';
 
@@ -18,6 +19,9 @@ import { fmtDateTime } from '../composables/useFormat';
 const api = {
   sites: () => req('/sites', { timeout: 30000 }),
   ssl: () => req('/ssl/certs', { timeout: 60000 }),
+  // 对账一轮要扫 nginx 配置、跑一次 ss、读一遍证书清单，上限给到 120s：
+  // 前端先 abort 的话，用户看到的是「对账失败」，而后端那轮探测其实照样跑完并写进缓存。
+  audit: (refresh: boolean) => req('/site-audit' + (refresh ? '?refresh=1' : ''), { timeout: 120000 }),
   config: (domain: string) => req(`/sites/${encodeURIComponent(domain)}/config`),
   apply: (id: number) => req(`/sites/${id}/apply`, { body: {}, timeout: 60000 }),
   remove: (id: number) => req(`/sites/${id}/vhost`, { method: 'DELETE', timeout: 60000 }),
@@ -311,9 +315,186 @@ const certColumns: any[] = [
   },
 ];
 
+/* ---------------------------------------------------------------- 站点链路对账 */
+/**
+ * 上面两张表各答一段：站点列表说「nginx 里有这个 server_name」，证书表说「这张证书还剩几天」。
+ * 这一卡答中间那段——域名被访问时到底拿不拿得到响应。判词全部来自后端
+ * `site_audit_service.audit()`（与自检项「站点链路」、`choyeonctl site-audit` 同一份），
+ * 页面不解析 nginx、不数端口、不算证书天数：同一个事实两处判断，阈值一改就分叉。
+ */
+const auditData = ref<any | null>(null);
+const auditErr = ref<string | null>(null);
+const loadingAudit = ref(false);
+// 「知道就好」那一档（异地目标、面板外 vhost）与要紧项混在同一个 findings 里，默认收起：
+// 一屏黄条会让人把真正的 502 也当成背景噪音。
+const showInfo = ref(false);
+
+async function loadAudit(refresh = false) {
+  loadingAudit.value = true;
+  try {
+    auditData.value = await api.audit(refresh);
+    auditErr.value = null;
+  } catch (e: any) {
+    auditErr.value = e.message;
+  } finally {
+    loadingAudit.value = false;
+  }
+}
+
+const SEVERITY: Record<string, { text: string; type: any; icon: string }> = {
+  risk: { text: '要紧', type: 'error', icon: 'ShieldOutline' },
+  warn: { text: '值得处理', type: 'warning', icon: 'WarningOutline' },
+  info: { text: '知道就好', type: 'default', icon: 'InformationCircleOutline' },
+};
+const sevOf = (k: string) => SEVERITY[k] || SEVERITY.info;
+
+const auditFindings = computed<any[]>(() => auditData.value?.findings ?? []);
+const auditLinks = computed<any[]>(() => auditData.value?.links ?? []);
+const auditCounts = computed(() => auditData.value?.counts ?? { risk: 0, warn: 0, info: 0 });
+const shownFindings = computed(() =>
+  (showInfo.value ? auditFindings.value : auditFindings.value.filter((f: any) => f.severity !== 'info')));
+
+/** 三条判据各自的来路：任何一条读不到，靠它的那类判词就只能标未确认，必须显出来。 */
+const auditFacts = computed(() => {
+  const d: any = auditData.value;
+  if (!d) return [];
+  const ng = d.nginx || {};
+  const li = d.listen || {};
+  const ce = d.certs || {};
+  return [
+    {
+      k: '配置',
+      ok: !!ng.ok,
+      good: `${ng.files} 份配置 · ${ng.domains} 个域名`,
+      bad: ng.reason || '读不到 nginx 配置',
+    },
+    {
+      k: '监听表',
+      ok: !!li.ok,
+      good: `${li.ports} 个端口在听`,
+      bad: `${li.reason || '监听表读不到'}——这一轮反代目标全部标未确认，不等于都在听`,
+    },
+    {
+      k: '证书清单',
+      ok: !!ce.ok,
+      good: `覆盖 ${ce.domains} 个域名（到期天数以下方证书表为准）`,
+      bad: `${ce.reason || '证书清单读不到'}——这一轮覆盖关系判不了`,
+    },
+  ];
+});
+const auditBlind = computed(() => auditFacts.value.filter((f: any) => !f.ok));
+
+const auditTone = computed(() => {
+  if (!auditData.value) return { type: 'default' as const, text: auditErr.value ? '对账失败' : '还没对上' };
+  const c = auditCounts.value;
+  if (c.risk) return { type: 'error' as const, text: `${c.risk} 处链路要紧` };
+  if (c.warn) return { type: 'warning' as const, text: `${c.warn} 处值得处理` };
+  if (c.info) return { type: 'info' as const, text: `链路对得上 · ${c.info} 条只是让你知道` };
+  return { type: 'success' as const, text: '链路对得上' };
+});
+
+/** 反代目标一格三种答案：有人听 / 没人听 / 判不了。「判不了」绝不折成「没人听」。 */
+function targetMarks(link: any) {
+  const rows = (link.targets || []).filter((t: any) => t.port !== null && t.port !== undefined);
+  if (!rows.length) return [h('span', { class: 'sa-plain' }, '非反代（静态或 root）')];
+  return rows.map((t: any) => {
+    const label = `${t.host}:${t.port}`;
+    if (t.listening === true) return h('span', { class: 'sa-mark ok mono' }, label);
+    if (t.listening === false) return h('span', { class: 'sa-mark err mono' }, `${label} 没人听`);
+    // 本机但监听表没读到，与目标根本不在这台机器：两种「判不了」原因不同，tooltip 分开写。
+    return h('span', {
+      class: 'sa-mark mute mono',
+      title: t.local ? '监听表这一轮读不到，没有判它' : '这个目标不在本机，本机的监听表对不上它',
+    }, `${label} 未确认`);
+  });
+}
+
+function certCell(r: any) {
+  if (!r.ssl) return h('span', { class: 'sa-plain' }, '不涉 https');
+  if (!auditData.value?.certs?.ok) return h('span', { class: 'st idle' }, '覆盖未确认');
+  const bad = r.uncovered || [];
+  if (!bad.length) return h('span', { class: 'st ok' }, '证书已覆盖');
+  return h('span', { class: 'st err' }, `${bad.length} 个域名不在证书里`);
+}
+
+function plainCell(r: any) {
+  if (r.no_redirect) return h('span', { class: 'st warn' }, '明文可达');
+  if (r.redirect) return h('span', { class: 'st ok' }, '已跳转 https');
+  const l: number[] = r.listen || [];
+  if (!l.includes(80)) return h('span', { class: 'sa-plain' }, '不接 80');
+  return h('span', { class: 'sa-plain' }, '80 在听但没跳转');
+}
+
+const linkColumns: any[] = [
+  {
+    title: '域名 / 配置文件',
+    key: 'domains',
+    minWidth: 220,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name cp-break' }, (r.domains || []).join(' · ') || '（无 server_name）'),
+      h('div', { class: 'cell-sub mono-dim cp-break' }, r.file),
+    ]),
+  },
+  { title: '反代目标', key: 'targets', minWidth: 230, render: (r: any) => h('div', { class: 'sa-marks' }, targetMarks(r)) },
+  {
+    title: '本块监听',
+    key: 'listen',
+    minWidth: 104,
+    render: (r: any) => h('span', { class: 'mono-dim cp-break' }, (r.listen || []).join(' / ') || '—'),
+  },
+  { title: '证书覆盖', key: 'cert', minWidth: 150, render: certCell },
+  { title: '明文 80', key: 'plain', minWidth: 150, render: plainCell },
+  {
+    title: '认领',
+    key: 'app',
+    minWidth: 130,
+    // 认领不上不是错误：手工 vhost、面板自己的反代都长这样，只是面板的启停够不到它。
+    render: (r: any) => (r.app
+      ? h('span', { class: 'cell-name', title: r.app }, r.app)
+      : h('span', { class: 'sa-plain' }, '面板外配置')),
+  },
+];
+
+const findingColumns: any[] = [
+  {
+    title: '判词',
+    key: 'title',
+    minWidth: 320,
+    render: (r: any) =>
+      h('div', { class: 'cell-main' }, [
+        h('span', { class: 'cell-ico' }, [
+          h(NIcon, {
+            component: icons[sevOf(r.severity).icon],
+            size: 17,
+            color: r.severity === 'risk' ? 'var(--cp-err)' : r.severity === 'warn' ? 'var(--cp-warn)' : 'var(--cp-text-mute)',
+          }),
+        ]),
+        h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'cell-name cp-prose' }, r.title),
+          h('div', { class: 'cell-sub cp-prose' }, r.detail),
+        ]),
+      ]),
+  },
+  {
+    title: '档位', key: 'severity', width: 96,
+    render: (r: any) => h(NTag, { size: 'small', type: sevOf(r.severity).type, bordered: false }, () => sevOf(r.severity).text),
+  },
+  {
+    // 这一列后端给的就是能当场粘贴的只读命令（ss / certbot / curl），所以配复制按钮。
+    // 面板不替你执行：reload nginx、改 vhost、签证书这三件事改错了是全站域名一起不可用。
+    title: '自己核对', key: 'fix', minWidth: 260,
+    render: (r: any) =>
+      h('div', { class: 'sa-fix' }, [
+        h('code', { class: 'sa-cmd' }, r.fix || '—'),
+        r.fix ? h(CopyButton, { text: String(r.fix), label: `复制「${r.title}」的核对命令` }) : null,
+      ]),
+  },
+];
+
 function refresh() {
   loadSites();
   loadCerts();
+  loadAudit();
 }
 
 onMounted(refresh);
@@ -354,6 +535,83 @@ onMounted(refresh);
           <EmptyBox :text="sitesReason ? '当前无法列出站点，原因见上方提示' : 'nginx 配置里还没有对外站点；到应用页为应用配置域名即可生成反代'" />
         </template>
       </NDataTable>
+    </NCard>
+
+    <NCard size="small" style="margin-bottom: var(--space-4)">
+      <template #header>
+        <div class="sa-head">
+          <span class="section-title">
+            <NIcon :component="icons.GitNetworkOutline" :size="15" color="var(--cp-brand-soft)" /> 站点链路对账
+          </span>
+          <NTag size="small" :bordered="false" :type="auditTone.type">{{ auditTone.text }}</NTag>
+          <NButton size="small" tertiary :loading="loadingAudit" :icon="ico('SyncOutline')"
+                   title="重扫 nginx 配置、监听端口与证书清单（只读：不 reload、不改 vhost、不签证书）"
+                   @click="loadAudit(true)">重新对账</NButton>
+        </div>
+      </template>
+
+      <NSpace vertical :size="12">
+        <NAlert v-if="auditErr && !auditData" type="error" :bordered="false" size="small">
+          链路对账失败：{{ auditErr }}。上下两张表都不受影响，这一卡只是判不了。
+        </NAlert>
+        <NAlert v-else-if="auditBlind.length" type="warning" :bordered="false" size="small">
+          <div>这一轮有 {{ auditBlind.length }} 条判据读不到，相关结论只能标「未确认」而不是「正常」：</div>
+          <div v-for="f in auditBlind" :key="f.k" class="sa-blind-line">{{ f.k }}：{{ f.bad }}</div>
+        </NAlert>
+
+        <div v-if="auditFacts.length" class="sa-chips">
+          <span v-for="f in auditFacts" :key="f.k" class="sa-chip" :class="f.ok ? '' : 'warn'">
+            <b>{{ f.k }}</b>{{ f.ok ? f.good : f.bad }}
+          </span>
+        </div>
+
+        <NDataTable
+          :columns="findingColumns" :data="shownFindings" size="small" :bordered="false"
+          :loading="loadingAudit && !auditData" :scroll-x="'auto'" :row-key="(r: any) => r.id"
+          class="cp-tbl"
+        >
+          <template #empty>
+            <EmptyBox :text="auditErr && !auditData
+              ? '链路对账没跑出来，原因见上方提示'
+              : (auditFindings.length && !shownFindings.length
+                ? `只有「知道就好」那一档（${auditCounts.info} 条），要点上方那颗按钮才看得见`
+                : '反代目标都在监听、证书都覆盖、明文都跳转')" />
+          </template>
+        </NDataTable>
+
+        <div v-if="auditCounts.info" class="sa-toggle">
+          <NButton text size="small" type="primary" class="cp-op" @click="showInfo = !showInfo">
+            {{ showInfo ? '收起' : '展开' }}「知道就好」那一档（{{ auditCounts.info }} 条）
+          </NButton>
+          <NText depth="3" class="sa-hint">
+            异地反代目标与面板外的 vhost 判不了，也不代表它们坏了，只是让你知道该以哪个地址为准。
+          </NText>
+        </div>
+
+        <div>
+          <div class="sa-block">
+            <span class="section-title">
+              <NIcon :component="icons.LayersOutline" :size="15" color="var(--cp-brand-soft)" /> 逐条链路
+            </span>
+            <NText depth="3" class="sa-src">
+              {{ auditData ? `共 ${auditLinks.length} 个 server 块 · 检查时间 ${auditData.as_of}` : '读不到就不列，这里不猜' }}
+            </NText>
+          </div>
+          <NDataTable
+            :columns="linkColumns" :data="auditLinks" size="small" :bordered="false"
+            :loading="loadingAudit && !auditData" :scroll-x="'auto'"
+            :row-key="(r: any) => `${r.file}|${(r.domains || []).join(',')}`" class="cp-tbl"
+          >
+            <template #empty>
+              <EmptyBox :text="auditErr && !auditData ? '链路对账没跑出来，原因见上方提示' : 'nginx 加载的配置里一个 server 块都没有'" />
+            </template>
+          </NDataTable>
+        </div>
+
+        <div v-if="(auditData?.notes || []).length" class="sa-notes">
+          <div v-for="(n, i) in auditData.notes" :key="i" class="sa-note">{{ n }}</div>
+        </div>
+      </NSpace>
     </NCard>
 
     <NCard size="small">
@@ -437,6 +695,34 @@ onMounted(refresh);
   line-height: 1.5;
   word-break: break-all;
 }
+/* 链路对账这一卡：判词、目标标记、可复制命令都长在 h() 生成的格子里，那些节点不带本组件的
+   data-v 作用域，纯 class 的 scoped 规则一条都命中不了，必须从模板上的表级类 .cp-tbl 走 :deep
+   （与服务器管理页同一套打法）。形态也刻意与那一页对齐，两页对照时不会看着像两种东西。 */
+.cp-tbl :deep(.sa-marks) { display: flex; flex-direction: column; gap: 3px; }
+.cp-tbl :deep(.sa-mark) { font-size: var(--fs-xs); line-height: 1.6; word-break: break-all; }
+.cp-tbl :deep(.sa-mark.ok) { color: var(--cp-ok); }
+.cp-tbl :deep(.sa-mark.err) { color: var(--cp-err); font-weight: 550; }
+.cp-tbl :deep(.sa-mark.mute), .cp-tbl :deep(.sa-plain) { color: var(--cp-text-mute); }
+.cp-tbl :deep(.sa-fix) { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cp-tbl :deep(.sa-cmd) {
+  flex: 0 1 auto; min-width: 0; padding: 3px 7px; border-radius: var(--radius-sm);
+  background: var(--cp-bg-soft); font-size: var(--fs-xs); overflow-x: auto; white-space: nowrap;
+}
+.sa-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sa-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.sa-chip {
+  display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%; padding: 4px 10px;
+  border-radius: var(--radius-md); background: var(--cp-bg-soft); font-size: var(--fs-sm); color: var(--cp-text);
+}
+.sa-chip b { font-weight: 550; font-size: var(--fs-xs); color: var(--cp-text-mute); }
+.sa-chip.warn { color: var(--cp-warn); }
+.sa-blind-line { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; word-break: break-word; }
+.sa-block { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.sa-src, .sa-hint { font-size: var(--fs-xs); }
+.sa-toggle { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sa-notes { margin-top: -4px; }
+.sa-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
+
 .timer-detail {
   margin-top: var(--space-1);
   font-size: var(--fs-2xs);
