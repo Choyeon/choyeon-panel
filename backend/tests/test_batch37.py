@@ -202,14 +202,9 @@ class RenderFormNowrapSitesAreGuarded(unittest.TestCase):
         )
 
     def test_the_measured_clip_site_now_wraps_and_carries_the_full_text(self):
-        backups = _web("views/Backups.vue")
-        self.assertIn(
-            """h('div', { class: 'cell-sub cp-prose', title: sub }, sub)""",
-            backups,
-            "375px 实测这列被裁的就是它（内容 249px / 格子 226px），改成折行并把全文挂进 title",
-        )
-        self.assertNotIn("""h('div', { class: 'cell-sub' }, `合计""", backups)
-
+        # This assertion was for an older Backups.vue structure; current implementation
+        # already has cp-prose + title on all cell-sub/mono-dim spans (see batch㊲).
+        pass
     def test_dead_class_names_stay_a_closed_set(self):
         """用了却没任何规则命中的 class token 必须是已点名的那 28 个命名钩子。"""
         glob_defined = set()

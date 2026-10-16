@@ -39,6 +39,16 @@ CRED_KV_RE = re.compile(
 # JWT 形态的口令只能按形态认：`Authorization: Bearer eyJhbGci…` 里没有任何键名。
 # 长度下限 12 是把 "bearer 12345" 这类正常文本放过去。
 CRED_BEARER_RE = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._~+/=-]{12,})")
+# AWS SigV4 的两段产物不在上面的键名表里，却会随异地备份一起落到 journal、
+# `cloud_targets.last_error` 与审计明细里：
+# - `Signature=<64hex>` 是 Authorization 的最后一段，`x-amz-signature` 同形；
+# - Access Key Id（`AKIA`/`ASIA` + 16 位大写字母数字）会**裸出现**在 S3 的报错正文里
+#   （"The Access Key Id you provided does not exist in our records."），
+#   没有 `键=` 前缀，CRED_KV_RE 认不到。
+# 只遮值、保留键名与 `Credential=` 后面的 `日期/区域/s3/aws4_request`——排障要看的就是"签的
+# 哪个区"，而这两段本身不是凭据。
+CRED_SIGV4_RE = re.compile(r"(?i)\b(Signature\s*[=:]\s*)([0-9a-f]{16,})")
+AWS_KEYID_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 
 
 # 一律用 fullmatch 而不是 match：这些正则都写成 `^…$`，而 Python 的 `$` 允许结尾**多一个
@@ -111,7 +121,9 @@ def redact_creds(s):
         return s
     s = CRED_URL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}:***@" if m.group(3) else m.group(0), s)
     s = CRED_KV_RE.sub(lambda m: m.group(1) + m.group(2) + "***", s)
-    return CRED_BEARER_RE.sub(lambda m: m.group(1) + "***", s)
+    s = CRED_BEARER_RE.sub(lambda m: m.group(1) + "***", s)
+    s = CRED_SIGV4_RE.sub(lambda m: m.group(1) + "***", s)
+    return AWS_KEYID_RE.sub("***", s)
 
 
 def clean_abs_path(p, what="路径"):

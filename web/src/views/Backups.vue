@@ -5,7 +5,7 @@ import {
   NDataTable, NSpace, NTag, NDrawer, NDrawerContent, NForm, NFormItem, NInputNumber,
   NSelect, useMessage, NIcon, NAlert, NSwitch,
 } from 'naive-ui';
-import { NButton, useDrawerWidth } from '../ui';
+import { NButton } from '../ui';
 import { api, getRole } from '../api';
 import { icon, icons } from '../icons';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
@@ -22,7 +22,6 @@ const router = useRouter();
 // 备份任务的增删改与立即执行都是 MUTATION，服务端统一拦 403：只读账号只看计数
 const isAdmin = getRole() === 'admin';
 const show = ref(false);
-const drawerW = useDrawerWidth(0.5);
 const busy = ref<number | null>(null);
 const toggling = ref<number | null>(null);
 const submitting = ref(false);
@@ -45,15 +44,12 @@ const { data, error, loading, refreshing, refresh } = useCachedFetch<any[]>({
   loader: () => api.backups(),
   maxAge: 30000,
 });
-const { data: appsData, error: appsError, load: loadApps } = useCachedFetch<any[]>({
+const { data: appsData, load: loadApps } = useCachedFetch<any[]>({
   key: () => 'apps',
   loader: () => api.apps(),
   maxAge: 60000,
 });
 watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
-// 这一份失败只影响下拉建议与目标名展示，不拦任何操作，所以是 warning 不是 error；
-// 但不说就成了另一回事：下拉空着，人只会以为这台机器上没有应用。
-watch(appsError, (e) => { if (e) msg.warning(`应用列表没取到，新建备份任务的下拉不会给建议：${(e as Error).message || String(e)}`); });
 // 原实现在 onMounted 里吞掉应用列表的错误（列表只影响下拉建议），保持一致
 void loadApps().catch(() => undefined);
 
@@ -122,7 +118,7 @@ const columns: any[] = [
         h('div', { class: 'cell-txt' }, [
           h('span', { class: 'cell-name', title: r.kind === 'sqlite' ? sqliteTargetName(r.target) : r.target }, r.kind === 'sqlite' ? sqliteTargetName(r.target) : r.target),
           r.target_missing
-            ? h(NTag, { size: 'tiny', type: 'warning', bordered: false, class: 'cell-sub' }, () => '目标应用已删除，备份将失败')
+            ? h(NTag, { size: 'tiny', type: 'warning', bordered: false, class: 'cell-sub cp-prose', title: '目标应用已删除，备份将失败' }, () => '目标应用已删除，备份将失败')
             : null,
         ]),
       ]),
@@ -134,7 +130,7 @@ const columns: any[] = [
     title: '启用', key: 'enabled', width: 90,
     render: (r: any) =>
       r.schedule === 'manual'
-        ? h('span', { class: 'cell-sub' }, '—')
+        ? h('span', { class: 'cell-sub cp-prose', title: '手动任务不挂 timer，只在列表里点「立即备份」' }, '—')
         : isAdmin
           ? h(NButton, {
               size: 'tiny', round: true, tertiary: true, type: r.enabled ? 'success' : 'info',
@@ -149,25 +145,21 @@ const columns: any[] = [
     render: (r: any) =>
       r.schedule === 'manual'
         ? h(NTag, { size: 'small', round: true, bordered: false }, () => '手动')
-        : h('span', { class: 'mono-dim' }, `${r.schedule === 'daily' ? '每日' : '每周一'} ${String(r.hour).padStart(2, '0')}:${String(r.minute).padStart(2, '0')}`),
+        : h('span', { class: 'mono-dim cp-prose', title: '每日/每周一 HH:mm（本地时区）' }, `${r.schedule === 'daily' ? '每日' : '每周一'} ${String(r.hour).padStart(2, '0')}:${String(r.minute).padStart(2, '0')}`),
   },
-  { title: '保留', key: 'keep', width: 70, render: (r: any) => h('span', { class: 'mono-dim' }, `${r.keep} 份`) },
+  { title: '保留', key: 'keep', width: 70, render: (r: any) => h('span', { class: 'mono-dim cp-prose', title: `${r.keep} 份` }, `${r.keep} 份`) },
   {
     title: '产物', key: 'files', width: 250,
-    render: (r: any) => {
-      if (!r.files.length) return h('span', { class: 'cell-sub' }, '—');
-      // 这一行是一句带空格的话，不是一个词：375px 实测内容 249px、格子只有 226px，
-      // 而 .cell-sub 自带 nowrap+ellipsis，于是最近一次备份的时间被切成「合计 188.6 K… UTC」
-      // 这种谁都读不出来的形状。列上没有第二个入口（原来连 title 都没写），所以直接折行。
-      const sub = `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)} UTC`;
-      return h('div', { class: 'cell-txt' }, [
-        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files.length} 份`),
-        h('div', { class: 'cell-sub cp-prose', title: sub }, sub),
-      ]);
-    },
+    render: (r: any) =>
+      r.files.length
+        ? h('div', { class: 'cell-txt' }, [
+            h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files.length} 份`),
+            h('div', { class: 'cell-sub cp-prose', title: `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)} UTC` }, `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)} UTC`),
+          ])
+        : h('span', { class: 'cell-sub cp-prose', title: '无备份产物' }, '—'),
   },
   {
-    title: '操作', key: 'ops', width: 230, align: 'center', fixed: 'right' as const,
+    title: '操作', key: 'ops', width: 230, align: 'center',
     render: (r: any) =>
       h(CpRowActions, {
         ellipsis: 3,
@@ -198,7 +190,6 @@ function sqliteTargetName(target: any) {
 }
 
 async function toggleEnabled(r: any) {
-  if (toggling.value !== null) return;
   toggling.value = r.id;
   try {
     await api.updateBackup(r.id, { enabled: !r.enabled });
@@ -211,7 +202,6 @@ async function toggleEnabled(r: any) {
 }
 
 async function run(id: number) {
-  if (busy.value !== null) return;
   busy.value = id;
   try {
     const r = await api.runBackup(id);
@@ -269,7 +259,6 @@ function openEdit(r: any) {
   show.value = true;
 }
 async function submit() {
-  if (submitting.value) return;
   // 切换类型会把 target 置空（pg 的库名不是应用名），而后端 update 对 target=null
   // 的语义是"沿用旧值"：不选目标就提交，任务会静默继续指向原来那个名字，
   // 列表上还显示着新类型 —— 必须在提交前把空目标拦下来。
@@ -304,7 +293,7 @@ async function submit() {
         <NButton size="small" tertiary :icon="icon('FolderOpenOutline', 14)" @click="router.push('/backups/files')">备份文件</NButton>
       </template>
       <template #right>
-        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px; max-width: 100%" aria-label="自动刷新间隔" />
+        <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px" aria-label="自动刷新间隔" />
         <NButton size="small" tertiary :loading="loading || refreshing" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
       </template>
 
@@ -315,7 +304,7 @@ async function submit() {
       <NDataTable
         ref="tableAnchor"
         :columns="columns" :data="rows" size="small" :bordered="false" :loading="loading"
-        :scroll-x="'auto'" :max-height="tableH" :row-key="(r: any) => r.id"
+        :scroll-x="1230" :max-height="tableH" :row-key="(r: any) => r.id"
       >
         <template #empty>
           <EmptyBox :text="error ? '备份任务获取失败，点上方「刷新」重试' : (isAdmin ? '还没有备份任务，点左上方「新建备份任务」' : '还没有备份任务')" />
@@ -323,7 +312,7 @@ async function submit() {
       </NDataTable>
     </CpToolbarCard>
 
-    <NDrawer v-model:show="show" :width="drawerW">
+    <NDrawer v-model:show="show" :width="'50%'">
       <NDrawerContent :title="`${editingId == null ? '新建备份任务' : '编辑备份任务'} - ${form.target || ''}`" closable>
         <NForm label-placement="top">
           <NSpace vertical :size="12">
@@ -344,7 +333,7 @@ async function submit() {
                     filterable
                     tag
                     placeholder="选择数据库"
-                    style="width: 230px; max-width: 100%"
+                    style="width: 230px"
                     aria-label="数据库名称"
                   />
                   <NButton size="small" tertiary @click="form.target = 'all'">全部</NButton>
@@ -366,8 +355,8 @@ async function submit() {
             </NFormItem>
             <NFormItem v-if="form.schedule !== 'manual'" label="执行时刻">
               <NSpace align="center" :size="8">
-                <NInputNumber v-model:value="form.hour" :min="0" :max="23" :input-props="{ 'aria-label': '执行小时' }" style="width: 84px; max-width: 100%" /> 时
-                <NInputNumber v-model:value="form.minute" :min="0" :max="59" :input-props="{ 'aria-label': '执行分钟' }" style="width: 84px; max-width: 100%" /> 分（本地时区）
+                <NInputNumber v-model:value="form.hour" :min="0" :max="23" :input-props="{ 'aria-label': '执行小时' }" style="width: 84px" /> 时
+                <NInputNumber v-model:value="form.minute" :min="0" :max="59" :input-props="{ 'aria-label': '执行分钟' }" style="width: 84px" /> 分（本地时区）
               </NSpace>
             </NFormItem>
             <NSpace justify="space-between" align="center" style="width: 100%">
@@ -376,7 +365,7 @@ async function submit() {
             </NSpace>
             <NFormItem label="保留份数">
               <NSpace vertical :size="2">
-                <NInputNumber v-model:value="form.keep" :min="1" :max="365" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px; max-width: 100%" />
+                <NInputNumber v-model:value="form.keep" :min="1" :max="365" :input-props="{ 'aria-label': '保留备份份数' }" style="width: 130px" />
                 <span class="cp-help">超出份数后由任务自动裁剪最旧的产物（按写入顺序删，同一秒生成的多份按序号排；不是按文件名的字母序）。</span>
               </NSpace>
             </NFormItem>
@@ -385,18 +374,28 @@ async function submit() {
         <template #footer>
           <NSpace justify="end" :size="12">
             <NButton size="small" :disabled="submitting" @click="show = false">取消</NButton>
-            <NButton size="small" type="primary" class="cp-press" :loading="submitting" :disabled="submitting" :icon="icon(editingId == null ? 'AddOutline' : 'SaveOutline', 14)" @click="submit">确定</NButton>
+            <NButton size="small" type="primary" class="cp-press" :loading="submitting" :icon="icon(editingId == null ? 'AddOutline' : 'SaveOutline', 14)" @click="submit">确定</NButton>
           </NSpace>
         </template>
       </NDrawerContent>
     </NDrawer>
 
-    <NDrawer v-model:show="logShow" :width="drawerW">
+    <NDrawer v-model:show="logShow" :width="'50%'">
       <NDrawerContent :title="`执行日志 - ${logTitle}`" closable>
-        <pre class="log-view log-drawer">{{ logText || '（无输出）' }}</pre>
+        <pre class="cr-log mono">{{ logText || '（无输出）' }}</pre>
       </NDrawerContent>
     </NDrawer>
 
     <ConfirmActionDialog ref="delDialog" />
   </div>
 </template>
+
+<style scoped>
+/* 1Panel LogFile：calc(100vh - 420px)、14px/16px、padding 5px、深色代码底 */
+.cr-log {
+  margin: 0; height: calc(100vh - 420px); overflow: auto; padding: 5px;
+  background: var(--cp-code-bg); color: var(--cp-code-text);
+  border: 1px solid var(--cp-border); border-radius: 8px;
+  font-size: 14px; line-height: 16px; white-space: pre-wrap; word-break: break-all;
+}
+</style>

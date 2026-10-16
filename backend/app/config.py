@@ -160,6 +160,12 @@ PG_LOCK_TIMEOUT_MS = _int("CP_PG_LOCK_TIMEOUT_MS", 5000, 0, 60000)
 # 把备份覆盖到另一个库上——那是数据丢失，不是慢一点。
 SQLITE_SCAN_MAX_ENTRIES = _int("CP_SQLITE_SCAN_MAX_ENTRIES", 200000, 1000, 5000000)
 SQLITE_SCAN_BUDGET_SEC = _int("CP_SQLITE_SCAN_BUDGET_SEC", 20, 1, 300)
+# 异地推送的时限。这两个数是同一件事的两个档位，出处只有这里：一次 PutObject 要真的
+# 把整份归档推过网络（几百 MB 在限速线路上就是几分钟），而"测试连通性"只该是几个
+# HEAD/LIST 往返——给前者用的 900 秒点一次"测试"会把页面钉死十五分钟。
+# runner 那边不封顶更糟：卡住的推送攥着 flock，之后每次定时备份都只打印一句跳过。
+CLOUD_PUSH_TIMEOUT_SEC = _int("CP_CLOUD_PUSH_TIMEOUT_SEC", 900, 30, 7200)
+CLOUD_PROBE_TIMEOUT_SEC = _int("CP_CLOUD_PROBE_TIMEOUT_SEC", 20, 3, 300)
 
 # 是否发送 HSTS 头（仅在 HTTPS 直接暴露时开启；反代场景由 nginx 负责）
 HSTS = _bool("CP_HSTS")
@@ -189,4 +195,7 @@ def as_dict() -> dict:
         "webDist": str(WEB_DIST),
         "webBuilt": WEB_DIST.exists(),
         "tokenTtlHours": TOKEN_TTL_HOURS,
+        # 备份页要说清"推送最多等多久"，也让前端能在超过单文件上限前就拦住一次注定失败的上传
+        "cloudPushTimeoutSec": CLOUD_PUSH_TIMEOUT_SEC,
+        "cloudProbeTimeoutSec": CLOUD_PROBE_TIMEOUT_SEC,
     }

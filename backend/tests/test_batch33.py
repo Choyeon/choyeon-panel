@@ -586,7 +586,7 @@ class TestArtifactNaming(unittest.TestCase):
         for n in names:
             Path(os.path.join(self.dir, n)).write_bytes(b"x")
         with mock.patch.object(R, "BACKUP_DIR", self.dir):
-            order = R._prune_order(7)
+            order = R.auto_files(7)
         self.assertEqual(order, names[:4], order)
         with mock.patch.object(R, "BACKUP_DIR", self.dir):
             R.prune({"id": 7, "keep": 2})

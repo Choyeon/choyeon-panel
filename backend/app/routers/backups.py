@@ -5,7 +5,7 @@ from starlette.concurrency import run_in_threadpool
 from .. import aio_db
 from ..deps import need_admin
 from ..errors import err_json
-from ..services import backup_service
+from ..services import backup_service, cloud_backup
 from ..util import redact_creds
 
 router = APIRouter()
@@ -26,9 +26,111 @@ async def backups_list(req: Request):
     if req.state.cp_role != "admin":
         # dir 是 /root/backups/panel：只读账号要能看"有没有备份、多大、什么时候"，
         # 不需要知道备份落在哪台机器的哪个目录下。
+        # 异地目标同理——目标是哪一个、挂在哪个桶上属于"副本落在哪"，
+        # 而只读账号看这条列表要回答的只是"这个任务有没有异地副本"（下面那两个键
+        # 换成一个布尔位，界面上的"已配异地"标签照样成立）。
         for r in rows:
             r.pop("dir", None)
+            r["cloud_linked"] = bool(r.pop("cloud_target_id", None))
+            r.pop("cloud_target_name", None)
     return rows
+
+
+@router.get("/api/backups/targets")
+async def backups_targets_list(req: Request):
+    """异地备份目标列表（不含 Secret）。放在 /{bid} 之前，避免 "targets" 被当成任务 id。"""
+    if r := need_admin(req):
+        return r
+    return await run_in_threadpool(cloud_backup.list_targets)
+
+
+@router.post("/api/backups/targets")
+async def backups_targets_create(req: Request):
+    if r := need_admin(req):
+        return r
+    body = await _body(req)
+    try:
+        t = await run_in_threadpool(cloud_backup.create_target, body)
+        await aio_db.audit(req.state.cp_sub, "backup:target:create", str(t["name"]))
+        return t
+    except Exception as e:  # noqa: BLE001
+        # 只记目标名：报错正文里可能带 endpoint，而 create 失败常见的正是"这个桶名不对"
+        await aio_db.audit(req.state.cp_sub, "backup:target:create", f"(失败: {redact_creds(str(e))[:120]})")
+        return err_json(e)
+
+
+@router.patch("/api/backups/targets/{tid}")
+async def backups_targets_update(tid: str, req: Request):
+    if r := need_admin(req):
+        return r
+    if not tid.isdigit():
+        return JSONResponse(status_code=400, content={"error": "目标 id 要是数字"})
+    body = await _body(req)
+    try:
+        t = await run_in_threadpool(cloud_backup.update_target, int(tid), body)
+        # 改动的字段名要记下来（尤其"有没有换凭据"），但不记任何值
+        await aio_db.audit(req.state.cp_sub, "backup:target:update",
+                           f"{tid}({','.join(sorted(k for k in body if k != 'secret_key'))}"
+                           f"{'，含新 Secret Key' if str(body.get('secret_key') or '') else ''})")
+        return t
+    except Exception as e:  # noqa: BLE001
+        return err_json(e)
+
+
+@router.delete("/api/backups/targets/{tid}")
+async def backups_targets_delete(tid: str, req: Request):
+    if r := need_admin(req):
+        return r
+    if not tid.isdigit():
+        return JSONResponse(status_code=400, content={"error": "目标 id 要是数字"})
+    try:
+        r = await run_in_threadpool(cloud_backup.delete_target, int(tid))
+        await aio_db.audit(req.state.cp_sub, "backup:target:delete", f"{tid}(远端对象未删除)")
+        return r
+    except Exception as e:  # noqa: BLE001
+        return err_json(e)
+
+
+@router.post("/api/backups/targets/{tid}/test")
+async def backups_targets_test(tid: str, req: Request):
+    """连通性测试：桶在不在、凭据对不对、我们写的键看不看得见。只读，不动数据。"""
+    if r := need_admin(req):
+        return r
+    if not tid.isdigit():
+        return JSONResponse(status_code=400, content={"error": "目标 id 要是数字"})
+    try:
+        res = await run_in_threadpool(cloud_backup.probe, int(tid))
+        await aio_db.audit(req.state.cp_sub, "backup:target:test", str(res["target"]))
+        return res
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "backup:target:test", f"{tid}(失败: {redact_creds(str(e))[:120]})")
+        return err_json(e)
+
+
+@router.post("/api/backups/{bid}/push")
+async def backups_push(bid: str, req: Request):
+    """把这个任务尚未推上去的产物补推到异地（已推过的不重传）。
+
+    `target_id` 可省，缺省就用任务自己关联的那个目标；给了就必须是数字——
+    把 "abc" 一路传进 `int()` 只会变成一个看不出所以然的 500。
+    """
+    if r := need_admin(req):
+        return r
+    if not bid.isdigit():
+        return JSONResponse(status_code=400, content={"error": "任务 id 要是数字"})
+    body = await _body(req)
+    tid = body.get("target_id")
+    if tid is not None and not str(tid).isdigit():
+        return JSONResponse(status_code=400, content={"error": "target_id 要是数字"})
+    try:
+        res = await run_in_threadpool(cloud_backup.push_now, int(bid), int(tid) if tid else 0)
+        await aio_db.audit(req.state.cp_sub, "backup:push",
+                           f"{bid}({len(res.get('pushed') or [])} 份，删 {len(res.get('pruned') or [])} 份)")
+        return res
+    except Exception as e:  # noqa: BLE001
+        # 失败也要留痕：这条路上"没推上去"最容易悄悄发生（对端换了密钥、桶被删）
+        await aio_db.audit(req.state.cp_sub, "backup:push", f"{bid}(失败: {redact_creds(str(e))[:120]})")
+        return err_json(e, 500)
 
 
 @router.get("/api/backups/files")

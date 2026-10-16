@@ -133,6 +133,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `user list\|create\|reset\|revoke\|2fa-disable\|delete` | `<name> --password --password-stdin --role --yes` | 账号管理；create/reset 用 `--password-stdin` 传口令。改密与 `revoke` 都会吊销旧 token：`revoke <name>` 只踢这个账号，`revoke all` 踢全部（`delete` 必须加 `--yes`）。`list` 每行末列显示该账号有没有开两步验证（`2fa` / `-`），不显示密钥。`2fa-disable <name> --yes` 是验证器丢失时的逃生口，只有 root 能跑，关闭同时吊销该账号全部会话 |
 | `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --type --repo --branch --path --port --domain --start-cmd --install-cmd --lines` | 应用全生命周期；`create` 需 `--template` 或 `--start-cmd` 之一 |
 | `backup run\|list` | — | 面板数据备份（SQLite 在线备份 API） |
+| `backup targets\|add-target\|edit-target\|del-target\|test-target\|push\|link` | `--id --target --name --endpoint --bucket --region --access-key --secret-stdin --prefix --path-style --no-path-style --enable --disable --yes` | 异地备份目标（S3 兼容对象存储）。Secret Key **只能** `--secret-stdin`；`link --id <任务> --target <目标>` 之后这条任务才会推送；`del-target` 只删配置，桶里的对象不动 |
 | `firewall list\|allow\|deny\|remove\|on\|off` | `--port --port-to --proto --source --comment --rate --num --expect --yes` | 本机 ufw/firewalld 读写；会把自己锁在门外的操作一律拒绝 |
 | `updates` | `--refresh` | 待装系统补丁与安全更新（只读探测）；面板不代跑 apt update/upgrade，升级命令只准备好供管理员执行 |
 | `ports` | `--refresh` | 监听端口与对外可达性对账（只读）：每个端口给 internal/expected/blocked/exposed 一档判词，不改绑定也不动防火墙 |

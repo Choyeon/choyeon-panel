@@ -13,7 +13,7 @@
     choyeonctl doctor [--json]       # 安全与健康自检
     choyeonctl user create alice --password 'xxx' [--role admin]
     choyeonctl app list|create|deploy|rollback|logs
-    choyeonctl backup run|list
+    choyeonctl backup run|list|targets|add-target|push|link
     choyeonctl firewall list|allow|deny|remove|on|off
     choyeonctl updates
     choyeonctl storage
@@ -43,6 +43,8 @@ from app import database as dbm  # noqa: E402
 from app.errors import BadInput, public_message  # noqa: E402
 from app.routers.meta import run_checks  # noqa: E402
 from app.services import (  # noqa: E402
+    backup_service,
+    cloud_backup,
     exposure_service,
     firewall_service,
     load_service,
@@ -52,7 +54,7 @@ from app.services import (  # noqa: E402
     storage_service,
     updates_service,
 )
-from app.util import CLI_LOG_LINES_MAX, human_bytes, timeout_note  # noqa: E402
+from app.util import CLI_LOG_LINES_MAX, human_bytes, redact_creds, timeout_note  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -353,6 +355,19 @@ def _password_arg(a: argparse.Namespace) -> str | None:
     return a.password
 
 
+def _secret_from_stdin() -> str:
+    """异地目标的 Secret Key 只从标准输入读，这一条没有 argv 逃生口。
+
+    `--password` 保留命令行写法只是为了兼容旧脚本，并且会打警告。新加的凭据入口不重复
+    那个错误：argv 进 `ps -ef`、进世界可读的 `/proc/<pid>/cmdline`、还进 root 的
+    shell 历史，而这台机器上跑着别人的业务应用——对象存储的长期密钥对它们同样可见。
+    """
+    s = sys.stdin.readline().rstrip("\r\n")
+    if not s:
+        Out.error("--secret-stdin 未从标准输入读到 Secret Key", EXIT_USAGE)
+    return s
+
+
 async def cmd_user(a: argparse.Namespace) -> dict:
     if a.user_cmd == "list":
         # totp 是"开没开"这个布尔，密钥本身不参与输出也不进 JSON：这个终端会被拍照、
@@ -606,6 +621,127 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         rows = [{"file": str(f), "size": f.stat().st_size, "mtime": int(f.stat().st_mtime)} for f in files[:50]]
         Out.result(rows, "\n".join(f"{r['size']:>10}  {r['file']}" for r in rows) or "(无备份)")
         return {"backups": rows}
+
+    if a.backup_cmd == "targets":
+        # 列表面向排障：一眼要能看出"这个桶还能不能用"，所以 last_error 直接进人读输出
+        # 而不是只躺在 --json 里（脚本会读 JSON，人读终端）。
+        rows = cloud_backup.list_targets()
+        Out.result(
+            rows,
+            "\n".join(
+                f"{r['id']:>3}  {r['name']:<16} {'启用' if r['enabled'] else '停用'}  "
+                f"{r['bucket']} @ {r['endpoint']}  前缀={r['prefix'] or '/'}  "
+                f"已推 {r['pushed_count']} 份  凭据={'有' if r['has_secret'] else '缺'}"
+                + (f"  上次失败：{r['last_error']}" if r["last_error"] else "")
+                for r in rows
+            ) or "(还没配置异地目标)",
+        )
+        return {"targets": rows}
+
+    if a.backup_cmd in ("add-target", "edit-target"):
+        if a.backup_cmd == "add-target":
+            miss = [k for k, v in (("name", a.name), ("endpoint", a.endpoint),
+                                   ("bucket", a.bucket), ("access-key", a.access_key)) if not v]
+            if miss:
+                Out.error(f"add-target 缺少参数：{'、'.join('--' + m for m in miss)}", EXIT_USAGE)
+            if not a.secret_stdin:
+                Out.error("add-target 必须用 --secret-stdin 传 Secret Key（命令行参数会留在 ps 与 shell 历史里）",
+                          EXIT_USAGE)
+        if a.enable and a.disable:
+            Out.error("--enable 与 --disable 不能同时使用", EXIT_USAGE)
+        # 只把"这次真的给了"的字段交给服务层：edit-target 是按字段 PATCH 的，
+        # 把 argparse 的缺省值一起传过去等于"没写的字段一律清空"。
+        body = {
+            k: v
+            for k, v in {
+                "name": a.name, "endpoint": a.endpoint, "bucket": a.bucket, "region": a.region,
+                "access_key": a.access_key, "prefix": a.prefix, "path_style": a.path_style,
+            }.items()
+            if v is not None
+        }
+        if a.enable:
+            body["enabled"] = True
+        elif a.disable:
+            body["enabled"] = False
+        if a.secret_stdin:
+            body["secret_key"] = _secret_from_stdin()
+        try:
+            if a.backup_cmd == "add-target":
+                t = cloud_backup.create_target(body)
+                dbm.audit("cli", "cli:backup:target:create", str(t["name"]))
+            else:
+                if not a.id:
+                    Out.error("edit-target 需要 --id", EXIT_USAGE)
+                t = cloud_backup.update_target(int(a.id), body)
+                dbm.audit("cli", "cli:backup:target:update", f"{a.id}")
+        except Exception as e:  # noqa: BLE001
+            Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
+            return {}
+        Out.result(t, f"异地目标已{'创建' if a.backup_cmd == 'add-target' else '更新'}：{t['name']}")
+        return {"ok": True, "target": t}
+
+    if a.backup_cmd == "del-target":
+        if not a.id:
+            Out.error("del-target 需要 --id", EXIT_USAGE)
+        if not a.yes:
+            Out.error("删除异地目标会让所有挂在它上面的备份任务停止推送，确认请加 --yes", EXIT_USAGE)
+        try:
+            r = cloud_backup.delete_target(int(a.id))
+        except Exception as e:  # noqa: BLE001
+            Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
+            return {}
+        dbm.audit("cli", "cli:backup:target:delete", f"{a.id}")
+        # 这句必须说：远端对象一个都没删（面板不会替人删数据），删掉的只是这台机器上的配置。
+        Out.result(r, "已删除目标配置，桶里的对象与本机备份都还在（需要清理请到对象存储侧自行删除）")
+        return {"ok": True, **r}
+
+    if a.backup_cmd == "test-target":
+        if not a.id:
+            Out.error("test-target 需要 --id", EXIT_USAGE)
+        try:
+            res = cloud_backup.probe(int(a.id))
+        except Exception as e:  # noqa: BLE001
+            Out.error(f"连通性测试失败：{public_message(e) or type(e).__name__}", EXIT_FAIL)
+            return {}
+        dbm.audit("cli", "cli:backup:target:test", str(res["target"]))
+        Out.result(res, f"{res['target']}：桶可读，前缀下 {res['objects_under_prefix']} 个对象"
+                       f"（{human_bytes(res['bytes_under_prefix'])}）")
+        return {"ok": True, **res}
+
+    if a.backup_cmd == "push":
+        if not a.id:
+            Out.error("push 需要 --id <备份任务 id>", EXIT_USAGE)
+        try:
+            res = cloud_backup.push_now(int(a.id), int(a.target) if a.target else 0)
+        except Exception as e:  # noqa: BLE001
+            dbm.audit("cli", "cli:backup:push", f"{a.id}(失败: {redact_creds(str(e))[:120]})")
+            Out.error(f"推送失败：{public_message(e) or type(e).__name__}", EXIT_FAIL)
+            return {}
+        dbm.audit("cli", "cli:backup:push", f"{a.id}({len(res.get('pushed') or [])} 份)")
+        if res.get("skipped"):
+            Out.result(res, f"未推送：{res['skipped']}")
+        else:
+            Out.result(res, f"已推送 {len(res['pushed'])} 份到异地"
+                            + (f"，按 keep 删掉远端最旧 {len(res['pruned'])} 份" if res.get("pruned") else ""))
+        return {"ok": True, **res}
+
+    if a.backup_cmd == "link":
+        # 关联＝"这个任务跑完之后往哪儿推"，写的是 backups.cloud_target_id 一列。
+        # 走服务层的同一个校验（目标必须存在），不在 CLI 里自己 INSERT：绕过校验的那一条路
+        # 就是"链接指向一个已删除的目标"这种只在备份失败那天才被发现的故障。
+        if not a.id:
+            Out.error("link 需要 --id <备份任务 id>", EXIT_USAGE)
+        if a.target is None:
+            Out.error("link 需要 --target <异地目标 id>，取消关联用 --target 0", EXIT_USAGE)
+        try:
+            backup_service.update_backup(int(a.id), {"cloud_target_id": int(a.target)})
+        except Exception as e:  # noqa: BLE001
+            Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
+            return {}
+        dbm.audit("cli", "cli:backup:link", f"{a.id}->{a.target}")
+        Out.result({"ok": True, "backup_id": int(a.id), "cloud_target_id": int(a.target)},
+                   f"备份任务 {a.id} 已{'关联到目标 ' + str(a.target) if int(a.target) else '取消关联异地'}")
+        return {"ok": True}
 
     Out.error(f"未知子命令: {a.backup_cmd}", EXIT_USAGE)
     return {}
@@ -1453,7 +1589,21 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                       "--port", "--domain", "--start-cmd", "--install-cmd", "--lines"],
              "desc": "应用全生命周期管理",
              "notes": ["create 需要 --template 或 --start-cmd 之一；用 --start-cmd 时可配 --type/--install-cmd"]},
-            {"name": "backup run|list", "args": [], "desc": "面板数据备份"},
+            {"name": "backup run|list|targets|add-target|edit-target|del-target|test-target|push|link",
+             "args": ["--id", "--target", "--yes", "--name", "--endpoint", "--bucket", "--region",
+                      "--access-key", "--secret-stdin", "--prefix",
+                      "--path-style", "--no-path-style",
+                      "--enable", "--disable"],
+             "desc": "面板数据备份，以及 S3 兼容的异地备份目标",
+             "notes": ["run 跑 scripts/backup.sh 备份面板数据，list 列本机产物",
+                       "异地 Secret Key 只有 --secret-stdin 一条路：不提供 argv 写法，"
+                       "因为它会留在 ps、世界可读的 /proc/<pid>/cmdline 和 root 的 shell 历史里",
+                       "add-target 之后还要 link 才会真的推：目标是「这台机器往哪儿写」，"
+                       "link 是「这个任务跑完交给哪个目标」",
+                       "push 只补推没推过的产物（按 target+文件名判重）；link --target 0 取消关联",
+                       "del-target 只删配置：桶里的对象与本机备份一个都不动，面板不替人删数据",
+                       "推送失败不会把这次备份改判成失败——少一份异地副本是要接手的一项，"
+                       "不是备份没做；原因写在 targets 列表的「上次失败」里"]},
             {"name": "firewall list|allow|deny|remove|on|off",
              "args": ["--port", "--port-to", "--proto", "--source", "--comment", "--rate",
                       "--num", "--expect", "--yes"],
@@ -1600,8 +1750,26 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--lines", type=int, default=50)
     ap.set_defaults(fn=cmd_app)
 
-    b = sub.add_parser("backup", help="备份管理", parents=[common])
-    b.add_argument("backup_cmd", choices=["run", "list"])
+    b = sub.add_parser("backup", help="备份管理与异地目标", parents=[common])
+    b.add_argument("backup_cmd", choices=[
+        "run", "list", "targets", "add-target", "edit-target", "del-target",
+        "test-target", "push", "link",
+    ])
+    b.add_argument("--id", type=int, help="备份任务 id（push/link）或异地目标 id（edit/del/test-target）")
+    b.add_argument("--target", type=int, help="link/push：异地目标 id，link 用 0 取消关联")
+    b.add_argument("--yes", action="store_true", help="del-target：确认删除目标配置")
+    b.add_argument("--name", help="add/edit-target：目标名")
+    b.add_argument("--endpoint", help="add/edit-target：S3 兼容端点，如 s3.amazonaws.com、oss-cn-hangzhou.aliyuncs.com")
+    b.add_argument("--bucket", help="add/edit-target：桶名")
+    b.add_argument("--region", help="add/edit-target：区域，缺省 us-east-1")
+    b.add_argument("--access-key", dest="access_key", help="add/edit-target：Access Key Id")
+    b.add_argument("--secret-stdin", dest="secret_stdin", action="store_true",
+                   help="add/edit-target：从标准输入读 Secret Key（不提供写在命令行里的选项）")
+    b.add_argument("--prefix", help="add/edit-target：对象键前缀，如 panel-backup/")
+    b.add_argument("--path-style", dest="path_style", action=argparse.BooleanOptionalAction, default=None,
+                   help="add/edit-target：用 {endpoint}/{bucket} 寻址（自建 MinIO 需要），--no-path-style 关闭")
+    b.add_argument("--enable", action="store_true", help="edit-target：启用这个目标（恢复自动推送）")
+    b.add_argument("--disable", action="store_true", help="edit-target：停用这个目标（暂停自动推送）")
     b.set_defaults(fn=cmd_backup)
 
     fw = sub.add_parser("firewall", help="本机防火墙读写（ufw / firewalld）", parents=[common])

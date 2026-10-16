@@ -14,7 +14,7 @@ from . import config, locks
 from . import database as dbm
 from .config import BACKUP_DIR
 from .services.files_service import _estimate_archive_bytes, assert_write_budget, write_budget
-from .util import kill_group, sh_escape, timeout_note
+from .util import kill_group, redact_creds, sh_escape, timeout_note
 
 EXCLUDES = ["node_modules", ".venv", ".next", ".output"]
 _SQLITE_EXTS = (".db", ".sqlite", ".sqlite3")
@@ -312,7 +312,18 @@ def _cleanup(path: str):
             os.unlink(path)
 
 
-def _prune_order(bid: int) -> list:
+def auto_pattern(bid: int) -> str:
+    r"""本任务自动生成的产物名的正则（字符串形式，两个读者共用）。
+
+    远端 prune（`services/cloud_backup.py`）要在桶里认出同一批对象，判据必须和这里
+    逐字相同；各写一份的话，带同秒序号的那一份（`bk1-…-03-41-00-2-…`）会在本机被认、
+    在异地不被认，于是远端越留越多而界面写着"按 keep 轮替"。写成函数返回模式串，
+    是为了让 sqlite 的键、本机目录、远端前缀三处都从同一行规则派生。
+    """
+    return rf"^bk{bid}-(\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}})(?:-(\d+))?.*(?:\.gz|\.tgz|\.env)$"
+
+
+def auto_files(bid: int) -> list:
     """本任务自动生成的产物，按"写入顺序从旧到新"排好的文件名列表。
 
     排序键是 (时间戳, 同秒序号, mtime, 名字)，不能直接按名字排：同一秒内跑两次备份时
@@ -328,9 +339,7 @@ def _prune_order(bid: int) -> list:
     旧写法只认 `.gz`/`.tgz`，于是每次崩掉的恢复都在备份目录里存一份永不轮替的凭据副本，
     既占磁盘又扩大口令的可读面。认进形状里，它就和真备份一起按 keep 淘汰。
     """
-    auto = re.compile(
-        rf"^bk{bid}-(\d{{4}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}}-\d{{2}})(?:-(\d+))?.*(?:\.gz|\.tgz|\.env)$"
-    )
+    auto = re.compile(auto_pattern(bid))
     held = []
     for name in os.listdir(BACKUP_DIR):
         m = auto.match(name)
@@ -356,7 +365,7 @@ def prune(bk: dict):
     上传的产物由用户在备份文件页自己删。
     """
     bid = int(bk["id"])
-    files = _prune_order(bid)
+    files = auto_files(bid)
     while len(files) > int(bk["keep"]):
         f = files.pop(0)
         try:
@@ -364,6 +373,35 @@ def prune(bk: dict):
             print(f"pruned {f}")
         except OSError:
             pass
+
+
+def _push_offsite(bk: dict) -> None:
+    """本机产物落盘后把该推的几份推到异地；推不动只报警，不把这次备份改判成失败。
+
+    为什么这一步在 `main()` 之后：本机已经有一份可用归档了，异地没上去是"少了一份副本"，
+    而不是"备份没做"——把它算成失败会让 timer 的 journal、备份页、自检三处一起报一条
+    和本机数据无关的错，而真正该盯的是 `cloud_targets.last_error`。
+    为什么不在 `main()` 之前：先推后写，对端半途失败会在桶里留下一个本地没有的对象，
+    远端的 prune 认它、恢复的人找不到它。
+    """
+    if not bk.get("cloud_target_id"):
+        return
+    from .services import cloud_backup  # 函数级导入：cloud_backup 反过来要认这里的名正则
+
+    try:
+        res = cloud_backup.push_pending(bk)
+    except Exception as e:  # noqa: BLE001 - 异地失败不影响本机结论，但必须留下三处痕迹
+        note = redact_creds(str(e))[:200]
+        print(f"offsite: 推送失败：{note}", file=sys.stderr)
+        dbm.audit("system", "backup:push-fail", f"{bk['id']}({note})")
+        return
+    if res.get("pushed"):
+        print(f"offsite: 已推送 {len(res['pushed'])} 份：" + "、".join(p["key"] for p in res["pushed"]))
+        if res.get("pruned"):
+            print(f"offsite: 按 keep 删掉远端最旧的 {len(res['pruned'])} 份")
+        dbm.audit("system", "backup:push", f"{bk['id']}({len(res['pushed'])} 份)")
+    elif res.get("skipped"):
+        print(f"offsite: {res['skipped']}")
 
 
 def run_job(bid: int) -> int:
@@ -392,6 +430,9 @@ def run_job(bid: int) -> int:
         return 0
     try:
         main(row)
+        # 本机归档已经落盘了才推异地：`_push_offsite` 自己吞掉推送异常，
+        # 所以这一步不会把一次成功的备份改判成失败（理由见它的 docstring）。
+        _push_offsite(row)
         print("backup ok")
     except subprocess.CalledProcessError as e:
         print(f"backup failed: exit {e.returncode}", file=sys.stderr)

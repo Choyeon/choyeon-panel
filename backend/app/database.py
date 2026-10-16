@@ -111,6 +111,35 @@ CREATE TABLE IF NOT EXISTS metrics(
   load1 REAL, io_r INTEGER, io_w INTEGER, procs INTEGER,
   PRIMARY KEY(gran, ts)
 );
+-- 异地备份目标（S3 兼容对象存储）。secret_key 与 users.totp_secret、apps.env 同一口径：
+-- 明文入库、出接口时遮，库文件本身靠 DATA_DIR 的 0700 与 panel.db 的 0600 挡同机用户。
+CREATE TABLE IF NOT EXISTS cloud_targets(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  endpoint TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  region TEXT NOT NULL DEFAULT 'us-east-1',
+  access_key TEXT NOT NULL,
+  secret_key TEXT NOT NULL DEFAULT '',
+  prefix TEXT NOT NULL DEFAULT '',
+  path_style INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_push_at TEXT,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+-- 已经推上去的那几份。(target_id,name) 唯一：推送是幂等的，重复点"立即推送"
+-- 不该在同一份产物上记两行，否则"远端仍有 N 份"会越点越多，prune 也跟着数错。
+CREATE TABLE IF NOT EXISTS backup_pushes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  target_id INTEGER NOT NULL,
+  backup_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  key TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  pushed_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(target_id, name)
+);
 """
 
 MAX_DEPLOY_LOG = 256 * 1024  # 单条部署日志上限，防止失控增长
@@ -183,6 +212,13 @@ def migrate() -> None:
         # 那几行，比全量 (app_id,status) 小一个数量级。
         conn.execute("CREATE INDEX IF NOT EXISTS idx_deployments_running ON deployments(app_id) WHERE status='running'")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_backups_enabled ON backups(enabled, id)")
+        # 备份任务关联的异地目标（NULL＝只落本机）。可空而不是默认 0：0 会指向一张
+        # 还不存在的目标行，而"没关联"和"关联到一个已删除的 id"必须是两件事。
+        bcols = _columns("backups")
+        if "cloud_target_id" not in bcols:
+            conn.execute("ALTER TABLE backups ADD COLUMN cloud_target_id INTEGER")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pushes_target ON backup_pushes(target_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pushes_backup ON backup_pushes(backup_id, id)")
         # 告警历史只按时间倒序翻页，metrics 只按 (gran, ts) 区间取窗口——两个都是覆盖查询的入口。
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts_log(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_open ON alerts_log(acked, ts)")

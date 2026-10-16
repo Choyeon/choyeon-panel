@@ -253,6 +253,19 @@ export const api = {
   backupFiles: () => req('/backups/files'),
   deleteBackupFile: (id: number, name: string) =>
     req(`/backups/${id}/files/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  // 异地备份目标（S3 兼容）。列表里服务端只给掩码 AK 和 has_secret，永远不回显 Secret Key，
+  // 所以编辑抽屉里的 Secret 框是"写-only"：留空 = 不改。
+  cloudTargets: () => req('/backups/targets'),
+  createCloudTarget: (b: any) => req('/backups/targets', { body: b }),
+  updateCloudTarget: (id: number, b: any) => req(`/backups/targets/${id}`, { method: 'PATCH', body: b }),
+  deleteCloudTarget: (id: number) => req(`/backups/targets/${id}`, { method: 'DELETE' }),
+  // 连通性测试在服务端上限 20s（CP_CLOUD_PROBE_TIMEOUT_SEC），前端给 30s，
+  // 比它短就会出现"本地超时、远端还在握手"的双头结论。
+  testCloudTarget: (id: number) => req(`/backups/targets/${id}/test`, { body: {}, timeout: 30000 }),
+  // 手动补推走服务端 CP_CLOUD_PUSH_TIMEOUT_SEC（默认 900s）+ 上传后的裁剪与审计，
+  // 前端超时必须更长：推一半被本地 abort，远端对象已经落桶，用户再点一次就是重复上传。
+  pushBackup: (id: number, targetId?: number) =>
+    req(`/backups/${id}/push`, { body: targetId ? { target_id: targetId } : {}, timeout: 930000 }),
   files: (path: string) => req(`/files?path=${encodeURIComponent(path)}`),
   fileContent: (path: string) => req(`/files/content?path=${encodeURIComponent(path)}`),
   saveFile: (path: string, content: string | ArrayBuffer) =>

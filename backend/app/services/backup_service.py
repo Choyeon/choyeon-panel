@@ -80,6 +80,10 @@ def list_backups() -> list:
     apps = dbm.query("SELECT id, name FROM apps")
     app_ids = {r["id"] for r in apps}
     app_names = {r["name"] for r in apps}
+    # 异地目标名同理一次取回。为什么要给名字：任务行上的 `cloud_target_id` 在界面上
+    # 只是一个数字，运维看到"3"并不知道那是哪个桶、能不能删；而列表页又要承担
+    # "这条任务到底有没有异地副本"这个问题，只能把名字一起端出来。
+    cloud = {r["id"]: r["name"] for r in dbm.query("SELECT id, name FROM cloud_targets")}
     listing = []
     if os.path.isdir(BACKUP_DIR):
         try:
@@ -90,6 +94,8 @@ def list_backups() -> list:
     for b in rows:
         b["dir"] = BACKUP_DIR
         b["target_missing"] = _target_missing(b, app_ids, app_names)
+        tid = b.get("cloud_target_id")
+        b["cloud_target_name"] = cloud.get(tid) if tid else None
         prefix = f"bk{b['id']}-"
         files = list(reversed([f for f in listing if f.startswith(prefix)]))[:30]
         entries = []
@@ -278,6 +284,29 @@ def rename_app(old_name: str, new_name: str) -> None:
     )
 
 
+_UNSET = object()
+
+
+def _cloud_target_id(raw, keep=None) -> int | None:
+    """把请求里的 `cloud_target_id` 折算成要写进库的值。
+
+    三种写法各有意义：缺省＝不改动（PATCH），`null`/`0`＝解除关联（本机留档、不再推异地），
+    正整数＝关联那个目标。为什么必须查目标存在：链接到一个不存在的目标，
+    runner 每次备份都会为它跑一次注定失败的推送，而 `cloud_targets.last_error`
+    根本没有这一行可写——用户在备份页看到的仍然是「备份完成」，
+    那份异地副本却从来没有出现过（⑤O 定过的同一条规矩：写的时候就要指对东西）。
+    """
+    if raw is _UNSET:
+        return keep
+    if raw is None or raw == 0:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise RuntimeError("cloud_target_id 要是异地目标的 id、0 或 null")
+    if not dbm.query_one("SELECT id FROM cloud_targets WHERE id=?", (raw,)):
+        raise RuntimeError(f"异地目标 {raw} 不存在")
+    return raw
+
+
 def _validate_fields(i: dict):
     if i.get("schedule") is not None and i["schedule"] not in ("manual", "daily", "weekly"):
         raise RuntimeError("schedule 必须是 manual/daily/weekly")
@@ -294,8 +323,9 @@ async def create_backup(i: dict) -> dict:
         raise RuntimeError("kind 必须是 pg/app/sqlite")
     _validate_target(i["kind"], i.get("target"))
     _validate_fields(i)
+    cloud = _cloud_target_id(i.get("cloud_target_id", _UNSET))
     res = dbm.execute(
-        "INSERT INTO backups(kind,target,schedule,hour,minute,keep,enabled) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO backups(kind,target,schedule,hour,minute,keep,enabled,cloud_target_id) VALUES(?,?,?,?,?,?,?,?)",
         (
             i["kind"],
             i.get("target"),
@@ -308,6 +338,7 @@ async def create_backup(i: dict) -> dict:
             # 同一个请求体在 POST/PATCH 下语义相反（JSON 里没有 Python 的 False 时，
             # 数字 0、空串是常见的"关"写法）。缺省仍然视为开启。
             1 if (i.get("enabled") is None or i["enabled"]) else 0,
+            cloud,
         ),
     )
     row = dbm.query_one("SELECT * FROM backups WHERE id=?", (res,))
@@ -350,8 +381,9 @@ async def update_backup(bid: int, i: dict) -> dict:
     _validate_target(
         merged["kind"], merged["target"], app_must_exist=str(merged["target"]) != str(cur["target"])
     )
+    cloud = _cloud_target_id(i.get("cloud_target_id", _UNSET), cur["cloud_target_id"])
     dbm.execute(
-        "UPDATE backups SET kind=?,target=?,schedule=?,hour=?,minute=?,keep=?,enabled=? WHERE id=?",
+        "UPDATE backups SET kind=?,target=?,schedule=?,hour=?,minute=?,keep=?,enabled=?,cloud_target_id=? WHERE id=?",
         (
             merged["kind"],
             merged["target"],
@@ -360,6 +392,7 @@ async def update_backup(bid: int, i: dict) -> dict:
             i["minute"] if i.get("minute") is not None else cur["minute"],
             i["keep"] if i.get("keep") is not None else cur["keep"],
             cur["enabled"] if i.get("enabled") is None else (1 if i["enabled"] else 0),
+            cloud,
             bid,
         ),
     )
@@ -372,8 +405,12 @@ async def update_backup(bid: int, i: dict) -> dict:
         # 库里已是新值、systemd 还是旧 timer，两边不一致且界面上看不出来：
         # 把库还原成改动前那一行，再按同一口径报错。
         dbm.execute(
-            "UPDATE backups SET kind=?,target=?,schedule=?,hour=?,minute=?,keep=?,enabled=? WHERE id=?",
-            (cur["kind"], cur["target"], cur["schedule"], cur["hour"], cur["minute"], cur["keep"], cur["enabled"], bid),
+            "UPDATE backups SET kind=?,target=?,schedule=?,hour=?,minute=?,keep=?,"
+            "enabled=?,cloud_target_id=? WHERE id=?",
+            (
+                cur["kind"], cur["target"], cur["schedule"], cur["hour"], cur["minute"],
+                cur["keep"], cur["enabled"], cur["cloud_target_id"], bid,
+            ),
         )
         # 还原时连 timer 也同步不上就是环境问题，别盖掉原始报错
         with suppress(Exception):
@@ -396,6 +433,11 @@ async def delete_backup(bid: int):
             os.unlink(f)
     await run("systemctl", ["daemon-reload"])
     dbm.execute("DELETE FROM backups WHERE id=?", (bid,))
+    # 推送台账跟着删：任务没了，这些行既不会被 `already_pushed` 再查到（它按任务取产物名），
+    # 又会让异地目标的 `pushed_count` 一直虚高——用户看到的是"这个目标推过 40 份"，
+    # 而目录里那条任务已经不存在，谁都无从核对。**远端的对象一个都不删**：
+    # 删配置不等于删数据，这一点和 delete_target 是同一条规矩。
+    dbm.execute("DELETE FROM backup_pushes WHERE backup_id=?", (bid,))
 
 
 def save_upload(bid: int, filename: str, data: bytes, overwrite: bool = False) -> dict:
