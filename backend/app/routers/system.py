@@ -14,6 +14,7 @@ from ..errors import BadInput, err_json, public_message
 from ..services import (
     access_stats,
     alerts_service,
+    ban_service,
     firewall_service,
     system_metrics,
     systemd_ops,
@@ -261,6 +262,67 @@ async def firewall_remove(num: int, req: Request):
         await aio_db.audit(req.state.cp_sub, "firewall:remove", f"num={num} -> 拒绝：{public_message(e)}")
         return err_json(e)
     await aio_db.audit(req.state.cp_sub, "firewall:remove", f"num={num} -> 已删除 {out.get('removed', '')}")
+    return out
+
+
+def _hits_only(raw) -> int:
+    """`hits` 只用来写进备注，不参与任何判定：它是客户端上一次列表里看到的显示值，
+    拿它做安全决策等于让浏览器替服务端决定"这个人是不是在爆破"。读不出就当 0。"""
+    text = str(raw if raw is not None else "").strip()
+    return max(0, min(int(text), ban_service.MAX_HITS)) if text.isdigit() else 0
+
+
+async def _ban_body(req: Request) -> dict:
+    """POST 的请求体：只认 `ip` 与可选的 `hits`，其余字段一律忽略（不接受调用方塞进来的动作）。"""
+    body = await req.json() if "application/json" in (req.headers.get("content-type") or "") else {}
+    body = body if isinstance(body, dict) else {}
+    return {"ip": str(body.get("ip") or "")[:64], "hits": _hits_only(body.get("hits"))}
+
+
+@router.get("/api/bans")
+async def bans_list(req: Request):
+    """面板认得的封禁地址（备注 / 命名集合里带 choyeon-ban 标记的那些）。
+
+    只读账号看不到：它和 `/api/firewall` 同一个理由——这张表等于"这台机器在挡谁"。
+    `ok=false` 时 `reason` 说清是"没有防火墙"还是"这份表没读到"，前端据此锁住写操作。
+    """
+    if r := need_admin(req):
+        return r
+    return await ban_service.list_bans()
+
+
+@router.post("/api/bans")
+async def bans_add(req: Request):
+    """封一个来源地址。成功与拒绝都进审计：这条动作挡的是别人，留痕比一般写操作更要紧。"""
+    if r := need_admin(req):
+        return r
+    body = await _ban_body(req)
+    ip, hits = body["ip"], body["hits"]
+    try:
+        out = await ban_service.ban(ip, req, hits)
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "ban:add", f"{ip} -> 拒绝：{public_message(e)}")
+        return err_json(e)
+    await aio_db.audit(req.state.cp_sub, "ban:add", f"{ip} -> {out.get('detail', '')[:160]}")
+    return out
+
+
+@router.delete("/api/bans")
+async def bans_remove(req: Request):
+    """解封。ufw 那一路仍然走防火墙的按编号 + 签名删除（编号会在两次请求之间移动，
+    靠它寻址而不核对签名等于盲删——和删放行规则是同一件事）。"""
+    if r := need_admin(req):
+        return r
+    ip = req.query_params.get("ip", "")[:64]
+    raw_num = req.query_params.get("num", "")
+    num = int(raw_num) if raw_num.isdigit() else 0
+    expect = req.query_params.get("expect", "")[:160]
+    try:
+        out = await ban_service.unban(ip, num, expect, req)
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "ban:remove", f"{ip}#{num} -> 拒绝：{public_message(e)}")
+        return err_json(e)
+    await aio_db.audit(req.state.cp_sub, "ban:remove", f"{ip}#{num} -> {out.get('detail', '')[:160]}")
     return out
 
 

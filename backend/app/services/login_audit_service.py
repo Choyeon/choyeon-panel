@@ -39,6 +39,9 @@ JOURNAL_TIMEOUT = 25.0
 MAX_KEYS = 60  # 单个 authorized_keys 最多逐条列这么多行，再多只报总数
 MAX_FILES = 64
 JOURNAL_LINES = 50000
+# 失败来源与成功来源各列前几名。两处用同一个数：只列失败的 Top5 而看不到"这个人其实
+# 登录成功过"，封禁那条路上的提醒就无从谈起。
+TOP_IPS = 5
 # 面板自己那扇门 24h 内的失败登录到达这个数，就把"没人开两步验证"升成要紧：
 # 有人反复试口令时，第二因子是唯一还能挡住的层；没人在试则只是加固建议。
 PANEL_BRUTE_RISK = 50
@@ -454,7 +457,17 @@ def _guard_phrase(guard: dict) -> str:
 
 def _no_attempts(note: str) -> dict:
     """读不到日志时如实返回"这一项没核对成"，不给出 0 次这种看着像好消息的数。"""
-    return {"ok": False, "window": "24h", "failed": 0, "distinct_ips": 0, "top": [], "accepted": [], "note": note}
+    return {"ok": False, "window": "24h", "failed": 0, "distinct_ips": 0, "top": [],
+            "accepted": [], "accepted_ips": [], "note": note}
+
+
+async def attempts() -> dict:
+    """过去 24h 的 sshd 认证尝试汇总（公开入口）。
+
+    封禁那一层需要知道某个地址有没有成功登录过，而它不该去调下划线函数：
+    这份数据的外形（ok / top / accepted_ips）就是这一层对外的契约。
+    """
+    return await _attempts()
 
 
 async def _attempts() -> dict:
@@ -472,7 +485,7 @@ async def _attempts() -> dict:
         return _no_attempts(f"journalctl 退出码 {r['code']}，这段窗口没读到")
     if r["code"] == 1 and not out:
         return _no_attempts("这台机器上没有 ssh 相关的 journal 单元（sshd 日志可能写在别处）")
-    failed, ips, accepted = 0, {}, {}
+    failed, ips, accepted, ok_ips = 0, {}, {}, {}
     for line in out.splitlines():
         if _FAILED_RE.search(line):
             failed += 1
@@ -484,11 +497,16 @@ async def _attempts() -> dict:
             if m:
                 method = m.group(0).split()[1].split("/")[0]
                 accepted[method] = accepted.get(method, 0) + 1
-    top = sorted(ips.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+                im = _IP_RE.search(line)
+                if im:
+                    ok_ips[im.group("ip")] = ok_ips.get(im.group("ip"), 0) + 1
+    top = sorted(ips.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_IPS]
+    tops_ok = sorted(ok_ips.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_IPS]
     return {
         "ok": True, "window": "24h", "failed": failed, "distinct_ips": len(ips),
         "top": [{"ip": ip, "count": c} for ip, c in top],
         "accepted": [{"method": k, "count": v} for k, v in sorted(accepted.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "accepted_ips": [{"ip": ip, "count": c} for ip, c in tops_ok],
         "note": "",
     }
 

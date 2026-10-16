@@ -15,6 +15,7 @@
     choyeonctl app list|create|deploy|rollback|logs
     choyeonctl backup run|list|targets|add-target|push|link
     choyeonctl firewall list|allow|deny|remove|on|off
+    choyeonctl ban list|add|rm        # 封禁 sshd 爆破来源
     choyeonctl updates
     choyeonctl storage
     choyeonctl logs [-n 100] | restart | stop | start | upgrade
@@ -46,6 +47,7 @@ from app.routers.meta import run_checks  # noqa: E402
 from app.services import (  # noqa: E402
     access_stats,
     backup_service,
+    ban_service,
     cloud_backup,
     exposure_service,
     firewall_service,
@@ -904,6 +906,66 @@ def _firewall_table(data: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_ban(a: argparse.Namespace) -> dict:
+    """封禁 sshd 爆破来源：写的还是本机防火墙那一张表，读的也是同一份结果。
+
+    这里不重新发明防火墙。ufw 的规则仍由 firewall_service 写删，编号+签名的删除比对、
+    自锁守卫一次都不绕。ban_service 只多回答三件事：封谁、这条是谁封的、封完到底生效没有
+    ——最后一条每次写完都重新列表确认，命令返回 0 而地址不在表里按失败处理。
+    """
+    verb = a.ban_cmd
+    tool = await firewall_service.detect()
+    if verb != "list" and tool not in (firewall_service.UFW, firewall_service.FIREWALLD):
+        Out.error("这台机器上既没有 ufw 也没有 firewalld，没有可封禁的地方；"
+                  "持续对抗爆破的长期方案是装 fail2ban 的 sshd jail", EXIT_PRECONDITION)
+
+    try:
+        if verb == "list":
+            data = await ban_service.list_bans()
+        elif verb == "add":
+            data = await ban_service.ban(a.ip or "", None, int(a.hits or 0))
+        else:
+            if tool == firewall_service.UFW and (not a.num or not a.expect):
+                Out.error("rm 需要 --num 与 --expect：ufw 按编号删除，而编号会随任何一次删除前移。"
+                          "先用 choyeonctl ban list --json 读回这条封禁的 num 与 sig", EXIT_USAGE)
+            data = await ban_service.unban(a.ip or "", int(a.num or 0), a.expect or "", None)
+    except BadInput as e:
+        Out.error(public_message(e), EXIT_USAGE)
+    except Exception as e:  # noqa: BLE001
+        Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
+
+    table = _ban_table(data)
+    Out.result(data, table if verb == "list" else f"{data.get('detail') or '已执行'}\n{table}")
+    return data
+
+
+def _ban_table(data: dict) -> str:
+    """`ban list` 的人类可读形态，与网页「登录安全」页签读的是同一个出处。
+
+    ok=false 时不印「共 0 条」：终端上这两个字读起来是「这台机器没封任何人」，
+    而它真正的意思是没读到——跟 firewall list 守同一条规矩。
+    """
+    tool = data.get("tool", "none")
+    bans = data.get("bans") or []
+    if not data.get("ok"):
+        return f"{tool} · 封禁列表没读到，这一条不等于「没有封禁」（{data.get('reason') or '未知原因'}）"
+    cap = data.get("maxBans") or ban_service.MAX_BANS
+    marker = data.get("marker") or ban_service.MARKER
+    lines = [f"{tool} · 封禁 {len(bans)} 条（上限 {cap}，标记 {marker}）"]
+    for b in bans:
+        num = f"[{b['num']}]  " if b.get("num") else ""
+        gap = ""
+        if not b.get("runtime"):
+            gap = "（只在永久配置里，当前还没生效）"
+        elif not b.get("permanent"):
+            gap = "（重启后失效，永久配置里还没有）"
+        sig = f"  sig={b['sig']}" if b.get("sig") else ""
+        lines.append(f"  {num}{b.get('ip', '')}{gap}{sig}  {b.get('comment') or ''}".rstrip())
+    if any(b.get("sig") for b in bans):
+        lines.append("解封：choyeonctl ban rm <ip> --num <编号> --expect <sig>")
+    return "\n".join(lines)
+
+
 async def cmd_updates(a: argparse.Namespace) -> dict:
     """待装补丁：只读回答"还差哪些更新、其中哪些是安全更新"。
 
@@ -1750,6 +1812,17 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "remove 必须带 list 里读回的 sig（--expect）：编号会随任何一次删除前移",
                        "off 需要 --yes；on 会先确认 SSH 与面板入口端口已经在放行列表里",
                        "参数写歪退出码 2（用法错误），被自锁守卫拦下与防火墙自身报错为 1"]},
+            {"name": "ban list|add|rm",
+             "args": ["--hits", "--num", "--expect"],
+             "desc": "sshd 爆破来源的一键封禁（写的还是本机防火墙那一张表）",
+             "notes": ["只封单个公网地址：CIDR、域名、内网/回环/组播一律拒绝——封一片是人在终端上"
+                       "想清楚的事，不该是一个顺手参数",
+                       "复用 firewall_service 的编号+签名删除与自锁守卫，没有绕过参数；"
+                       "ufw 用规则备注 choyeon-ban 标记，firewalld 用同名 ipset（rich rule 没有备注字段）",
+                       "每一次写都重新列表确认：命令返回 0 而地址不在表里，按失败处理（退出码 1）",
+                       "上限 50 条；重复封同一个地址只回「已经在列表里」，不会写第二条",
+                       "地址过去 24 小时成功登录过照样封，但会先说明那会断开它的会话",
+                       "rm（ufw）要带 ban list 读回的 --num 与 --expect；没有防火墙工具时退出码 3"]},
             {"name": "updates", "args": ["--refresh"],
              "desc": "待装系统补丁与安全更新（只读探测，面板不代跑 apt update/upgrade）",
              "notes": ["结论来自本地包索引；索引过旧会在 notes 里如实说明",
@@ -1945,6 +2018,14 @@ def build_parser() -> argparse.ArgumentParser:
     fw.add_argument("--expect", help="remove：list 里那条规则的 sig，服务端重新列表比对")
     fw.add_argument("--yes", action="store_true", help="off：确认停用防火墙")
     fw.set_defaults(fn=cmd_firewall)
+
+    bn = sub.add_parser("ban", help="sshd 爆破来源封禁（写的还是本机防火墙）", parents=[common])
+    bn.add_argument("ban_cmd", choices=["list", "add", "rm"])
+    bn.add_argument("ip", nargs="?", help="add/rm：单个公网地址，不接受 CIDR、域名或内网地址")
+    bn.add_argument("--hits", type=int, help="add：过去 24 小时失败次数，只写进备注，不参与判定")
+    bn.add_argument("--num", type=int, help="rm（ufw）：ban list 里这条封禁的规则编号")
+    bn.add_argument("--expect", help="rm（ufw）：ban list 里这条封禁的 sig，服务端重新列表比对")
+    bn.set_defaults(fn=cmd_ban)
 
     up = sub.add_parser("updates", help="待装系统补丁与安全更新（只读探测）", parents=[common])
     up.add_argument("--refresh", action="store_true", help="忽略 30 分钟缓存，立即重新探测")
