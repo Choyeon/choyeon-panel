@@ -165,7 +165,12 @@ export function useCachedFetch<T = unknown>(opts: CachedFetchOptions<T>) {
 
   /** 订阅当前 key：LRU 淘汰绕开有人在读的条目 */
   function bind(key: string) {
-    if (key === boundKey) return;
+    // key 没变不代表还能用：invalidateCache 是"标记 dead + 从 store 删条"，条目就此作废。
+    // 只比 key 的话，"先 invalidate 再 refresh"会把组件永久绑死在那条 dead 条目上——
+    // 响应回来了既不写 store 也不画画面，界面从此停在挂载那一刻（实测：建完异地目标，
+    // 接口 200 返回列表，卡片还写着"还没有异地目标"，点刷新也不会好）。
+    // dead 时必须重新 getEntry 绑到新条目；老条目的 readers 递减是无害的。
+    if (key === boundKey && boundEntry && !boundEntry.dead) return;
     if (boundEntry) {
       boundEntry.readers = Math.max(0, boundEntry.readers - 1);
       boundEntry = null;

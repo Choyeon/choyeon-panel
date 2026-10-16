@@ -734,7 +734,11 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         if a.target is None:
             Out.error("link 需要 --target <异地目标 id>，取消关联用 --target 0", EXIT_USAGE)
         try:
-            backup_service.update_backup(int(a.id), {"cloud_target_id": int(a.target)})
+            # 必须 await：update_backup 是 async def，漏掉 await 只会造一个从不执行的
+            # 协程对象——except 抓不到任何东西，CLI 照样打印「已关联到目标 N」并写审计，
+            # 而 backups.cloud_target_id 一个字都没改。实测 choyeonctl backup link 是
+            # 静默空操作，连 --target 999999（目标不存在）都报成功。
+            await backup_service.update_backup(int(a.id), {"cloud_target_id": int(a.target)})
         except Exception as e:  # noqa: BLE001
             Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
             return {}

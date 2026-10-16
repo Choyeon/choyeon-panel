@@ -140,7 +140,7 @@ choyeonctl upgrade --no-pull  # 只改了配置时：跳过拉代码，仅重建
 | 网站与证书 | 按域名/端口生成反代配置，开关 WebSocket 升级、请求体大小、重定向；`nginx -t` 校验后热加载，校验失败自动回滚原文件。certbot 签发/续期，域名 × 应用 × 端口的 vhost 总览能一键套用/移除与手动续期，并列出剩余天数与最早到期提醒 |
 | 系统监控 | psutil 进程内采集（无 fork）：CPU/内存/网速实时曲线，1h/6h/24h/7d 历史曲线（磁盘、负载、磁盘 IO）、Top 进程；systemd 服务启停；journalctl 实时日志（SSE）与关键词检索 |
 | 数据库 | PostgreSQL 库/角色管理 + SQL 控制台 + 表/行数据浏览（可编辑）；Redis 键浏览器（string/hash/list/set/zset，含 TTL 与内存），读路径走进程内 RESP 客户端，不 fork redis-cli |
-| 备份 | pg_dump / 目录打包 / SQLite 在线备份，daily/weekly 调度由 systemd timer 托管（列表直接显示下次触发时间），支持在线恢复、上传与下载备份文件 |
+| 备份 | pg_dump / 目录打包 / SQLite 在线备份，daily/weekly 调度由 systemd timer 托管（列表直接显示下次触发时间），支持在线恢复、上传与下载备份文件；可另配 S3 兼容异地目标（S3 / MinIO / OSS / COS），本机归档落盘后推送、按目标轮替，签名只用标准库 |
 | 日志中心 | 系统日志按 unit/时间/级别/正则关键词检索（journalctl 固定 argv），应用与面板日志尾读，命中高亮 |
 | 文件管理 | 白名单根目录内浏览/编辑/多文件上传/下载/打包下载/解压/重命名/删除，带体积上限；上传按字节落盘，解压拒绝越界路径与符号链接 |
 | Web 终端 | pty + xterm.js，仅管理员，带并发会话上限与空闲回收 |
@@ -171,6 +171,11 @@ choyeonctl app create my-api --template python-fastapi \
 choyeonctl app deploy --id 1 --json
 choyeonctl app logs --id 1 --lines 80
 choyeonctl backup run                                # SQLite 在线备份 API
+choyeonctl backup targets                            # 异地目标与上次失败原因
+printf '%s' "$SK" | choyeonctl backup add-target --name offsite --endpoint https://minio.example.com:9000 \
+  --bucket panel --access-key AKIA... --secret-stdin --json   # Secret Key 只走 stdin
+choyeonctl backup link --id 1 --target 1 --json       # 任务跑完推给哪个目标；--target 0 取消
+choyeonctl backup push --id 1 --json                  # 只补推没推过的产物
 choyeonctl schema --json                             # 输出命令契约（本表的权威来源）
 ```
 
@@ -324,6 +329,9 @@ choyeonctl backup list
 ```cron
 0 4 * * * <安装目录>/scripts/backup.sh >> /var/log/choyeon-backup.log 2>&1
 ```
+
+本机归档落了盘才算这次备份成功；异地一份是附加副本，推不上去只记在目标的上次失败里，不会把成功的备份改判成失败。
+面板以 root 运行，而异地端点是填写的任意地址，因此拒绝元数据与内网保留地址；对象存储的凭据只走 stdin，接口与日志里只出现遮罩位。
 
 恢复：停服务 → 解压覆盖 `panel.db` → 起服务 → `scripts/healthcheck.sh`（详细步骤见 RUNBOOK 第 4 节）。
 

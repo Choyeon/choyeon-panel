@@ -202,9 +202,21 @@ class RenderFormNowrapSitesAreGuarded(unittest.TestCase):
         )
 
     def test_the_measured_clip_site_now_wraps_and_carries_the_full_text(self):
-        # This assertion was for an older Backups.vue structure; current implementation
-        # already has cp-prose + title on all cell-sub/mono-dim spans (see batch㊲).
-        pass
+        """375px 实测被裁断的那一格（备份任务「产物」列的合计行）要同时有折行触发器和全文。
+
+        内容 249px、格子只有 226px，而 .cell-sub 自带 nowrap+ellipsis，
+        列上又没有第二个入口，于是「合计 … · 最近 … UTC」这半句会被吃掉。
+        只写 title 不算修好（手机上没有 hover），只折行也不算（折完仍可能超宽），
+        所以两样都得在；这一格是那一批唯一的实测缺陷，钉子单独打在这里。
+        """
+        text = _web("views/Backups.vue")
+        self.assertIn("const sub = `合计", text, "产物列的合计行没了：那一格的实测结论要重新做一次")
+        self.assertIn(
+            "h('div', { class: 'cell-sub cp-prose', title: sub }, sub)",
+            text,
+            "合计行必须同时挂 cp-prose 触发器并把全文写进 title",
+        )
+
     def test_dead_class_names_stay_a_closed_set(self):
         """用了却没任何规则命中的 class token 必须是已点名的那 28 个命名钩子。"""
         glob_defined = set()

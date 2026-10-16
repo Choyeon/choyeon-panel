@@ -21,7 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from http.client import HTTPConnection, HTTPSConnection
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from .. import config
 from .. import database as dbm
@@ -40,6 +40,9 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _REGION_RE = re.compile(r"^[a-z0-9-]{1,32}$")
 _AKID_RE = re.compile(r"^[A-Za-z0-9._-]{4,128}$")
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9._/-]{0,200}$")
+# 主机名形态：RFC 域名与 IP 字面量的字符集。含空格/下划线/中文的写法在建目标时就拒掉，
+# 而不是留下一条"每次备份都失败在连接阶段"的目标。
+_HOST_SHAPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
 # 云厂商的元数据服务地址：这类主机名永远不可能是对象存储端点，
 # 而面板以 root 出网，被人往 endpoint 里塞一个 `169.254.169.254` 就等于借它去取
 # 实例角色凭据。这一条与"允许内网自建 MinIO"无关，永远拒。
@@ -84,6 +87,12 @@ def _check_endpoint(endpoint: str) -> dict:
     host = u.hostname or ""
     if not host:
         raise RuntimeError("端点里读不出主机名")
+    if not _HOST_SHAPE_RE.fullmatch(host):
+        # urlsplit 把 IPv6 的方括号去掉了，所以 `::1` 这类字面量走 ipaddress 判。
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            raise RuntimeError("端点里的主机名不合法：请用域名或 IP，例如 https://minio.example.com:9000") from None
     if host.lower() in _DENY_HOSTS:
         raise RuntimeError(f"{host} 是云厂商的元数据地址，不是对象存储端点")
     try:
@@ -170,7 +179,11 @@ def _clean(body: dict, *, partial: bool = False) -> dict:
     if want("prefix"):
         out["prefix"] = _norm_prefix(body.get("prefix"))
     for flag in ("path_style", "enabled"):
-        if want(flag):
+        # 只看"这次给了没有"，不用 want()：新建时缺省也要写一列的话，写进去的就是 0，
+        # 而库里这两列的默认值是 path_style=0 / enabled=1。实测后果是
+        # `choyeonctl backup add-target`（不带 --enable）建出来的目标一出生就停用，
+        # push_pending 永远返回"已停用"，异地那份副本一次都没写过。
+        if flag in keys:
             out[flag] = 1 if body.get(flag) in (1, True, "1", "true", "yes", "on") else 0
     return out
 
@@ -288,8 +301,13 @@ def _canonical_query(query: str) -> str:
         return ""
     pairs = []
     for part in query.split("&"):
+        if not part:
+            continue
         k, _, v = part.partition("=")
-        pairs.append((quote(k, safe="-_.~"), quote(v, safe="-_.~")))
+        # 先还原再编码：查询串在发出前已经编码过一次，直接再编码会把 %2F 变成 %252F，
+        # 于是线上发的是一个串、签名算的是另一个串，对端只回一句 SignatureDoesNotMatch。
+        # 带 `/` 的对象前缀（panel/db/）与翻页 token 里的 +/= 是最常见的两种写法。
+        pairs.append((quote(unquote(k), safe="-_.~"), quote(unquote(v), safe="-_.~")))
     return "&".join(f"{k}={v}" for k, v in sorted(pairs))
 
 
@@ -374,7 +392,7 @@ def _request(t: dict, method: str, key: str = "", query: str = "", body=None,
         headers["content-length"] = str(body_len)
     auth, _ = authorization(method=method, path=raw, query=query, headers=headers,
                             payload_hash=payload_hash, access_key=t["access_key"],
-                            secret_key=t["secret_key"], region=t["region"], when=when)
+                            secret=t["secret_key"], region=t["region"], when=when)
     headers["authorization"] = auth
     conn = (HTTPSConnection(ep["host"], ep["port"], timeout=timeout, context=ssl.create_default_context())
             if ep["scheme"] == "https" else HTTPConnection(ep["host"], ep["port"], timeout=timeout))

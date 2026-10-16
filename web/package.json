@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build && node scripts/gzip-assets.mjs",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "test:unit": "node --experimental-strip-types --test \"tests/**/*.test.mjs\""
   },
   "dependencies": {
     "@vicons/ionicons5": "^0.13.0",

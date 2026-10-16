@@ -672,6 +672,23 @@ html.cp-vt *::after {
   }
 }
 
+/* ---------- 窄屏取消表格固定列（≤640px，和字号/内边距同一档） ---------- */
+/* 操作列 fixed: 'right' 在桌面档是对的：列很多，横向滚动时按钮要一直在手边。
+   但窄屏下它按自身宽度吸在右边缘，容器比"固定列 + 首列"还窄时就把正文盖掉了——
+   375px 实测备份页容器 293px、操作列 230px，首列即使有 200px 也只剩 63px 可读，
+   "rosetta" 显示成 "ros"。让它退回普通单元格跟着横向滚动一起走：名字读得到，
+   操作列滚到最右就是，和手机上绝大多数表格的行为一致。
+   box-shadow 一起清掉：那是 naive 给吸边列的分隔阴影，列不吸边了它就是条脏线。 */
+@media (max-width: 640px) {
+  .n-data-table-th--fixed-left,
+  .n-data-table-th--fixed-right,
+  .n-data-table-td--fixed-left,
+  .n-data-table-td--fixed-right {
+    position: static !important;
+    box-shadow: none !important;
+  }
+}
+
 /* 尊重系统「减少动效」设置 */
 @media (prefers-reduced-motion: reduce) {
   *,

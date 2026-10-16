@@ -130,6 +130,13 @@ jobs:
       - name: 安装依赖
         run: npm ci --no-audit --fund=false
 
+      - name: 单元测试（composable 时序回归）
+        # Node 22.18+ 默认按类型擦除跑 .ts；--experimental-strip-types 让 22.6~22.17
+        # 的 runner 同样能跑，别让这条静默不执行。
+        # 这条必须跑在构建前面：批次㊸ useCachedFetch 绑死 dead 条目导致全站
+        # 「写完不刷新」，typecheck 与 vite build 全绿，只有真时序用例能抓到。
+        run: npm run test:unit
+
       - name: 类型检查
         run: npm run typecheck
 

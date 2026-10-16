@@ -328,6 +328,34 @@
   `--yes`/账号不存在/本来没开三种失败、吊销会话与审计留痕，以及源码级用例钉住"状态响应与 `user list`
   里搜不到密钥本身""位数来自响应""qrcode 走动态 import 且单独成块""输入框只在能填的时候出现"。
 
+- 异地备份目标（S3 兼容对象存储）：备份只落在本机 `/root/backups/panel`，盘坏、机器被删、
+  整台还给云厂商时"最近 7 份"跟着一起没——而那正是备份要防的那件事。`backend/app/services/cloud_backup.py`
+  补上异地一份：virtual-host 与 path-style 两种寻址都支持（MinIO 要后者），单文件走 PutObject，
+  远端 prune 与本机保留策略同一批键。签名只用标准库（SigV4 是四层 HMAC，`hashlib`/`hmac` 够用）：
+  `requirements.txt` 只有 fastapi/uvicorn/websockets/PyJWT/psutil/python-multipart，
+  `install.sh` 要在最小发行版上一次跑通，多引一个 SDK 就多一条"依赖装不上所以部署失败"的路径
+  ——webhook 那侧同样只用 `urllib`。
+- `cloud_targets` 与 `backup_pushes` 两张表：目标存名称/端点/region/bucket/前缀/Access Key/
+  路径风格/启用位，Secret Key 走凭据那一套（不进 JSON、接口只回 `has_secret` 布尔与遮罩位）；
+  `backup_pushes` 以 `(target_id, name)` 唯一，判重与 prune 都认它，所以补推与轮替都是幂等的。
+- runner 耦合：`backup_runner._push_offsite` 在本机归档落盘**之后**才跑，异常全吞（stderr + 审计
+  `backup:push-fail`），异地推不上去只写目标的 `last_error`，绝不把一次成功的本机备份改判成失败。
+  单文件上传有总时限（`_DeadlineReader`）：`http.client` 的 timeout 只保单次 socket 操作，
+  一个不封总时长的推送会攥着 flock，让后面每次定时备份都"跳过"。
+- 异地端点是用户在表单里填的任意字符串，而面板进程是 root——所以出网前先过 SSRF 门禁：
+  `_DENY_HOSTS` 挡 `169.254.169.254`/`metadata*`/`instance-data`，`_assert_not_metadata` 每次请求
+  前还要按 DNS 结果再判一次 link-local（建目标时判一次不够，DNS 会重绑）。
+- CLI：`choyeonctl backup targets|add-target|edit-target|del-target|test-target|push|link`。
+  Secret Key 只走 `--secret-stdin`（命令行参数会留在 `ps`、`/proc/<pid>/cmdline` 和 shell 历史里）；
+  `add-target` 之后还要 `link` 才真的推——目标是"这台机器往哪儿写"，link 是"这个任务跑完交给哪个目标"；
+  `del-target` 只删配置，桶里的对象与本机备份一个都不动，面板不替人删数据。
+- 前端：备份页新增「异地目标」卡片（含每个目标的上次失败原因）与建/改目标、推送记录两个抽屉；
+  viewer 角色收起这些写操作，接口侧同步剔除 `dir`、把 `cloud_target_id` 换成 `cloud_linked`。
+- `backend/tests/test_batch43.py`（85 条）按危险排序，不按功能排序。最关键的一条是"签的必须正是线上那一份"：
+  用假连接把真实发出的请求行与请求头录下来，再对**录到的内容**反向验签，而期望值是独立重写的一份
+  SigV4 规范（四层 HMAC 循环派生、头值 `split()` 折叠、路径逐段编码）——不拿模块自己的 `authorization()`
+  当金标准，那样只能证明"代码和它自己一致"。其余覆盖凭据脱敏（S3 报错里裸出现的 `AKIA…`/`ASIA…`
+  与 `Signature=<64hex>`）、元数据地址拒绝、PATCH"给了才换"、推送判重与失败口径。
 
 ### 修复
 
@@ -1334,6 +1362,51 @@
   "reload 被扣下时不许出现 --reload"；再用源码级断言钉住页面与自检：`_check_firewall()` 里不许再出现
   `shutil.which("ufw")` 或 `ufw status`，`Firewall.vue` 里不许剩 `st.active ? '运行中' : '未运行'`
   这类真值两格的写法，`Services.vue` 的 unknown 告警必须排在 blocked 之前。
+
+- 异地备份整条链路自批次㊸A 落地起就没成功过一次，第一次跑回归测试就撞出来了：调用 `authorization()`
+  时写的是 `secret_key=`，函数签名是 `secret=`，于是每个异地请求都在开连接之前 `TypeError`。
+  真实后果不是"备份失败"而是"看起来配好了，异地那份副本从来没写过"——这一层当时零测试。
+- 签名算的查询串和线上发的不是同一个：`_canonical_query` 对已经编码过一次的值再编码，`%2F` 变成
+  `%252F`，对端只回一句不含原因的 `SignatureDoesNotMatch`。对象前缀带 `/`（`panel/db/`）与翻页
+  token 里的 `+`/`=` 是最常见的两种写法。现在先 `unquote` 再 `quote`，让这一步幂等。
+- `_clean` 用兜底值写标志位，把缺省的 `enabled` 写成了 0：`choyeonctl backup add-target`（不带
+  `--enable`）建出来的目标一出生就停用，`push_pending` 永远返回"已停用"。现在只看"这次给了没有"，
+  没给就不写这一列，让 schema 的默认值（`path_style=0`/`enabled=1`）生效。
+- `choyeonctl backup link` 是静默空操作：漏了 `await`，而 `update_backup` 是 `async def`，
+  于是只造出一个从不执行的协程对象，`except` 抓不到任何东西，CLI 照样打印"已关联到目标 N"并写审计，
+  库里 `backups.cloud_target_id` 一个字没改——连 `--target 999999`（目标不存在）都报成功。
+- 端点里"读得出主机名"不等于"那是个能连的地址"：含空格、下划线或中文的写法以前能存进库，
+  之后每次备份都失败在连接阶段。现在建目标时就拒（IPv6 字面量另走 `ipaddress` 判，
+  因为 `urlsplit` 把方括号去掉了）。
+- 请求体里 `cloud_target_id: false` 会静默解开这台机器上最后一份异地副本的链接：
+  `False == 0` 为真，若先走"0＝解除关联"那一支，同一个 JSON 形态里 `false` 是解除关联、`true` 是类型错误，
+  两个结果、查不出来。现在先判 bool 并明确报错。
+
+- 写完操作界面不更新，整站六个视图一起中招（批次㊸在线上 375px 浏览器里撞到）：备份页新建异地目标，
+  接口 200 返回了那一行，卡片还写着「还没有异地目标」，点刷新也没用。`useCachedFetch.bind()` 只比
+  `key === boundKey` 就认定"还在读同一条"，而 `invalidateCache` 的动作是「标记 dead + 从 store 删条」——
+  条目已经作废，组件却仍绑在上面，之后的响应既不写 store 也不画画面，界面从此停在挂载那一刻。
+  六个视图（备份/应用/文件/服务/用户/定时任务）都是「invalidateCache(自己的 key) → refresh()」这一套写法，
+  所以一处改完全站才好；dead 时必须重新 `getEntry` 绑到新条目，老条目 readers 递减是无害的。
+- 上面这条 `vue-tsc` 与 `vite build` 全绿，所以给它配了能在 CI 里跑的时序回归。`web/tests/useCachedFetch.test.mjs`
+  （5 条）跑的是线上那份 `.ts` 本体，真 vue 响应式 + `effectScope`，不引 jsdom：写完立刻刷新要画出新行、
+  连着两次写都要（只修一次的话第二条起又绑回 dead 条目）、跨页前缀失效要回源、`maxAge` 之内一次接口都不许多打、
+  key 变了以后慢的旧响应不许盖回新画面、失败先报错而恢复之后强制刷新要把画面救回来。
+  `npm run test:unit` 用 node 22 的类型擦除（`--experimental-strip-types`）直接跑 `.ts`，CI 前端 job 里这条
+  **排在类型检查前面**：构建那两步只证明"能编译"，证明不了"写得进去、画得出来"。
+- 异地目标抽屉的 7 个输入框把 `aria-label` 直接写在了 `NInput` 上：naive-ui 会把多出来的属性落到
+  `.n-input` 外层 div，读屏软件拿不到名字（登录页 `maxlength` 那处是同一个坑的另一种表现）。改走
+  `:input-props="{ 'aria-label': … }"`，与仓库既有写法一致。
+- 窄屏下三张表的主名列宽度是 0。批次㊴把 `scroll-x` 换成 `auto` 之后，没写 `width` 也没写 `minWidth`
+  的弹性列拿到的是「容器宽 − 固定列宽」，固定列一旦超过容器就成了 0px（375px 实测应用页名字整列看不见）。
+  `Apps.vue`/`Files.vue`/`Backups.vue` 四列补 `minWidth`（200/220/200/180），并用
+  `web/tests/columnWidth.test.mjs` 从源码钉住：凡带 `scroll-x` 的表里的列，要么有宽度约束，要么按
+  `文件:行号 [数组名] title/key` 点名报错——新表不能只靠肉眼在窄屏发现。渲染函数里的 `title` tooltip
+  与动态生成的列（文件页扩展名列）不在这一条的匹配范围。
+- 操作列 `fixed: 'right'` 在窄屏把正文盖掉了：375px 实测备份页容器 293px 而操作列 230px，首列即使给了
+  200px 也只剩 63px 可读，"rosetta" 显示成 "ros"。`style.css` 加一条 ≤640px 规则（与字号、内边距同一档），
+  让固定列退回普通单元格跟着横向滚动一起走并清掉吸边阴影，一处改掉全站 12 个视图 15 个固定列；
+  桌面档行为不变，按钮仍在手边。
 
 ## [1.1.10] - 2026-10-12
 

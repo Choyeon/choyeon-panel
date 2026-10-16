@@ -304,7 +304,8 @@ async function pack() {
 
 const columns: any[] = [
   {
-    title: '名称', key: 'name',
+    // 弹性列必须给 minWidth：scroll-x auto 下没有它，固定列一超过容器就被挤成 0 宽（375px 实测名字看不见）
+    title: '名称', key: 'name', minWidth: 220,
     render: (e: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [

@@ -298,9 +298,14 @@ def _cloud_target_id(raw, keep=None) -> int | None:
     """
     if raw is _UNSET:
         return keep
+    # bool 先判：`False == 0` 为真，若先走"0＝解除关联"那一支，请求体里写
+    # `cloud_target_id: false` 会被当成"取消关联"，把这台机器上最后一份异地副本的
+    # 链接静默解开；`true` 则报类型错。同一个 JSON 形态两个结果，是查不出来的那种故障。
+    if isinstance(raw, bool):
+        raise RuntimeError("cloud_target_id 要是异地目标的 id、0 或 null")
     if raw is None or raw == 0:
         return None
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+    if not isinstance(raw, int) or raw < 0:
         raise RuntimeError("cloud_target_id 要是异地目标的 id、0 或 null")
     if not dbm.query_one("SELECT id FROM cloud_targets WHERE id=?", (raw,)):
         raise RuntimeError(f"异地目标 {raw} 不存在")
