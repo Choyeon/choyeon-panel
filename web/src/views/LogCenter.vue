@@ -22,7 +22,7 @@ type SFile = { i: number; label: string; kind: string; site: string };
 type NResp = { items: string[]; count: number; source: string; files: SFile[]; truncated: boolean; hint?: string };
 type LogOpts = {
   lines_default: number; lines_max: number; ladder: number[];
-  nginx_tail_bytes: number; stats_minutes: number[];
+  nginx_tail_bytes: number; stats_minutes: number[]; stats_days: number[];
 };
 type SResp = {
   hint?: string; files?: SFile[]; source?: string; site?: string; file?: number;
@@ -36,6 +36,22 @@ type SResp = {
   topClients?: { key: string; count: number }[];
   methods?: { key: string; count: number }[];
   series?: { ts: number; count: number }[];
+};
+type DSpan = {
+  pv: number; uv: number; uvFloored?: boolean; bytes: number; e4xx: number; e5xx: number;
+};
+type DResp = {
+  hint?: string; source?: string; site?: string; file?: number;
+  days?: number; anchor?: string; from?: string; prevFrom?: string;
+  rows?: { date: string; pv: number; uv: number; uvFloored: boolean; bytes: number; e4xx: number; e5xx: number }[];
+  current?: DSpan;
+  previous?: DSpan & { days: number; partial: boolean; reason: string };
+  comparable?: boolean; deltaPvPct?: number | null;
+  parsed?: number; malformed?: number; outside?: number;
+  scannedLines?: number; scannedFiles?: number; totalFiles?: number;
+  truncatedFiles?: number; unreadableFiles?: number;
+  bytesScanned?: number; diskBytes?: number; historyFrom?: string;
+  series?: { name: string; gen: number; gz: boolean; bytes: number }[];
 };
 
 const err = ref('');
@@ -294,6 +310,123 @@ const statsInfo = computed<InfoItem[]>(() => {
   return rows;
 });
 
+// —— 按天流量与环比（读 logrotate 轮替出来的世代，比分钟窗口重，所以这一步要人点）——
+const df = ref({ days: 0 });
+const dResult = ref<DResp | null>(null);
+const dLoading = ref(false);
+
+// 天数档位同样来自 /system/log-options（后端 access_stats.DAY_LADDER）。这里抄一份 3/7/14/30
+// 的后果和分钟窗口那版一样：服务端把上限放宽后，下拉里还是老档位，而校验早已放行。
+const dayLadder = computed(() => (logOpts.value?.stats_days || []).filter((n) => Number.isInteger(n) && n >= 1));
+const dayOpts = computed(() => dayLadder.value.map((n) => ({ label: `${n} 天`, value: n })));
+const defaultDays = computed(() => dayLadder.value.find((n) => n === 7) || dayLadder.value[0] || 0);
+watch(defaultDays, (v) => { if (v && !df.value.days) df.value.days = v; });
+
+// 分钟统计和按天共用服务端那份清单（同一个序号空间），所以"有没有可统计的来源"也只认一次：
+// 按天按钮在跑过一次分钟统计（哪怕答案是"白名单里没有访问日志"）之前是灰的，
+// 灰的原因是还不知道有哪些来源，而不是按天这个功能坏了。
+const hasAccessSource = computed(() => (sResult.value?.files || []).some((f) => f.kind === 'access'));
+
+// 一次按天回看最多读 31 份世代（含解压），比分钟窗口的单份尾读重得多，
+// 所以并发同样认序号：连点两下会打两份全量扫描，而先回来的会盖掉后回来的。
+let dailySeq = 0;
+async function runDaily() {
+  if (dLoading.value) return;
+  dLoading.value = true;
+  const seq = ++dailySeq;
+  err.value = '';
+  const q = new URLSearchParams();
+  // 序号空间与分钟窗口是同一份（服务端 _pick_access_source），所以这里直接跟随下拉当前选的号；
+  // 一次统计都没跑过时不带 file，交给服务端挑一个「能统计的」来源。
+  if (typeof sResult.value?.file === 'number') q.set('file', String(sf.value.file));
+  if (df.value.days) q.set('days', String(df.value.days));
+  try {
+    const r: DResp = await req(`/system/nginx-daily?${q.toString()}`, { timeout: 120000 });
+    if (seq !== dailySeq) return;
+    dResult.value = r;
+  } catch (e: any) {
+    if (seq !== dailySeq) return;
+    err.value = e.message || String(e);
+  } finally {
+    if (seq === dailySeq) dLoading.value = false;
+  }
+}
+
+// 环比的判词只照抄服务端给的 `comparable` 与 `previous.reason`：
+// 「上一周期读满了吗」是扫描侧的事实，页面拿 rows 自己拼只会拼出一个假的涨跌。
+const dailyVerdict = computed(() => {
+  const d = dResult.value;
+  if (!d || !d.current || !d.source) return null;
+  if (d.comparable) {
+    const pct = Number(d.deltaPvPct) || 0;
+    const dir = pct > 0 ? '上升' : pct < 0 ? '下降' : '持平';
+    return {
+      tone: pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat',
+      text: `最近 ${d.days} 天 ${d.current.pv} 次请求，比上一周期（${d.previous?.pv ?? 0} 次）${dir}${pct === 0 ? '' : ` ${Math.abs(pct)}%`}`,
+    };
+  }
+  const r = d.previous?.reason || 'history';
+  const why = r === 'no-data'
+    ? '这些日志里读不出可用的时间戳'
+    : r === 'clipped'
+      ? `上一周期那几份有被截断或读不到的（截断 ${d.truncatedFiles ?? 0} 份、读不到 ${d.unreadableFiles ?? 0} 份）`
+      : `日志只到 ${d.historyFrom || '?'}，往前凑不满一个周期（上一周期只留住 ${d.previous?.days ?? 0} 天）`;
+  return { tone: 'none', text: `不做环比：${why}` };
+});
+
+// 换了下拉但没重取：这张表还是上一个来源的数字，得说清楚，不能让它顶着新选择的标题装作刚算过。
+const dailyStale = computed(() => {
+  const d = dResult.value;
+  if (!d || typeof d.file !== 'number' || d.file === sf.value.file) return '';
+  return '来源已经换了，下面这份还是上一个来源的数（点「按天回看」重取）';
+});
+
+const dailyInfo = computed<InfoItem[]>(() => {
+  const d = dResult.value;
+  if (!d || !d.source) return [];
+  const rows: InfoItem[] = [
+    { k: '来源', v: d.source, mono: true },
+    { k: '站点', v: d.site || '-' },
+    { k: '区间', v: `${d.days} 天 · ${d.from || '?'} → ${d.anchor || '?'}` },
+    { k: '请求数', v: `${d.current?.pv ?? 0} 次` },
+    { k: '独立客户端', v: `${d.current?.uv ?? 0} 个${d.current?.uvFloored ? '（到封顶值，实际更多）' : ''}` },
+    { k: '出站流量', v: fmtBytes(d.current?.bytes || 0) },
+    { k: '4xx / 5xx', v: `${d.current?.e4xx ?? 0} / ${d.current?.e5xx ?? 0}` },
+    {
+      k: '回看',
+      v: `读了 ${d.scannedFiles ?? 0}/${d.totalFiles ?? 0} 份世代、${d.scannedLines ?? 0} 行`
+        + `（盘上共 ${fmtBytes(d.diskBytes || 0)}）${d.historyFrom ? `，最早到 ${d.historyFrom}` : ''}`,
+    },
+  ];
+  if (d.truncatedFiles) rows.push({ k: '读到底的世代', v: `${d.truncatedFiles} 份比单次读量还大，只算了读进来的那部分` });
+  if (d.unreadableFiles) rows.push({ k: '这次读不到', v: `${d.unreadableFiles} 份（多半正好赶上 logrotate 改名）` });
+  if (d.outside) rows.push({ k: '窗口外', v: `${d.outside} 行比日历天窗口更早，未计入` });
+  if (d.malformed) rows.push({ k: '解析不了', v: `${d.malformed} 行（不是 common/combined 格式，或时间戳读不出）` });
+  return rows;
+});
+
+type DRow = NonNullable<DResp['rows']>[number];
+const dailyXs = computed(() => (dResult.value?.rows || []).map((r) => r.date.slice(5)));
+const dailyChart = computed(() => {
+  const rows = dResult.value?.rows || [];
+  return [
+    { name: '请求数', color: '--cp-brand', data: rows.map((r) => r.pv), area: true, straight: true },
+    { name: '独立客户端', color: '--cp-ok', data: rows.map((r) => r.uv), axis: 1, thin: true },
+  ];
+});
+const dCols: any[] = [
+  { title: '日期', key: 'date', minWidth: 96, render: (r: DRow) => h('span', { class: 'mono-dim' }, r.date) },
+  { title: '请求', key: 'pv', width: 76, align: 'right' },
+  {
+    // 封顶那天如实写「2000+」：写成 2000 会让人以为客户端数刚好摸到上限。
+    title: '独立客户端', key: 'uv', width: 100, align: 'right',
+    render: (r: DRow) => (r.uvFloored ? `${r.uv}+` : String(r.uv)),
+  },
+  { title: '下行', key: 'bytes', width: 92, align: 'right', render: (r: DRow) => fmtBytes(r.bytes) },
+  { title: '4xx', key: 'e4xx', width: 66, align: 'right' },
+  { title: '5xx', key: 'e5xx', width: 66, align: 'right' },
+];
+
 const pCols: any[] = [
   {
     title: '路径（不含查询串）', key: 'path', minWidth: 200, ellipsis: tapEllipsis,
@@ -539,6 +672,52 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
             </NGridItem>
           </NGrid>
         </template>
+
+        <NCard size="small" class="lg-daily">
+          <template #header><span class="section-title">按天流量与环比</span></template>
+          <NSpace :size="8" wrap align="center" style="margin-bottom: var(--space-3)">
+            <NSelect
+              :value="df.days || null" size="small" style="width: 104px; max-width: 100%"
+              :options="dayOpts" placeholder="天数" aria-label="回看天数"
+              @update:value="(v: number) => { df.days = v; }"
+            />
+            <NButton
+              size="small" :loading="dLoading" :disabled="dLoading || !hasAccessSource"
+              :icon="icon('SearchOutline', 14)" @click="runDaily"
+            >按天回看</NButton>
+            <NText class="cell-sub cp-break" style="font-size: var(--fs-xs)">
+              {{ hasAccessSource
+                ? '按天要读轮替出来的历史世代（含 .gz），比分钟窗口慢，所以这一步不自动跑'
+                : '先点上面的「统计」拿到来源清单——这一页还不知道有哪些访问日志可回看' }}
+            </NText>
+          </NSpace>
+
+          <NAlert v-if="dResult?.hint" type="info" :bordered="false" size="small">{{ dResult.hint }}</NAlert>
+          <template v-else-if="dResult && dResult.source">
+            <div v-if="dailyStale" class="cp-help" style="margin-bottom: var(--space-2)">{{ dailyStale }}</div>
+            <div v-if="dailyVerdict" class="lg-verdict" :class="`t-${dailyVerdict.tone}`">
+              {{ dailyVerdict.text }}
+            </div>
+            <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+              <NGridItem span="1 m:1">
+                <div class="lg-sub">回看口径</div>
+                <InfoList :items="dailyInfo" />
+              </NGridItem>
+              <NGridItem span="1 m:1">
+                <div class="lg-sub">按天请求数与独立客户端</div>
+                <MetricChart :xs="dailyXs" :series="dailyChart" height="200px" :loading="dLoading" legend />
+              </NGridItem>
+            </NGrid>
+            <div class="lg-sub" style="margin-top: var(--space-4)">按天明细</div>
+            <NDataTable
+              :columns="dCols" :data="dResult.rows || []" size="small" :bordered="false"
+              :scroll-x="'auto'" :max-height="tableH" :row-key="(r: { date: string }) => r.date"
+            >
+              <template #empty><EmptyBox text="这些世代里没有落在窗口内的请求行" /></template>
+            </NDataTable>
+          </template>
+          <EmptyBox v-else-if="!dLoading" text="换好来源与天数后点「按天回看」" />
+        </NCard>
       </NTabPane>
     </NTabs>
   </div>
@@ -570,4 +749,18 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
   flex: 0 0 auto; font-size: var(--fs-xs); color: var(--cp-text-dim); white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+/* 按天回看自成一块（它读的是轮替出来的世代，代价和分钟窗口不是一个量级）。
+   判词紧贴工具条：这一屏最要紧的是"比上一周期涨还是跌、还是根本没比成"，
+   要人滚到表格里才发现没环比，等于把诚实的结论藏起来了。 */
+.lg-daily { margin-top: var(--space-4); }
+.lg-sub { font-size: var(--fs-xs); color: var(--cp-text-dim); margin-bottom: var(--space-2); }
+.lg-verdict {
+  display: inline-block; margin-bottom: var(--space-3); padding: 4px 10px;
+  border-radius: 8px; background: var(--cp-bg-soft);
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.lg-verdict.t-up { color: var(--cp-brand); }
+.lg-verdict.t-down { color: var(--cp-text); }
+.lg-verdict.t-flat { color: var(--cp-text-dim); }
+.lg-verdict.t-none { color: var(--cp-warn); }
 </style>
