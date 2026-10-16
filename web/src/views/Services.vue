@@ -315,8 +315,8 @@ const banColumns: any[] = [
   {
     title: '地址', key: 'ip', minWidth: 220,
     render: (r: any) => h('div', { class: 'cell-txt' }, [
-      h('span', { class: 'cell-name mono ls-wrap' }, r.ip),
-      h('div', { class: 'cell-sub ls-wrap' }, r.comment || banMarker.value),
+      h('span', { class: 'cell-name mono cp-break' }, r.ip),
+      h('div', { class: 'cell-sub cp-prose' }, r.comment || banMarker.value),
     ]),
   },
   {

@@ -49,14 +49,14 @@ NOWRAP = ("cell-sub", "mono-dim", "mono-1l", "cell-name")
 TRIGGERS = ("cp-break", "cp-prose")
 
 # 用了、但整个仓库（全局 style.css 与本文件 <style>）都没有一条规则命中它的 class token。
-# 这 28 个都是**标在 naive 组件根节点上的命名钩子**（`class="cp-tbl tbl-mounts"`、
+# 这 29 个都是**标在 naive 组件根节点上的命名钩子**（`class="cp-tbl tbl-mounts"`、
 # `class="cp-opd"`）：真正生效的样式在 cp-tbl / cp-opd-msg 那一层，这个 token 只是给
 # 人和探针留的名字，删掉不会改变一个像素。列成封闭集合而不是不管，是因为下一次再写出
 # `class="cell-sub ls-wrap2"` 这种"以为是触发器"的死名字必须失败——㊱B 那批踩过一次
 # 失效 cp-break 的坑（见批次㉕A）。
 DEAD_TOKEN_WHITELIST = frozenset({
     "comp-bar", "cp-footer-copy", "cp-opd", "cp-set-row", "cp-tool-card", "mono-on", "ptb-card",
-    "tbl-bigfiles", "tbl-findings", "tbl-keys", "tbl-ld-busy", "tbl-ld-findings", "tbl-ld-quota",
+    "tbl-bans", "tbl-bigfiles", "tbl-findings", "tbl-keys", "tbl-ld-busy", "tbl-ld-findings", "tbl-ld-quota",
     "tbl-ld-states", "tbl-log", "tbl-mem-findings", "tbl-mem-oom", "tbl-mem-procs", "tbl-mem-swaps",
     "tbl-mem-units", "tbl-mounts", "tbl-patches", "tbl-pend-findings", "tbl-pend-reloads",
     "tbl-pend-units", "tbl-ports", "tbl-roots", "tbl-settings",
@@ -218,7 +218,7 @@ class RenderFormNowrapSitesAreGuarded(unittest.TestCase):
         )
 
     def test_dead_class_names_stay_a_closed_set(self):
-        """用了却没任何规则命中的 class token 必须是已点名的那 28 个命名钩子。"""
+        """用了却没任何规则命中的 class token 必须是已点名的那 29 个命名钩子。"""
         glob_defined = set()
         for css in [WEB / "style.css", *WEB.glob("**/*.css")]:
             glob_defined |= set(re.findall(r"\.([A-Za-z][A-Za-z0-9_-]*)", css.read_text(encoding="utf-8")))

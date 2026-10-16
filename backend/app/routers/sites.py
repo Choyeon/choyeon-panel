@@ -11,9 +11,9 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .. import aio_db, config
+from .. import aio_db
 from ..deps import need_admin as _need_admin
-from ..services import apps_service, cert_ops, nginx_ops, systemd_ops
+from ..services import apps_service, cert_ops, nginx_ops, site_audit_service, systemd_ops
 from ..util import redact_creds
 
 router = APIRouter()
@@ -48,7 +48,7 @@ def _cmd_error(exc: Exception) -> str:
 
 def _conf_dirs_available() -> bool:
     """nginx 装没装：只看配置目录是否存在（不存在就别把空列表伪装成「没有站点」）。"""
-    return any(Path(d).is_dir() for d in config.NGINX_CONF_DIRS)
+    return nginx_ops.config_dirs_present()
 
 
 def _scan_nginx_sites() -> list[dict]:
@@ -148,6 +148,15 @@ async def sites_list():
     """站点总览：nginx 域名映射 join apps 表。nginx 缺失时返回空列表 + reason，不编数据。"""
     rows, reason = await _site_rows()
     return {"sites": rows, "reason": reason}
+
+
+@router.get("/api/site-audit")
+async def site_audit(refresh: int = 0):
+    """站点链路对账：只读探测，viewer 也能看；reload、改 vhost、签证书一律回终端手工做。
+
+    载荷里只有文件名，没有 /etc/nginx 下的绝对路径——本机目录结构本身就是攻击面信息。
+    """
+    return await site_audit_service.audit(refresh=bool(refresh))
 
 
 @router.get("/api/sites/{domain}/config")

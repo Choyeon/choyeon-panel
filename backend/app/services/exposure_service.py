@@ -304,6 +304,10 @@ async def _collect() -> dict:
         "ok": True,
         "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "as_root": as_root,
+        # 缺席判定要用到这两条：ss 根本不可用、或条目被 MAX_PORTS 封顶时，
+        # "端口不在这份表里"就不能当成"没人听"。
+        "ss_available": bool(shutil.which("ss")) and ss["code"] == 0,
+        "ports_capped": len(ports) >= MAX_PORTS,
         "firewall": {
             "tool": fw.get("tool"),
             "active": fw.get("active"),

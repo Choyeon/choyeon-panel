@@ -55,6 +55,7 @@ from app.services import (  # noqa: E402
     login_audit_service,
     memory_service,
     pending_service,
+    site_audit_service,
     storage_service,
     updates_service,
     web_logs,
@@ -1503,6 +1504,52 @@ def _pending_text(d: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_site_audit(a: argparse.Namespace) -> dict:
+    """站点链路对账：一个域名从被访问到拿到响应，中间每一跳都要有人认领。
+
+    严格只读——不 reload nginx、不改 vhost、不签证书、不重启应用。502 的成因大多在应用侧
+    （进程没起来、端口填错），面板替你 reload 或改配置只会把现场抹掉。
+    """
+    data = await site_audit_service.audit(refresh=bool(a.refresh))
+    if not (data.get("nginx") or {}).get("ok"):
+        Out.error((data.get("nginx") or {}).get("reason")
+                  or "读不到 nginx 配置，站点链路无法对账", EXIT_PRECONDITION)
+    Out.result(data, _site_audit_text(data))
+    return data
+
+
+def _site_audit_text(d: dict) -> str:
+    ng = d.get("nginx") or {}
+    li = d.get("listen") or {}
+    ce = d.get("certs") or {}
+    c = d.get("counts") or {}
+    lines = ["站点链路对账（只读：不 reload nginx、不改 vhost、不签证书、不重启应用）"]
+    lines.append(f"配置：{ng.get('files')} 份、{ng.get('domains')} 个域名"
+                 + ("" if ng.get("ok") else f"（{ng.get('reason') or '读不到'}）"))
+    lines.append("监听表：" + (f"{li.get('ports')} 个端口在听" if li.get("ok")
+                          else f"读不到（{li.get('reason')}），这一轮的反代目标都标未确认"))
+    lines.append("证书：" + ("清单已读到，只看覆盖关系（到期天数见证书项）" if ce.get("ok")
+                         else f"读不到（{ce.get('reason')}），覆盖关系未确认"))
+    for f in d.get("findings") or []:
+        lines.append(f"[{f['severity']}] {f['title']}")
+        lines.append(f"    {f['detail']}")
+        lines.append(f"    修复：{f['fix']}")
+    if not d.get("findings"):
+        lines.append(f"没有判词：{c.get('risk', 0)}/{c.get('warn', 0)}/{c.get('info', 0)} 档都是空的——"
+                     "反代目标都在监听、证书都覆盖、明文都跳转")
+    for link in (d.get("links") or [])[:20]:
+        doms = "、".join(link.get("domains") or []) or "（无 server_name）"
+        tgt = "、".join(
+            f"{t['host']}:{t['port']}" + ("(没人听)" if t["listening"] is False
+                                          else "(未确认)" if t["listening"] is None else "")
+            for t in link.get("targets") or [] if t.get("port") is not None) or "非反代"
+        lines.append(f"  {link['file']} · {doms} · 听 {link.get('listen')} · {tgt}"
+                     + (f" · 应用 {link['app']}" if link.get("app") else ""))
+    for n in d.get("notes") or []:
+        lines.append(f"注：{n}")
+    return "\n".join(lines)
+
+
 async def cmd_load(a: argparse.Namespace) -> dict:
     """负载与 CPU 归因：机器有多忙、这份忙是谁造成的、有没有被自己的 CPU 配额压住。
 
@@ -1892,6 +1939,20 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "扫 /proc 有预算：最多 " + str(load_service.PROC_SCAN_CAP) + " 个进程、"
                        + str(load_service.SCAN_BUDGET_SEC) + " 秒，没扫完会如实标出来",
                        "load 与 /proc/stat 都读不到时退出码 3"]},
+            {"name": "site-audit", "args": ["--refresh"],
+             "desc": "站点链路对账（只读：不 reload nginx、不改 vhost、不签证书、不重启应用）",
+             "notes": ["判的是四段连不连得上：server_name → proxy_pass 目标 → 证书覆盖 → 明文跳转；"
+                       "配置解析、监听表与证书清单都复用已有读者，这一层只 join 不重算",
+                       "nginx -t 只校验语法，不会发现 127.0.0.1:3100 上没进程；反代目标没人听是"
+                       "配置、服务、证书三页全绿而用户拿到 502 的那一类",
+                       "只有指向 127.0.0.1 / localhost / ::1 的目标能拿本机监听表判死；"
+                       "指向别的机器的标成未确认，判死会逼人在一个根本没错的地址上找问题",
+                       "ss 不可用或监听表被封顶时，缺席判定整轮降为未确认，不会折成「没人听」",
+                       "证书只看覆盖关系（这张证书含不含这个域名），到期天数以证书项为准，"
+                       "同一个 alert_ssl_days 阈值不在这里抄第二份",
+                       "明文可达只在同一个文件里 80 与 443 都听着、且没有 301/308 到 https 时判",
+                       "只出文件名不出绝对路径：/etc/nginx 下的目录结构本身就是攻击面信息",
+                       "nginx 配置目录一个都不存在时退出码 3"]},
             {"name": "webstats", "args": ["--file", "--minutes", "--list", "--daily", "--days"],
              "desc": "网站访问流量统计（只读：状态码分布、TOP 路径与客户端、每分钟请求数）",
              "notes": ["来源白名单 = CP_LOG_ROOTS + CP_FILE_ROOTS，与网页端日志中心是同一份列表；"
@@ -2054,6 +2115,11 @@ def build_parser() -> argparse.ArgumentParser:
     lo = sub.add_parser("load", help="负载与 CPU 归因对账（只读：不改配额、不杀进程）", parents=[common])
     lo.add_argument("--refresh", action="store_true", help="忽略 60 秒缓存，立即重采一个窗口")
     lo.set_defaults(fn=cmd_load)
+
+    sa = sub.add_parser("site-audit", help="站点链路对账（只读：不 reload、不改配置、不签证书）",
+                        parents=[common])
+    sa.add_argument("--refresh", action="store_true", help="忽略 60 秒缓存，立即重新扫一遍 nginx 配置")
+    sa.set_defaults(fn=cmd_site_audit)
 
     ws = sub.add_parser("webstats", help="网站访问流量统计（只读：解析 nginx access.log）", parents=[common])
     ws.add_argument("--file", default="0", help="日志来源序号（webstats --list 读回，与网页端同一份）")

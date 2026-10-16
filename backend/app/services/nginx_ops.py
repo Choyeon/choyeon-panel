@@ -19,6 +19,11 @@ RE_PROXY_PORT = re.compile(r"proxy_pass\s+https?://[\w.:-]*?:(\d{2,5})\s*;")
 RE_UPSTREAM = re.compile(r"upstream\s+([\w.-]+)\s*\{([^}]*)\}")
 RE_UP_SERVER = re.compile(r"server\s+[\w.:-]*?:(\d{2,5})")
 RE_PROXY_NAME = re.compile(r"proxy_pass\s+https?://([\w.-]+)\s*;")
+# 链路对账要知道反代目标"是谁"，光有端口不够：同一个 3100 指在 127.0.0.1 上是本机应用，
+# 指在别的机器上，本机的监听表就完全不是它的证据。
+RE_PROXY_TARGET = re.compile(r"proxy_pass\s+https?://([^:/;\s]+)(?::(\d{1,5}))?\s*;")
+RE_UP_TARGET = re.compile(r"\bserver\s+([^:/;\s]+)(?::(\d{1,5}))?")
+RE_LISTEN_LINE = re.compile(r"^\s*listen\s+([^;]+);", re.M)
 
 # 「写文件 → nginx -t → reload」必须整体串行：nginx -t 校验的是 /etc/nginx 全目录，
 # 两个并发写会让其中一方在校验时读到另一方刚截断的空文件（把好配置判成语法错误，
@@ -423,15 +428,26 @@ def analyze_config(content: str) -> dict:
             if n and n != "_" and n not in names:
                 names.append(n)
     proxy_ports = [int(m.group(1)) for m in RE_PROXY_PORT.finditer(content)]
-    upstreams: dict[str, list[int]] = {}
+    # upstream 一次解析、两处用：proxyPorts 要端口，proxyTargets 要「主机:端口」整对。
+    upstreams: dict[str, list[tuple[str, int | None]]] = {}
     for m in RE_UPSTREAM.finditer(content):
-        ports = [int(x.group(1)) for x in RE_UP_SERVER.finditer(m.group(2))]
-        if ports:
-            upstreams[m.group(1)] = ports
-    for m in RE_PROXY_NAME.finditer(content):
-        ups = upstreams.get(m.group(1))
-        if ups:
-            proxy_ports.extend(ups)
+        pairs = [(s.group(1).strip(), int(s.group(2)) if s.group(2) else None)
+                 for s in RE_UP_TARGET.finditer(m.group(2))]
+        if pairs:
+            upstreams[m.group(1)] = pairs
+    targets: list[dict] = []
+    for m in RE_PROXY_TARGET.finditer(content):
+        host = m.group(1).strip()
+        port_text = m.group(2)
+        if port_text is None and host in upstreams:
+            # proxy_pass http://<upstream 名>; 展开成它自己的 server 行，与 proxyPorts 同一个口径：
+            # 只算被真正引用到的 upstream，没被引用的块不该参与端口对账。
+            for h, p in upstreams[host]:
+                targets.append({"host": h, "port": p})
+                if p is not None:
+                    proxy_ports.append(p)
+            continue
+        targets.append({"host": host, "port": int(port_text) if port_text else None})
     uniq_ports: list[int] = []
     seen: set[int] = set()
     for p in proxy_ports:
@@ -446,7 +462,48 @@ def analyze_config(content: str) -> dict:
         "bodySize": body.group(1) if body else None,
         "httpsRedirect": bool(re.search(r"return\s+30[123]\s+https", content)),
         "proxyPorts": uniq_ports,
+        "listenPorts": _listen_ports(content),
+        "proxyTargets": targets,
     }
+
+
+def _listen_ports(content: str) -> list[int]:
+    """这个 server 块自己听着哪些端口。
+
+    `listen` 的写法五花八门（`80`、`443 ssl http2`、`[::]:443`、`listen 80 default_server`），
+    取每行第一个 token 再按最后一个冒号切端口，与 exposure_service.parse_ss 同一套取数法；
+    解析不出数字的那行直接跳过，不猜。
+    """
+    out: list[int] = []
+    for m in RE_LISTEN_LINE.finditer(content):
+        head = m.group(1).strip().split()
+        if not head:
+            continue
+        text = head[0].rpartition(":")[2]
+        if text.isdigit() and 1 <= int(text) <= 65535 and int(text) not in out:
+            out.append(int(text))
+    return sorted(out)
+
+
+def config_dirs_present() -> bool:
+    """nginx 装没装：只看配置目录是否存在（不存在就别把空列表伪装成「没有站点」）。"""
+    return any(Path(d).is_dir() for d in config.NGINX_CONF_DIRS)
+
+
+def loaded_configs() -> list[dict]:
+    """nginx 实际会加载的每份配置与它的解析结果。
+
+    站点列表、域名→端口映射和站点链路对账都必须读这一份：两处各扫一遍目录，
+    迟早会在「sites-available 里没启用的草稿算不算一个站点」上分叉。
+    """
+    out: list[dict] = []
+    for p, f in _iter_conf_files():
+        try:
+            c = Path(p).read_text(errors="replace")
+        except OSError:
+            continue
+        out.append({"file": p, "name": f, "analysis": analyze_config(c)})
+    return out
 
 
 def _enabled_targets(available_dir: str):

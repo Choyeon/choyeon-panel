@@ -28,6 +28,7 @@ from ..services import (
     login_audit_service,
     memory_service,
     pending_service,
+    site_audit_service,
     storage_service,
     systemd_ops,
     updates_service,
@@ -457,6 +458,18 @@ async def _check_load() -> dict:
     return load_service.doctor_item(await load_service.audit())
 
 
+async def _check_sites() -> dict:
+    """站点链路：域名 → 反代目标 → 证书覆盖 → 明文跳转，四段连成一条线。
+
+    网站页说「nginx 里有这个 server_name」，证书页说「这张证书还剩几天」，端口暴露面说「这个端口
+    有人听」。三段各自都对，合起来仍然看不见线上最常见的那次事故：nginx -t 只校验语法，不校验
+    127.0.0.1:3100 上有没有进程，配置、服务、证书三页全绿，用户拿到 502。这一项把四段 join 起来
+    判一次，用的还是那三页同一个读者（nginx_ops.loaded_configs / exposure_service / cert_ops）。
+    严格只读：不 reload nginx、不改 vhost、不签证书——这三件改错是全站域名同时不可用。
+    """
+    return site_audit_service.doctor_item(await site_audit_service.audit())
+
+
 # 同一套值会写进两个地方：systemd unit 的 Environment=（服务真正听着的）与 .env
 # （`choyeonctl status` 与健康检查读的那份）。这两个出处只要不一致，一次成功的部署就会在
 # 文档推荐的验收命令上显示 healthy:false，所以逐项对账。
@@ -543,6 +556,7 @@ _CHECKS = [
     ("memory", "内存压力", _check_memory),
     ("pending", "改动未生效", _check_pending),
     ("load", "负载与CPU", _check_load),
+    ("sites", "站点链路", _check_sites),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。
