@@ -372,6 +372,7 @@ async def log_options(request: Request):
         "ladder": log_ladder(),
         "nginx_tail_bytes": web_logs.TAIL_BYTES,
         "stats_minutes": access_stats.WINDOW_LADDER,
+        "stats_days": access_stats.DAY_LADDER,
     }
 
 
@@ -469,6 +470,48 @@ async def nginx_log(request: Request):
     }
 
 
+def _file_choices(files: list) -> list:
+    """给浏览器的来源清单：只有序号、展示名与类型，没有绝对路径。"""
+    return [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]} for i, f in enumerate(files)]
+
+
+def _pick_access_source(files: list, want):
+    """把 `?file=` 序号换成一个"能统计的访问日志"。
+
+    返回（要直接回给浏览器的响应或 None, （序号, 文件）或 None）。分钟窗口和按天趋势必须
+    共用这一段：两处各挑各的，"同一个 3 号文件"就会在两个页签里指两个来源。
+    """
+    if not files:
+        return {"hint": web_logs.discovery_hint(), "files": [], "source": ""}, None
+    if want is None:
+        # 不带 file 时取第一个"能统计的"来源：页面的下拉要先有一次响应才有清单，
+        # 而第一枪撞进 error.log 会变成 400，用户看到的是"点了统计却报错"。
+        idx = next((i for i, f in enumerate(files) if f["kind"] == "access"), -1)
+        if idx < 0:
+            return {"hint": "白名单里只有错误日志，没有可统计的访问日志；给站点开一份 access.log，"
+                            "或把它的目录加进 CP_LOG_ROOTS",
+                    "files": _file_choices(files), "source": ""}, None
+    else:
+        idx = want
+    if not 0 <= idx < len(files):
+        return _bad(f"file 序号超出范围（可用 0-{len(files) - 1}）"), None
+    picked = files[idx]
+    if picked["kind"] != "access":
+        return _bad(f"{picked['label']} 是错误日志，里面没有请求行可统计；"
+                    f"可选的访问日志序号："
+                    f"{', '.join(str(i) for i, f in enumerate(files) if f['kind'] == 'access') or '无'}"), None
+    return None, (idx, picked)
+
+
+def _file_index(qp):
+    """解析 `?file=`；返回（要直接回给浏览器的响应或 None, 序号或 None）。"""
+    raw = (qp.get("file") or "").strip()
+    try:
+        return None, (int(raw) if raw else None)
+    except ValueError:
+        return _bad("file 参数是日志文件的序号（整数）"), None
+
+
 @router.get("/api/system/nginx-stats")
 async def nginx_stats(request: Request):
     """访问日志流量统计：状态码分布、TOP 路径/客户端、方法占比与每分钟请求曲线。
@@ -480,47 +523,68 @@ async def nginx_stats(request: Request):
     if r := need_admin(request):
         return r
     qp = request.query_params
-    raw_file = (qp.get("file") or "").strip()
-    try:
-        want = int(raw_file) if raw_file else None
-    except ValueError:
-        return _bad("file 参数是日志文件的序号（整数）")
+    bad, want = _file_index(qp)
+    if bad is not None:
+        return bad
+    minutes = 60
     raw_minutes = (qp.get("minutes") or "").strip()
     if raw_minutes:
         try:
             minutes = int(raw_minutes)
         except ValueError:
             return _bad(f"minutes 参数是分钟数（整数，1-{access_stats.SERIES_MAX}）")
-    else:
-        minutes = 60
     if not 1 <= minutes <= access_stats.SERIES_MAX:
         return _bad(f"minutes 只能是 1-{access_stats.SERIES_MAX}（最多统计 24 小时）")
     files = await run_in_threadpool(web_logs.nginx_log_files)
-    if not files:
-        return {"hint": web_logs.discovery_hint(), "files": [], "source": ""}
-    if want is None:
-        # 不带 file 时取第一个“能统计的”来源：页面的下拉要先有一次响应才有清单，
-        # 而第一枪撞进 error.log 会变成 400，用户看到的是“点了统计却报错”。
-        idx = next((i for i, f in enumerate(files) if f["kind"] == "access"), -1)
-        if idx < 0:
-            return {"hint": "白名单里只有错误日志，没有可统计的访问日志；给站点开一份 access.log，"
-                            "或把它的目录加进 CP_LOG_ROOTS",
-                    "files": [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]}
-                              for i, f in enumerate(files)],
-                    "source": ""}
-    else:
-        idx = want
-    if not 0 <= idx < len(files):
-        return _bad(f"file 序号超出范围（可用 0-{len(files) - 1}）")
-    picked = files[idx]
-    if picked["kind"] != "access":
-        return _bad(f"{picked['label']} 是错误日志，里面没有请求行可统计；"
-                    f"可选的访问日志序号："
-                    f"{', '.join(str(i) for i, f in enumerate(files) if f['kind'] == 'access') or '无'}")
+    bad, picked_source = _pick_access_source(files, want)
+    if bad is not None:
+        return bad
+    idx, picked = picked_source
     data = await run_in_threadpool(access_stats.collect, picked["path"], minutes)
     data["source"] = picked["label"]
     data["site"] = picked["site"]
     data["file"] = idx
-    data["files"] = [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]}
-                     for i, f in enumerate(files)]
+    data["files"] = _file_choices(files)
+    return data
+
+
+@router.get("/api/system/nginx-daily")
+async def nginx_daily(request: Request):
+    """按天的访问量与上一周期环比：读轮替出来的历史世代（`.1`、`.2.gz`……）。
+
+    分钟窗口只能回答"这一小时忙不忙"，"这个星期比上个工作日多还是少"要看轮替掉的那几份，
+    而那一层正是 tail 故意不读的 gzip（解压完再截尾，读的是随机中段）。所以按天趋势单独走
+    `web_logs.log_series()`：同一份白名单、同一个序号，只是换了一种读法，世代数与每份字节都有封顶。
+
+    `days` 只接受 1-30，档位由 `/api/system/log-options` 的 `stats_days` 给前端，别处不抄。
+    """
+    if r := need_admin(request):
+        return r
+    qp = request.query_params
+    bad, want = _file_index(qp)
+    if bad is not None:
+        return bad
+    days = access_stats.DAY_LADDER[1]
+    raw_days = (qp.get("days") or "").strip()
+    if raw_days:
+        try:
+            days = int(raw_days)
+        except ValueError:
+            return _bad(f"days 参数是天数（整数，1-{access_stats.MAX_DAYS}）")
+    if not 1 <= days <= access_stats.MAX_DAYS:
+        return _bad(f"days 只能是 1-{access_stats.MAX_DAYS}（最多回看 {access_stats.MAX_DAYS} 天）")
+    files = await run_in_threadpool(web_logs.nginx_log_files)
+    bad, picked_source = _pick_access_source(files, want)
+    if bad is not None:
+        return bad
+    idx, picked = picked_source
+    entries = await run_in_threadpool(web_logs.log_series, picked["path"])
+    data = await run_in_threadpool(access_stats.collect_days, entries, days)
+    data["source"] = picked["label"]
+    data["site"] = picked["site"]
+    data["file"] = idx
+    data["files"] = _file_choices(files)
+    # 世代只报"读到了哪几份、多大"，路径不出这道门
+    data["series"] = [{"name": e["name"], "gen": e["gen"], "gz": e["gz"], "bytes": e["bytes"]}
+                      for e in entries]
     return data

@@ -13,10 +13,14 @@
   而统计不需要它。
 - **窗口是真的窗口**：尾读到的字节里必然混着比窗口更早的行，所以状态码、榜单、曲线
   只累计窗口内的请求，窗口外被跳过的行数单列在 `outsideWindow`，不静默吞掉。
+- **回看历史也封顶**：按天趋势要翻轮替世代（`.1`、`.2.gz`……），解压是这里唯一贵的动作，
+  所以每份最多读 `DAILY_FILE_BYTES`（解压后）、每天最多记 `MAX_UV_PER_DAY` 个客户端，
+  读到哪一天（`historyFrom`）与上一周期依据够不够（`previous.partial`）都如实说明。
 """
 
+import gzip
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # 一次扫描最多往回读这么多字节；再大的文件只看尾部（truncatedRead 会如实说明）。
@@ -31,6 +35,15 @@ SERIES_MAX = 1440
 # 统计窗口档位：给网页下拉用，不是校验区间（校验用 SERIES_MAX，任何 1-1440 都接受）。
 # 放这里而不是前端抄一份：档位一改，接口、CLI、下拉必须一起改。
 WINDOW_LADDER = [15, 30, 60, 180, 360, 720, 1440]
+# 按天趋势的窗口档位，同一条纪律：只在服务里定义一次，接口、下拉、CLI 都读它。
+DAY_LADDER = [3, 7, 14, 30]
+MAX_DAYS = 30
+# 按天回看的每一份世代最多读这么多字节（解压后的量，因为费内存与 CPU 的是它）。
+# 读满就如实标 truncatedFiles，不假装"这就是那一天"。
+DAILY_FILE_BYTES = 32 * 1024 * 1024
+# 一天里独立客户端的记名上限。最坏情况是 61 个桶 × 这个数 ≈ 12 万个字符串，
+# 超过就只报"至少这么多人"（uvFloored），而不是报一个看着精确的假数。
+MAX_UV_PER_DAY = 2000
 # 路径名截断长度：聚合键本身不该比一屏表格宽。
 PATH_CHARS = 200
 # 扫描器会把 TLS 记录当 HTTP 打到 80 端口，nginx 把里面读不出来的字节写成 \xHH 文本
@@ -60,7 +73,16 @@ _TIME_RE = re.compile(r"^(\d{2})/([A-Za-z]{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2}) (
 
 
 def _parse_time(raw: str) -> float | None:
-    """把 nginx 的时间戳换成 epoch 秒；解析不出来就返回 None（计入坏行，不抛）。
+    """把 nginx 的时间戳换成 epoch 秒；解析不出来就返回 None（计入坏行，不抛）。"""
+    parts = _parse_time_parts(raw)
+    return None if parts is None else parts[0]
+
+
+def _parse_time_parts(raw: str):
+    """nginx 时间戳 →（epoch 秒，这一行自己声明的 UTC 偏移秒）；读不出来返回 None。
+
+    偏移要单独留着：按天分桶得按"日志自己写的那天"分。这台机器的 nginx 记 `+0800`，
+    23:30 +0800 那一行按 UTC 归桶会算进前一天，看趋势的人会以为昨天凭空多了几百个请求。
 
     不用 strptime：`%b` 走的是 C 库的当前 locale，容器或 locale 一变就整月识别失败，
     而失败表现是"统计里所有行都算坏行"，比少几个数字更难查。
@@ -76,9 +98,10 @@ def _parse_time(raw: str) -> float | None:
         offset = (int(tz_h) * 60 + int(tz_m)) * 60
         if sign == "-":
             offset = -offset
-        return datetime(int(year), month, int(day), int(hh), int(mm), int(ss), tzinfo=UTC).timestamp() - offset
+        epoch = datetime(int(year), month, int(day), int(hh), int(mm), int(ss), tzinfo=UTC).timestamp() - offset
     except ValueError:
         return None
+    return epoch, offset
 
 
 def _unescape_nginx(raw: str) -> str:
@@ -274,3 +297,223 @@ def _top_paths(counter: dict, extra: int) -> list:
     if extra:
         out.append({"path": "…其他", "count": extra, "bytes": 0})
     return out
+
+
+def read_lines(entry: dict, cap: int = DAILY_FILE_BYTES):
+    """读一份轮替世代（`.gz` 也读），返回（行, 是否被封顶）。
+
+    封顶卡在解压后的字节上：`.gz` 在盘上 1MB 也可能解出 40MB，吃内存与 CPU 的是解压后的量。
+    被封顶时丢掉最后半行——它不是完整记录，把它当一条请求计入就是编数字。
+    """
+    path = entry["path"]
+    if entry.get("gz"):
+        with gzip.open(path, "rb") as f:
+            raw = f.read(cap + 1)
+    else:
+        with open(path, "rb") as f:
+            raw = f.read(cap + 1)
+    if len(raw) <= cap:
+        return raw.decode(errors="replace").splitlines(), False
+    lines = raw[:cap].decode(errors="replace").splitlines()
+    if lines:
+        lines.pop()
+    return lines, True
+
+
+def _day_bucket(buckets: dict, day) -> dict:
+    b = buckets.get(day)
+    if b is None:
+        b = {"pv": 0, "uv": set(), "uvFloored": False, "bytes": 0, "e4xx": 0, "e5xx": 0}
+        buckets[day] = b
+    return b
+
+
+def _prune(buckets: dict, keep: int) -> int:
+    """只留住最近 `keep` 天，返回被丢掉的请求数。
+
+    一个坏掉的 logrotate（或一份手工 cat 进去的历史）能让一个文件横跨几个月，
+    逐日桶就会无界增长。这里封顶，并把丢掉的量如实报成 outside，不静默吞。
+    """
+    if len(buckets) <= keep:
+        return 0
+    drop = sorted(buckets.keys())[: len(buckets) - keep]
+    gone = 0
+    for day in drop:
+        gone += buckets.pop(day)["pv"]
+    return gone
+
+
+def collect_days(entries: list, days: int) -> dict:
+    """按天聚合访问日志，并和"上一个同样长的周期"比一次。
+
+    锚点是读到的最新一行那天，不是墙上时钟：站点可能两天没人访问，用今天做窗口
+    只会得到一列 0，看上去像统计坏了（和分钟窗口同一个理由）。
+    只翻到够覆盖两个周期为止——更老的世代对本次对比没有信息量，读到就停。
+    `previous.partial` 说的是"上一周期没有足够依据"（reason：日志没那么长 = history，
+    扫描被封顶或有世代读不到 = clipped），此时不给百分比：
+    拿 3 天的量去比 7 天的量，或者拿半份日志去比整份，得出的涨跌都是假的。
+    """
+    want = max(1, min(int(days) if days else DAY_LADDER[1], MAX_DAYS))
+    buckets: dict = {}
+    anchor = None
+    history_from = None
+    parsed = malformed = scanned_lines = outside = 0
+    bytes_scanned = disk_bytes = scanned_files = truncated_files = 0
+    unreadable_files = 0
+    capped = False
+
+    for entry in entries:
+        try:
+            # 世代是在这一步之前才发现的，中间正好赶上 logrotate 跑完（改名 + 删最老那份）
+            # 完全可能。读不到就点名为"读不到"，别让一次刷新变成 500。
+            lines, tr = read_lines(entry)
+        except OSError:
+            unreadable_files += 1
+            continue
+        scanned_files += 1
+        disk_bytes += int(entry.get("bytes") or 0)
+        if tr:
+            truncated_files += 1
+        limit = min(len(lines), MAX_LINES)
+        if len(lines) > limit:
+            capped = True
+        for line in lines[:limit]:
+            m = _LINE_RE.match(line)
+            if not m:
+                if line.strip():
+                    malformed += 1
+                continue
+            parts = _parse_time_parts(m.group("time"))
+            if parts is None:
+                malformed += 1
+                continue
+            ts, offset = parts
+            day = datetime.fromtimestamp(ts + offset, UTC).date()
+            bytes_scanned += len(line.encode(errors="replace"))
+            parsed += 1
+            if anchor is None or day > anchor:
+                anchor = day
+            if history_from is None or day < history_from:
+                history_from = day
+            b = _day_bucket(buckets, day)
+            b["pv"] += 1
+            code = m.group("status")
+            if code[0] == "4":
+                b["e4xx"] += 1
+            elif code[0] == "5":
+                b["e5xx"] += 1
+            b["bytes"] += int(m.group("bytes")) if m.group("bytes").isdigit() else 0
+            ip = m.group("client")
+            if ip in b["uv"] or len(b["uv"]) < MAX_UV_PER_DAY:
+                b["uv"].add(ip)
+            else:
+                b["uvFloored"] = True
+        scanned_lines += limit
+        outside += _prune(buckets, 2 * want)
+        # 两个周期都已经读到边缘就可以停了：更老的世代不会再往任何一格添数字。
+        if (anchor is not None and history_from is not None
+                and (anchor - history_from).days >= 2 * want - 1):
+            break
+
+    if anchor is None:
+        return {"days": want, "anchor": "", "from": "", "prevFrom": "", "rows": [],
+                "current": _empty_span(), "previous": {"pv": 0, "uv": 0, "bytes": 0, "days": 0,
+                                                        "partial": True, "reason": "no-data"},
+                "comparable": False, "deltaPvPct": None,
+                "parsed": 0, "malformed": malformed, "outside": outside,
+                "scannedLines": scanned_lines, "scannedFiles": scanned_files,
+                "totalFiles": len(entries), "truncatedFiles": truncated_files,
+                "unreadableFiles": unreadable_files,
+                "bytesScanned": bytes_scanned, "diskBytes": disk_bytes,
+                "historyFrom": "", "uvFloored": False}
+
+    from_day = anchor - timedelta(days=want - 1)
+    prev_from = from_day - timedelta(days=want)
+    rows = []
+    for back in range(want - 1, -1, -1):
+        day = anchor - timedelta(days=back)
+        b = buckets.get(day)
+        rows.append({"date": day.isoformat(), "pv": b["pv"] if b else 0,
+                     "uv": len(b["uv"]) if b else 0, "uvFloored": bool(b and b["uvFloored"]),
+                     "bytes": b["bytes"] if b else 0,
+                     "e4xx": b["e4xx"] if b else 0, "e5xx": b["e5xx"] if b else 0})
+    current = _span_totals(buckets, from_day, anchor)
+    prev_days = _span_days(buckets, prev_from, from_day - timedelta(days=1))
+    previous = _span_totals(buckets, prev_from, from_day - timedelta(days=1))
+    previous["days"] = prev_days
+    # 覆盖判断只看"最早读到哪天"：那天晚于 prev_from 就是日志本身没那么长，
+    # 中间某天是 0 还是没日志，光看访问日志分不出来，所以这里只认文件边界这一个证据。
+    short = history_from is not None and history_from > prev_from
+    clipped = capped or truncated_files > 0 or unreadable_files > 0
+    previous["partial"] = short or clipped
+    # 两个原因同时成立时先说 clipped：「历史没那么长」用户什么也做不了，
+    # 「这一份被截断/读不到」才是可以调 logrotate 或读量上限的线索。
+    previous["reason"] = "clipped" if clipped else "history" if short else "full"
+    comparable = not previous["partial"] and previous["pv"] > 0 and current["pv"] > 0
+    delta = None
+    if comparable and previous["pv"]:
+        delta = round((current["pv"] - previous["pv"]) * 100.0 / previous["pv"], 1)
+    window_uv, uv_floored = _union_uv(buckets, from_day, anchor)
+    current["uv"] = window_uv
+    current["uvFloored"] = uv_floored
+    return {"days": want, "anchor": anchor.isoformat(), "from": from_day.isoformat(),
+            "prevFrom": prev_from.isoformat(), "rows": rows,
+            "current": current, "previous": previous,
+            "comparable": comparable, "deltaPvPct": delta,
+            "parsed": parsed, "malformed": malformed, "outside": outside,
+            "scannedLines": scanned_lines, "scannedFiles": scanned_files,
+            "totalFiles": len(entries), "truncatedFiles": truncated_files,
+            "unreadableFiles": unreadable_files,
+            "bytesScanned": bytes_scanned, "diskBytes": disk_bytes,
+            "historyFrom": history_from.isoformat() if history_from else "",
+            "uvFloored": uv_floored}
+
+
+def _empty_span() -> dict:
+    return {"pv": 0, "uv": 0, "uvFloored": False, "bytes": 0, "e4xx": 0, "e5xx": 0}
+
+
+def _span_totals(buckets: dict, lo, hi) -> dict:
+    out = _empty_span()
+    if hi < lo:
+        return out
+    for day, b in buckets.items():
+        if lo <= day <= hi:
+            out["pv"] += b["pv"]
+            out["bytes"] += b["bytes"]
+            out["e4xx"] += b["e4xx"]
+            out["e5xx"] += b["e5xx"]
+    uv, floored = _union_uv(buckets, lo, hi)
+    out["uv"] = uv
+    out["uvFloored"] = floored
+    return out
+
+
+def _span_days(buckets: dict, lo, hi) -> int:
+    if hi < lo:
+        return 0
+    return sum(1 for day in buckets if lo <= day <= hi)
+
+
+def _union_uv(buckets: dict, lo, hi) -> tuple:
+    """窗口级独立客户端：跨天要去重，所以只能把各天的集合并起来数。
+
+    并集也封顶（沿用 `MAX_KEYS` 这个已经存在的数，不再新造一个），超出就标 uvFloored，
+    前端写"至少这么多人"。
+    """
+    if hi < lo:
+        return 0, False
+    seen: set = set()
+    floored = False
+    for day in sorted(buckets):
+        if not (lo <= day <= hi):
+            continue
+        b = buckets[day]
+        if b["uvFloored"]:
+            floored = True
+        for ip in b["uv"]:
+            if ip in seen or len(seen) < MAX_KEYS:
+                seen.add(ip)
+            else:
+                floored = True
+    return len(seen), floored

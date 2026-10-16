@@ -19,9 +19,14 @@ from ..util import redact_creds
 
 # 日志文件名：access.log / error.log、按站点分开的 <site>.access.log，
 # 以及未压缩的轮替件 <...>.log.1。
-# .gz 不收：tail 与统计都是按字节读末尾再解码，gzip 内容只会吐出乱码，
-# 而"看昨天"这件事由轮替前的 .log.1 承担，不该由这一层去解压。
+# .gz 不进这份名单：tail 与单次统计都是"按字节读末尾再解码"，gzip 内容只会吐出乱码。
+# 需要回看历史的只有按天趋势，它走下面那份 SERIES_NAME_RE 与 log_series()，
+# 在那里解压才有明确的字节上界。
 LOG_NAME_RE = re.compile(r"^(?:(?P<site>[A-Za-z0-9._-]{1,80})\.)?(?P<kind>access|error)\.log(?:\.1)?$")
+# 轮替世代名：<同一个名>.<代数> 与 <同一个名>.<代数>.gz（logrotate 的 rotate N）。
+SERIES_NAME_RE = re.compile(r"^(?P<stem>.+?)\.(?P<gen>\d{1,3})(?P<gz>\.gz)?$")
+# 最多回看几份世代：装了几年没清的老日志不该把一个"看趋势"变成整盘扫描。
+MAX_SERIES_FILES = 31
 # 扫描时跳过的目录：应用依赖目录里同名文件成千上万，
 # 既慢又只会把真正想看的日志挤出结果列表。
 _SKIP_DIRS = {"node_modules", ".git", ".venv", "dist", "build", "__pycache__", ".next", ".output"}
@@ -99,6 +104,57 @@ def nginx_log_files() -> list[dict]:
                 if len(out) >= MAX_LOG_FILES:
                     return sorted(out, key=lambda f: f["label"])
     return sorted(out, key=lambda f: f["label"])
+
+
+def log_series(path: str) -> list:
+    """同一个日志的轮替世代，从新到旧：当前文件、`.1`、`.2.gz`……
+
+    只在原文件所在的那一个目录里找同名世代，并且每份都要重新过一遍白名单与
+    "普通文件"判定——"回看历史"不构成第二条任意文件读取的路径。世代数封顶
+    `MAX_SERIES_FILES`，按代数排序，所以 `.10` 排在 `.2` 之后而不是按字符串排。
+    """
+    real = os.path.realpath(path)
+    directory = os.path.dirname(real)
+    base = os.path.basename(real)
+    stem, _ = _stem_and_gen(base)
+    real_roots = [os.path.realpath(r) for r in log_roots()]
+    out: list = []
+    try:
+        names = sorted(e.name for e in os.scandir(directory))
+    except OSError:
+        return out
+    for name in names:
+        if name == stem:
+            gen, gz = 0, False
+        else:
+            m = SERIES_NAME_RE.match(name)
+            if not m or m.group("stem") != stem:
+                continue
+            gen, gz = int(m.group("gen")), bool(m.group("gz"))
+            if gen < 1:
+                # logrotate 的代数从 1 起：`access.log.0.gz` 这种名字只会和"当前文件"抢第 0 代，
+                # 让它进来就等于给同一个来源凭空多算一份历史。
+                continue
+        cand = os.path.realpath(os.path.join(directory, name))
+        if not _inside_roots(cand, real_roots):
+            continue
+        try:
+            st = os.stat(cand)
+        except OSError:
+            continue
+        if not S_ISREG(st.st_mode):
+            continue
+        out.append({"path": cand, "name": name, "gen": gen, "gz": gz, "bytes": st.st_size})
+    out.sort(key=lambda f: (f["gen"], f["name"]))
+    return out[:MAX_SERIES_FILES]
+
+
+def _stem_and_gen(name: str) -> tuple:
+    """`access.log.7.gz` → ("access.log", 7)；没有代数后缀就是当前文件（第 0 代）。"""
+    m = SERIES_NAME_RE.match(name)
+    if m:
+        return m.group("stem"), int(m.group("gen"))
+    return name, 0
 
 
 def discovery_hint() -> str:

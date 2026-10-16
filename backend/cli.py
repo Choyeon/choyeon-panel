@@ -1579,6 +1579,16 @@ async def cmd_webstats(a: argparse.Namespace) -> dict:
         Out.error("--file 是 --list 里读回的序号、--minutes 是窗口分钟数，两者都必须是整数", EXIT_USAGE)
     if not 1 <= minutes <= access_stats.SERIES_MAX:
         Out.error(f"--minutes 只能是 1-{access_stats.SERIES_MAX}（最多统计 24 小时）", EXIT_USAGE)
+    if a.days is not None and not a.daily:
+        Out.error("--days 只配 --daily 用：--minutes 是分钟窗口，--daily 才是按天趋势，"
+                  "两种口径不要混着写", EXIT_USAGE)
+    try:
+        days = int(a.days) if a.days is not None else access_stats.DAY_LADDER[1]
+    except ValueError:
+        Out.error("--days 是天数（整数）", EXIT_USAGE)
+    if not 1 <= days <= access_stats.MAX_DAYS:
+        Out.error(f"--days 只能是 1-{access_stats.MAX_DAYS}（最多回看 {access_stats.MAX_DAYS} 天，"
+                  "再老的历史早就被 logrotate 删了）", EXIT_USAGE)
     if not files:
         Out.error(web_logs.discovery_hint(), EXIT_PRECONDITION)
     if not 0 <= idx < len(files):
@@ -1589,11 +1599,62 @@ async def cmd_webstats(a: argparse.Namespace) -> dict:
         access_idx = [str(i) for i, f in enumerate(files) if f["kind"] == "access"]
         Out.error(f"[{idx}] {picked['label']} 是错误日志，里面没有请求行可统计；"
                   f"访问日志的序号是 {'、'.join(access_idx) if access_idx else '无'}", EXIT_USAGE)
+    if a.daily:
+        entries = web_logs.log_series(picked["path"])
+        data = access_stats.collect_days(entries, days)
+        data["source"] = picked["label"]
+        data["site"] = picked["site"]
+        data["series"] = [{"name": e["name"], "gen": e["gen"], "gz": e["gz"], "bytes": e["bytes"]}
+                          for e in entries]
+        Out.result(data, _webdaily_text(data))
+        return data
     data = access_stats.collect(picked["path"], minutes)
     data["source"] = picked["label"]
     data["site"] = picked["site"]
     Out.result(data, _webstats_text(data))
     return data
+
+
+def _webdaily_text(d: dict) -> str:
+    """按天趋势的终端形态：一列日期 + 一句"跟上个周期比怎么样" + 一句回看余量。"""
+    rows = d.get("rows") or []
+    out = [f"网站按天流量：{d.get('source')} · 最近 {d.get('days')} 天"
+           f"（{rows[0]['date'] if rows else '—'} → {rows[-1]['date'] if rows else '—'}）"]
+    if not rows:
+        return "\n".join(out + [
+            f"没读到可解析的请求行：翻了 {d.get('scannedFiles')} 份世代"
+            f"（盘上 {human_bytes(int(d.get('diskBytes') or 0))}），坏行 {d.get('malformed')} 条。"
+            "这个站点此刻确实没人访问，或者日志格式既不是 combined 也不是 common。"])
+    out.append(f"{'日期':<12}{'请求':>8}{'独立客户端':>10}{'下行':>10}{'4xx':>6}{'5xx':>6}")
+    for r in rows:
+        out.append(f"{r['date']:<12}{r['pv']:>8}{r['uv']:>10}"
+                   f"{human_bytes(int(r['bytes'])):>10}{r['e4xx']:>6}{r['e5xx']:>6}")
+    cur, prev = d.get("current") or {}, d.get("previous") or {}
+    if d.get("comparable"):
+        delta = d.get("deltaPvPct") or 0
+        arrow = "持平" if delta == 0 else ("上升" if delta > 0 else "下降")
+        out.append(f"环比：这 {d.get('days')} 天 {cur.get('pv')} 次请求，上一周期 {prev.get('pv')} 次"
+                   f"（{arrow} {abs(delta)}%）")
+    else:
+        why = {"no-data": "上一周期一天日志都没读到",
+               "history": f"日志只到 {d.get('historyFrom') or '—'}，往前凑不满一个周期",
+               "clipped": "有世代被读量上限截断或恰好读不到（撞上 logrotate），两边口径不一致"}
+        out.append(f"不做环比：{why.get(prev.get('reason'), '上一周期依据不足')}"
+                   f"（上一周期只留住 {prev.get('days')} 天）")
+    if d.get("uvFloored") or any(r.get("uvFloored") for r in rows):
+        out.append(f"  注：独立客户端最多只记 {access_stats.MAX_KEYS} 个，"
+                   "uvFloored=true 的行请读成「至少这么多人」")
+    if d.get("outside"):
+        out.append(f"  窗口外（更早）另有 {d['outside']} 次请求未计入")
+    if d.get("truncatedFiles"):
+        out.append(f"  注：{d['truncatedFiles']} 份世代超过单份读量上限 "
+                   f"{human_bytes(access_stats.DAILY_FILE_BYTES)}，只读了开头")
+    if d.get("unreadableFiles"):
+        out.append(f"  注：{d['unreadableFiles']} 份世代这次没读到，多半正被 logrotate 改名或清理")
+    out.append(f"回看：读了 {d.get('scannedFiles')}/{d.get('totalFiles')} 份世代、"
+               f"{d.get('scannedLines')} 行，盘上 {human_bytes(int(d.get('diskBytes') or 0))}，"
+               f"最早到 {d.get('historyFrom') or '—'}")
+    return "\n".join(out)
 
 
 def _webstats_text(d: dict) -> str:
@@ -1758,7 +1819,7 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "扫 /proc 有预算：最多 " + str(load_service.PROC_SCAN_CAP) + " 个进程、"
                        + str(load_service.SCAN_BUDGET_SEC) + " 秒，没扫完会如实标出来",
                        "load 与 /proc/stat 都读不到时退出码 3"]},
-            {"name": "webstats", "args": ["--file", "--minutes", "--list"],
+            {"name": "webstats", "args": ["--file", "--minutes", "--list", "--daily", "--days"],
              "desc": "网站访问流量统计（只读：状态码分布、TOP 路径与客户端、每分钟请求数）",
              "notes": ["来源白名单 = CP_LOG_ROOTS + CP_FILE_ROOTS，与网页端日志中心是同一份列表；"
                        "--file 序号在 --list、网页下拉和这个命令里指同一个文件",
@@ -1770,6 +1831,16 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "扫描器会把 TLS 记录打到 80 端口，nginx 用 `\\xHH` 文本记下不可打印字节；"
                        "这类行还原后认不出方法名，方法位统一记 \"-\"，不会挤掉真实流量的榜位",
                        "时间窗按日志里最新一行往回算，不按墙上时钟：一小时没人访问的站点用当前时间做窗口会得到全空表",
+                       "--daily 是另一条读法：把轮替出来的世代（.1、.2.gz……）逐份解压再按天聚合，"
+                       "最多回看 " + str(access_stats.MAX_DAYS) + " 天、最多 "
+                       + str(web_logs.MAX_SERIES_FILES) + " 份、单份解压后 "
+                       + str(access_stats.DAILY_FILE_BYTES // 1024 // 1024) + "MB，"
+                       "被截断的份数写在 truncatedFiles 里",
+                       "--daily 的环比只在上一周期依据完整时才给百分比（comparable=false 时 deltaPvPct 是 null）；"
+                       "日志没那么长（history）、世代被截断（clipped）都宁可没有百分比，也不要一个假的",
+                       "按天的独立客户端跨天去重后再数，单日最多记 " + str(access_stats.MAX_UV_PER_DAY)
+                       + " 个、窗口并集最多 " + str(access_stats.MAX_KEYS)
+                       + " 个，超出标 uvFloored 读成「至少这么多人」",
                        "找不到来源时退出码 3 并给出修复线索；选中错误日志（kind=error）是用法错误，退出码 2"],
              "exitCodes": {"0": "统计已产出（有没有异常看 JSON 里的数字）", "2": "序号/窗口写错或选到错误日志",
                            "3": "白名单里没有任何日志文件"}},
@@ -1906,6 +1977,11 @@ def build_parser() -> argparse.ArgumentParser:
     ws = sub.add_parser("webstats", help="网站访问流量统计（只读：解析 nginx access.log）", parents=[common])
     ws.add_argument("--file", default="0", help="日志来源序号（webstats --list 读回，与网页端同一份）")
     ws.add_argument("--minutes", default="60", help=f"统计窗口分钟数（1-{access_stats.SERIES_MAX}）")
+    ws.add_argument("--daily", action="store_true",
+                  help="按天统计并和上一个同样长的周期比（会读轮替出来的历史世代）")
+    ws.add_argument("--days", default=None,
+                  help=f"按天统计的天数（1-{access_stats.MAX_DAYS}，只配 --daily 用，"
+                       f"默认 {access_stats.DAY_LADDER[1]}）")
     ws.add_argument("--list", action="store_true", help="只列出可统计的日志来源")
     ws.set_defaults(fn=cmd_webstats)
 

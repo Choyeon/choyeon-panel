@@ -143,7 +143,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `load` | `--refresh` | 负载与 CPU 归因对账（只读：不 renice、不 kill、不 restart、不改 `CPUQuota=`）：load 一律折成每核排队（它是绝对排队数不是百分比），并把「CPU 不够」与「在等 IO」分开给（`procs_blocked`、D 状态名单、iowait、PSI）；另读 cgroup 的 `cpu.max` / `cpu.stat` 指出谁被自己的配额限流（被限流的进程不进 run queue 也不进 D 状态，load 与曲线都好看）；判词分要紧/值得处理/知道就好，处置全是只读命令；load 与 `/proc/stat` 都读不到时退出码 3 |
 | `start\|stop\|restart` | — | systemd 服务控制 |
 | `logs` | `--lines` | journalctl 日志 |
-| `webstats` | `--file --minutes --list` | 网站访问流量统计（只读解析 nginx access.log：状态码分布、TOP 路径/客户端、每分钟请求数）。`--list` 先看有哪些来源，`--file` 的序号与网页端日志中心同源；找不到来源退出码 3，选到错误日志是 2 |
+| `webstats` | `--file --minutes --list --daily --days` | 网站访问流量统计（只读解析 nginx access.log：状态码分布、TOP 路径/客户端、每分钟请求数）。`--list` 先看有哪些来源，`--file` 的序号与网页端日志中心同源；`--daily` 额外读 logrotate 轮替出来的历史世代（含 `.gz`）按天统计，并与上一个同样长的周期环比，依据不足时 `comparable=false` 且不给百分比；找不到来源退出码 3，选到错误日志或把 `--days` 写成没有 `--daily` 是 2 |
 | `schema` | — | 输出命令契约 |
 
 应用模板（`choyeonctl app templates`）：`node-service`、`node-next`、`python-fastapi`、`static-site`。
