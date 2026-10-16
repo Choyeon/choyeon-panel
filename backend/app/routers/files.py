@@ -114,7 +114,11 @@ async def files_action(request: Request):
         r = await run_in_threadpool(
             files_service.fs_action, body.get("action", ""), body.get("path", ""), body.get("path2")
         )
-        await aio_db.audit(request.state.cp_sub, f"file:{body.get('action')}", body.get("path"))
+        # 搬运的落点必须进审计：只记源路径的话，事后看日志看不出文件被搬去了哪。
+        src = body.get("path")
+        landed = r.get("path") if isinstance(r, dict) else None
+        await aio_db.audit(request.state.cp_sub, f"file:{body.get('action')}",
+                           f"{src} -> {landed}" if landed else src)
         return r
     except Exception as e:  # noqa: BLE001
         return err_json(e)

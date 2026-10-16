@@ -1,9 +1,11 @@
 import contextlib
 import datetime as _dt
+import errno
 import os
 import shutil
 import stat
 import threading
+import uuid
 from pathlib import Path
 
 from .. import config
@@ -450,6 +452,165 @@ def make_archive(paths: list[str], out_name: str = "archive.tar.gz") -> dict:
     return {"path": final, "size": os.path.getsize(final), "items": [os.path.basename(x) for x in picked]}
 
 
+
+# ---------------------------------------------------------------- 搬运（复制 / 移动）
+def _entry_bytes(abs_: str) -> int:
+    """这个条目大概要占多少字节——只数眼前这一层，不递归。
+
+    不递归是刻意的：数一棵大树要在动手前占住线程池里的一个线程，而少算的差额由
+    `_copy_entry` 的临时副本清理兜住——失败留下的是"没有"，不是"半份"。
+    """
+    if os.path.islink(abs_):
+        return 0
+    if os.path.isdir(abs_):
+        try:
+            return sum(os.path.getsize(os.path.join(abs_, n)) for n in os.listdir(abs_))
+        except OSError:
+            return 0
+    try:
+        return os.path.getsize(abs_)
+    except OSError:
+        return 0
+
+
+def _remove_entry(abs_: str) -> None:
+    """删掉一个已经判过根与白名单的条目：目录连内容一起，链接删的是链接本身。"""
+    if os.path.isdir(abs_) and not os.path.islink(abs_):
+        shutil.rmtree(abs_)
+    else:
+        os.unlink(abs_)
+
+
+def _copy_xattrs(src: str, dst: str) -> None:
+    """尽力带上扩展属性（SELinux 安全标签与 ACL 都住在这里）。
+
+    内容对、属主对、权限对而标签丢了，在 enforcing 的 RHEL 系机器上文件照样读不到，
+    而这台面板明确支持 Rocky/AlmaLinux。不支持 xattr 的挂载点本来也没有标签可丢，
+    所以逐个名字 try 过去、失败就跳过——不能因为文件系统没这个能力就宣布搬运失败。
+    """
+    try:
+        names = os.listxattr(src, follow_symlinks=False)
+    except OSError:
+        return
+    for name in names:
+        try:
+            value = os.getxattr(src, name, follow_symlinks=False)
+            os.setxattr(dst, name, value, follow_symlinks=False)
+        except OSError:
+            continue
+
+
+def _restore_tree(src: str, dst: str) -> None:
+    """把 copytree 出来的副本逐层回到源端的属主，并补扩展属性。
+
+    copytree 只带 mode 与时间戳，属主落的是发起搬运的 root 进程：把 /data/www 下
+    www-data 的站点目录搬去另一个挂载点会变成 root 私有，nginx 下一次读就是 500，
+    而报错的时机离"拖了个文件夹"这个动作很远，排查对不上。
+    属主落不上就是真失败（宁可不搬），所以这里不 suppress。
+    """
+    for dirpath, dirnames, filenames in os.walk(dst):
+        base = src if os.path.samefile(dst, dirpath) else os.path.join(src, os.path.relpath(dirpath, dst))
+        for name in dirnames + filenames:
+            sp = os.path.join(base, name)
+            fp = os.path.join(dirpath, name)
+            try:
+                st = os.lstat(sp)
+                os.lchown(fp, st.st_uid, st.st_gid)
+            except OSError as e:
+                raise RuntimeError(f"副本属主没落上（{e.strerror or e}），已放弃这次搬运") from e
+            _copy_xattrs(sp, fp)
+        try:
+            st = os.lstat(base)
+            os.lchown(dirpath, st.st_uid, st.st_gid)
+        except OSError as e:
+            raise RuntimeError(f"副本属主没落上（{e.strerror or e}），已放弃这次搬运") from e
+        _copy_xattrs(base, dirpath)
+
+
+def _place(tmp: str, dst: str, is_dir: bool) -> None:
+    """把临时副本落到最终名字上，且不许顶掉任何东西。
+
+    "目标不存在"的检查与落位之间总有窗口（两个人同时往一个目录搬同名文件）。
+    文件与符号链接用 os.link 收尾：目标已存在时它直接 EEXIST，是这里唯一的排他落位；
+    目录没法硬链接，只能回到 rename，窗口和面板既有的 rename 一样宽——如实写在注释里。
+    """
+    if not is_dir:
+        try:
+            os.link(tmp, dst, follow_symlinks=False)
+        except OSError as e:
+            if e.errno == errno.EEXIST:
+                raise RuntimeError("目标目录下已有同名条目（落位时才撞见，可能有并发的搬运）") from None
+            if e.errno not in (errno.EPERM, errno.EOPNOTSUPP):
+                raise RuntimeError(f"落位失败：{e.strerror or e}") from e
+            # vfat 一类没有硬链接的文件系统：退回 rename
+        else:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            return
+    try:
+        os.rename(tmp, dst)
+    except OSError as e:
+        raise RuntimeError(f"落位失败：{e.strerror or e}") from e
+
+
+def _copy_entry(src: str, dst: str) -> None:
+    """复制到 dst（调用方已确认 dst 尚不存在），任何一步失败都不留半份目标。
+
+    三点都在防"搬完比搬前更糟"：
+    - 符号链接按链接本身搬：跟过去会把"指错路的 symlink"复制成一份真文件，
+      目录里的相对链接还会在副本里指向别处；
+    - 先写 .cpmove-xxxx 再落位：中途磁盘满/进程被杀时目标位置上什么都没有；
+    - 属主与权限（含 setuid 等高位）原样带上：源与目标同属主同模式，才等于
+      "这次搬运没有多出任何权限"。`_keep_owner` 给文本编辑掩掉高危位是对的，
+      搬运不能掩——掩了等于把二进制与共享库的权限改了。
+    """
+    st = os.lstat(src)
+    parent, base = os.path.split(dst)
+    tmp = os.path.join(parent, f".{base}.cpmove-{uuid.uuid4().hex[:8]}")
+    is_dir = stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+    try:
+        if stat.S_ISLNK(st.st_mode):
+            os.symlink(os.readlink(src), tmp)
+            os.lchown(tmp, st.st_uid, st.st_gid)
+            _copy_xattrs(src, tmp)
+        elif is_dir:
+            shutil.copytree(src, tmp, symlinks=True)
+            _restore_tree(src, tmp)
+        else:
+            shutil.copyfile(src, tmp)
+            shutil.copystat(src, tmp, follow_symlinks=False)
+            os.chown(tmp, st.st_uid, st.st_gid)
+            _copy_xattrs(src, tmp)
+        _place(tmp, dst, is_dir)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            _remove_entry(tmp)
+        raise
+
+
+def _move_entry(src: str, dst: str) -> None:
+    """同分区就是 os.rename；跨分区（EXDEV）退化成"复制 + 删源"。
+
+    CP_FILE_ROOTS 经常跨挂载点（/root/www 软链到 /data/www，或备份盘单独挂载），
+    这种布局上 rename 必然 EXDEV。退路要么整体成功，要么留下明确的两份并说破，
+    绝不能留下"目标半份 + 源还在"还不吭声。
+    """
+    try:
+        os.rename(src, dst)
+        return
+    except OSError as e:
+        if getattr(e, "errno", None) != errno.EXDEV:
+            raise RuntimeError(f"移动失败：{e.strerror or e}") from e
+    _copy_entry(src, dst)
+    try:
+        _remove_entry(src)
+    except (OSError, shutil.Error) as e:
+        raise RuntimeError(
+            f"跨分区移动：{dst} 已经写好，但删不掉原件（{e}）——现在同一份内容存在两处，"
+            "请先确认再手工删旧的那份"
+        ) from e
+
+
 def fs_action(action: str, p: str, p2: str | None = None) -> dict:
     if action == "mkdir":
         abs_ = safe_path(p)
@@ -502,11 +663,52 @@ def fs_action(action: str, p: str, p2: str | None = None) -> dict:
         if os.path.lexists(to):
             raise RuntimeError("目标已存在")
         if os.path.dirname(abs_) != os.path.dirname(to):
-            raise RuntimeError("暂不支持跨目录移动")
+            # 重命名只管"在这个目录里改个名"。跨目录是搬运：要判自身子目录、要处理跨分区、
+            # 要保属主与扩展属性，那些都在 move 分支里。放这里过等于给一次手滑开第二条路径。
+            raise RuntimeError("重命名只在同一目录内进行，跨目录请改用「移动」")
         try:
             os.rename(abs_, to)
         except OSError as e:
             raise RuntimeError(f"重命名失败：{e.strerror or e}") from e
+    elif action in ("copy", "move"):
+        verb = "复制" if action == "copy" else "移动"
+        if is_root(p):
+            raise RuntimeError(f"禁止{verb}根目录")
+        abs_ = safe_entry_path(p)
+        dest_dir = safe_path(p2 or "")
+        if not os.path.lexists(abs_):
+            raise RuntimeError("原路径不存在")
+        if not os.path.isdir(dest_dir):
+            raise RuntimeError("目标不是目录")
+        base = os.path.basename(abs_)
+        if not base or base in {".", ".."}:
+            raise RuntimeError("非法路径")
+        # 落点也走 safe_entry_path：只要求父目录在白名单内，链接本身才能按链接搬。
+        to = safe_entry_path(os.path.join(dest_dir, base))
+        if os.path.realpath(os.path.dirname(abs_)) == os.path.realpath(dest_dir):
+            raise RuntimeError(f"已经在目标目录里，无需{verb}")
+        if os.path.lexists(to):
+            raise RuntimeError("目标目录下已有同名条目")
+        if action == "move" and os.path.isdir(abs_) and not os.path.islink(abs_):
+            real_src = os.path.realpath(abs_)
+            if os.path.realpath(to).startswith(real_src + os.sep):
+                # 把目录搬进它自己的子树，结果取决于内核先拆哪一层：轻则结构变了，
+                # 重则半棵子树跟着挪。判掉，不赌。
+                raise RuntimeError("不能把目录搬进它自己的子目录")
+        # 同分区的移动只改目录项，一个字节都不重写，所以只有真要落盘的操作才问额度。
+        same_fs = os.stat(os.path.dirname(abs_)).st_dev == os.stat(dest_dir).st_dev
+        if action == "copy" or not same_fs:
+            assert_write_budget(dest_dir, _entry_bytes(abs_), f"{verb}这个条目")
+        try:
+            if action == "copy":
+                _copy_entry(abs_, to)
+            else:
+                _move_entry(abs_, to)
+        except (OSError, shutil.Error) as e:
+            # 搬运中途的 errno 原文（"[Errno 28] No space left..."）不该直接甩给用户：
+            # 本仓的错误契约是可读文案，且失败路径已经清掉了临时副本。
+            raise RuntimeError(f"{verb}失败：{getattr(e, 'strerror', None) or e}") from e
+        return {"ok": True, "path": to}
     else:
         raise RuntimeError("未知操作")
     return {"ok": True}
