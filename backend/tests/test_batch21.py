@@ -37,7 +37,7 @@ from starlette.testclient import TestClient  # noqa: E402
 
 from app import database as dbm  # noqa: E402
 from app import main, security  # noqa: E402
-from app.routers import system as sys_router  # noqa: E402
+from app.services import web_logs  # noqa: E402
 from app.util import HTTP_LOG_LINES_MAX, LOG_LINES_DEFAULT, log_ladder, parse_lines  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -113,7 +113,7 @@ class TestLogOptionsEndpoint(unittest.TestCase):
 
     def test_tail_bytes_come_from_the_reader_itself(self):
         """文案里那个 KB 必须和真正 seek 的字节数是同一个数。"""
-        self.assertEqual(self._get("b21-admin").json()["nginx_tail_bytes"], sys_router.TAIL_BYTES)
+        self.assertEqual(self._get("b21-admin").json()["nginx_tail_bytes"], web_logs.TAIL_BYTES)
 
     def test_endpoint_delegates_to_the_ladder(self):
         with mock.patch("app.routers.system.log_ladder", lambda: [7, 77]):

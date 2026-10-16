@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import re
 import time
 from contextlib import suppress
@@ -9,10 +8,17 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from .. import aio_db, config, security
+from .. import aio_db, security
 from ..deps import need_admin
 from ..errors import BadInput, err_json, public_message
-from ..services import alerts_service, firewall_service, system_metrics, systemd_ops
+from ..services import (
+    access_stats,
+    alerts_service,
+    firewall_service,
+    system_metrics,
+    systemd_ops,
+    web_logs,
+)
 from ..util import HTTP_LOG_LINES_MAX, LOG_LINES_DEFAULT, is_unit, log_ladder, parse_lines, redact_creds, run
 
 router = APIRouter()
@@ -364,7 +370,8 @@ async def log_options(request: Request):
         "lines_default": LOG_LINES_DEFAULT,
         "lines_max": HTTP_LOG_LINES_MAX,
         "ladder": log_ladder(),
-        "nginx_tail_bytes": TAIL_BYTES,
+        "nginx_tail_bytes": web_logs.TAIL_BYTES,
+        "stats_minutes": access_stats.WINDOW_LADDER,
     }
 
 
@@ -424,62 +431,13 @@ async def logs_search(request: Request):
     }
 
 
-NGINX_LOG_NAMES = ("access.log", "error.log")
-# 扫描 CP_FILE_ROOTS 时跳过的目录：应用依赖目录里同名文件成千上万，
-# 既慢又只会把真正想看的日志挤出结果列表。
-_SKIP_DIRS = {"node_modules", ".git", ".venv", "dist", "build", "__pycache__", ".next", ".output"}
-TAIL_BYTES = 512 * 1024
-
-
-def _inside_roots(real: str) -> bool:
-    return any(real == root or real.startswith(root.rstrip("/") + "/") for root in config.FILE_ROOTS)
-
-
-def nginx_log_files() -> list:
-    """CP_FILE_ROOTS 允许范围内的 nginx/应用访问日志（最多扫到一级子目录）。
-
-    只从这份白名单里找文件，等价于「文件管理页能打开的目录才能被 tail」：
-    新加一个日志接口就新開一条任意文件读取的思路，不复用白名单迟早出事。
-    """
-    out: list[dict] = []
-    seen: set[str] = set()
-    for root in config.FILE_ROOTS:
-        bases = [root]
-        try:
-            with os.scandir(root) as it:
-                bases += sorted(e.path for e in it if e.is_dir() and e.name not in _SKIP_DIRS)
-        except OSError:
-            pass
-        for base in bases:
-            for name in NGINX_LOG_NAMES:
-                cand = os.path.join(base, name)
-                real = os.path.realpath(cand)
-                if real in seen or not _inside_roots(real):
-                    continue
-                if not os.path.isfile(real):
-                    continue
-                seen.add(real)
-                out.append({"path": real, "label": f"{os.path.basename(base) or 'root'}/{name}"})
-    return out
-
-
-def _tail_file(path: str, lines: int, filt: str) -> list:
-    """从文件末尾最多读 TAIL_BYTES，再取后 lines 行（大日志不会把内存打满）。"""
-    size = os.path.getsize(path)
-    with open(path, "rb") as f:
-        f.seek(max(0, size - TAIL_BYTES))
-        raw = f.read()
-    out = []
-    for line in raw.decode(errors="replace").splitlines()[-lines:]:
-        if filt and filt.lower() not in line.lower():
-            continue
-        out.append(redact_creds(line)[:MAX_ITEM_CHARS])
-    return out
-
-
 @router.get("/api/system/nginx-log")
 async def nginx_log(request: Request):
-    """tail 白名单目录下的 access/error 日志（journal 里没有的那部分，比如 nginx 的文件日志）。"""
+    """tail 日志白名单（CP_LOG_ROOTS ∪ CP_FILE_ROOTS）下的 access/error 日志。
+
+    journal 里没有的那部分——nginx 按站点写的文件日志——只能从这里读。
+    来源发现、普通文件判定与序号口径都在 `web_logs`，`/api/system/nginx-stats` 用的是同一份列表。
+    """
     if r := need_admin(request):
         return r
     qp = request.query_params
@@ -491,23 +449,78 @@ async def nginx_log(request: Request):
         idx = int(qp.get("file") or 0)
     except ValueError:
         return _bad("file 参数是日志文件的序号（整数）")
-    files = await run_in_threadpool(nginx_log_files)
+    files = await run_in_threadpool(web_logs.nginx_log_files)
     if not files:
         return {
             "items": [],
             "files": [],
-            "hint": "CP_FILE_ROOTS 下没有找到 access.log / error.log。nginx 默认日志在 /var/log/nginx，"
-                    "需要把它加进 CP_FILE_ROOTS 才允许被 tail。",
+            "hint": web_logs.discovery_hint(),
         }
     if not 0 <= idx < len(files):
         return _bad(f"file 序号超出范围（可用 0-{len(files) - 1}）")
     picked = files[idx]
-    items = await run_in_threadpool(_tail_file, picked["path"], lines, filt)
+    items = await run_in_threadpool(web_logs.tail_file, picked["path"], lines, filt, MAX_ITEM_CHARS)
     return {
         "items": items,
         "count": len(items),
         "source": picked["label"],
-        "files": [{"i": i, "label": f["label"]} for i, f in enumerate(files)],
+        "files": [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]} for i, f in enumerate(files)],
         "truncated": len(items) >= lines,
     }
 
+
+@router.get("/api/system/nginx-stats")
+async def nginx_stats(request: Request):
+    """访问日志流量统计：状态码分布、TOP 路径/客户端、方法占比与每分钟请求曲线。
+
+    对标 1Panel/宝塔的「网站监控」，但不装第三方分析器：一次有界尾读 + 内存聚合，
+    不落临时文件、不返回原始日志行。`file` 序号与 `/api/system/nginx-log` 同一份列表，
+    所以「在日志页签看到的 3 号文件」和「统计页签的 3 号」是同一个来源。
+    """
+    if r := need_admin(request):
+        return r
+    qp = request.query_params
+    raw_file = (qp.get("file") or "").strip()
+    try:
+        want = int(raw_file) if raw_file else None
+    except ValueError:
+        return _bad("file 参数是日志文件的序号（整数）")
+    raw_minutes = (qp.get("minutes") or "").strip()
+    if raw_minutes:
+        try:
+            minutes = int(raw_minutes)
+        except ValueError:
+            return _bad(f"minutes 参数是分钟数（整数，1-{access_stats.SERIES_MAX}）")
+    else:
+        minutes = 60
+    if not 1 <= minutes <= access_stats.SERIES_MAX:
+        return _bad(f"minutes 只能是 1-{access_stats.SERIES_MAX}（最多统计 24 小时）")
+    files = await run_in_threadpool(web_logs.nginx_log_files)
+    if not files:
+        return {"hint": web_logs.discovery_hint(), "files": [], "source": ""}
+    if want is None:
+        # 不带 file 时取第一个“能统计的”来源：页面的下拉要先有一次响应才有清单，
+        # 而第一枪撞进 error.log 会变成 400，用户看到的是“点了统计却报错”。
+        idx = next((i for i, f in enumerate(files) if f["kind"] == "access"), -1)
+        if idx < 0:
+            return {"hint": "白名单里只有错误日志，没有可统计的访问日志；给站点开一份 access.log，"
+                            "或把它的目录加进 CP_LOG_ROOTS",
+                    "files": [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]}
+                              for i, f in enumerate(files)],
+                    "source": ""}
+    else:
+        idx = want
+    if not 0 <= idx < len(files):
+        return _bad(f"file 序号超出范围（可用 0-{len(files) - 1}）")
+    picked = files[idx]
+    if picked["kind"] != "access":
+        return _bad(f"{picked['label']} 是错误日志，里面没有请求行可统计；"
+                    f"可选的访问日志序号："
+                    f"{', '.join(str(i) for i, f in enumerate(files) if f['kind'] == 'access') or '无'}")
+    data = await run_in_threadpool(access_stats.collect, picked["path"], minutes)
+    data["source"] = picked["label"]
+    data["site"] = picked["site"]
+    data["file"] = idx
+    data["files"] = [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]}
+                     for i, f in enumerate(files)]
+    return data

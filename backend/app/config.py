@@ -113,6 +113,11 @@ DATA_DIR = _path("CP_DATA_DIR", str(BASE / "data"))
 APP_ROOT = _path("CP_APP_ROOT", "/root/www")
 BACKUP_DIR = _path("CP_BACKUP_DIR", "/root/backups/panel")
 FILE_ROOTS = _paths("CP_FILE_ROOTS", "/root/www,/etc/nginx,/root/backups/panel")
+# 访问/错误日志的发现根。它和 CP_FILE_ROOTS 是两个键，而且必须分开：后者管"文件管理页能打开哪些
+# 目录"，前者只管"哪些目录里有 access.log/error.log"。线上 nginx 的日志在 /var/log/nginx，
+# 把它塞进 FILE_ROOTS 才看得到日志，等于顺手把系统日志目录变成人能浏览的地方。
+# 发现时取 LOG_ROOTS ∪ FILE_ROOTS：应用把 access.log 写在自己项目目录里（后者之内）照旧能看。
+LOG_ROOTS = _paths("CP_LOG_ROOTS", "/var/log/nginx")
 WEB_DIST = BASE / "web" / "dist"
 AVATAR_DIR = str(Path(DATA_DIR) / "avatars")
 SYS_HELPER = BASE / "backend" / "python" / "sys_helper.py"
@@ -186,6 +191,7 @@ def as_dict() -> dict:
         "appRoot": APP_ROOT,
         "backupDir": BACKUP_DIR,
         "fileRoots": FILE_ROOTS,
+        "logRoots": LOG_ROOTS,
         # 前端上传前先按这个额度拦一道，免得用户传完 300MB 才被服务端拒绝
         "maxUploadBytes": MAX_UPLOAD_BYTES,
         "maxBodyBytes": MAX_BODY_BYTES,

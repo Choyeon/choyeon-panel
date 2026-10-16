@@ -18,6 +18,7 @@
     choyeonctl updates
     choyeonctl storage
     choyeonctl logs [-n 100] | restart | stop | start | upgrade
+    choyeonctl webstats [--file N] [--minutes M] [--list]
     choyeonctl schema --json         # 输出命令契约（AI 读取入口）
 """
 
@@ -43,6 +44,7 @@ from app import database as dbm  # noqa: E402
 from app.errors import BadInput, public_message  # noqa: E402
 from app.routers.meta import run_checks  # noqa: E402
 from app.services import (  # noqa: E402
+    access_stats,
     backup_service,
     cloud_backup,
     exposure_service,
@@ -53,6 +55,7 @@ from app.services import (  # noqa: E402
     pending_service,
     storage_service,
     updates_service,
+    web_logs,
 )
 from app.util import CLI_LOG_LINES_MAX, human_bytes, redact_creds, timeout_note  # noqa: E402
 
@@ -1551,6 +1554,74 @@ def _load_text(d: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_webstats(a: argparse.Namespace) -> dict:
+    """网站访问流量统计：状态码分布、TOP 路径与客户端、每分钟请求数。
+
+    严格只读：来源发现复用面板日志中心那份白名单（CP_LOG_ROOTS ∪ CP_FILE_ROOTS），
+    只往文件尾读有限字节，不写任何临时文件，也不把原始日志行打出来——
+    访问日志的查询串里常带 token，统计用的是去掉查询串的路径。
+    """
+    files = web_logs.nginx_log_files()
+    if a.list:
+        data = {"files": [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"],
+                           "path": f["path"]} for i, f in enumerate(files)],
+                "roots": web_logs.log_roots()}
+        if not files:
+            Out.error(web_logs.discovery_hint(), EXIT_PRECONDITION)
+        Out.result(data, "\n".join(
+            [f"日志来源 {len(files)} 个（扫描根：{', '.join(web_logs.log_roots())}）"]
+            + [f"  [{it['i']}] {it['kind']:<6} {it['label']}  {it['path']}" for it in data["files"]]))
+        return data
+    try:
+        idx = int(a.file or 0)
+        minutes = int(a.minutes or 60)
+    except ValueError:
+        Out.error("--file 是 --list 里读回的序号、--minutes 是窗口分钟数，两者都必须是整数", EXIT_USAGE)
+    if not 1 <= minutes <= access_stats.SERIES_MAX:
+        Out.error(f"--minutes 只能是 1-{access_stats.SERIES_MAX}（最多统计 24 小时）", EXIT_USAGE)
+    if not files:
+        Out.error(web_logs.discovery_hint(), EXIT_PRECONDITION)
+    if not 0 <= idx < len(files):
+        Out.error(f"--file 序号超出范围（可用 0-{len(files) - 1}，先用 choyeonctl webstats --list 看清单）",
+                  EXIT_USAGE)
+    picked = files[idx]
+    if picked["kind"] != "access":
+        access_idx = [str(i) for i, f in enumerate(files) if f["kind"] == "access"]
+        Out.error(f"[{idx}] {picked['label']} 是错误日志，里面没有请求行可统计；"
+                  f"访问日志的序号是 {'、'.join(access_idx) if access_idx else '无'}", EXIT_USAGE)
+    data = access_stats.collect(picked["path"], minutes)
+    data["source"] = picked["label"]
+    data["site"] = picked["site"]
+    Out.result(data, _webstats_text(data))
+    return data
+
+
+def _webstats_text(d: dict) -> str:
+    st = d.get("status") or {}
+    lines = [f"访问统计：{d.get('source')} · 窗口 {d.get('windowMinutes')} 分钟"
+             f"（{d.get('from') or '—'} → {d.get('to') or '—'}）"]
+    if not d.get("parsed"):
+        lines.append(f"这个窗口里没有可解析的请求行：扫描 {d.get('scannedLines')} 行，"
+                     f"坏行 {d.get('malformed')} 条。日志格式可能是自定义 log_format"
+                     "（既不是 combined 也不是 common），或者这个站点此刻确实没人访问。")
+        return "\n".join(lines)
+    lines.append(f"请求 {d['parsed']} 次 · 独立客户端 {d['clients']} 个 · "
+                 f"下行 {human_bytes(int(d.get('bytesOut') or 0))} · 坏行 {d.get('malformed')}")
+    if d.get("outsideWindow"):
+        lines.append(f"  窗口外（更早）另有 {d['outsideWindow']} 行未计入")
+    if d.get("truncatedRead"):
+        lines.append("  注：日志比统计上限大，只看了尾部（truncatedRead）")
+    lines.append("状态码：" + " ".join(f"{k} {st.get(k, 0)}" for k in
+                                        ("2xx", "3xx", "4xx", "5xx", "1xx", "0xx") if st.get(k)))
+    if d.get("topPaths"):
+        lines.append("TOP 路径：")
+        lines += [f"  {p['count']:>7}  {p['path']}" for p in d["topPaths"][:10]]
+    if d.get("topClients"):
+        lines.append("TOP 客户端：")
+        lines += [f"  {c['count']:>7}  {c['key']}" for c in d["topClients"][:10]]
+    return "\n".join(lines)
+
+
 async def cmd_schema(_a: argparse.Namespace) -> dict:
     """机器可读命令契约：AI 智能体读这一份就够，不用翻源码。"""
     schema = {
@@ -1687,6 +1758,21 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "扫 /proc 有预算：最多 " + str(load_service.PROC_SCAN_CAP) + " 个进程、"
                        + str(load_service.SCAN_BUDGET_SEC) + " 秒，没扫完会如实标出来",
                        "load 与 /proc/stat 都读不到时退出码 3"]},
+            {"name": "webstats", "args": ["--file", "--minutes", "--list"],
+             "desc": "网站访问流量统计（只读：状态码分布、TOP 路径与客户端、每分钟请求数）",
+             "notes": ["来源白名单 = CP_LOG_ROOTS + CP_FILE_ROOTS，与网页端日志中心是同一份列表；"
+                       "--file 序号在 --list、网页下拉和这个命令里指同一个文件",
+                       "只往文件尾读 " + str(access_stats.MAX_BYTES // 1024 // 1024) + "MB、最多 "
+                       + str(access_stats.MAX_LINES) + " 行，再大的日志只看尾部，truncatedRead 会如实标出来",
+                       "路径与客户端各自最多 " + str(access_stats.MAX_KEYS) + " 个键，超出并进「…其他」并计数，"
+                       "不会因为爬虫刷唯一 URL 就把内存吃光",
+                       "统计口径不含查询串：访问日志的 ?token= 常带凭据，而榜单要回答的是哪个地址被访问得多",
+                       "扫描器会把 TLS 记录打到 80 端口，nginx 用 `\\xHH` 文本记下不可打印字节；"
+                       "这类行还原后认不出方法名，方法位统一记 \"-\"，不会挤掉真实流量的榜位",
+                       "时间窗按日志里最新一行往回算，不按墙上时钟：一小时没人访问的站点用当前时间做窗口会得到全空表",
+                       "找不到来源时退出码 3 并给出修复线索；选中错误日志（kind=error）是用法错误，退出码 2"],
+             "exitCodes": {"0": "统计已产出（有没有异常看 JSON 里的数字）", "2": "序号/窗口写错或选到错误日志",
+                           "3": "白名单里没有任何日志文件"}},
             {"name": "start|stop|restart", "args": [], "desc": "systemd 服务控制"},
             {"name": "logs", "args": ["--lines"], "desc": "查看面板日志"},
             {"name": "schema", "args": [], "desc": "输出本契约"},
@@ -1816,6 +1902,12 @@ def build_parser() -> argparse.ArgumentParser:
     lo = sub.add_parser("load", help="负载与 CPU 归因对账（只读：不改配额、不杀进程）", parents=[common])
     lo.add_argument("--refresh", action="store_true", help="忽略 60 秒缓存，立即重采一个窗口")
     lo.set_defaults(fn=cmd_load)
+
+    ws = sub.add_parser("webstats", help="网站访问流量统计（只读：解析 nginx access.log）", parents=[common])
+    ws.add_argument("--file", default="0", help="日志来源序号（webstats --list 读回，与网页端同一份）")
+    ws.add_argument("--minutes", default="60", help=f"统计窗口分钟数（1-{access_stats.SERIES_MAX}）")
+    ws.add_argument("--list", action="store_true", help="只列出可统计的日志来源")
+    ws.set_defaults(fn=cmd_webstats)
 
     for verb in ("start", "stop", "restart"):
         s = sub.add_parser(verb, help=f"systemctl {verb} {SERVICE}", parents=[common])

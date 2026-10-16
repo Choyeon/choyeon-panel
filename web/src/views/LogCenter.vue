@@ -1,24 +1,45 @@
 <script setup lang="ts">
 import { computed, h, ref, watch } from 'vue';
 import {
-  NAlert, NDataTable, NInput, NSelect, NSpace, NTabPane, NTabs, NSwitch, NTag, NText,
+  NAlert, NCard, NDataTable, NGrid, NGridItem, NInput, NSelect, NSpace, NTabPane, NTabs,
+  NSwitch, NTag, NText,
 } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, tapEllipsis } from '../ui';
 import { req } from '../api';
 import { icon } from '../icons';
+import { fmtBytes } from '../composables/useFormat';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
+import InfoList, { type InfoItem } from '../components/InfoList.vue';
+import MetricChart from '../components/MetricChart.vue';
 import { useCachedFetch } from '../composables/useCachedFetch';
 import { useTableHeight } from '../composables/useTableHeight';
 import { useVisiblePoll } from '../composables/useVisiblePoll';
 
 type JItem = { ts: string; unit: string; prio: number; text: string };
 type JResp = { items: JItem[]; count: number; truncated: boolean };
-type NResp = { items: string[]; count: number; source: string; files: { i: number; label: string }[]; truncated: boolean; hint?: string };
-type LogOpts = { lines_default: number; lines_max: number; ladder: number[]; nginx_tail_bytes: number };
+type SFile = { i: number; label: string; kind: string; site: string };
+type NResp = { items: string[]; count: number; source: string; files: SFile[]; truncated: boolean; hint?: string };
+type LogOpts = {
+  lines_default: number; lines_max: number; ladder: number[];
+  nginx_tail_bytes: number; stats_minutes: number[];
+};
+type SResp = {
+  hint?: string; files?: SFile[]; source?: string; site?: string; file?: number;
+  parsed?: number; outsideWindow?: number; malformed?: number; scannedLines?: number;
+  bytesRead?: number; truncatedRead?: boolean; windowMinutes?: number;
+  from?: string; to?: string; bytesOut?: number; clients?: number;
+  clientsOverflow?: number; pathsOverflow?: number;
+  status?: Record<string, number>;
+  topCodes?: { code: string; count: number }[];
+  topPaths?: { path: string; count: number; bytes: number }[];
+  topClients?: { key: string; count: number }[];
+  methods?: { key: string; count: number }[];
+  series?: { ts: number; count: number }[];
+};
 
 const err = ref('');
-const tab = ref<'journal' | 'nginx'>('journal');
+const tab = ref<'journal' | 'nginx' | 'stats'>('journal');
 
 const LEVELS = ['emerg', 'alert', 'crit', 'err', 'warning', 'notice', 'info', 'debug'];
 const PRIO_CN: Record<string, string> = {
@@ -94,7 +115,7 @@ const defaultLines = computed(() => {
 });
 const tailKb = computed(() => Math.round(Number(logOpts.value?.nginx_tail_bytes) / 1024) || 0);
 const tailNote = computed(() => {
-  const only = '只允许文件管理白名单目录下的 access.log / error.log。';
+  const only = '只读白名单目录里的 access.log / error.log（CP_LOG_ROOTS 加 CP_FILE_ROOTS，和统计页签同一份清单）。';
   return tailKb.value ? `服务端最多读末尾 ${tailKb.value}KB，且${only}` : only;
 });
 watch(defaultLines, (v) => {
@@ -165,6 +186,130 @@ async function tailNginx() {
   }
 }
 
+// —— 访问统计（只读：一次有界尾读 + 内存聚合，服务端不返回原始日志行）——
+const sf = ref({ file: 0, minutes: 0 });
+const sResult = ref<SResp | null>(null);
+const sLoading = ref(false);
+
+// 下拉只列"能统计的"来源：序号空间与尾读页签是同一份（服务端那份排序稳定的列表），
+// 但错误日志没有请求行，选它只能得到一个 400。
+const statsFileOpts = computed(() => (sResult.value?.files || [])
+  .filter((f) => f.kind === 'access')
+  .map((f) => ({ label: f.label, value: f.i })));
+
+// 窗口档位来自 /system/log-options（后端 access_stats.WINDOW_LADDER），页面不抄数字：
+// 抄一份 15/30/60 就会在上限改动后安静失真——下拉里还有 24 小时，服务端已经截到 720。
+const minuteLadder = computed(() =>
+  (logOpts.value?.stats_minutes || []).filter((n) => Number.isInteger(n) && n >= 1));
+const minuteOpts = computed(() => minuteLadder.value.map((n) => ({
+  label: n % 60 === 0 ? `${n / 60} 小时` : `${n} 分钟`,
+  value: n,
+})));
+const defaultMinutes = computed(() => minuteLadder.value.find((n) => n === 60) || minuteLadder.value[0] || 0);
+watch(defaultMinutes, (v) => { if (v && !sf.value.minutes) sf.value.minutes = v; });
+
+// 同一次统计只允许一份在路上：连点两下会并发两次全量尾读，而先回来的那个
+// 会盖掉后回来的那个（和 journal 那条同一个病），所以认序号。
+let statsSeq = 0;
+async function runStats() {
+  if (sLoading.value) return;
+  sLoading.value = true;
+  const seq = ++statsSeq;
+  err.value = '';
+  const q = new URLSearchParams();
+  // 第一枪不带 file：让服务端挑一个「能统计的」来源并回写序号。
+  // 写死 0 的话，撞上排序靠前的 error.log 就是「点了统计却报错」。
+  if (typeof sResult.value?.file === 'number') q.set('file', String(sf.value.file));
+  if (sf.value.minutes) q.set('minutes', String(sf.value.minutes));
+  try {
+    const r: SResp = await req(`/system/nginx-stats?${q.toString()}`, { timeout: 60000 });
+    if (seq !== statsSeq) return;
+    sResult.value = r;
+    if (typeof r.file === 'number') sf.value.file = r.file;
+  } catch (e: any) {
+    if (seq !== statsSeq) return;
+    err.value = e.message || String(e);
+  } finally {
+    if (seq === statsSeq) sLoading.value = false;
+  }
+}
+
+// 进页签自动跑一次：这一页没有"还没查"和"查了是空"两种状态的区别，
+// 留白只会让人以为统计坏了（和访问日志页签要手点不一样，那边一次尾读几十行是有代价的）。
+watch(tab, (t) => { if (t === 'stats' && !sResult.value && !sLoading.value) void runStats(); });
+
+const STATUS_CN: Record<string, string> = {
+  '0xx': '无效/其他', '1xx': '信息 1xx', '2xx': '成功 2xx',
+  '3xx': '重定向 3xx', '4xx': '客户端 4xx', '5xx': '服务端 5xx',
+};
+// 类别由服务端给（0xx-5xx 全量），页面只负责排序与配色，不再抄一份键名。
+const statusRows = computed(() => {
+  const total = sResult.value?.parsed || 0;
+  return Object.entries(sResult.value?.status || {})
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => {
+      const pct = total ? Math.round((n / total) * 100) : 0;
+      return { k, label: STATUS_CN[k] || k, n, pct, w: pct > 0 ? Math.max(2, pct) : 0 };
+    });
+});
+function statusColor(k: string) {
+  if (k === '5xx') return 'var(--cp-err)';
+  if (k === '4xx') return 'var(--cp-warn)';
+  if (k === '2xx') return 'var(--cp-ok)';
+  return 'var(--cp-text-mute)';
+}
+
+// 曲线刻度按 UTC 标：from/to 与窗口边界在服务端就是 UTC，
+// 用浏览器时区画横轴会让「16:00 那一分钟」在两个时区的屏幕上指不同的请求。
+const utcHM = (ts: number) => new Date(ts * 1000).toISOString().slice(11, 16);
+const statXs = computed(() => (sResult.value?.series || []).map((p) => utcHM(p.ts)));
+const statChart = computed(() => [{
+  name: '请求数',
+  color: '--cp-brand',
+  data: (sResult.value?.series || []).map((p) => p.count),
+  area: true,
+  straight: true,
+}]);
+
+const statsInfo = computed<InfoItem[]>(() => {
+  const d = sResult.value;
+  if (!d || !d.source) return [];
+  const rows: InfoItem[] = [
+    { k: '来源', v: d.source, mono: true },
+    { k: '站点', v: d.site || '-' },
+    { k: '窗口', v: `${d.windowMinutes} 分钟 · ${d.from || '?'} → ${d.to || '?'}（UTC）` },
+    { k: '请求数', v: `${d.parsed} 次` },
+    { k: '独立客户端', v: `${d.clients} 个${d.clientsOverflow ? `（另有 ${d.clientsOverflow} 个未上榜）` : ''}` },
+    { k: '出站流量', v: fmtBytes(d.bytesOut || 0) },
+    {
+      k: '扫描范围',
+      v: `${d.scannedLines} 行 / ${Math.round((d.bytesRead || 0) / 1024)}KB`
+        + `${d.truncatedRead ? '（日志比这更大，只读了尾部）' : ''}`,
+    },
+  ];
+  if (d.outsideWindow) rows.push({ k: '窗口外', v: `${d.outsideWindow} 行更早，未计入本次窗口` });
+  if (d.malformed) rows.push({ k: '解析不了', v: `${d.malformed} 行（不是 common/combined 格式，或时间戳读不出）` });
+  if (d.pathsOverflow) rows.push({ k: '路径溢出', v: `${d.pathsOverflow} 个唯一路径并进「…其他」` });
+  return rows;
+});
+
+const pCols: any[] = [
+  {
+    title: '路径（不含查询串）', key: 'path', minWidth: 200, ellipsis: tapEllipsis,
+    render: (r: { path: string }) => h('span', { class: 'mono-dim', title: r.path }, r.path),
+  },
+  { title: '次数', key: 'count', width: 74, align: 'right' },
+  { title: '字节', key: 'bytes', width: 92, align: 'right', render: (r: { bytes: number }) => fmtBytes(r.bytes) },
+];
+const cCols: any[] = [
+  {
+    title: '客户端', key: 'key', minWidth: 130, ellipsis: tapEllipsis,
+    render: (r: { key: string }) => h('span', { class: 'mono-dim', title: r.key }, r.key),
+  },
+  { title: '次数', key: 'count', width: 74, align: 'right' },
+];
+
 // 命中高亮只做纯文本切分：日志内容里可能带 < > 与口令片段，走 v-html 既不安全也没必要。
 function highlight(line: string, needle: string) {
   const k = (needle || '').trim().toLowerCase();
@@ -223,7 +368,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
 
 <template>
   <div>
-    <PageHeader title="日志中心" sub="journal 按 unit/时间/级别/关键词检索，访问日志 tail 白名单目录里的文件，跟随模式按同样条件定时重查">
+    <PageHeader title="日志中心" sub="journal 按 unit/时间/级别/关键词检索，访问日志 tail 白名单目录里的文件，访问统计把一次有界尾读聚成流量榜，跟随模式按同样条件定时重查">
       <template #actions>
         <NText class="cell-sub" style="font-size: var(--fs-xs)">只读查询，不写入任何数据</NText>
       </template>
@@ -308,6 +453,93 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
           <template #empty><EmptyBox :text="nResult ? '这段日志里没有命中行（换个过滤词，或加大尾读行数）' : '点「读取末尾」取一份日志'" /></template>
         </NDataTable>
       </NTabPane>
+
+      <NTabPane name="stats" tab="访问统计">
+        <NSpace :size="8" wrap align="end" style="margin-bottom: var(--space-3)">
+          <NSelect
+            :value="statsFileOpts.length ? sf.file : null" size="small" style="width: 260px; max-width: 100%"
+            :options="statsFileOpts" :disabled="!statsFileOpts.length" filterable
+            placeholder="先跑一次取来源清单" aria-label="统计来源"
+            @update:value="(v: number) => { sf.file = v; }"
+          />
+          <NSelect
+            :value="sf.minutes || null" size="small" style="width: 132px; max-width: 100%"
+            :options="minuteOpts" placeholder="窗口" aria-label="统计窗口"
+            @update:value="(v: number) => { sf.minutes = v; }"
+          />
+          <NButton size="small" type="primary" :loading="sLoading" :disabled="sLoading" :icon="icon('SearchOutline', 14)" @click="runStats">统计</NButton>
+          <NText class="cell-sub cp-break" style="font-size: var(--fs-xs); align-self: center">
+            只读：解析访问日志的请求行，不返回原始日志行
+          </NText>
+        </NSpace>
+
+        <NAlert v-if="sResult?.hint" type="info" :bordered="false" size="small">{{ sResult.hint }}</NAlert>
+        <EmptyBox v-else-if="!sResult && !sLoading" text="这一页会自己跑一次；也可以换来源或窗口后点「统计」" />
+
+        <template v-else-if="sResult">
+          <div v-if="!sResult.parsed" class="cp-help" style="margin-bottom: var(--space-3)">
+            这个窗口里没有解析出请求行{{ sResult.malformed ? `（读到 ${sResult.malformed} 行都不是 common/combined 格式）` : '' }}。
+            先把站点的 access.log 开起来，或把窗口放宽一点。
+          </div>
+          <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
+            <NGridItem span="1 m:1">
+              <NCard size="small">
+                <template #header><span class="section-title">统计口径</span></template>
+                <InfoList :items="statsInfo" />
+              </NCard>
+            </NGridItem>
+            <NGridItem span="1 m:1">
+              <NCard size="small">
+                <template #header><span class="section-title">状态码分布</span></template>
+                <div v-if="!statusRows.length" class="cp-help">这个窗口里没有可统计的响应。</div>
+                <div v-else>
+                  <div v-for="row in statusRows" :key="row.k" class="ls-row">
+                    <span class="ls-k">{{ row.label }}</span>
+                    <span class="ls-bar"><i :style="{ width: row.w + '%', background: statusColor(row.k) }" /></span>
+                    <span class="ls-n">{{ row.n }} · {{ row.pct }}%</span>
+                  </div>
+                  <div class="chip-row" style="margin-top: var(--space-3)">
+                    <span v-for="c in sResult.topCodes || []" :key="c.code" class="cp-chip">{{ c.code }} <b>{{ c.count }}</b></span>
+                  </div>
+                  <div class="chip-row" style="margin-top: var(--space-2)">
+                    <span v-for="m in sResult.methods || []" :key="m.key" class="cp-chip">{{ m.key }} <b>{{ m.count }}</b></span>
+                  </div>
+                </div>
+              </NCard>
+            </NGridItem>
+          </NGrid>
+
+          <NCard size="small" style="margin-bottom: var(--space-4)">
+            <template #header><span class="section-title">每分钟请求数（UTC）</span></template>
+            <MetricChart :xs="statXs" :series="statChart" height="200px" :loading="sLoading" y-name="( 次/分钟 )" />
+          </NCard>
+
+          <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+            <NGridItem span="1 m:1">
+              <NCard size="small">
+                <template #header><span class="section-title">TOP 路径</span></template>
+                <NDataTable
+                  :columns="pCols" :data="sResult.topPaths || []" size="small" :bordered="false"
+                  :scroll-x="'auto'" :max-height="tableH"
+                >
+                  <template #empty><EmptyBox text="这个窗口里没有请求行" /></template>
+                </NDataTable>
+              </NCard>
+            </NGridItem>
+            <NGridItem span="1 m:1">
+              <NCard size="small">
+                <template #header><span class="section-title">TOP 客户端</span></template>
+                <NDataTable
+                  :columns="cCols" :data="sResult.topClients || []" size="small" :bordered="false"
+                  :scroll-x="'auto'" :max-height="tableH"
+                >
+                  <template #empty><EmptyBox text="这个窗口里没有请求行" /></template>
+                </NDataTable>
+              </NCard>
+            </NGridItem>
+          </NGrid>
+        </template>
+      </NTabPane>
     </NTabs>
   </div>
 </template>
@@ -320,4 +552,22 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
    grep 命中也变成看不见的高亮——两个都是静默的。 */
 :deep(.lg-text) { font-size: var(--fs-2xs); line-height: 1.65; word-break: break-all; white-space: pre-wrap; }
 :deep(.lg-hit) { background: var(--cp-code-hl); color: inherit; border-radius: 3px; padding: 0 1px; }
+/* 状态码分布：窄屏上标签列用 em 而不是 px（6.5em 在最小档也不顶穿），
+   条本身走 flex + min-width:0，宽度百分比只作用于条，不作用于卡片。 */
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.ls-row { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.ls-row + .ls-row { margin-top: 7px; }
+.ls-k {
+  flex: 0 0 6.5em; font-size: var(--fs-xs); color: var(--cp-text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ls-bar {
+  flex: 1 1 auto; min-width: 0; height: 8px; border-radius: 4px;
+  background: var(--cp-bg-soft); overflow: hidden;
+}
+.ls-bar > i { display: block; height: 100%; border-radius: 4px; }
+.ls-n {
+  flex: 0 0 auto; font-size: var(--fs-xs); color: var(--cp-text-dim); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 </style>

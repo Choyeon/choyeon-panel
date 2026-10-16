@@ -163,6 +163,7 @@ choyeonctl storage --json                            # 存储占用对账：面�
 choyeonctl memory --json                             # 内存压力对账：谁在吃内存、有没有在换页与直接回收、内核 OOM 杀过谁
 choyeonctl pending --json                            # 改动未生效对账：补丁装了但进程还踩着旧库、新内核没重启、配置改过没 reload
 choyeonctl load --json                               # 负载归因：每核排队、是 CPU 不够还是在等 IO、谁被自己的 CPUQuota 限流
+choyeonctl webstats --list --json                    # 网站访问统计：状态码分布、TOP 路径 / 客户端、每分钟请求数（只读解析 nginx access.log）
 
 printf '%s' "$PW" | choyeonctl user create admin --password-stdin --json
 choyeonctl app templates                             # node-service / node-next / python-fastapi / static-site
@@ -233,6 +234,7 @@ LICENSE                MIT
 | `CP_HSTS` | 关 | 面板直连 HTTPS 时才开；走 nginx 时由 nginx 统一发送 |
 | `CP_DATA_DIR` | 仓库根 `data/` | SQLite 与密钥目录，**唯一必须备份** |
 | `CP_FILE_ROOTS` | `/root/www,/etc/nginx,/root/backups/panel` | 文件管理根目录白名单（绝对路径） |
+| `CP_LOG_ROOTS` | `/var/log/nginx` | 访问/错误日志与流量统计能读到的目录（不放大文件管理白名单） |
 | `CP_TOKEN_TTL_HOURS` | `12` | 登录有效期（1-72） |
 | `CP_LOGIN_LIMIT` | `10` | 每 IP 每分钟登录尝试上限 |
 | `CP_MAX_UPLOAD_MB` | `8` | 单文件上限（nginx `client_max_body_size` 需 ≥ 此值） |

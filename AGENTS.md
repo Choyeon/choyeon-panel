@@ -132,7 +132,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `doctor` | — | 只读安全与健康自检（当前 20 项，以 JSON 的 `items` 为准），每项带修复命令 |
 | `user list\|create\|reset\|revoke\|2fa-disable\|delete` | `<name> --password --password-stdin --role --yes` | 账号管理；create/reset 用 `--password-stdin` 传口令。改密与 `revoke` 都会吊销旧 token：`revoke <name>` 只踢这个账号，`revoke all` 踢全部（`delete` 必须加 `--yes`）。`list` 每行末列显示该账号有没有开两步验证（`2fa` / `-`），不显示密钥。`2fa-disable <name> --yes` 是验证器丢失时的逃生口，只有 root 能跑，关闭同时吊销该账号全部会话 |
 | `app templates\|list\|create\|deploy\|rollback\|logs` | `--id --name --template --type --repo --branch --path --port --domain --start-cmd --install-cmd --lines` | 应用全生命周期；`create` 需 `--template` 或 `--start-cmd` 之一 |
-| `backup run\|list\|targets\|add-target\|edit-target\|del-target\|test-target\|push\|link` | `--id --target --name --endpoint --bucket --region --prefix --access-key --secret-stdin --path-style/--no-path-style --enable/--disable --yes` | 面板数据备份（SQLite 在线备份 API）与 S3 兼容异地目标。Secret Key **只能**走 `--secret-stdin`（argv 写法会留在 `ps` 和 shell 历史里）；`push`/`link` 的 `--id` 是备份任务，`edit/del/test-target` 的 `--id` 是目标；`link --id <任务> --target <目标>` 之后这条任务才会推送，`--target 0` 取消关联；`del-target` 只删配置，桶里的对象与本机备份一个都不动 |
+| `backup run\|list\|targets\|add-target\|edit-target\|del-target\|test-target\|push\|link` | `--id --target --name --endpoint --bucket --region --prefix --access-key --secret-stdin --path-style --no-path-style --enable --disable --yes` | 面板数据备份（SQLite 在线备份 API）与 S3 兼容异地目标。Secret Key **只能**走 `--secret-stdin`（argv 写法会留在 `ps` 和 shell 历史里）；`push`/`link` 的 `--id` 是备份任务，`edit/del/test-target` 的 `--id` 是目标；`link --id <任务> --target <目标>` 之后这条任务才会推送，`--target 0` 取消关联；`del-target` 只删配置，桶里的对象与本机备份一个都不动 |
 | `firewall list\|allow\|deny\|remove\|on\|off` | `--port --port-to --proto --source --comment --rate --num --expect --yes` | 本机 ufw/firewalld 读写；会把自己锁在门外的操作一律拒绝 |
 | `updates` | `--refresh` | 待装系统补丁与安全更新（只读探测）；面板不代跑 apt update/upgrade，升级命令只准备好供管理员执行 |
 | `ports` | `--refresh` | 监听端口与对外可达性对账（只读）：每个端口给 internal/expected/blocked/exposed 一档判词，不改绑定也不动防火墙 |
@@ -143,9 +143,13 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `load` | `--refresh` | 负载与 CPU 归因对账（只读：不 renice、不 kill、不 restart、不改 `CPUQuota=`）：load 一律折成每核排队（它是绝对排队数不是百分比），并把「CPU 不够」与「在等 IO」分开给（`procs_blocked`、D 状态名单、iowait、PSI）；另读 cgroup 的 `cpu.max` / `cpu.stat` 指出谁被自己的配额限流（被限流的进程不进 run queue 也不进 D 状态，load 与曲线都好看）；判词分要紧/值得处理/知道就好，处置全是只读命令；load 与 `/proc/stat` 都读不到时退出码 3 |
 | `start\|stop\|restart` | — | systemd 服务控制 |
 | `logs` | `--lines` | journalctl 日志 |
+| `webstats` | `--file --minutes --list` | 网站访问流量统计（只读解析 nginx access.log：状态码分布、TOP 路径/客户端、每分钟请求数）。`--list` 先看有哪些来源，`--file` 的序号与网页端日志中心同源；找不到来源退出码 3，选到错误日志是 2 |
 | `schema` | — | 输出命令契约 |
 
 应用模板（`choyeonctl app templates`）：`node-service`、`node-next`、`python-fastapi`、`static-site`。
+
+`webstats` 读的是 nginx 的 access.log，来源白名单是 `CP_LOG_ROOTS`（默认 `/var/log/nginx`）加上
+`CP_FILE_ROOTS`。全新安装里这两个键都不含站点日志目录时，日志页签与统计都会如实回`「没有找到可读的日志来源」`并给出修复线索——那是配置状态，不是接口坏了。
 
 `deploy --prefix` 默认取 CLI 所在的仓库目录（结构完整时就地部署），只有仓库不完整（无 `.git`）时才退回 `/root/choyeon-panel`；
 `deploy --branch` 仅在全新克隆时生效——安装目录已是 git 仓库时会打印 warn 并保持当前分支，切分支请执行 `CP_BRANCH=<分支> bash scripts/update.sh`。

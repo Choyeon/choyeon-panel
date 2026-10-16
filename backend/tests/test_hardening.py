@@ -276,7 +276,7 @@ class TestConfigParsers(unittest.TestCase):
     def test_as_dict_leaks_no_secret(self):
         allowed = {
             "version", "host", "port", "trustProxy", "log", "dataDir", "appRoot",
-            "backupDir", "fileRoots", "unitDir", "python", "webDist", "webBuilt",
+            "backupDir", "fileRoots", "logRoots", "unitDir", "python", "webDist", "webBuilt",
             "tokenTtlHours", "maxUploadBytes", "maxBodyBytes", "terminalMaxSessions",
             # ⑤R：可信任反代列表。它是"哪些源 IP 的 X-Forwarded-For 可以采信"的开关，
             # 不是密钥；doctor/设置页要展示它才知道限速现在认不认头。

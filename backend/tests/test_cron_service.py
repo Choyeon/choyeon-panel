@@ -30,6 +30,7 @@ from app import database as dbm  # noqa: E402
 from app.errors import BadInput, NotFound  # noqa: E402
 from app.routers import system as SYS  # noqa: E402
 from app.services import cron_service as C  # noqa: E402
+from app.services import web_logs as WL  # noqa: E402
 from app.util import CLI_LOG_LINES_MAX, HTTP_LOG_LINES_MAX, LOG_LINES_DEFAULT  # noqa: E402
 
 _seq = iter(range(1000, 999999))
@@ -859,14 +860,19 @@ class TestNginxLog(unittest.TestCase):
         p = mock.patch.object(config, "FILE_ROOTS", [self.root])
         self.addCleanup(p.stop)
         p.start()
+        # 日志发现现在也读 CP_LOG_ROOTS。不打桩的话，跑测试这台机器上真实的 /var/log/nginx 会混进
+        # 结果里，"列出了哪些来源"就变成看机器脸色——而这三条用例断言的正是"只有白名单里的文件可见"。
+        p2 = mock.patch.object(config, "LOG_ROOTS", [])
+        self.addCleanup(p2.stop)
+        p2.start()
 
     def test_both_roots_list_their_files(self):
         with mock.patch.object(config, "FILE_ROOTS", [self.root, self.outside]):
-            paths = sorted(f["path"] for f in SYS.nginx_log_files())
+            paths = sorted(f["path"] for f in WL.nginx_log_files())
         self.assertEqual(paths, sorted([f"{self.root}/access.log", f"{self.outside}/access.log"]))
 
     def test_only_files_under_roots_are_visible(self):
-        paths = [f["path"] for f in SYS.nginx_log_files()]
+        paths = [f["path"] for f in WL.nginx_log_files()]
         self.assertEqual(paths, [f"{self.root}/access.log"])
         self.assertNotIn(f"{self.outside}/access.log", paths)
 
@@ -875,7 +881,7 @@ class TestNginxLog(unittest.TestCase):
             os.symlink(self.outside, f"{self.root}/link")
         except (OSError, NotImplementedError):
             self.skipTest("平台不支持符号链接")
-        paths = [f["path"] for f in SYS.nginx_log_files()]
+        paths = [f["path"] for f in WL.nginx_log_files()]
         self.assertEqual(paths, [f"{self.root}/access.log"])
 
     def test_tail_filter_and_redaction(self):
