@@ -218,6 +218,13 @@ export const api = {
   alertTest: () => req('/settings/alerts/test', { body: {}, timeout: 25000 }),
   alertRunChecks: () => req('/settings/alerts/run-checks', { body: {}, timeout: 60000 }),
   firewall: () => req('/firewall'),
+  // 封禁 sshd 爆破来源。后端写的是防火墙那一张表：ufw 要 insert 再把规则表整份列回来才算数
+  // （服务端子进程超时 60 秒）。前端必须比它慢一点，否则真实结果已经落地，画面只剩"请求超时"。
+  bans: () => req('/bans'),
+  ban: (ip: string, hits = 0) => req('/bans', { body: { ip, hits }, timeout: 70000 }),
+  unban: (b: { ip: string; num?: number; sig?: string }) =>
+    req(`/bans?ip=${encodeURIComponent(b.ip)}&num=${Number(b.num) || 0}&expect=${encodeURIComponent(b.sig || '')}`,
+        { method: 'DELETE', timeout: 70000 }),
   pgDbs: () => req('/db/pg/databases'),
   pgRoles: () => req('/db/pg/roles'),
   pgManage: (body: any) => req('/db/pg/manage', { body, timeout: 40000 }),

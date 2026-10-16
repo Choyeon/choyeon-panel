@@ -203,6 +203,139 @@ const loginAlert = computed(() => {
   };
 });
 
+// 封禁是这一页唯一的写动作，写的还是本机防火墙那份入站表（后端 ban_service 复用
+// firewall_service 的读与删，面板不开第二条删除路径）。三条约束都是从这个事实推出来的：
+// ① 只有 admin 看得见、点得动：/api/bans 对只读账号本来就是 403，把必然失败的动作摆出来
+//    只会让人以为点了没反应；
+// ② 后端说这份表「读不到」（ok=false）时，封禁与解除全部锁住——连现在挡着谁都不知道，
+//    再点一次只会多一条谁也说不清生效没有的规则；
+// ③ 每次写完都重新拉一次列表，画面上的「面板封禁的来源」永远等于防火墙里那张表，
+//    不放本地乐观状态（ufw 会说"Aborted"但仍然返回 0，退出码不可信）。
+const {
+  data: bansData, error: bansError, loading: bansLoading, refreshing: bansRefreshing,
+  load: loadBans, refresh: refreshBans,
+} = useCachedFetch<any>({
+  key: () => 'bans',
+  loader: () => api.bans(),
+  maxAge: 30000,
+  immediate: false,
+});
+watch(bansError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
+// 进这一页才读：它打的是 ufw status numbered / firewall-cmd，不该在每次进服务器管理时都跑。
+watch(tab, (t) => { if (isAdmin && t === 'login') void loadBans().catch(() => undefined); }, { immediate: true });
+
+const banTool = computed(() => bansData.value?.tool ?? 'none');
+const banMarker = computed(() => bansData.value?.marker ?? 'choyeon-ban');
+const banCap = computed(() => bansData.value?.maxBans ?? 0);
+const banRead = computed(() => bansData.value?.ok === true);
+const banList = computed<any[]>(() => bansData.value?.bans ?? []);
+const bansBusy = computed(() => bansLoading.value || bansRefreshing.value);
+// 一次只允许一个写在飞：ufw 的规则编号会因任何一次删除整体前移，两条并发写会让第二次的
+// 签名比对落在一条已经挪了位置的规则上——那正是防火墙层一直防的盲删。
+const banBusy = ref('');
+const banCanWrite = computed(() => isAdmin && banRead.value && banBusy.value === '');
+const banLockTitle = computed(() => {
+  if (!banRead.value) return '封禁列表没读到，写操作已锁住';
+  if (banBusy.value) return `上一条（${banBusy.value}）还没写完：规则编号会移动，这里一次只允许一条`;
+  return '';
+});
+const bannedOf = (ip: string) => banList.value.find((b: any) => b.ip === ip);
+// 同一个地址既在爆破、又成功登录过（口令被猜中过一次）时，封它就是把一个在工作的会话一起
+// 带走。这件事必须点在按钮之前就看到——等接口回来说明，人已经按下去了。
+const acceptedOf = (ip: string) =>
+  (loginAttempts.value.accepted_ips ?? []).find((a: any) => a.ip === ip);
+
+const banNote = computed(() => {
+  if (!isAdmin) return null;
+  if (bansError.value && !bansData.value) {
+    return { type: 'error' as const, text: `封禁列表请求失败：${(bansError.value as Error).message || '未知错误'}。写操作已锁住，点上方「刷新」重试。` };
+  }
+  const d = bansData.value;
+  if (!d) return null;
+  if (d.ok) return null;
+  const why = d.reason || '未知原因';
+  if (d.tool === 'none') {
+    return { type: 'info' as const, text: `${why}。面板只往 ufw / firewalld 上封，不替你装别的东西；长期对抗持续爆破，请自己给 fail2ban 配 sshd jail。` };
+  }
+  return { type: 'warning' as const, text: `${d.tool} 那份入站表没读到：${why}。这不等于「没有封禁」，所以本页的封禁与解除都已锁住；先在终端跑 choyeonctl ban list --json 看防火墙那一层为什么读不出来。` };
+});
+
+async function writeBan(t: any) {
+  banBusy.value = t.ip;
+  try {
+    await api.ban(t.ip, Number(t.count) || 0);
+  } finally {
+    // 成没成都要回读：失败也可能已经写进去一半（ufw 加规则与重新列表是两条命令）。
+    await refreshBans().catch(() => undefined);
+    banBusy.value = '';
+  }
+}
+
+async function writeUnban(r: any) {
+  banBusy.value = r.ip;
+  try {
+    await api.unban(r);
+  } finally {
+    await refreshBans().catch(() => undefined);
+    banBusy.value = '';
+  }
+}
+
+function askBan(t: any) {
+  if (!banCanWrite.value) return;
+  const acc = acceptedOf(t.ip);
+  opRef.value?.acceptParams({
+    title: '封禁来源地址',
+    names: [t.ip],
+    msg: `此操作会把 ${t.ip} 写进 ${banTool.value} 的入站拒绝规则（标记 ${banMarker.value}），`
+      + `过去 24 小时它认证失败 ${t.count} 次。`
+      + (acc ? `注意：这个地址还成功登录过 ${acc.count} 次，封掉会同时断开那个会话。` : '')
+      + '面板不会自动解封，要在这里解除。',
+    api: () => writeBan(t),
+    successMsg: `${t.ip} 已封禁`,
+  });
+}
+
+function askUnban(r: any) {
+  if (!banCanWrite.value) return;
+  const how = banTool.value === 'ufw'
+    ? `按规则编号 ${r.num} 删除，删之前再核对一次签名（编号会随任何一次删除整体前移，只认编号就是盲删）。`
+    : '防火墙的两份配置（当前生效与永久）都要去掉，只删一份会在重启后回来。';
+  opRef.value?.acceptParams({
+    title: '解除封禁',
+    names: [r.ip],
+    msg: `此操作会从 ${banTool.value} 的入站表里删掉这条封禁（${r.comment || banMarker.value}）。${how}`,
+    api: () => writeUnban(r),
+    successMsg: `${r.ip} 已解封`,
+    confirmText: '解除',
+  });
+}
+
+const banColumns: any[] = [
+  {
+    title: '地址', key: 'ip', minWidth: 220,
+    render: (r: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'cell-name mono ls-wrap' }, r.ip),
+      h('div', { class: 'cell-sub ls-wrap' }, r.comment || banMarker.value),
+    ]),
+  },
+  {
+    // ufw 只有"运行中这一份"，两份永远一致；firewalld 会出现只写了永久或只写了当前的半份，
+    // 那正是重启前后行为不一样、而列表里看着像封好了的那种情况，必须单独点出来。
+    title: '生效', key: 'state', minWidth: 150,
+    render: (r: any) => (r.runtime && r.permanent
+      ? h(NTag, { size: 'small', type: 'success', bordered: false }, () => '当前与重启后都挡着')
+      : h(NTag, { size: 'small', type: 'warning', bordered: false },
+          () => (r.runtime ? '只在当前，重启后失效' : '只在永久配置，当前没生效'))),
+  },
+  {
+    title: '操作', key: 'ops', width: 92, align: 'center',
+    render: (r: any) => h(CpRowActions, {
+      buttons: [{ label: '解除', danger: true, disabled: !banCanWrite.value, run: () => askUnban(r) }],
+    }),
+  },
+];
+
 // 存储占用也是只读对账（走盘扫目录 + journalctl --disk-usage，服务端 5 分钟 TTL）。
 // 这一页一个修复按钮都没有：磁盘上的清理动作每一条都是"删了就没了"，面板只把占用摆清楚、
 // 把命令写清楚，按下去的那只手得是人的。
@@ -2005,8 +2138,42 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       <div v-if="(loginAttempts.top || []).length" class="ls-ips">
         <span v-for="t in loginAttempts.top" :key="t.ip" class="ls-ip">
           <code class="mono">{{ t.ip }}</code><b>{{ t.count }}</b>
+          <em v-if="acceptedOf(t.ip)" class="ls-ip-warn">成功登录过 {{ acceptedOf(t.ip).count }} 次</em>
+          <template v-if="isAdmin">
+            <NButton v-if="bannedOf(t.ip)" text size="tiny" class="ls-ip-op" type="success"
+                     :title="`已在 ${banTool} 的入站表里，下面「面板封禁的来源」可以解除`">已封禁</NButton>
+            <NButton v-else text size="tiny" class="ls-ip-op" :loading="banBusy === t.ip"
+                     :disabled="!banCanWrite" :title="banLockTitle || '封禁这个来源地址'"
+                     @click="askBan(t)">封禁</NButton>
+          </template>
         </span>
       </div>
+
+      <template v-if="isAdmin">
+        <div class="ls-block">
+          <span class="section-title">
+            <NIcon :component="icons.ShieldOutline" :size="15" color="var(--cp-brand-soft)" /> 面板封禁的来源
+          </span>
+          <NText v-if="bansData" depth="3" class="ls-src">
+            {{ banTool }} 入站拒绝 · 标记 {{ banMarker }} · 上限 {{ banCap }} 条
+          </NText>
+          <NButton size="small" tertiary :loading="bansBusy" :icon="icon('RefreshOutline', 14)" @click="refreshBans">
+            刷新
+          </NButton>
+        </div>
+        <NAlert v-if="banNote" :type="banNote.type" :bordered="false" class="cp-prose" style="margin-bottom: 6px">
+          {{ banNote.text }}
+        </NAlert>
+        <NDataTable
+          :columns="banColumns" :data="banList" size="small" :bordered="false"
+          :loading="bansBusy && !bansData" :scroll-x="'auto'" :pagination="pager(banList.length, loginPaging)"
+          :row-key="(r: any) => `${r.ip}|${r.num}|${r.sig}`" class="cp-tbl tbl-bans"
+        >
+          <template #empty>
+            <EmptyBox :text="banRead ? '面板还没有封过任何来源地址' : '封禁列表读不到，判据见上方说明'" />
+          </template>
+        </NDataTable>
+      </template>
 
       <div v-if="loginData && (loginData.notes || []).length" class="ls-notes">
         <div v-for="(n, i) in loginData.notes" :key="i" class="ls-note">{{ n }}</div>
@@ -2691,6 +2858,11 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
   border-radius: var(--radius-sm); background: var(--cp-bg-soft); font-size: var(--fs-xs);
 }
 .ls-ip b { color: var(--cp-text-dim); font-weight: 500; }
+/* 375px 档：一个来源地址要把「次数 / 是否也成功登录过 / 封没封」三件事并排说清，
+   装不下时让 chip 内部折行，而不是把整页撑出横向滚动。 */
+.ls-ip { flex-wrap: wrap; max-width: 100%; }
+.ls-ip-warn { font-style: normal; color: var(--cp-err); }
+.ls-ip-op { margin-left: 2px; }
 .ls-notes { margin: -4px 0 var(--space-3); }
 .ls-note { font-size: var(--fs-xs); color: var(--cp-text-dim); line-height: 1.7; }
 .ls-block { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: var(--space-3) 0 6px; }
