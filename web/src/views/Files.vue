@@ -31,6 +31,11 @@ const checkedKeys = ref<string[]>([]);
 const showRename = ref(false);
 const renameFrom = ref<any>(null);
 const renameTo = ref('');
+// 搬运剪贴板只活在页面里，存的是勾选那一刻的绝对路径：之后翻目录、点面包屑，
+// 都不会把「剪切」的源换成新目录里的同名条目——那会搬错文件，而按钮看起来一模一样。
+const clip = ref<{ mode: 'copy' | 'move'; items: string[] } | null>(null);
+const clipCount = computed(() => clip.value?.items.length ?? 0);
+const clipVerb = computed(() => (clip.value?.mode === 'move' ? '移动' : '复制'));
 
 // 每个目录一条缓存：来回浏览已看过的目录立刻出列表，超过 15s 才后台再验证。
 // node_modules 这类目录动辄几千项，缓存条数由 LRU 上限兜住，不会一直涨。
@@ -302,7 +307,50 @@ async function pack() {
   }
 }
 
+function setClip(mode: 'copy' | 'move') {
+  if (busyOp.value) return;
+  const names = checkedKeys.value;
+  if (!names.length) return;
+  clip.value = { mode, items: names.map(join) };
+  msg.info(`已${mode === 'move' ? '剪切' : '复制'} ${names.length} 项，进目标目录后点「粘贴到当前目录」`);
+}
+async function pasteClip() {
+  const c = clip.value;
+  if (!c || busyOp.value) return;
+  // 目的地在动手前定死：粘贴途中点了面包屑，剩下几项跟着落进新目录，
+  // 一次操作两个去处比整批留在原处难解释得多。
+  const dest = path.value;
+  busyOp.value = 'paste';
+  const failed: string[] = [];
+  let done = 0;
+  try {
+    // 逐项串行。同名冲突、搬进自己的子目录、跨分区、落盘余量都由后端判（唯一出处），
+    // 页面只转述每一条的结果，不预先猜哪几项「应该能成」。
+    for (const src of c.items) {
+      try {
+        await postJson('/files/action', { action: c.mode, path: src, path2: dest });
+        done += 1;
+      } catch (e: any) {
+        failed.push(`${src.split('/').pop() || src}：${e.message}`);
+      }
+    }
+  } finally {
+    // 一次粘贴就清空：留着再点一次会把成功过的项再搬一遍（复制撞同名、移动报原路径不存在），
+    // 没成的项在提示里已经点了名，重新勾选比让页面猜后端状态可靠。
+    busyOp.value = '';
+    clip.value = null;
+  }
+  const verb = c.mode === 'move' ? '移动' : '复制';
+  if (failed.length) msg.warning(`已${verb} ${done} 项到 ${dest}，${failed.length} 项没成：${failed.join('；')}`);
+  else msg.success(`已${verb} ${done} 项到 ${dest}`);
+  reload();
+}
+
 const columns: any[] = [
+  // 勾选在 naive-ui 里是一列（type: 'selection'），不是表格属性：
+  // 原来绑的 :row-selection 这个 prop 在 NDataTable 上根本不存在，会被整个忽略，
+  // 于是「打包选中」从上线起就只有按钮、没有可勾的框（375px 与 1440px 实测 0 个 .n-checkbox）。
+  { type: 'selection' },
   {
     // 弹性列必须给 minWidth：scroll-x auto 下没有它，固定列一超过容器就被挤成 0 宽（375px 实测名字看不见）
     title: '名称', key: 'name', minWidth: 220,
@@ -348,11 +396,10 @@ const columns: any[] = [
   },
 ];
 
-const rowSelection = computed(() => ({
-  type: 'checkbox' as const,
-  checkedRowKeys: checkedKeys.value,
-  onUpdateCheckedRowKeys: (keys: Array<string | number>) => { checkedKeys.value = keys.map(String); },
-}));
+/** 受控写法：naive 回传的是 RowKey[]（string|number），本表 row-key 取自条目名，统一收成 string。 */
+function onChecked(keys: Array<string | number>) {
+  checkedKeys.value = keys.map(String);
+}
 
 // 快捷入口与"可访问范围"都来自服务端白名单：前端写死一份的话，
 // 改过 CP_FILE_ROOTS 的部署点一下就报"路径超出允许范围"。
@@ -368,6 +415,26 @@ const rowSelection = computed(() => ({
           :icon="icon('CubeOutline', 14)" @click="pack"
         >
           打包选中{{ checkedKeys.length ? `（${checkedKeys.length}）` : '' }}
+        </NButton>
+        <NButton
+          size="small" tertiary :disabled="!checkedKeys.length || !!busyOp"
+          :icon="icon('CopyOutline', 14)" @click="setClip('copy')"
+        >
+          复制选中{{ checkedKeys.length ? `（${checkedKeys.length}）` : '' }}
+        </NButton>
+        <NButton
+          size="small" tertiary :disabled="!checkedKeys.length || !!busyOp"
+          :icon="icon('CutOutline', 14)" @click="setClip('move')"
+        >
+          剪切选中{{ checkedKeys.length ? `（${checkedKeys.length}）` : '' }}
+        </NButton>
+        <NButton
+          v-if="clip"
+          size="small" type="primary" :loading="busyOp === 'paste'" :disabled="!!busyOp"
+          :title="`把 ${clipCount} 项${clipVerb}到 ${path}`"
+          :icon="icon('ClipboardOutline', 14)" @click="pasteClip"
+        >
+          粘贴到当前目录（{{ clipCount }}）
         </NButton>
         <NButton size="small" type="primary" :loading="uploading" :disabled="uploading" :icon="icon('CloudUploadOutline', 14)" @click="pickFiles">
           {{ uploadHint || '上传文件' }}
@@ -400,14 +467,14 @@ const rowSelection = computed(() => ({
     </NCard>
 
     <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">
-      可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑；勾选多项可打包成 tar.gz。
+      可访问范围：{{ quick.join('、') || '（未配置 CP_FILE_ROOTS）' }}。点击文件名直接在线编辑；勾选多项可打包成 tar.gz，也可复制/剪切后到别的目录粘贴（剪贴板只在本页有效）。
       当前 {{ entryCount }} 项{{ truncated ? `（条目过多，按名称只列出前 ${data?.maxEntries ?? entries.length} 项，进子目录缩小范围）` : '' }}。
     </NText>
 
     <NDataTable
       ref="tableAnchor"
       :columns="columns" :data="entries" size="small" :bordered="false" :loading="listing"
-      :row-selection="rowSelection"
+      :checked-row-keys="checkedKeys" @update:checked-row-keys="onChecked"
       :scroll-x="'auto'" :max-height="tableH" :min-row-height="40" virtual-scroll :pagination="false"
       :row-key="(e: any) => e.name"
     >
