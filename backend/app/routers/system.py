@@ -16,6 +16,7 @@ from ..services import (
     alerts_service,
     ban_service,
     firewall_service,
+    site_claim_service,
     system_metrics,
     systemd_ops,
     web_logs,
@@ -51,27 +52,19 @@ async def sys_stats():
 async def sys_overview():
     """仪表盘「概览」条：一次请求拿齐四个计数，取代前端各页各自拉全表再数长度。
 
-    站点数只扫 nginx 配置（纯文件读），不走 _site_rows() 的那条链路——后者还要查
-    apps 表并向 systemd 逐个问单元状态，那是打开网站页才需要的开销。
+    站点数只扫 nginx 配置（纯文件读），不走站点页那条链路——后者还要查 apps 表与纳管登记表、
+    并向 systemd 逐个问单元状态，那是打开网站页才需要的开销。
+    域名集合用的是同一个读者（`site_claim_service.site_domains`），概览条与网站页不会各数一套。
     nginx 不在时如实返回 null + reason，前端显示「—」而不是 0。
     """
-    from .sites import _conf_dirs_available, _scan_nginx_sites  # 路由互引只在需要时建立
-
     apps = await aio_db.query_one("SELECT COUNT(*) c FROM apps")
     cron = await aio_db.query_one("SELECT COUNT(*) c, COALESCE(SUM(enabled),0) e FROM cron_task")
     backups = await aio_db.query_one("SELECT COUNT(*) c FROM backups WHERE enabled=1")
     alerts = await aio_db.query_one("SELECT COUNT(*) c FROM alerts_log WHERE acked=0")
 
-    def _site_count():
-        if not _conf_dirs_available():
-            return None, "未检测到 nginx 配置目录"
-        names = set()
-        for entry in _scan_nginx_sites():
-            names.update(d.lower() for d in entry["domains"])
-        return len(names), None
-
     try:
-        sites, site_reason = await asyncio.to_thread(_site_count)
+        names, site_reason = await asyncio.to_thread(site_claim_service.site_domains)
+        sites = None if site_reason else len(names)
     except Exception as e:  # noqa: BLE001 - 计数失败不该让整条概览消失
         sites, site_reason = None, f"站点扫描失败：{type(e).__name__}"
 

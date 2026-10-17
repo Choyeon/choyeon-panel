@@ -15,15 +15,19 @@ CONF_DIR = config.NGINX_CONF_DIRS[0]
 TLS_DIR = config.TLS_DIR
 
 RE_SERVER_NAME = re.compile(r"server_name\s+([^;]+);")
-RE_PROXY_PORT = re.compile(r"proxy_pass\s+https?://[\w.:-]*?:(\d{2,5})\s*;")
-RE_UPSTREAM = re.compile(r"upstream\s+([\w.-]+)\s*\{([^}]*)\}")
-RE_UP_SERVER = re.compile(r"server\s+[\w.:-]*?:(\d{2,5})")
-RE_PROXY_NAME = re.compile(r"proxy_pass\s+https?://([\w.-]+)\s*;")
 # 链路对账要知道反代目标"是谁"，光有端口不够：同一个 3100 指在 127.0.0.1 上是本机应用，
 # 指在别的机器上，本机的监听表就完全不是它的证据。
 RE_PROXY_TARGET = re.compile(r"proxy_pass\s+https?://([^:/;\s]+)(?::(\d{1,5}))?\s*;")
 RE_UP_TARGET = re.compile(r"\bserver\s+([^:/;\s]+)(?::(\d{1,5}))?")
 RE_LISTEN_LINE = re.compile(r"^\s*listen\s+([^;]+);", re.M)
+# `$` 也排除：certbot 写的 `return 301 https://$host$request_uri` 是自己跳自己，
+# 主机名位置是变量，跳去哪个域名读不出来；而末尾的 `$request_uri` 必须留在捕获之外，
+# 否则捕获到的是 `choyeon.cc$request_uri` 这种带变量的串，跟任何 server_name 都对不上。
+RE_RETURN_HTTPS = re.compile(r"return\s+30[123]\s+https?://([^/:;$\s]+)")
+
+# 反代目标是"本机另一个端口"还是"别的机器"，决定了本机监听表能不能拿来对账，
+# 也决定了域名归属能不能按端口落。两处（链路对账、纳管判定）共用这一份判据。
+LOCAL_TARGETS = ("127.0.0.1", "localhost", "::1")
 
 # 「写文件 → nginx -t → reload」必须整体串行：nginx -t 校验的是 /etc/nginx 全目录，
 # 两个并发写会让其中一方在校验时读到另一方刚截断的空文件（把好配置判成语法错误，
@@ -421,22 +425,67 @@ async def renew_certs() -> dict:
     }
 
 
-def analyze_config(content: str) -> dict:
-    names: list[str] = []
-    for m in RE_SERVER_NAME.finditer(content):
-        for n in m.group(1).strip().split():
-            if n and n != "_" and n not in names:
-                names.append(n)
-    proxy_ports = [int(m.group(1)) for m in RE_PROXY_PORT.finditer(content)]
-    # upstream 一次解析、两处用：proxyPorts 要端口，proxyTargets 要「主机:端口」整对。
-    upstreams: dict[str, list[tuple[str, int | None]]] = {}
-    for m in RE_UPSTREAM.finditer(content):
-        pairs = [(s.group(1).strip(), int(s.group(2)) if s.group(2) else None)
-                 for s in RE_UP_TARGET.finditer(m.group(2))]
-        if pairs:
-            upstreams[m.group(1)] = pairs
+def _strip_comments(text: str) -> str:
+    """抹掉行注释，保留引号内的原文。
+
+    块扫描靠花括号配对，而注释里出现的花括号（`# 旧写法 listen 443 ssl http2; { }` 这类
+    说明）会把配对算错，进而把半份配置当成一个 server 块解析出域名来。
+    """
+    out: list[str] = []
+    quote = ""
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+        elif ch == "#":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _keyword_blocks(body: str, keyword: str) -> list[tuple[int, str, str]]:
+    """`keyword 参数 { … }` 的块，返回 (起始深度, 花括号前的参数, 块体)。
+
+    深度是相对传入 body 的：同一段文本里 `upstream x { server 127.0.0.1:8000; }` 的那行
+    `server` 在深度 1，靠深度就能和真正的 server 块分开——旧的正则做不到这件事，
+    它把整份文件当一个 server 块读，于是一个文件里三个域名的反代端口全被混成一份账。
+    花括号不配对（配置本来就坏，nginx -t 会先拒绝）的那块直接跳过，不猜块体。
+    """
+    out: list[tuple[int, str, str]] = []
+    for m in re.finditer(rf"\b{keyword}\b([^{{;]*)\{{", body):
+        depth = body.count("{", 0, m.start()) - body.count("}", 0, m.start())
+        i, open_count = m.end(), 1
+        while i < len(body) and open_count:
+            if body[i] == "{":
+                open_count += 1
+            elif body[i] == "}":
+                open_count -= 1
+            i += 1
+        if open_count:
+            continue
+        out.append((depth, m.group(1).strip(), body[m.end(): i - 1]))
+    return out
+
+
+def _expand_targets(body: str, upstreams: dict) -> tuple[list[dict], list[int]]:
+    """一个 server 块的反代目标与端口（upstream 名按它自己的 server 行展开）。"""
     targets: list[dict] = []
-    for m in RE_PROXY_TARGET.finditer(content):
+    ports: list[int] = []
+    for m in RE_PROXY_TARGET.finditer(body):
         host = m.group(1).strip()
         port_text = m.group(2)
         if port_text is None and host in upstreams:
@@ -445,24 +494,117 @@ def analyze_config(content: str) -> dict:
             for h, p in upstreams[host]:
                 targets.append({"host": h, "port": p})
                 if p is not None:
-                    proxy_ports.append(p)
+                    ports.append(p)
             continue
-        targets.append({"host": host, "port": int(port_text) if port_text else None})
-    uniq_ports: list[int] = []
-    seen: set[int] = set()
-    for p in proxy_ports:
-        if p not in seen:
-            seen.add(p)
-            uniq_ports.append(p)
-    body = re.search(r"client_max_body_size\s+([^;]+);", content)
+        port = int(port_text) if port_text else None
+        targets.append({"host": host, "port": port})
+        if port is not None:
+            ports.append(port)
+    uniq: list[int] = []
+    for p in ports:
+        if p not in uniq:
+            uniq.append(p)
+    return targets, uniq
+
+
+def _default_target(body: str, upstreams: dict) -> dict | None:
+    """`location /` 反代到哪儿——这个域名「主体」由谁服务。
+
+    一个站常见形态是主站与接口分开反代（Rosetta：`/api`、`/media` → FastAPI，`/` → SSR）。
+    整份文件的端口集合判不出归属（两个应用都在里面），而「打开这个域名看到的是什么」
+    只由根路径那一跳决定，所以纳管判定看它。
+    """
+    for depth, args, inner in _keyword_blocks(body, "location"):
+        if depth:
+            continue
+        parts = args.split()
+        if not parts or parts[-1] != "/":
+            continue
+        targets, _ = _expand_targets(inner, upstreams)
+        if targets:
+            return targets[0]
+    return None
+
+
+def _analyze_block(body: str, upstreams: dict) -> dict:
+    names: list[str] = []
+    for m in RE_SERVER_NAME.finditer(body):
+        for n in m.group(1).strip().split():
+            if n and n != "_" and n not in names:
+                names.append(n)
+    targets, ports = _expand_targets(body, upstreams)
+    size = re.search(r"client_max_body_size\s+([^;]+);", body)
+    # 跳转目标域名：别名块（www / blog 跳裸域）自己没有反代目标，归属只能跟随它跳去的那个域名。
+    # 只认字面量主机名，见 RE_RETURN_HTTPS 的说明。
+    redirect = RE_RETURN_HTTPS.search(body)
     return {
         "serverNames": names,
-        "ssl": bool(re.search(r"listen\s+443\s+ssl|ssl_certificate\s", content)),
-        "websocket": bool(re.search(r"proxy_set_header\s+Upgrade", content)),
-        "bodySize": body.group(1) if body else None,
-        "httpsRedirect": bool(re.search(r"return\s+30[123]\s+https", content)),
-        "proxyPorts": uniq_ports,
-        "listenPorts": _listen_ports(content),
+        "targets": targets,
+        "ports": ports,
+        "defaultTarget": _default_target(body, upstreams),
+        "redirectTarget": redirect.group(1).lower() if redirect else "",
+        "listenPorts": _listen_ports(body),
+        "ssl": bool(re.search(r"listen\s+443\s+ssl|ssl_certificate\s", body)),
+        "websocket": bool(re.search(r"proxy_set_header\s+Upgrade", body)),
+        "httpsRedirect": bool(re.search(r"return\s+30[123]\s+https", body)),
+        "bodySize": size.group(1) if size else None,
+    }
+
+
+def parse_blocks(content: str) -> list[dict]:
+    """按 server 块解析一份配置；每个块给出自己的域名、反代目标、监听口与 SSL/跳转形态。
+
+    analyze_config 是它的文件级聚合，两处不各写一份解析：站点列表、域名映射、链路对账
+    过去都读同一份「整文件当一个块」的近似，于是同一个文件里 80 跳转块与 443 主块
+    共用一份端口账，域名归属只能靠猜。
+    只取文件里最浅一层的 server 块（Debian 的站点文件是裸 server 块，
+    少数把整份 http{} 塞进 conf.d 的写法也照样能解析），upstream 取同一层。
+    """
+    body = _strip_comments(content or "")
+    servers = _keyword_blocks(body, "server")
+    if not servers:
+        return []
+    depth = min(d for d, _a, _b in servers)
+    upstreams: dict[str, list[tuple[str, int | None]]] = {}
+    for d, args, inner in _keyword_blocks(body, "upstream"):
+        if d != depth or not re.fullmatch(r"[\w.-]+", args):
+            continue
+        pairs = [(s.group(1).strip(), int(s.group(2)) if s.group(2) else None)
+                 for s in RE_UP_TARGET.finditer(inner)]
+        if pairs:
+            upstreams[args] = pairs
+    return [_analyze_block(b, upstreams) for d, _a, b in servers if d == depth]
+
+
+def analyze_config(content: str) -> dict:
+    """文件级聚合（字段口径与历史一致）：解析本身只有一处，见 parse_blocks。"""
+    blocks = parse_blocks(content)
+    names: list[str] = []
+    ports: list[int] = []
+    listen: list[int] = []
+    targets: list[dict] = []
+    size = None
+    for b in blocks:
+        for n in b["serverNames"]:
+            if n not in names:
+                names.append(n)
+        for p in b["ports"]:
+            if p not in ports:
+                ports.append(p)
+        for p in b["listenPorts"]:
+            if p not in listen:
+                listen.append(p)
+        targets.extend(b["targets"])
+        if size is None:
+            size = b["bodySize"]
+    return {
+        "serverNames": names,
+        "ssl": any(b["ssl"] for b in blocks),
+        "websocket": any(b["websocket"] for b in blocks),
+        "bodySize": size,
+        "httpsRedirect": any(b["httpsRedirect"] for b in blocks),
+        "proxyPorts": ports,
+        "listenPorts": sorted(listen),
         "proxyTargets": targets,
     }
 
@@ -502,7 +644,7 @@ def loaded_configs() -> list[dict]:
             c = Path(p).read_text(errors="replace")
         except OSError:
             continue
-        out.append({"file": p, "name": f, "analysis": analyze_config(c)})
+        out.append({"file": p, "name": f, "analysis": analyze_config(c), "blocks": parse_blocks(c)})
     return out
 
 

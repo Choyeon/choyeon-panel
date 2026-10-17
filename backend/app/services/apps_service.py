@@ -931,6 +931,12 @@ async def delete_app(app_id: int, purge: bool, actor: str = "system"):
         from . import alerts_service
 
         alerts_service.forget_app(app["name"])
+        # 纳管登记按 app_id 认应用，不跟着删就留下一条指向不存在应用的归属；
+        # 而站点页那一行还会继续显示这个应用名（登记表优先于判定），比名字残留更难看。
+        # 延迟导入：site_claim_service 自己要用 apps_service 的 unit_name，两边都在顶层导会绕成环。
+        from . import site_claim_service
+
+        await site_claim_service.drop_app(app_id)
         if purge:
             _purge_app_dir(app["path"])
     finally:

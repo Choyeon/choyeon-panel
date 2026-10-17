@@ -8,7 +8,8 @@
 - **要紧的才点红**：只有「反代目标没人听」（现在访问就是 502）让自检项 fail；证书不覆盖、
   明文不跳转、配置读不到都只到 warn。面板不替你 reload nginx，也不替你改 vhost。
 - **一个事实一个出处**：配置走 `nginx_ops.loaded_configs()`、端口走 `exposure_service`、
-  证书清单走 `cert_ops`，这里只判覆盖关系、不算到期天数；数与点名同源（`tallied`）。
+  证书清单走 `cert_ops`、域名归属走 `site_claim_service.attribution()`，这里只判覆盖关系、
+  不算到期天数，也不再自己按端口认第二次应用；数与点名同源（`tallied`）。
 - **载荷只出文件名**：`/etc/nginx` 下的绝对路径不进浏览器——本机目录结构本身就是攻击面信息。
 """
 
@@ -50,16 +51,27 @@ def _certs(domains=("a.com",), source="certbot", reason=""):
 
 
 def _cfg(name, *, doms=(), listen=(80, 443), ssl=True, targets=(), redirect=True):
-    """一份「配置项 + 解析结果」。绝对路径故意留着，用来验证它不会进载荷。"""
+    """一份「配置项 + 解析结果」。绝对路径故意留着，用来验证它不会进载荷。
+
+    `blocks` 与 `analysis` 都给，与 `loaded_configs()` 的真实形状一致：链路判定看文件级聚合，
+    纳管归属看 server 块的根路径反代。只给一份的话，另一层会静默拿到空数据。
+    """
+    proxy_ports = [t["port"] for t in targets if t.get("port")]
+    analysis = {"serverNames": list(doms), "listenPorts": list(listen), "ssl": ssl,
+                "proxyTargets": [dict(t) for t in targets], "httpsRedirect": redirect,
+                "proxyPorts": proxy_ports}
+    blocks = [{"serverNames": list(doms), "targets": [dict(t) for t in targets],
+               "ports": proxy_ports, "redirectTarget": "",
+               "defaultTarget": dict(targets[0]) if targets else None,
+               "listenPorts": list(listen), "ssl": ssl, "websocket": False,
+               "httpsRedirect": redirect}]
     return {"name": name, "file": f"/etc/nginx/conf.d/{name}",
-            "analysis": {"serverNames": list(doms), "listenPorts": list(listen), "ssl": ssl,
-                         "proxyTargets": [dict(t) for t in targets], "httpsRedirect": redirect,
-                         "proxyPorts": [t["port"] for t in targets if t.get("port")]}}
+            "analysis": analysis, "blocks": blocks}
 
 
-def _build(cfgs, exp=None, certs=None, apps=(), present=True):
+def _build(cfgs, exp=None, certs=None, apps=(), present=True, reg=None):
     return SA._build(cfgs, _exp() if exp is None else exp,
-                     _certs() if certs is None else certs, list(apps), present)
+                     _certs() if certs is None else certs, list(apps), present, reg)
 
 
 def _sev(payload, sev):
@@ -191,22 +203,44 @@ class PlainHttpNeedsBothEnds(unittest.TestCase):
 
 
 class AppClaimIsBestEffort(unittest.TestCase):
-    def test_domain_first_then_port(self):
+    def test_domain_first_then_root_port(self):
+        """归属仍按「登记的域名优先，其次根路径反代端口」，但判定只出一份：纳管层。
+
+        两个域名各自反代到同一个 3000，靠端口只能认出一个；另一个靠应用自己登记的域名认。
+        """
         cfgs = [_cfg("a.conf", doms=["shop.com"], targets=[{"host": "127.0.0.1", "port": 3000}]),
                 _cfg("b.conf", doms=["other.com"], targets=[{"host": "127.0.0.1", "port": 3000}])]
-        p = _build(cfgs, apps=[{"name": "shop", "port": None, "domain": "shop.com"},
-                               {"name": "api", "port": 3000, "domain": ""}])
+        p = _build(cfgs, apps=[{"id": 1, "name": "shop", "port": None, "domain": "shop.com"},
+                               {"id": 2, "name": "api", "port": 3000, "domain": ""}])
         self.assertEqual([link["app"] for link in p["links"]], ["shop", "api"])
+
+    def test_registry_beats_the_guess(self):
+        """登记说了归谁，链路那一列就照登记走——哪怕判定按端口认出的是另一个应用。
+
+        这条锁的是批次五七的立足点：共用端口与应用登记的端口跟配置对不上（3100 vs 3300）两种
+        情况下，人的登记不能被机器的猜测盖掉。认领的文件名故意给另一份，一并验证那一列读的是
+        登记里的应用，不会因为「文件对不上」就退回猜端口。
+        """
+        cfgs = [_cfg("a.conf", doms=["a.com"], targets=[{"host": "127.0.0.1", "port": 3000}])]
+        apps = [{"id": 1, "name": "api", "port": 3000, "domain": ""},
+                {"id": 2, "name": "legacy", "port": 3001, "domain": ""}]
+        self.assertEqual(_build(cfgs, apps=apps)["links"][0]["app"], "api")
+        p = _build(cfgs, apps=apps, reg={"a.com": {"domain": "a.com", "app_id": 2,
+                                                   "file": "other.conf", "kind": "app",
+                                                   "source": "manual", "note": "手工指定"}})
+        self.assertEqual(p["links"][0]["app"], "legacy", "归属跟着登记走")
 
     def test_unmanaged_vhost_is_info_not_warn(self):
         p = _build([_cfg("a.conf", doms=["a.com"], targets=[{"host": "127.0.0.1", "port": 3000}])],
                    apps=[])
         self.assertEqual(_ids(p), ["unmanaged"])
         self.assertEqual(p["findings"][0]["severity"], SEV_INFO)
+        self.assertIn("site claim-all", p["findings"][0]["fix"])
 
     def test_db_failure_leaves_the_column_empty(self):
         """/api/site-audit 不许因为 apps 表读不到就整轮失败——认领那一列如实留空。"""
-        with mock.patch.object(SA.aio_db, "query", mock.AsyncMock(side_effect=RuntimeError("locked"))):
+        with mock.patch.object(SA.site_claim_service, "app_rows",
+                               mock.AsyncMock(side_effect=RuntimeError("locked"))):
             self.assertEqual(asyncio.run(SA._app_rows()), [])
         p = _build([_cfg("a.conf", doms=["a.com"], targets=[{"host": "127.0.0.1", "port": 3000}])])
         self.assertIsNone(p["links"][0]["app"])
@@ -416,18 +450,22 @@ class OneFactOneReader(unittest.TestCase):
         present = mock.Mock(return_value=True)
         exp = mock.AsyncMock(return_value=_exp())
         certs = mock.AsyncMock(return_value=_certs())
-        rows = mock.AsyncMock(return_value=[{"name": "api", "port": 3000, "domain": "a.com"}])
+        rows = mock.AsyncMock(return_value=[{"id": 1, "name": "api", "port": 3000, "domain": "a.com"}])
+        claims = mock.AsyncMock(return_value={})
+        sc = SA.site_claim_service
         with mock.patch.object(SA.nginx_ops, "loaded_configs", loaded), \
              mock.patch.object(SA.nginx_ops, "config_dirs_present", present), \
              mock.patch.object(SA.exposure_service, "audit", exp), \
              mock.patch.object(SA.cert_ops, "list_certs", certs), \
-             mock.patch.object(SA.aio_db, "query", rows):
+             mock.patch.object(sc, "app_rows", rows), \
+             mock.patch.object(sc, "claims", claims):
             SA.reset_cache()
             data = asyncio.run(SA._reprobe())
         self.assertEqual(loaded.call_count, 1)
         self.assertEqual(present.call_count, 1)
         exp.assert_awaited_once()
         certs.assert_awaited_once()
+        claims.assert_awaited_once()
         self.assertEqual([link["file"] for link in data["links"]], ["a.conf"])
         self.assertEqual(data["links"][0]["app"], "api")
         self.assertEqual(data["findings"], [])

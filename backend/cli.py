@@ -20,6 +20,7 @@
     choyeonctl storage
     choyeonctl logs [-n 100] | restart | stop | start | upgrade
     choyeonctl webstats [--file N] [--minutes M] [--list]
+    choyeonctl site list|claim|unclaim|claim-all   # 站点纳管（只写登记表，不碰 nginx）
     choyeonctl schema --json         # 输出命令契约（AI 读取入口）
 """
 
@@ -56,6 +57,7 @@ from app.services import (  # noqa: E402
     memory_service,
     pending_service,
     site_audit_service,
+    site_claim_service,
     storage_service,
     updates_service,
     web_logs,
@@ -1621,6 +1623,98 @@ def _site_audit_text(d: dict) -> str:
     return "\n".join(lines)
 
 
+async def cmd_site(a: argparse.Namespace) -> dict:
+    """站点纳管：域名归属登记在面板自己的表里，nginx 的一个字节都不动。
+
+    纳管＝写一行「这个域名归哪个应用」并认领它所在的那份配置文件；取消纳管只删这一行。
+    不写 nginx、不 reload：手工 vhost 是多 server 块 + alias 跳转 + certbot 注入的证书行，
+    不是面板模板 render 出来的形状，套一遍等于把别人的配置改回面板模板。
+    """
+    verb = a.site_cmd
+    if verb == "list":
+        rows, reason = await site_claim_service.sites_rows()
+        if reason:
+            Out.error(reason, EXIT_PRECONDITION)
+        data = {"sites": rows, "counts": _site_counts(rows)}
+        Out.result(data, _site_list_text(rows))
+        return data
+    if verb == "claim":
+        if not (a.domain or ""):
+            Out.error("claim 需要域名", EXIT_USAGE)
+        if a.app and not a.app.isdigit():
+            Out.error("--app 是应用 id（choyeonctl app list 的第一列），不是应用名", EXIT_USAGE)
+        try:
+            data = await site_claim_service.claim(a.domain, int(a.app) if a.app else None)
+        except Exception as e:  # noqa: BLE001
+            dbm.audit("cli", "cli:site:claim", f"{a.domain}(失败: {redact_creds(str(e))[:120]})")
+            Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
+        site_audit_service.reset_cache()
+        dbm.audit("cli", "cli:site:claim", f"{data['domain']} → {data['app'] or '面板入口'}")
+        Out.result(data, f"已纳管 {data['domain']}：{data['note']}（认领 {data['file'] or '无配置文件'}）")
+        return data
+    if verb == "unclaim":
+        if not (a.domain or ""):
+            Out.error("unclaim 需要域名", EXIT_USAGE)
+        try:
+            data = await site_claim_service.unclaim(a.domain)
+        except Exception as e:  # noqa: BLE001
+            Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
+        site_audit_service.reset_cache()
+        dbm.audit("cli", "cli:site:unclaim", data["domain"])
+        # removed=false 时不说"已取消纳管"：那行登记本来就不在，说反了会让人以为
+        # 之前有个归属被解掉了，而它从来没被纳管过。
+        Out.result(data, f"{data['domain']}：" +
+                  ("登记已删除，nginx 配置未做任何改动" if data["removed"] else "本来就没有登记"))
+        return data
+    data = await site_claim_service.claim_all()
+    site_audit_service.reset_cache()
+    dbm.audit("cli", "cli:site:claim-all",
+              f"纳管 {len(data['claimed'])} 个，判不出归属 {len(data['skipped'])} 个")
+    Out.result(data, _site_claim_all_text(data))
+    return data
+
+
+def _site_counts(rows: list[dict]) -> dict:
+    return {"total": len(rows),
+            "claimed": sum(1 for r in rows if r["claimed"]),
+            "unclaimed": sum(1 for r in rows if not r["claimed"]),
+            "stale": sum(1 for r in rows if r["claim_stale"])}
+
+
+def _site_list_text(rows: list[dict]) -> str:
+    c = _site_counts(rows)
+    lines = [f"站点纳管：{c['total']} 个域名，{c['claimed']} 个已登记、{c['unclaimed']} 个未登记"
+             + (f"，其中 {c['stale']} 条登记认领的配置文件已不在 nginx 加载列表里" if c["stale"] else "")]
+    for r in rows:
+        who = r["app"] or "—（未纳管）"
+        mark = ("已纳管" if r["claimed"] else
+                ("可判定" if r["suggest_kind"] == "panel" or r["suggest_app"] else "判不出"))
+        gap = "（认领的文件已不在加载列表）" if r["claim_stale"] else ""
+        ports = f"{r['port'] if r['port'] is not None else '—'}"
+        if r["port_mismatch"]:
+            ports += f"≠登记 {r['app_port']}"
+        lines.append(f"  {r['domain']} · {who}（{mark}）· {r['file'] or '未认领文件'} · {ports}{gap}")
+        if not r["claimed"]:
+            why = r["suggest_note"] or r["suggest_reason"]
+            if why:
+                lines.append(f"      {why}")
+    if c["unclaimed"]:
+        lines.append("纳管：choyeonctl site claim <域名>（判不出的加 --app <应用 id> 手工指定）")
+        lines.append("批量：choyeonctl site claim-all --json（判得出的落登记，判不出的原样列出理由）")
+    return "\n".join(lines)
+
+
+def _site_claim_all_text(d: dict) -> str:
+    lines = [f"批量纳管：登记 {len(d['claimed'])} 个，判不出归属 {len(d['skipped'])} 个"]
+    for r in d["claimed"]:
+        lines.append(f"  {r['domain']} → {r['app'] or '面板入口'}（{r['note']}）")
+    for r in d["skipped"]:
+        lines.append(f"  {r['domain']} 未纳管：{r['reason']}")
+    if d["skipped"]:
+        lines.append("这些必须手工指定应用（site claim <域名> --app <应用 id>），面板不替你猜。")
+    return "\n".join(lines)
+
+
 async def cmd_load(a: argparse.Namespace) -> dict:
     """负载与 CPU 归因：机器有多忙、这份忙是谁造成的、有没有被自己的 CPU 配额压住。
 
@@ -2032,6 +2126,23 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "明文可达只在同一个文件里 80 与 443 都听着、且没有 301/308 到 https 时判",
                        "只出文件名不出绝对路径：/etc/nginx 下的目录结构本身就是攻击面信息",
                        "nginx 配置目录一个都不存在时退出码 3"]},
+            {"name": "site list|claim|unclaim|claim-all", "args": ["--app"],
+             "desc": "站点纳管：域名归属登记 + 认领配置文件（不写 nginx、不 reload）",
+             "notes": ["归属由登记表说了算，不再按「反代端口等于哪个应用的端口」猜：共用端口和"
+                       "应用登记的端口与配置对不上（3100 vs 3300）两种情况都会猜错",
+                       "判定强度依次是：反代到面板自身端口（那是面板入口，单独一档 kind=panel）＞"
+                       "应用登记的域名 ＞ 根路径 location / 的反代端口（且该端口只属于一个应用）＞"
+                       "配置文件名与应用同名 ＞ 跟随字面量 301 的目标域名",
+                       "判不出的一个都不猜：claim 直接报错说明原因，claim-all 把它们列进 skipped，"
+                       "要落归属就带 --app <应用 id> 手工指定",
+                       "纳管只写登记表这一行，nginx 的文件一个字节都不动；取消纳管也只删这一行，"
+                       "域名照旧由原配置服务",
+                       "之后要改这份文件，走的还是原有那条临界区（原子写 → nginx -t → 失败回滚 → reload），"
+                       "纳管本身不多开一条绕过校验的写路径",
+                       "应用被删除时它名下的登记一起清掉（派生态跟着对象走）",
+                       "登记表里认领的文件不在 nginx 加载列表时标 claim_stale，不静默；"
+                       "配置已删而登记还在的行照样出现在列表里，否则页面上没有入口能看见它",
+                       "nginx 配置目录一个都不存在时退出码 3"]},
             {"name": "webstats", "args": ["--file", "--minutes", "--list", "--daily", "--days"],
              "desc": "网站访问流量统计（只读：状态码分布、TOP 路径与客户端、每分钟请求数）",
              "notes": ["来源白名单 = CP_LOG_ROOTS + CP_FILE_ROOTS，与网页端日志中心是同一份列表；"
@@ -2199,6 +2310,13 @@ def build_parser() -> argparse.ArgumentParser:
                         parents=[common])
     sa.add_argument("--refresh", action="store_true", help="忽略 60 秒缓存，立即重新扫一遍 nginx 配置")
     sa.set_defaults(fn=cmd_site_audit)
+
+    st = sub.add_parser("site", help="站点纳管：域名归属登记与配置文件认领（不写 nginx、不 reload）",
+                        parents=[common])
+    st.add_argument("site_cmd", choices=["list", "claim", "unclaim", "claim-all"])
+    st.add_argument("domain", nargs="?", help="claim/unclaim：nginx 里正在服务的那个域名")
+    st.add_argument("--app", help="claim：判不出归属时手工指定应用 id（choyeonctl app list 的第一列）")
+    st.set_defaults(fn=cmd_site)
 
     ws = sub.add_parser("webstats", help="网站访问流量统计（只读：解析 nginx access.log）", parents=[common])
     ws.add_argument("--file", default="0", help="日志来源序号（webstats --list 读回，与网页端同一份）")

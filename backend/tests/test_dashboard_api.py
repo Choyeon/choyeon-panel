@@ -241,7 +241,8 @@ class OverviewCase(unittest.TestCase):
         base = self._counts()
         self._seed()
         self.addCleanup(self._clean)
-        with mock.patch("app.routers.sites._conf_dirs_available", return_value=False):
+        with mock.patch("app.services.site_claim_service.site_domains",
+                        return_value=(set(), "未检测到 nginx 配置目录")):
             body = self.client.get("/api/system/overview").json()
         self.assertEqual(body["apps"], base["apps"] + 2)
         self.assertEqual((body["cron"], body["cronEnabled"]), (base["cron"] + 2, base["cronEnabled"] + 1))
@@ -249,23 +250,27 @@ class OverviewCase(unittest.TestCase):
         self.assertEqual(body["openAlerts"], base["openAlerts"] + 2)
 
     def test_missing_nginx_is_null_with_reason_not_zero(self):
-        with mock.patch("app.routers.sites._conf_dirs_available", return_value=False):
+        with mock.patch("app.services.site_claim_service.site_domains",
+                        return_value=(set(), "未检测到 nginx 配置目录")):
             body = self.client.get("/api/system/overview").json()
         self.assertIsNone(body["sites"])
         self.assertTrue(body["sitesReason"])
 
-    def test_site_count_dedupes_domains_across_configs(self):
-        scanned = [{"domains": ["A.example.com", "b.example"], "https": True},
-                   {"domains": ["a.example.com"], "https": False}]
-        with mock.patch("app.routers.sites._conf_dirs_available", return_value=True), \
-             mock.patch("app.routers.sites._scan_nginx_sites", return_value=scanned):
+    def test_site_count_comes_from_the_sites_reader(self):
+        """概览条数站点不再自己扫一遍目录：域名集合直接取自纳管层。
+
+        去重（同一域名出现在多个 vhost 只算一个）归 `site_domains`，那边有真实 nginx 目录的用例；
+        这里只锁定「一个出处」这条链路，免得两处对「有几个站」各答一次。
+        """
+        domains = mock.Mock(return_value=({"a.example.com", "b.example"}, None))
+        with mock.patch("app.services.site_claim_service.site_domains", domains):
             body = self.client.get("/api/system/overview").json()
-        self.assertEqual(body["sites"], 2, "同一域名在多个 vhost 里只算一个站点")
+        self.assertEqual(body["sites"], 2)
         self.assertIsNone(body["sitesReason"])
+        domains.assert_called_once_with()
 
     def test_scan_failure_degrades_to_null(self):
-        with mock.patch("app.routers.sites._conf_dirs_available", return_value=True), \
-             mock.patch("app.routers.sites._scan_nginx_sites", side_effect=OSError("boom")):
+        with mock.patch("app.services.site_claim_service.site_domains", side_effect=OSError("boom")):
             body = self.client.get("/api/system/overview").json()
         self.assertIsNone(body["sites"])
         self.assertIn("站点扫描失败", body["sitesReason"])

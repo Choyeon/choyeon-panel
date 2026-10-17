@@ -30,14 +30,13 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
-from .. import aio_db, probe
+from .. import probe
 from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
 from ..util import tallied
-from . import cert_ops, exposure_service, nginx_ops
+from . import cert_ops, exposure_service, nginx_ops, site_claim_service
+from .nginx_ops import LOCAL_TARGETS
 
 CACHE_TTL = 60.0
-# 只有指向本机的反代目标能拿监听表对账；指向别的机器只能标未确认。
-LOCAL_TARGETS = ("127.0.0.1", "localhost", "::1")
 # 判词里点名点几条：与自检项那句同源，所以两处看到的名单是同一份。
 NAME_LIMIT = 3
 NOTE_LISTEN_UNKNOWN = "监听表这一轮读不到：反代目标是不是没人听，这里判不了"
@@ -76,22 +75,18 @@ def _cert_state(certs: dict) -> tuple[bool, set[str], str]:
     return True, covered, ""
 
 
-def _app_index(apps: list[dict]) -> tuple[dict[str, str], dict[int, str]]:
-    by_domain: dict[str, str] = {}
-    by_port: dict[int, str] = {}
-    for a in apps:
-        name = a.get("name")
-        if not name:
-            continue
-        dom = str(a.get("domain") or "").strip().lower()
-        if dom:
-            by_domain[dom] = str(name)
-        try:
-            if a.get("port") is not None:
-                by_port[int(a["port"])] = str(name)
-        except (TypeError, ValueError):
-            continue
-    return by_domain, by_port
+def _apps_of(link_domains: list[str], attributed: dict[str, dict]) -> str | None:
+    """这份配置归哪个应用：一个文件里多个域名可能分属不同应用，那就都点名。
+
+    归属一律取自纳管登记表（`site_claim_service.attribution`），这里不再自己按端口认第二次：
+    过去两处各猜各的，站点页与链路对账会给同一个域名报出不同的应用。
+    """
+    names: list[str] = []
+    for d in link_domains:
+        n = (attributed.get(d) or {}).get("app")
+        if n and n not in names:
+            names.append(n)
+    return "、".join(names) if names else None
 
 
 def _domains_of(link: dict) -> str:
@@ -126,11 +121,12 @@ def _targets(raw: list[dict], listen_ok: bool, listen_ports: set[int]) -> tuple[
     return rows, dead, remote
 
 
-def _build(configs: list[dict], exp: dict, certs: dict, apps: list[dict], dirs_present: bool) -> dict:
+def _build(configs: list[dict], exp: dict, certs: dict, apps: list[dict], dirs_present: bool,
+           reg: dict[str, dict] | None = None) -> dict:
     """join：每个 server 块一条链路 + 判词。判定全在这里，页面与 CLI 只渲染。"""
     listen_ok, listen_ports, listen_reason = _listen_state(exp)
     certs_ok, cert_names, certs_reason = _cert_state(certs)
-    app_by_domain, app_by_port = _app_index(apps)
+    attributed = site_claim_service.attribution(configs, apps, reg or {})
 
     links: list[dict] = []
     dead_rows: list[dict] = []
@@ -148,16 +144,7 @@ def _build(configs: list[dict], exp: dict, certs: dict, apps: list[dict], dirs_p
         uncovered = [d for d in domains if d not in cert_names] if (ssl and domains and certs_ok) else []
         # 只有 80 与 443 都听着、又确实没有 301/308 到 https，才是「明文进得去」。
         no_redirect = ssl and 80 in listen and 443 in listen and not a.get("httpsRedirect")
-        app = None
-        for d in domains:
-            if d in app_by_domain:
-                app = app_by_domain[d]
-                break
-        if app is None:
-            for t in targets:
-                if t.get("port") is not None and int(t["port"]) in app_by_port:
-                    app = app_by_port[int(t["port"])]
-                    break
+        app = _apps_of(domains, attributed)
         link = {
             "file": str(cfg.get("name") or ""),
             "domains": domains,
@@ -297,11 +284,12 @@ def _findings(links, dead_rows, nocert_rows, plain_rows, remote_rows, foreign_ro
         out.append({
             "id": "unmanaged",
             "severity": SEV_INFO,
-            "title": tallied(named, " 个 server 块不在面板管理的应用里", unit="个"),
-            "detail": "域名与端口都没能认领回 apps 表里的某个应用——手工配的 vhost、"
-                      "面板自己的反代、或者应用改名后遗留的配置都长这样。"
-                      "面板的启停、探活与回滚都够不到它们。",
-            "fix": "choyeonctl app list",
+            "title": tallied(named, " 个 server 块还没有纳管", unit="个"),
+            "detail": "纳管登记表里没有这些域名，面板认不出它们归哪个应用——手工配的 vhost、"
+                      "应用改名后遗留的配置都长这样，面板的启停、探活与回滚够不到它们。"
+                      "判得出归属的直接点「全部纳管」登记，判不出的（共用端口、端口没登记）"
+                      "要在网站页上手工指定应用，面板不替你猜。",
+            "fix": "choyeonctl site claim-all",
         })
     return out
 
@@ -318,11 +306,11 @@ _cache: dict = probe.new_cache()
 
 
 async def _app_rows() -> list[dict]:
+    """应用表读法与站点页共用 `site_claim_service.app_rows`，这里只负责"读不到就留空"。"""
     try:
-        rows = await aio_db.query("SELECT name, port, domain FROM apps ORDER BY name")
+        return await site_claim_service.app_rows()
     except Exception:  # noqa: BLE001 - 认领不到应用名不影响链路判定，那一列如实留空
         return []
-    return [dict(r) for r in rows or []]
 
 
 async def audit(refresh: bool = False) -> dict:
@@ -335,7 +323,12 @@ async def _reprobe() -> dict:
     configs = await asyncio.to_thread(nginx_ops.loaded_configs)
     exp = await exposure_service.audit()
     certs = await cert_ops.list_certs()
-    return _build(configs, exp, certs, await _app_rows(), present)
+    apps = await _app_rows()
+    try:
+        reg = await site_claim_service.claims()
+    except Exception:  # noqa: BLE001 - 登记表读不到时那一列留空，不拖累链路判定本身
+        reg = {}
+    return _build(configs, exp, certs, apps, present, reg)
 
 
 def reset_cache() -> None:

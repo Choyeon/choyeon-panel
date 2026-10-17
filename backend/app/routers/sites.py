@@ -1,7 +1,8 @@
 """网站与证书总览接口。
 
-职责边界：nginx 的解析/写入/回滚全部委托 nginx_ops，certbot 续期委托它已有的 renew_certs，
-本文件只做「读 + join + 把错误翻译成人话」，不再实现第二套 nginx 逻辑。
+职责边界：nginx 的解析/写入/回滚全部委托 nginx_ops，站点归属与纳管登记委托
+site_claim_service，certbot 续期委托它已有的 renew_certs；本文件只做「把请求接住、
+把错误翻译成人话、写审计」，不实现第二套 nginx 逻辑，也不在这里猜域名归谁。
 """
 
 import asyncio
@@ -13,10 +14,21 @@ from fastapi.responses import JSONResponse
 
 from .. import aio_db
 from ..deps import need_admin as _need_admin
-from ..services import apps_service, cert_ops, nginx_ops, site_audit_service, systemd_ops
+from ..errors import err_json
+from ..services import cert_ops, nginx_ops, site_audit_service, site_claim_service
+from ..services.site_claim_service import PANEL_LABEL
 from ..util import redact_creds
 
 router = APIRouter()
+
+
+async def _body(req: Request) -> dict:
+    try:
+        b = await req.json()
+    except Exception:  # noqa: BLE001
+        b = None
+    return b if isinstance(b, dict) else {}
+
 
 # nginx/certbot 的报错原文里满是 /etc/nginx/conf.d/xxx.conf 这种绝对路径。
 # 面板以 root 跑，本机目录结构本身就是攻击面信息，出接口前统一换成文件名。
@@ -46,108 +58,86 @@ def _cmd_error(exc: Exception) -> str:
     return f"操作失败：{detail}"
 
 
-def _conf_dirs_available() -> bool:
-    """nginx 装没装：只看配置目录是否存在（不存在就别把空列表伪装成「没有站点」）。"""
-    return nginx_ops.config_dirs_present()
-
-
-def _scan_nginx_sites() -> list[dict]:
-    """同步扫描 nginx 配置文件，每个 server_name 出一条原始站点记录。
-
-    复用 nginx_ops 的目录列举与 analyze_config：域名/端口/SSL/WebSocket/跳转的判定
-    只应该有一份实现，否则面板两处对同一个文件的理解会分叉。
-    列举那一份现在只给 nginx **实际加载**的文件（见 _iter_conf_files），所以
-    sites-available 里未启用的草稿不会再被列成一个在线站点。
-    """
-    out = []
-    for path, fname in nginx_ops._iter_conf_files():
-        try:
-            content = Path(path).read_text(errors="replace")
-        except OSError:
-            continue
-        a = nginx_ops.analyze_config(content)
-        if not a["serverNames"]:
-            continue
-        out.append({
-            "file": fname,
-            "domains": a["serverNames"],
-            "https": a["ssl"],
-            "redirect": a["httpsRedirect"],
-            "websocket": a["websocket"],
-            "ports": a["proxyPorts"],
-        })
-    return out
-
-
-def _app_index(rows: list[dict]) -> tuple[dict, dict]:
-    """域名 → 应用、端口 → 应用。端口表要剔掉被多个应用共用的端口：
-    共用时按端口归属会张冠李戴，宁可显示成「未纳管的手工配置」。"""
-    by_domain = {}
-    port_count: dict[int, int] = {}
-    by_port: dict[int, dict] = {}
-    for r in rows:
-        d = (r.get("domain") or "").strip().lower()
-        if d:
-            by_domain.setdefault(d, r)
-        p = r.get("port")
-        if isinstance(p, int):
-            port_count[p] = port_count.get(p, 0) + 1
-            by_port.setdefault(p, r)
-    return by_domain, {p: r for p, r in by_port.items() if port_count[p] == 1}
-
-
-def _merge_site(seen: dict, row: dict) -> None:
-    """同一个域名可能同时出现在手工配置与 panel-*.conf 里：
-    保留信息更多的那条（HTTPS 优先，其次面板管理的文件），避免列表出现两行同名站点。"""
-    old = seen.get(row["domain"])
-    if old is None:
-        seen[row["domain"]] = row
-        return
-    better = (bool(row["https"]), row["file"].startswith("panel-"))
-    worse = (bool(old["https"]), old["file"].startswith("panel-"))
-    if better > worse:
-        seen[row["domain"]] = row
-
-
-async def _site_rows() -> tuple[list, str | None]:
-    if not _conf_dirs_available():
-        return [], "未找到 nginx 配置目录（本机可能未安装 nginx，或 CP_NGINX_CONF_DIRS 指向了不存在的路径）"
-
-    scanned = await asyncio.to_thread(_scan_nginx_sites)
-    apps = await aio_db.query("SELECT id,name,port,domain,unit_override FROM apps")
-    by_domain, by_port = _app_index(apps)
-    units = {apps_service.unit_name(a): a for a in apps}
-    states = await systemd_ops.unit_states(list(units))
-
-    seen: dict = {}
-    for entry in scanned:
-        for domain in entry["domains"]:
-            app = by_domain.get(domain.lower())
-            if app is None and len(entry["ports"]) == 1:
-                app = by_port.get(entry["ports"][0])
-            port = app["port"] if app and app["port"] is not None else (entry["ports"][0] if entry["ports"] else None)
-            active = None
-            if app is not None:
-                active = bool((states.get(apps_service.unit_name(app)) or {}).get("active"))
-            _merge_site(seen, {
-                "domain": domain,
-                "app": app["name"] if app else None,
-                "app_id": app["id"] if app else None,
-                "port": port,
-                "https": entry["https"],
-                "redirect": entry["redirect"],
-                "websocket": entry["websocket"],
-                "file": entry["file"],
-                "active": active,
-            })
-    return sorted(seen.values(), key=lambda r: (r["app"] is None, r["app"] or r["domain"])), None
-
-
 @router.get("/api/sites")
 async def sites_list():
-    """站点总览：nginx 域名映射 join apps 表。nginx 缺失时返回空列表 + reason，不编数据。"""
-    rows, reason = await _site_rows()
+    """站点总览：nginx 里实际加载的域名，join 纳管登记表与 apps 表。
+
+    归属取自 site_claim_service 的登记表（批次五七）：过去这里按「反代端口等于哪个应用的端口」
+    猜归属，共用端口与端口登记不符两种情况都会猜错，于是只能把判不出的都标成未纳管。
+    判不出归属的那些现在带着 `suggest_reason` 返回理由，前端逐行说清"为什么认不出来、
+    要怎么才认得出"，而不是给一个看不出所以然的标签。
+    nginx 缺失时返回空列表 + reason，不编数据。
+    """
+    rows, reason = await site_claim_service.sites_rows()
     return {"sites": rows, "reason": reason}
+
+
+@router.post("/api/sites/claim")
+async def site_claim(req: Request):
+    """纳管一个域名：登记归属 + 认领它所在的配置文件。**不写 nginx、不 reload**。
+
+    `app_id` 可省——省下面板按判定结果落（面板入口会落成 kind=panel）；判定给不出归属时
+    如实报错并说明该怎么办，不替管理员猜一个应用。
+    """
+    if r := _need_admin(req):
+        return r
+    body = await _body(req)
+    domain = str(body.get("domain") or "").strip()
+    if not domain:
+        return JSONResponse(status_code=400, content={"error": "缺少 domain"})
+    app_id = body.get("app_id")
+    if app_id in (None, ""):
+        app_id = None
+    elif not str(app_id).isdigit():
+        return JSONResponse(status_code=400, content={"error": "app_id 要是数字"})
+    try:
+        res = await site_claim_service.claim(domain, int(app_id) if app_id is not None else None)
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "site:claim", f"{domain}(失败: {_mask(redact_creds(str(e)))[:120]})")
+        return err_json(e)
+    await aio_db.audit(req.state.cp_sub, "site:claim",
+                       f"{domain} → {res['app'] or PANEL_LABEL}（{res['file'] or '未认领文件'}）")
+    return {"ok": True, **res}
+
+
+@router.post("/api/sites/unclaim")
+async def site_unclaim(req: Request):
+    """取消纳管：只删那一行登记，nginx 的配置一个字节都不动，域名照旧服务。"""
+    if r := _need_admin(req):
+        return r
+    body = await _body(req)
+    domain = str(body.get("domain") or "").strip()
+    if not domain:
+        return JSONResponse(status_code=400, content={"error": "缺少 domain"})
+    try:
+        res = await site_claim_service.unclaim(domain)
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "site:unclaim", f"{domain}(失败: {_mask(redact_creds(str(e)))[:120]})")
+        return err_json(e)
+    # removed=False 也要写审计：页面上的按钮只给已纳管的行，点了却发现没有登记，
+    # 说明登记表和 nginx 已经对不上，这是要查的事，不是可以静默成功的空操作。
+    await aio_db.audit(req.state.cp_sub, "site:unclaim",
+                       f"{domain}（{'已删除登记' if res['removed'] else '本就没有登记'}）")
+    return {"ok": True, **res}
+
+
+@router.post("/api/sites/claim-all")
+async def site_claim_all(req: Request):
+    """批量纳管：判得出归属的逐条落登记，判不出的原样列出理由，一个都不猜。
+
+    已经纳管过的域名不在这一轮里重复写：登记表里那条可能就是管理员手工指定的应用，
+    批量"全部纳管"把它改写回按端口猜出来的结果，等于把人的判断覆盖成机器的判断。
+    """
+    if r := _need_admin(req):
+        return r
+    try:
+        res = await site_claim_service.claim_all()
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "site:claim-all", f"(失败: {_mask(redact_creds(str(e)))[:120]})")
+        return err_json(e)
+    await aio_db.audit(req.state.cp_sub, "site:claim-all",
+                       f"纳管 {len(res['claimed'])} 个，判不出归属 {len(res['skipped'])} 个")
+    return {"ok": True, **res}
 
 
 @router.get("/api/site-audit")

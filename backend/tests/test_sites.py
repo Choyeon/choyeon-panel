@@ -279,7 +279,21 @@ class TestTimerStatus(unittest.TestCase):
 
 
 class TestSitesListing(unittest.TestCase):
-    def test_joins_domain_to_app(self):
+    """站点行的归属口径：登记表说了算，判定只是建议。
+
+    判定层（谁家的域名、共用端口、面板入口）在 `test_batch57a.py` 里逐条锁；
+    这里锁 GET /api/sites 这一层：字段形状、纳管/未纳管怎么呈现、nginx 缺失怎么如实退回。
+    """
+
+    def _rows(self, conf):
+        async def _states(units):
+            return {u: {"active": True, "mainPid": 42} for u in units}
+
+        with mock.patch.object(config, "NGINX_CONF_DIRS", [conf]), \
+             mock.patch.object(sites.site_claim_service.systemd_ops, "unit_states", _states):
+            return asyncio.run(sites.sites_list())
+
+    def test_joins_domain_to_app_as_suggestion(self):
         conf = _mkdtemp("cp_conf_")
         domain = f"demo{os.getpid()}.choyeon.cc"
         orphan = f"orphan{os.getpid()}.choyeon.cc"
@@ -288,12 +302,7 @@ class TestSitesListing(unittest.TestCase):
         name, app_id = _mk_app(domain)
         self.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (app_id,))
 
-        async def _states(units):
-            return {u: {"active": True, "mainPid": 42} for u in units}
-
-        with mock.patch.object(config, "NGINX_CONF_DIRS", [conf]), \
-             mock.patch.object(sites.systemd_ops, "unit_states", _states):
-            r = asyncio.run(sites.sites_list())
+        r = self._rows(conf)
         rows = {x["domain"]: x for x in r["sites"]}
         self.assertIsNone(r["reason"])
         hit = rows[domain]
@@ -305,10 +314,54 @@ class TestSitesListing(unittest.TestCase):
         self.assertTrue(hit["websocket"])
         self.assertEqual(hit["file"], "panel-demo.conf")
         self.assertTrue(hit["active"])
-        # 未纳管的 nginx 配置也要露出来，但归属信息必须留空，而不是错挂到别的应用
+        # 判得出归属 ≠ 已纳管：没登记就没有认领文件的人，前端要能分出这两件事
+        self.assertFalse(hit["claimed"])
+        self.assertEqual(hit["suggest_app"], name)
+        self.assertIn("应用登记的域名", hit["suggest_note"], "建议要写明依据，不能只给一个名字")
+        # 认不出的 nginx 配置也要露出来，但归属信息必须留空，而不是错挂到别的应用
         self.assertIsNone(rows[orphan]["app"])
         self.assertIsNone(rows[orphan]["active"])
         self.assertEqual(rows[orphan]["port"], 9099)
+        self.assertTrue(rows[orphan]["suggest_reason"])
+
+    def test_claimed_row_wins_over_the_guess(self):
+        """登记过的那行：应用与文件取自登记表，判定结果只留在 suggest_* 里。
+
+        端口刻意造成「应用登记 3100、配置写 3300」（本机上 choyeon-video 的真实形态）：
+        按端口认的话这一行根本认不出归属，只有登记能把它认领回来。
+        """
+        conf = _mkdtemp("cp_conf_")
+        domain = f"claim{os.getpid()}.choyeon.cc"
+        Path(conf, "manual.conf").write_text(_conf_text(MANUAL_CONF, domain, 3300))
+        name, app_id = _mk_app(f"other{os.getpid()}.choyeon.cc", port=3100)
+        self.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (app_id,))
+        self.addCleanup(dbm.execute, "DELETE FROM site_claims WHERE domain=?", (domain,))
+        dbm.execute("INSERT INTO site_claims(domain,app_id,file,kind,source,note) VALUES(?,?,?,?,?,?)",
+                    (domain, app_id, "manual.conf", "app", "manual", "手工指定"))
+
+        hit = self._rows(conf)["sites"][0]
+        self.assertEqual(hit["domain"], domain)
+        self.assertTrue(hit["claimed"])
+        self.assertEqual(hit["app"], name, "登记指向的应用，不是端口猜出来的那个")
+        self.assertEqual(hit["claim_source"], "manual")
+        self.assertEqual(hit["file"], "manual.conf")
+        self.assertEqual(hit["port"], 3300)
+        self.assertEqual(hit["app_port"], 3100)
+        self.assertTrue(hit["port_mismatch"], "配置写 3300、应用登记 3100，必须点出来而不是抹平")
+
+    def test_claimed_row_with_missing_app_is_not_dropped(self):
+        """登记指向的应用已经不在了：行要留着并标 stale，不能静默消失。"""
+        conf = _mkdtemp("cp_conf_")
+        domain = f"ghost{os.getpid()}.choyeon.cc"
+        Path(conf, "manual.conf").write_text(_conf_text(MANUAL_CONF, domain, 4400))
+        self.addCleanup(dbm.execute, "DELETE FROM site_claims WHERE domain=?", (domain,))
+        dbm.execute("INSERT INTO site_claims(domain,app_id,file,kind,source,note) VALUES(?,?,?,?,?,?)",
+                    (domain, 999999, "gone.conf", "app", "manual", ""))
+
+        hit = self._rows(conf)["sites"][0]
+        self.assertTrue(hit["claimed"])
+        self.assertIsNone(hit["app"], "应用查不到就不编一个名字")
+        self.assertTrue(hit["claim_stale"], "认领的文件已不在加载列表里")
 
     def test_returns_empty_with_reason_when_nginx_missing(self):
         with mock.patch.object(config, "NGINX_CONF_DIRS", ["/nonexistent-nginx-conf-dir"]):
@@ -319,16 +372,9 @@ class TestSitesListing(unittest.TestCase):
 
     def test_existing_dir_without_files_is_a_plain_empty_list(self):
         """目录在、里面没配置 → 是"确实没有站点"，不该报 nginx 缺失。"""
-        conf = _mkdtemp("cp_conf_")
-        with mock.patch.object(config, "NGINX_CONF_DIRS", [conf]), \
-             mock.patch.object(sites.systemd_ops, "unit_states", _empty_states):
-            r = asyncio.run(sites.sites_list())
+        r = self._rows(_mkdtemp("cp_conf_"))
         self.assertEqual(r["sites"], [])
         self.assertIsNone(r["reason"])
-
-
-async def _empty_states(units):
-    return {}
 
 
 class TestRenewEndpoint(unittest.TestCase):

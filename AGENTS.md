@@ -145,6 +145,7 @@ bash scripts/install.sh                    # 在终端中按提示配置反代 +
 | `start\|stop\|restart` | — | systemd 服务控制 |
 | `logs` | `--lines` | journalctl 日志 |
 | `site-audit` | `--refresh` | 站点链路对账（严格只读）：`server_name` → `proxy_pass` 目标 → 证书覆盖 → 明文跳转四段连起来判一次；配置解析、监听表与证书清单都复用已有读者，这一层只 join 不重算。只判指向 127.0.0.1 的目标，ss 读不到时整轮降为未确认；不 reload nginx、不改 vhost、不签证书，修复命令只供管理员自己执行；nginx 配置目录一个都不存在时退出码 3 |
+| `site list\|claim\|unclaim\|claim-all` | `--app` | 站点纳管：域名归属写进面板自己的登记表，并**认领**它所在的那份 nginx 配置文件。**不写 nginx、不 reload、不签证书**——`unclaim` 取消纳管同样只删登记表那一行，域名照旧由原配置服务。归属不再按「反代端口等于哪个应用的端口」猜（两个应用共用一个端口、应用登记的端口与配置里写的对不上，两种情况都会猜错）：判定强度依次是反代到面板自身端口（那是面板入口，单独一档 `kind=panel`，不挂应用）＞应用自己登记的域名＞根路径 `location /` 的反代端口（且该端口只属于一个应用）＞配置文件名与应用同名＞跟随字面量 301 的目标域名。判不出归属的一个都不猜——`claim` 当场报错说明原因，`claim-all` 把它们列进 `skipped` 并逐条给理由，要落归属就带 `--app <应用 id>`（`choyeonctl app list` 的第一列）手工指定；纳管之后要改那份文件，走的还是原有那条临界区（原子写 → `nginx -t` → 失败回滚 → reload）。`list` 的 `claimed` 与 `suggest_app` 是两件事：已判定不等于已纳管；登记认领的文件被删了标 `claim_stale`，行照样列出。nginx 配置目录一个都不存在时 `list` 退出码 3 |
 | `webstats` | `--file --minutes --list --daily --days` | 网站访问流量统计（只读解析 nginx access.log：状态码分布、TOP 路径/客户端、每分钟请求数）。`--list` 先看有哪些来源，`--file` 的序号与网页端日志中心同源；`--daily` 额外读 logrotate 轮替出来的历史世代（含 `.gz`）按天统计，并与上一个同样长的周期环比，依据不足时 `comparable=false` 且不给百分比；找不到来源退出码 3，选到错误日志或把 `--days` 写成没有 `--daily` 是 2 |
 | `schema` | — | 输出命令契约 |
 

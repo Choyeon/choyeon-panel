@@ -143,6 +143,20 @@ CREATE TABLE IF NOT EXISTS backup_pushes(
   pushed_at TEXT DEFAULT (datetime('now')),
   UNIQUE(target_id, name)
 );
+-- 站点纳管登记：域名 → 应用（或面板自己），外加认领的那份 nginx 配置文件。
+-- 归属必须由人登记，不能按「反代端口 == 应用端口」猜：这台机器上两个应用共用过同一个端口，
+-- 也有应用登记的端口与配置里写的对不上（3100 vs 3300），猜出来的归属会把域名安到错误的应用上。
+-- app_id 不设外键：kind='panel' 的行本来就没有应用，而删应用时的派生态由
+-- site_claim_service.drop_app 负责清理（探活标记、备份任务改名走的是同一口径）。
+CREATE TABLE IF NOT EXISTS site_claims(
+  domain TEXT PRIMARY KEY,
+  app_id INTEGER,
+  file TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL CHECK(kind IN ('app','panel')),
+  source TEXT NOT NULL DEFAULT 'auto' CHECK(source IN ('auto','manual')),
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 MAX_DEPLOY_LOG = 256 * 1024  # 单条部署日志上限，防止失控增长
