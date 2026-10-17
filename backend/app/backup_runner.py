@@ -36,6 +36,10 @@ JOB_TIMEOUT_SEC = 1800
 # 做不到这两件事）。让出来的那 120 秒是给 sqlite 快照、prune 与审计记账的。
 CMD_TIMEOUT_SEC = JOB_TIMEOUT_SEC - 120
 
+# 执行留痕（backups.last_note）的字数上界：存的是给人读的一句话，不是日志。
+# 与 `_push_offsite` 里那条 note 同一个上界，两处一起长会让告警正文被自己的原因挤掉。
+RUN_NOTE_MAX = 200
+
 
 def run_sh(cmd: str, out_file: str | None = None, timeout: float = CMD_TIMEOUT_SEC) -> int:
     """bash + pipefail 执行，返回退出码（不抛异常，由调用方判定严重程度）。
@@ -404,6 +408,26 @@ def _push_offsite(bk: dict) -> None:
         print(f"offsite: {res['skipped']}")
 
 
+def _record_run(bid: int, status: str, note: str = "") -> None:
+    """把这一次执行写回 backups（last_run / last_status / last_note）。
+
+    为什么必须由 runner 来写：timer 的 `ExecStart=` 起的是独立进程，没有 API 调用方，
+    也没有人替它记账。库里没有这一行时，一条每晚都 SystemExit 的任务在面板上永远显示
+    "已启用"，只有翻 journalctl 才发现早就不产出了（批次㉔同一条理由：判词光有数不够，
+    还得点得出是谁没成）。
+    时间格式与 cron_service.run_now 同一条 `strftime`：两者都要和 `_local_ts` 读回的
+    systemd 时间戳比先后，格式不一致时前端 fmtDateTime 就得分两种来源解析。
+    """
+    try:
+        dbm.execute(
+            "UPDATE backups SET last_run=?, last_status=?, last_note=? WHERE id=?",
+            (time.strftime("%Y-%m-%d %H:%M:%S"), status,
+             redact_creds(str(note))[:RUN_NOTE_MAX], bid),
+        )
+    except Exception as e:  # noqa: BLE001 - 留痕写不进去不能把一次成功的备份改判成失败
+        print(f"backup: 执行留痕写入失败：{type(e).__name__}: {e}", file=sys.stderr)
+
+
 def run_job(bid: int) -> int:
     """进程入口：按备份任务抢一把跨进程锁，再跑 `main()`。返回退出码。
 
@@ -418,6 +442,12 @@ def run_job(bid: int) -> int:
     抢不到锁返回 0 并打印跳过原因，不返回失败：同一个任务同时跑两次时，放弃后到的那一次
     是**正确行为**（前一份马上就要落盘），把它报成失败会让 timer 的 journal 和 unit 状态
     长期挂着一条假故障，而真正该失败的（pg_dump 崩了、磁盘满）就被淹没了。
+    同理，这一条路径**不写**执行留痕：跳过不是这一轮的结论，写了会把上一次真失败盖成
+    "刚刚也失败过"，也会把上一次的成功盖成失败。
+
+    SystemExit 单独接一条：`_fail()` 与各处校（库名、应用目录）抛的就是它，而它是
+    BaseException，`except Exception` 接不住——以前它一路穿出 `__main__`，进程照样退 1、
+    原因照样进 journal，只是留痕会漏掉最常态的那一类失败。
     """
     row = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
     if not row:
@@ -428,21 +458,30 @@ def run_job(bid: int) -> int:
     except RuntimeError as e:
         print(f"backup skipped: {e}")
         return 0
+    code = 0
     try:
         main(row)
         # 本机归档已经落盘了才推异地：`_push_offsite` 自己吞掉推送异常，
         # 所以这一步不会把一次成功的备份改判成失败（理由见它的 docstring）。
         _push_offsite(row)
         print("backup ok")
+        _record_run(bid, "ok")
     except subprocess.CalledProcessError as e:
         print(f"backup failed: exit {e.returncode}", file=sys.stderr)
-        return 1
+        _record_run(bid, f"exit {e.returncode}", str(e))
+        code = 1
+    except SystemExit as e:
+        reason = e.code if isinstance(e.code, str) else "备份进程提前退出"
+        print(f"backup failed: {reason}", file=sys.stderr)
+        _record_run(bid, "fail", reason)
+        code = e.code if isinstance(e.code, int) and e.code else 1
     except Exception as e:  # noqa: BLE001
         print(f"backup failed: {e}", file=sys.stderr)
-        return 1
+        _record_run(bid, "fail", str(e))
+        code = 1
     finally:
         guard.release()
-    return 0
+    return code
 
 
 if __name__ == "__main__":

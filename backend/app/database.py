@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS backups(
   minute INTEGER NOT NULL DEFAULT 30,
   keep INTEGER NOT NULL DEFAULT 7,
   enabled INTEGER NOT NULL DEFAULT 1,
+  last_run TEXT,
+  last_status TEXT NOT NULL DEFAULT '',
+  last_note TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now'))
 );
 -- 告警历史：run_checks 每轮都把结论写进来（含恢复 ok），面板重启后不再失忆。
@@ -217,6 +220,17 @@ def migrate() -> None:
         bcols = _columns("backups")
         if "cloud_target_id" not in bcols:
             conn.execute("ALTER TABLE backups ADD COLUMN cloud_target_id INTEGER")
+        # 备份任务的执行留痕。为什么必须由 runner 写：systemd timer 的 ExecStart 起的是
+        # 独立进程，没有 API 调用方、也没有人替它记账——库里不留这一行，一条每晚都在
+        # SystemExit 的任务在面板上永远显示"已启用"，只有翻 journalctl 才发现早就不产出了。
+        # last_run 可空（从没跑过），last_status 用空串表示"没有结论"而不是 'ok'：
+        # 新建的任务一次都没执行，判词只能是"未执行"，不能粉饰成绿灯。
+        if "last_run" not in bcols:
+            conn.execute("ALTER TABLE backups ADD COLUMN last_run TEXT")
+        if "last_status" not in bcols:
+            conn.execute("ALTER TABLE backups ADD COLUMN last_status TEXT NOT NULL DEFAULT ''")
+        if "last_note" not in bcols:
+            conn.execute("ALTER TABLE backups ADD COLUMN last_note TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pushes_target ON backup_pushes(target_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pushes_backup ON backup_pushes(backup_id, id)")
         # 告警历史只按时间倒序翻页，metrics 只按 (gran, ts) 区间取窗口——两个都是覆盖查询的入口。

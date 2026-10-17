@@ -173,6 +173,50 @@ def _sqlite_target_label(target) -> str:
     return row["name"] if row else f"#{t}"
 
 
+# 任务在判词里的类型名（唯一出处）：告警正文、自检点名单和 CLI 都用这一个表，
+# 同一个 #3 在页面叫「SQLite 备份 rosetta」、在邮件里叫「sqlite:3」就永远对不上号。
+_KIND_LABEL = {"pg": "PG 备份", "app": "应用备份", "sqlite": "SQLite 备份"}
+
+
+def run_label(b: dict) -> str:
+    """把一条备份任务读成一句人话：类型 + 目标（sqlite 的 id 换成应用名）。"""
+    kind = str(b.get("kind") or "")
+    target = b.get("target")
+    if kind == "sqlite":
+        target = _sqlite_target_label(target)
+    return f"{_KIND_LABEL.get(kind, kind or '?')} {target}"
+
+
+def scheduled_runs() -> list[dict]:
+    """所有「该由定时器跑」的备份任务及其执行留痕（enabled 且非 manual），带 label。
+
+    巡检、自检与 CLI 都从这一个入口取：过滤条件（停用的不算、手动任务不算「该跑没跑」）
+    写进 SQL 一处，两个读者才不会一个说「有 3 条失败」、另一个只点名 2 条。
+    """
+    rows = dbm.query(
+        "SELECT id, kind, target, schedule, enabled, last_run, last_status, last_note "
+        "FROM backups WHERE enabled=1 AND schedule<>'manual' ORDER BY id"
+    )
+    for r in rows:
+        r["label"] = run_label(r)
+    return rows
+
+
+def is_failed_run(b: dict) -> bool:
+    """这一条留痕是不是「最近一次没成」。
+
+    空串＝从没跑过：刚建的任务报故障是冤枉它，界面该显示「未执行」而不是红色；
+    `ok`＝最近一次成功；其余（`fail`、`exit N`）才是真失败。
+    """
+    status = str(b.get("last_status") or "")
+    return bool(status) and status != "ok"
+
+
+def failing_tasks() -> list[dict]:
+    """启用的定时备份任务里最近一次没成的那些——自检点名单与 CLI 用。"""
+    return [b for b in scheduled_runs() if is_failed_run(b)]
+
+
 def _write_if_changed(path: str, content: str):
     if os.path.exists(path) and Path(path).read_text() == content:
         return
@@ -448,6 +492,11 @@ async def delete_backup(bid: int):
     # 而目录里那条任务已经不存在，谁都无从核对。**远端的对象一个都不删**：
     # 删配置不等于删数据，这一点和 delete_target 是同一条规矩。
     dbm.execute("DELETE FROM backup_pushes WHERE backup_id=?", (bid,))
+    # 告警标记跟着清（见 alerts_service.forget_backup）：巡检按 `backup:<id>` 编 code，
+    # 任务删了这两个键就再没人读。局部导入是必须的——alerts_service 顶部就 import 了本模块。
+    from . import alerts_service
+
+    alerts_service.forget_backup(bid)
 
 
 def save_upload(bid: int, filename: str, data: bytes, overwrite: bool = False) -> dict:

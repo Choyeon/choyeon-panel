@@ -39,6 +39,7 @@ from .. import database as dbm
 from ..log import warn
 from ..util import PROBE_TIMEOUT, disk_usage_pct, is_http_url, is_unit, redact_creds, run
 from . import system_metrics
+from .backup_service import is_failed_run, scheduled_runs
 from .load_service import LOAD_RISK_PER_CORE
 
 # 存活探测只打本机：面板只监听 127.0.0.1，应用端口也绑回环，
@@ -590,6 +591,7 @@ async def run_checks():
                                  meta=_meta(cert=c["name"], days=c["days"]))
 
     await _check_resources()
+    await run_backup_checks()
     if setting_int("alert_probe") == 1:
         await run_probes()
 
@@ -777,6 +779,63 @@ def rename_app(old_name: str, new_name: str) -> None:
         if val:
             dbm.set_setting(new_key, val)
         dbm.delete_setting(old_key)
+
+
+def forget_backup(bid: int) -> None:
+    """备份任务被删掉时，清掉它名下那两个按任务编号写的告警标记。
+
+    与 `forget_app` 同一口径，但后果只有"死行"这一档：编号是 AUTOINCREMENT，新任务不会
+    复用 `backup:<id>`，所以既不存在同名继承，也不会让新任务当天被旧的 `sent:` 静音。
+    留着只是让 settings 攒没人读的键——探活标记当年就是这么攒出来的。
+    `alerts_log` 的历史行照旧不动（约定 4：历史属于已经发生过的事）。
+    """
+    dbm.delete_setting(f"sent:backup-{bid}")
+    dbm.delete_setting(f"notified:backup:{bid}")
+
+
+async def run_backup_checks() -> list[dict]:
+    """按任务巡检备份执行留痕：最近一次没成就 crit，成功后补一条「已恢复」。
+
+    为什么不复用「目录里最新一份多少天前」那条自检：它判得出"很久没产出"，判不出"今晚
+    这一份是失败了、还是压根没人跑、还是跑成了但产物已按 keep 轮替掉"。留痕进库之后，
+    失败能点名到任务与原因，恢复的一侧也由同一条留痕驱动（约定 5）。
+    从没跑过的任务（last_status 空串）不参与：那是刚建好的计划，不是故障（批次⑰A：
+    判不出不等于正常，反过来也不等于异常）。
+    历史行用不带时间戳的稳定句（`log_message`），时间与原因只进推送与 meta——与磁盘同一条约定 4。
+    """
+    try:
+        rows = await asyncio.to_thread(scheduled_runs)
+    except Exception as e:  # noqa: BLE001
+        warn("读取备份任务留痕失败，跳过备份巡检:", type(e).__name__, e)
+        return []
+    results: list[dict] = []
+    for b in rows:
+        bid = int(b["id"])
+        label = str(b["label"])[:48]
+        # code 用 id 而不是 kind:target：backups.id 是 AUTOINCREMENT，删掉的任务不会把编号
+        #  reused，所以 `backup:3` 永远指同一件事；改目标或改名会换掉文字型 code，
+        # 于是历史与 `notified:` 标记一起丢失（⑤L 同一条理由）。
+        code = f"backup:{bid}"
+        key = f"backup-{bid}"
+        status = str(b["last_status"] or "")
+        ok_message = f"备份任务 {label} 最近一次执行成功"
+        if not is_failed_run(b):
+            if status == "ok":
+                await _check(key, False, "", code=code, ok_message=ok_message,
+                             meta=_meta(backup=bid, at=b["last_run"] or ""))
+            continue
+        await _check(
+            key, True,
+            f"备份任务 {label} 最近一次执行失败（{b['last_run'] or '时间未知'}，状态 {status}）："
+            f"{(b['last_note'] or '原因见 journalctl -u choyeon-panel')[:120]}",
+            code=code, level="crit",
+            log_message=f"备份任务 {label} 执行失败（状态 {status}）",
+            ok_message=ok_message,
+            meta=_meta(backup=bid, kind=b["kind"], at=b["last_run"] or "", status=status,
+                       note=str(b["last_note"] or "")[:200]),
+        )
+        results.append({"id": bid, "label": label, "status": status})
+    return results
 
 
 async def run_probes() -> list[dict]:

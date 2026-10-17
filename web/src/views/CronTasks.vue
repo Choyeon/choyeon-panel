@@ -326,7 +326,9 @@ function confirmDel(r: Task) {
 
 function statusTag(r: Task) {
   const s = r.last_status || '';
-  if (!s) return h('span', { class: 'cell-sub' }, '未执行');
+  // 「未执行」写在时间列，这一列只放执行器留下的结论 token（ok / timeout / exit N）。
+  // 备份页与这一页是同一句话的两种说法时，读的人要先到第二页才知道"原来同一个意思"。
+  if (!s) return h('span', { class: 'cell-sub' }, '—');
   const type = s === 'ok' ? 'success' : s === 'timeout' ? 'error' : 'warning';
   return h(NTag, { size: 'tiny', bordered: false, round: true, type: type as any }, { default: () => s });
 }
@@ -340,7 +342,7 @@ function lastRunCell(r: Task) {
   const color = !s ? 'var(--cp-text-mute)' : s === 'ok' ? 'var(--cp-ok)' : 'var(--cp-err)';
   // 来源必须标出来：timer 那一轮的结果是 systemd 报的（退出码来自 unit），面板库里并没有这行
   const src = r.last_source === 'timer' ? '·定时' : r.last_source === 'manual' ? '·手动' : '';
-  const text = r.running ? '执行中…' : r.last_run ? fmtDateTime(r.last_run) + src : '—';
+  const text = r.running ? '执行中…' : r.last_run ? fmtDateTime(r.last_run) + src : '未执行';
   return h('div', { class: 'cell-lastrun' }, [
     h(NIcon, { component: icons[icoName], size: 14, color }),
     h('span', { class: 'mono-dim cp-prose', title: r.last_run ? `${r.last_run} (本地)${src}` : '' }, text),
@@ -439,7 +441,7 @@ const cols: any[] = [
         ref="tableAnchor"
         :columns="cols" :data="rows" size="small" :bordered="false" :loading="loading"
         :scroll-x="'auto'" :max-height="tableH"
-        :row-key="(r: Task) => r.id" class="tbl-cron"
+        :row-key="(r: Task) => r.id"
       >
         <template #empty>
           <EmptyBox :text="(err || listErr) ? '定时任务获取失败，点上方「刷新」重试' : (isAdmin ? '还没有定时任务，点「新建任务」加一条' : '还没有定时任务')" />
@@ -547,10 +549,8 @@ const cols: any[] = [
 </template>
 
 <style scoped>
-/* h() 生成的单元格拿不到本组件的 data-v 作用域（scoped 纯 class 规则一条都不命中），
-必须从模板上的类走 :deep。
-   缺了这行时图标和时间各占一行、也撑不出 min-width:0，窄屏上这一列会把表顶宽。 */
-.tbl-cron :deep(.cell-lastrun) { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* `.cell-lastrun` 现在在 style.css 里：h() 生成的单元格拿不到本组件的 data-v 作用域，
+   而备份页要复用同一个形状，规则写在 scoped 块里就只有这一页能用。 */
 .cr-preview {
   display: flex; flex-direction: column; gap: 4px; min-height: 44px;
   padding: var(--space-3); border: 1px solid var(--cp-border); border-radius: 8px;

@@ -161,6 +161,40 @@ async function loadPg() {
   }
 }
 
+// 执行留痕：runner（timer 那一轮起的是独立进程）把结果写回 backups.last_*，
+// 这里只是把同一份账读出来。「未执行」要显式写：新建的计划一次都没跑过，
+// 空着会被读成"接口没返回"，而它其实是"还没到点"。
+function lastRunCell(r: any) {
+  const s = String(r.last_status || '');
+  const ico = !s
+    ? { n: 'InformationCircleOutline', c: 'var(--cp-text-mute)' }
+    : s === 'ok'
+      ? { n: 'CheckmarkCircleOutline', c: 'var(--cp-ok)' }
+      : { n: 'CloseCircleOutline', c: 'var(--cp-err)' };
+  return h('div', { class: 'cell-lastrun' }, [
+    h(NIcon, { component: icons[ico.n], size: 14, color: ico.c }),
+    h('span', {
+      class: 'mono-dim cp-prose',
+      title: r.last_run ? `${r.last_run} (本地)` : '这条任务还没有执行记录',
+    }, r.last_run ? fmtDateTime(r.last_run) : '未执行'),
+  ]);
+}
+
+function runResultCell(r: any) {
+  const s = String(r.last_status || '');
+  if (!s) return h('span', { class: 'cell-sub' }, '—');
+  // 状态词与定时任务页同源（ok / timeout / exit N）：两边写的都是执行器留下的那串，
+  // 各翻译一遍就会出现「这一页换个叫法、告警正文里还是 ok」两句话。
+  const type = s === 'ok' ? 'success' : s === 'timeout' ? 'error' : 'warning';
+  const tag = h(NTag, { size: 'tiny', bordered: false, round: true, type: type as any }, { default: () => s });
+  if (s === 'ok' || !r.last_note) return tag;
+  return h('div', { class: 'cell-txt' }, [
+    tag,
+    // 失败原因是这一格最要紧的一句话，不能只藏在 hover 里（批次㉕）：折行显示，长文本再给 title。
+    h('div', { class: 'cell-sub cp-prose', title: r.last_note }, r.last_note),
+  ]);
+}
+
 const columns: any[] = [
   {
     // 弹性列必须给 minWidth：scroll-x auto 下没有它，固定列一超过容器就被挤成 0 宽（375px 实测名字看不见）
@@ -201,6 +235,11 @@ const columns: any[] = [
       r.schedule === 'manual'
         ? h(NTag, { size: 'small', round: true, bordered: false }, () => '手动')
         : h('span', { class: 'mono-dim' }, `${r.schedule === 'daily' ? '每日' : '每周一'} ${String(r.hour).padStart(2, '0')}:${String(r.minute).padStart(2, '0')}`),
+  },
+  { title: '上次执行', key: 'last_run', width: 170, render: lastRunCell },
+  {
+    // minWidth 而不是 width：失败原因是一整句话，钉死宽度会被 ellipsis 切成读不出来的形状
+    title: '结果', key: 'last_status', minWidth: 150, render: runResultCell,
   },
   { title: '保留', key: 'keep', width: 70, render: (r: any) => h('span', { class: 'mono-dim' }, `${r.keep} 份`) },
   {

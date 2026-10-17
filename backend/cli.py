@@ -13,7 +13,7 @@
     choyeonctl doctor [--json]       # 安全与健康自检
     choyeonctl user create alice --password 'xxx' [--role admin]
     choyeonctl app list|create|deploy|rollback|logs
-    choyeonctl backup run|list|targets|add-target|push|link
+    choyeonctl backup run|list|jobs|targets|add-target|push|link
     choyeonctl firewall list|allow|deny|remove|on|off
     choyeonctl ban list|add|rm        # 封禁 sshd 爆破来源
     choyeonctl updates
@@ -627,6 +627,38 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         rows = [{"file": str(f), "size": f.stat().st_size, "mtime": int(f.stat().st_mtime)} for f in files[:50]]
         Out.result(rows, "\n".join(f"{r['size']:>10}  {r['file']}" for r in rows) or "(无备份)")
         return {"backups": rows}
+
+    if a.backup_cmd == "jobs":
+        # 任务列表与网页备份页共用同一个读者（list_backups）：终端上判"哪条任务昨晚没成"
+        # 必须和页面看到同一份留痕，不能各查各的列。
+        rows = backup_service.list_backups()
+        jobs = []
+        for r in rows:
+            status = str(r.get("last_status") or "") or "未执行"
+            jobs.append({
+                "id": r["id"],
+                "label": backup_service.run_label(r),
+                "kind": r["kind"],
+                "target": r["target"],
+                "schedule": r["schedule"],
+                "enabled": bool(r["enabled"]),
+                "target_missing": bool(r.get("target_missing")),
+                "last_run": r.get("last_run") or "",
+                "last_status": status,
+                "last_note": r.get("last_note") or "",
+                "cloud_target_name": r.get("cloud_target_name"),
+                "artifacts": len(r.get("files") or []),
+            })
+        failed = [j for j in jobs if j["last_status"] not in ("ok", "未执行")]
+        lines = [
+            f"{j['id']:>3}  {j['label']:<26}  {j['schedule']:<7}  "
+            f"{'启用' if j['enabled'] else '停用'}  {(j['last_run'] or '-'):<19}  {j['last_status']}"
+            + (f"  ← {j['last_note'][:60]}" if j["last_note"] else "")
+            for j in jobs
+        ]
+        Out.result({"jobs": jobs, "failed": failed},
+                   "\n".join(lines) or "(无备份任务)")
+        return {"jobs": jobs, "failed": failed}
 
     if a.backup_cmd == "targets":
         # 列表面向排障：一眼要能看出"这个桶还能不能用"，所以 last_error 直接进人读输出
@@ -1834,13 +1866,15 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                       "--port", "--domain", "--start-cmd", "--install-cmd", "--lines"],
              "desc": "应用全生命周期管理",
              "notes": ["create 需要 --template 或 --start-cmd 之一；用 --start-cmd 时可配 --type/--install-cmd"]},
-            {"name": "backup run|list|targets|add-target|edit-target|del-target|test-target|push|link",
+            {"name": "backup run|list|jobs|targets|add-target|edit-target|del-target|test-target|push|link",
              "args": ["--id", "--target", "--yes", "--name", "--endpoint", "--bucket", "--region",
                       "--access-key", "--secret-stdin", "--prefix",
                       "--path-style", "--no-path-style",
                       "--enable", "--disable"],
-             "desc": "面板数据备份，以及 S3 兼容的异地备份目标",
+             "desc": "面板数据备份、备份任务留痕，以及 S3 兼容的异地备份目标",
              "notes": ["run 跑 scripts/backup.sh 备份面板数据，list 列本机产物",
+                       "jobs 列备份任务与每条的最近一次执行留痕（timer 起的是独立进程，"
+                       "留痕由 runner 自己写回 backups 表，终端与网页读同一份）",
                        "异地 Secret Key 只有 --secret-stdin 一条路：不提供 argv 写法，"
                        "因为它会留在 ps、世界可读的 /proc/<pid>/cmdline 和 root 的 shell 历史里",
                        "add-target 之后还要 link 才会真的推：目标是「这台机器往哪儿写」，"
@@ -2047,7 +2081,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     b = sub.add_parser("backup", help="备份管理与异地目标", parents=[common])
     b.add_argument("backup_cmd", choices=[
-        "run", "list", "targets", "add-target", "edit-target", "del-target",
+        "run", "list", "jobs", "targets", "add-target", "edit-target", "del-target",
         "test-target", "push", "link",
     ])
     b.add_argument("--id", type=int, help="备份任务 id（push/link）或异地目标 id（edit/del/test-target）")

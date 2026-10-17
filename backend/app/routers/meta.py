@@ -196,6 +196,21 @@ async def _check_firewall() -> dict:
 
 async def _check_backup() -> dict:
     count, mtime = _recent_backups()
+    # 留痕先于份数：一条每晚都在 SystemExit 的任务，别的任务照样能产出归档，
+    # 只看"目录里最新一份多少天前"就会报 pass，而这条任务的副本其实早就断了。
+    failing = await asyncio.to_thread(backup_service.failing_tasks)
+    if failing:
+        named = "、".join(
+            f"{b['label']}（{b['last_status']}，{b['last_run'] or '时间未知'}）"
+            for b in failing[:5])
+        more = f"，另有 {len(failing) - 5} 条" if len(failing) > 5 else ""
+        return {
+            # fail 而不是 warn：备份是这台机器上唯一一份"出事还能重来"的东西，
+            # 它失败意味着恢复路径已经断了，与磁盘写满同一档。
+            "status": "fail",
+            "detail": f"{len(failing)} 条定时备份任务最近一次执行失败：{named}{more}",
+            "fix": "choyeonctl backup jobs 看每条任务的最近执行与原因，修好后在备份页「立即备份」补跑一次",
+        }
     if count == 0:
         return {"status": "warn", "detail": f"{config.BACKUP_DIR} 下还没有备份", "fix": "choyeonctl backup run"}
     days = (time.time() - (mtime or 0)) / 86400

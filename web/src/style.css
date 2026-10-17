@@ -313,6 +313,9 @@ a:focus-visible,
 .cell-avatar.sm { width: 20px; height: 20px; }
 .cell-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
 .cell-txt { min-width: 0; max-width: 100%; display: flex; flex-direction: column; gap: 1px; }
+/* 「上次执行」那一格：图标 + 时间横排，时间折行时图标不被推走。
+   定时任务页先写、备份页随后复用，所以它在全局而不是某个页面的 scoped 块里。 */
+.cell-lastrun { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cell-name {
   font-size: var(--fs-sm);
   font-weight: 550;

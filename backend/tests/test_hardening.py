@@ -179,11 +179,18 @@ class TestTerminalCleanup(unittest.IsolatedAsyncioTestCase):
             start_new_session=True, stdout=subprocess.DEVNULL,
         )
         self.addCleanup(lambda: os.path.exists(marker) and os.unlink(marker))
-        for _ in range(60):
+        # bash 建立重定向的那一刻就把 marker 创建成空文件，`echo $!` 才是内容到货。
+        # 只判断"文件存在"会在高负载下读到空串——int('') 直接崩，看起来像 reap 坏了，
+        # 其实是被等的进程还没写完。这一等要等的是内容，不是 inode。
+        pid_text = ""
+        for _ in range(100):
             if os.path.exists(marker):
-                break
+                pid_text = Path(marker).read_text(encoding="utf-8").strip()
+                if pid_text:
+                    break
             await asyncio.sleep(0.05)
-        child = int(Path(marker).read_text().strip())
+        self.assertTrue(pid_text, "子进程没把 pid 写进 marker，进程组断言无法进行")
+        child = int(pid_text)
 
         terminal._reap_process(proc)
 
