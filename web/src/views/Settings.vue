@@ -179,10 +179,18 @@ async function commitExpect(v: string) {
   await saveOne('alert_probe_expect', v, prev);
 }
 
+// 通道类配置（值都是"怎么联系到管理员"）。`secret` 决定列表行遮不遮、抽屉用不用密码框：
+// token 和 SMTP 口令遮成 "1234****" 是对的，主机名和收件人遮成 "smtp****" 只是让人看不见
+// 自己填了什么。后端下发时的掩码另由 ALERT_SECRET_KEYS 决定（只读账号一律空串）。
 const CHAN_META = {
-  alert_telegram_bot: { label: 'Telegram Bot Token', placeholder: '如 123456:ABC-DEF…' },
-  alert_telegram_chat: { label: 'Telegram Chat ID', placeholder: '如 987654321' },
-  alert_webhook_url: { label: '通用 Webhook URL', placeholder: 'POST {text}，兼容主流机器人网关' },
+  alert_telegram_bot: { label: 'Telegram Bot Token', placeholder: '如 123456:ABC-DEF…', secret: true },
+  alert_telegram_chat: { label: 'Telegram Chat ID', placeholder: '如 987654321', secret: true },
+  alert_webhook_url: { label: '通用 Webhook URL', placeholder: 'POST {text}，兼容主流机器人网关', secret: true },
+  alert_email_host: { label: '邮件服务器', placeholder: '只填主机名，如 smtp.example.com（端口另有一行）', secret: false },
+  alert_email_from: { label: '发件人', placeholder: '如 panel@example.com，只能一个地址', secret: false },
+  alert_email_to: { label: '收件人', placeholder: '逗号分隔，最多 8 个，如 ops@example.com, oncall@example.com', secret: false },
+  alert_email_user: { label: 'SMTP 用户名', placeholder: '留空表示这台服务器允许匿名发送', secret: false },
+  alert_email_pass: { label: 'SMTP 口令', placeholder: '建议用应用专用口令，不要用账号登录口令', secret: true },
 } as const;
 type ChanKey = keyof typeof CHAN_META;
 const chanOpen = ref(false);
@@ -192,6 +200,11 @@ const chanKey = ref<ChanKey>('alert_telegram_bot');
 const chanDraft = ref('');
 const chanSaving = ref(false);
 const chanMeta = computed(() => CHAN_META[chanKey.value]);
+// 列表行的显示值按 CHAN_META.secret 走，不在模板里各写一遍 mask/原值。
+function chanText(key: ChanKey) {
+  const v = alerts.value[key] ?? '';
+  return CHAN_META[key].secret ? mask(v) : String(v);
+}
 function openChan(key: ChanKey) {
   chanKey.value = key;
   chanDraft.value = alerts.value[key] ?? '';
@@ -442,11 +455,21 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
             <NButton round size="small" tertiary :icon="ico('CloudUploadOutline')" :loading="testing" :disabled="testing" @click="testAlert">发送测试通知</NButton>
           </NSpace>
         </div>
-        <span class="cp-help">每 30 分钟自动巡检：磁盘、CPU、内存、负载、服务 failed、SSL 剩余天数，以及逐个应用的 HTTP 探活（只连 127.0.0.1 的端口，看它有没有应答）。触发后经 Telegram Bot 或 Webhook 推送，同类告警每天最多一次；资源类阈值要连续两轮超标才推送，历史里当轮就留痕。</span>
+        <span class="cp-help">每 30 分钟自动巡检：磁盘、CPU、内存、负载、服务 failed、SSL 剩余天数，以及逐个应用的 HTTP 探活（只连 127.0.0.1 的端口，看它有没有应答）。触发后经 Telegram Bot、通用 Webhook 或邮件（SMTP）推送，同类告警每天最多一次；资源类阈值要连续两轮超标才推送，历史里当轮就留痕。</span>
         <NForm class="cp-set-form" size="small" :label-width="isMobile ? undefined : 150" :label-placement="isMobile ? 'top' : 'left'" style="margin-top: var(--space-3)">
           <CpSettingRow label="Telegram Bot Token" :value="mask(alerts.alert_telegram_bot)" @edit="openChan('alert_telegram_bot')" />
           <CpSettingRow label="Telegram Chat ID" :value="mask(alerts.alert_telegram_chat)" @edit="openChan('alert_telegram_chat')" />
           <CpSettingRow label="通用 Webhook URL" :value="mask(alerts.alert_webhook_url)" @edit="openChan('alert_webhook_url')" />
+          <CpSettingRow label="邮件服务器" :value="chanText('alert_email_host')" @edit="openChan('alert_email_host')" />
+          <CpSettingRow label="SMTP 端口" help="465 走隐式 TLS；其余端口必须服务器支持 STARTTLS，否则面板不会把口令带上明文连接。">
+            <template #control>
+              <NInputNumber :value="alerts.alert_email_port" :min="lim('alert_email_port').min" :max="lim('alert_email_port').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': 'SMTP 端口' }" @update:value="commitNum('alert_email_port', $event)" />
+            </template>
+          </CpSettingRow>
+          <CpSettingRow label="发件人" :value="chanText('alert_email_from')" @edit="openChan('alert_email_from')" />
+          <CpSettingRow label="收件人" :value="chanText('alert_email_to')" @edit="openChan('alert_email_to')" />
+          <CpSettingRow label="SMTP 用户名" :value="chanText('alert_email_user')" @edit="openChan('alert_email_user')" />
+          <CpSettingRow label="SMTP 口令" :value="chanText('alert_email_pass')" @edit="openChan('alert_email_pass')" />
           <CpSettingRow label="磁盘阈值 %" :help="critHint('alert_disk_pct')">
             <template #control>
               <NInputNumber :value="alerts.alert_disk_pct" :min="lim('alert_disk_pct').min" :max="lim('alert_disk_pct').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
@@ -545,7 +568,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       <NDrawerContent :title="chanMeta.label" closable>
         <NForm label-placement="top" size="small">
           <NFormItem :label="chanMeta.label">
-            <NInput v-model:value="chanDraft" :type="'password'" show-password-on="click" :placeholder="chanMeta.placeholder" :input-props="{ 'aria-label': chanMeta.label }" />
+            <NInput v-model:value="chanDraft" :type="chanMeta.secret ? 'password' : 'text'" :show-password-on="chanMeta.secret ? 'click' : undefined" :placeholder="chanMeta.placeholder" :input-props="{ 'aria-label': chanMeta.label }" />
           </NFormItem>
         </NForm>
         <template #footer>

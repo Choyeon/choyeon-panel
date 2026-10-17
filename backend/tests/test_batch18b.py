@@ -41,6 +41,7 @@ SHIPPED = {
     "alert_probe": (1, 0, 1),
     "alert_keep_days": (30, 1, 365),
     "alert_keep_rows": (2000, 100, 20000),
+    "alert_email_port": (587, 1, 65535),
 }
 NUMERIC_KEYS = sorted(SHIPPED)
 
@@ -54,6 +55,7 @@ STUB = {
     "alert_probe": (0, 0, 1),
     "alert_keep_days": (7, 1, 365),
     "alert_keep_rows": (500, 100, 20000),
+    "alert_email_port": (2525, 1, 65535),
 }
 
 

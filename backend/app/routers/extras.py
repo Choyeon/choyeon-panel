@@ -233,7 +233,9 @@ def _validate_alert(k: str, val: str) -> str | None:
             return f"{k} 必须在 {lo}-{hi} 之间，收到 {n}"
     if k in alerts_service.ALERT_URL_KEYS and not is_http_url(val):
         return "Webhook URL 必须以 http:// 或 https:// 开头"
-    return None
+    # 邮件这一组的语义（哪个键是主机、哪个键是地址列表）只有服务层认识，
+    # 键名字面量不许出现在路由里（㊿B），所以这里问的是一个函数要答案。
+    return alerts_service.extra_validate(k, val)
 
 
 @router.post("/api/settings/alerts")

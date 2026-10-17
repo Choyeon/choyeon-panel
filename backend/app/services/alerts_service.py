@@ -1,8 +1,10 @@
 """告警通道与巡检。
 
-三条硬性约定（都是实测踩过的坑）：
-1. 只走 http/https。urllib 默认 handler 认 `file://`，webhook 填 `file:///etc/shadow`
-   会让面板带着自己的权限去读本地文件；发送前和保存时各校验一次。
+硬性约定（都是实测踩过的坑）：
+1. http/https 之外的通道只有 SMTP 这一条，且主机与端口只能来自登记表的配置键。
+   urllib 默认 handler 认 `file://`，webhook 填 `file:///etc/shadow` 会让面板带着自己的
+   权限去读本地文件，所以发送前和保存时各校验一次；邮件走 smtplib，没有 URL 解析面，
+   但换来一条新的明文风险：非 465 端口必须 STARTTLS 成功才允许发（见 `_send_email`）。
 2. `notify()` 返回是否真的投递成功。巡检据此决定要不要写"今天已发过"的标记——
    先前是发之前先标记，通道一抖当天告警就永久丢了。
 3. 解析外部命令输出一律先确认命令跑成功（code=0），再把文本当结构化数据。
@@ -27,13 +29,15 @@ import datetime
 import json
 import os
 import re
+import smtplib
 import urllib.request
 from contextlib import suppress
+from email.message import EmailMessage
 
 from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
-from ..util import PROBE_TIMEOUT, disk_usage_pct, is_http_url, is_unit, run
+from ..util import PROBE_TIMEOUT, disk_usage_pct, is_http_url, is_unit, redact_creds, run
 from . import system_metrics
 from .load_service import LOAD_RISK_PER_CORE
 
@@ -82,6 +86,8 @@ ALERT_LIMITS: dict[str, tuple[int, int, int]] = {
     "alert_probe": (1, 0, 1),
     "alert_keep_days": (30, 1, 365),
     "alert_keep_rows": (2000, 100, 20000),
+    # 邮件服务器端口与 ALERT_TEXT_MAX 里那组 `alert_email_*` 是一对（批次52A）。
+    "alert_email_port": (587, 1, 65535),
 }
 
 # 文本型告警配置：key → 最大字符数。它和上面的 ALERT_LIMITS 合起来就是
@@ -95,14 +101,36 @@ ALERT_TEXT_MAX: dict[str, int] = {
     "alert_telegram_bot": 128,
     "alert_telegram_chat": 64,
     "alert_webhook_url": 512,
+    "alert_email_host": 128,
+    "alert_email_from": 128,
+    "alert_email_to": 256,
+    "alert_email_user": 128,
+    "alert_email_pass": 128,
     "alert_probe_expect": 32,
 }
 
 # 值必须是 http(s) URL 的键：保存时当场拒掉畸形值，比让 notify 在巡检里悄悄不发好。
 ALERT_URL_KEYS = frozenset({"alert_webhook_url"})
 
+# 邮件通道的键名前缀（批次52A）：登记表、掩码、语义校验都按这个前缀认它们，
+# 再加一个邮件键不必去路由或页面里补第二份名单。
+ALERT_EMAIL_PREFIX = "alert_email_"
+# 这一组里的文本键（端口是数值键，不算）：判断"管理员想不想用邮件"要看它们任何一个。
+EMAIL_TEXT_KEYS = tuple(k for k in ALERT_TEXT_MAX if k.startswith(ALERT_EMAIL_PREFIX))
+# 一封通知的预算。通道都是"发完就算"，一台慢 SMTP 服务器不该把整轮巡检拖住。
+NOTIFY_TIMEOUT = 15
+# 465 走隐式 TLS（SMTP_SSL）；其余端口必须 STARTTLS 成功，否则口令就是明文过网。
+EMAIL_SSL_PORT = 465
+# 收件人上限：这里的用途是"叫醒值班的人"，不是拿面板当群发器。
+EMAIL_MAX_TO = 8
+
 # 值里含密钥的通道配置：非管理员读到的一律是空串，否则 bot token 从只读账号漏出去。
-ALERT_SECRET_KEYS = frozenset({"alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url"})
+# 邮件那一组按前缀整组进来（含主机与端口）：与其逐键判断哪个算敏感，不如把
+# "怎么连到我的邮件服务器"整体当配置秘密——只读账号不需要知道这些。
+ALERT_SECRET_KEYS = frozenset(
+    {"alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url"}
+) | frozenset(k for k in tuple(ALERT_LIMITS) + tuple(ALERT_TEXT_MAX)
+              if k.startswith(ALERT_EMAIL_PREFIX))
 
 
 def alert_keys() -> tuple[str, ...]:
@@ -204,13 +232,111 @@ def _post(url: str, payload: dict):
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT) as resp:
         resp.read()
+
+
+def email_addrs(val: str) -> list[str]:
+    """收件人列表可以逗号/分号/空格分隔；拆开也只为校验与 sendmail 的 envelope。"""
+    return [a for a in re.split(r"[,;\s]+", (val or "").strip()) if a]
+
+
+def email_configured() -> bool:
+    """主机、发件人、收件人齐了才算配好（与 telegram 要求 bot+chat 同一口径）。"""
+    return bool((dbm.get_setting("alert_email_host") or "").strip()
+                and (dbm.get_setting("alert_email_from") or "").strip()
+                and email_addrs(dbm.get_setting("alert_email_to") or ""))
+
+
+def email_wanted() -> bool:
+    """这一组填过任何一项，就认为管理员打算用邮件投递。
+
+    配了一半（最常见：填了主机忘了收件人）时，"不发"是对的，"什么都不说"是错的：
+    没有这条判断，他会一直以为告警正在往邮箱里飞。用 `email_wanted()` 而不是
+    `email_configured()` 进 `notify()`，缺的部分由 `_send_email` 抛出来记进日志。
+    """
+    return any((dbm.get_setting(k) or "").strip() for k in EMAIL_TEXT_KEYS)
+
+
+def _send_email(text: str) -> None:
+    """按登记表里的邮件配置发一封纯文本告警。
+
+    这里不吞异常：调用方（`notify()`）负责把失败记进面板日志并让"投递成功"保持 False，
+    测试通知接口据此回 400，管理员才知道自己配的那条通道其实没通。
+    """
+    host = (dbm.get_setting("alert_email_host") or "").strip()
+    port = setting_int("alert_email_port")
+    user = (dbm.get_setting("alert_email_user") or "").strip()
+    pw = (dbm.get_setting("alert_email_pass") or "").strip()
+    sender = (dbm.get_setting("alert_email_from") or "").strip()
+    to = email_addrs(dbm.get_setting("alert_email_to") or "")
+    if not email_configured():
+        raise ValueError("邮件通道配置不全：主机、发件人、收件人都要填")
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = ", ".join(to)
+    first = next((line for line in text.splitlines() if line.strip()), "告警")
+    msg["Subject"] = f"[choyeon-panel] {first[:60]}"
+    msg.set_content(text)
+    smtp = (smtplib.SMTP_SSL if port == EMAIL_SSL_PORT else smtplib.SMTP)(
+        host, port, timeout=NOTIFY_TIMEOUT)
+    try:
+        if port != EMAIL_SSL_PORT:
+            # 不做"降级发送"：服务器不支持 STARTTLS 就失败。口令在这种联机上 login()
+            # 等于广播给路径上任何一个抓包的人，而面板拿的是 root。
+            if not smtp.has_extn("starttls"):
+                raise ValueError(f"{host}:{port} 不支持 STARTTLS，已拒绝发送（凭据不走明文）")
+            smtp.starttls()
+        if user:
+            smtp.login(user, pw)
+        smtp.sendmail(sender, to, msg.as_string())
+    finally:
+        with suppress(Exception):
+            smtp.quit()
 
 
 def _telegram_configured(bot: str, chat: str) -> bool:
     """bot token 形如 `123456:ABC-DEF...`；填反了（chat 当 token）时 URL 会拼出畸形请求。"""
     return bool(bot and chat) and bool(re.fullmatch(r"\d{6,}:[\w-]{20,}", bot.strip()))
+
+
+_EMAIL_LABEL = {"alert_email_host": "邮件服务器", "alert_email_from": "发件人",
+                "alert_email_to": "收件人", "alert_email_user": "SMTP 用户名",
+                "alert_email_pass": "SMTP 口令"}
+_EMAIL_ADDR = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}$")
+
+
+def extra_validate(key: str, val: str) -> str | None:
+    """登记表之外、只有服务层认识的那些语义校验（路由里不许出现 `alert_` 键名，㊿B）。
+
+    长度与整数区间由登记表给，URL 形状由 `ALERT_URL_KEYS` 给，剩下邮件这一组
+    需要看懂"这是一个地址/一串地址/一个主机名"，就写在这里，仍然只有一个出处。
+    """
+    if not key.startswith(ALERT_EMAIL_PREFIX):
+        return None
+    label = _EMAIL_LABEL.get(key, key)
+    if key == "alert_email_host":
+        # 端口另有其键：把 `smtp.x.com:587` 整串当主机名存进去，连接时只会得到一个
+        # 查不到的主机名，而页面看起来是"配好了"。
+        if re.search(r"[\s@:/<>\"'\\]", val):
+            return f"{label}只填主机名，端口另有其键"
+        return None
+    if key in ("alert_email_from", "alert_email_to"):
+        addrs = email_addrs(val)
+        if not addrs:
+            return f"{label}不能为空"
+        if key == "alert_email_from" and len(addrs) > 1:
+            return "发件人只能填一个地址"
+        if len(addrs) > EMAIL_MAX_TO:
+            return f"{label}最多 {EMAIL_MAX_TO} 个，收到 {len(addrs)} 个"
+        bad = next((a for a in addrs if not _EMAIL_ADDR.match(a)), "")
+        if bad:
+            # 原文里可能有换行（粘贴带进来的），报错文本不许把它带回页面
+            return f"{label}不合法：{bad[:64]}"
+        return None
+    if key in ("alert_email_user", "alert_email_pass") and re.search(r"[\r\n]", val):
+        return f"{label}里不能有换行"
+    return None
 
 
 async def notify(text: str) -> bool:
@@ -238,6 +364,13 @@ async def notify(text: str) -> bool:
                 delivered = True
             except Exception as e:  # noqa: BLE001
                 warn("webhook notify failed:", e)
+    if email_wanted():
+        try:
+            await asyncio.to_thread(_send_email, text)
+            delivered = True
+        except Exception as e:  # noqa: BLE001
+            # 服务器回显原文里可能带主机名与账号，出模块前过一道脱敏再截断
+            warn("email notify failed:", redact_creds(str(e))[:160])
     return delivered
 
 

@@ -58,11 +58,24 @@ def _app_code() -> dict[str, str]:
 
 
 # 登记表里每个键的合法样例值（数值取登记的默认值，文本给一个一定过形状校验的串）
+# 邮件那一组的值有语义（主机名、地址列表），"sample" 过不了服务层的形状校验，
+# 所以按键各给一个真能存的；登记表再加邮件键时这张对照表要跟上。
+_EMAIL_SAMPLE = {
+    "alert_email_host": "smtp.example.com",
+    "alert_email_from": "panel@example.com",
+    "alert_email_to": "ops@example.com, oncall@example.com",
+    "alert_email_user": "panel@example.com",
+    "alert_email_pass": "an-app-password",
+}
+
+
 def _sample(key: str) -> str:
     if key in als.ALERT_LIMITS:
         return str(als.ALERT_LIMITS[key][0])
     if key in als.ALERT_URL_KEYS:
         return "https://hooks.example.com/panel"
+    if key in _EMAIL_SAMPLE:
+        return _EMAIL_SAMPLE[key]
     return "sample"
 
 
@@ -88,11 +101,15 @@ class RegistryShapeTests(unittest.TestCase):
         改了登记表而路由留着旧数字，长度校验会按老规矩拦人。"""
         self.assertIs(extras.ALERT_MAX_LEN, als.ALERT_TEXT_MAX)
 
-    def test_含密钥的通道就是那三项(self):
-        """产品口径：bot token / chat id / webhook URL 是秘密，只读账号一律看到空串。
-        新增通道键必须同时决定它算不算秘密，这条用例逼迫当时就做这个决定。"""
+    def test_算秘密的通道键就是Telegram加邮件整组(self):
+        """产品口径：bot token / chat id / webhook URL 是秘密，而"怎么连到我的邮件服务器"
+        整组（含主机与端口）同样按秘密处理，只读账号一律看到空串。
+        新增通道键必须同时决定它算不算秘密，这条用例逼迫当时就做这个决定；邮件那组
+        按前缀整组进来，所以加一个邮件键不必来这里再点一次名（派生规则由 52A 锁住）。"""
         self.assertEqual(set(als.ALERT_SECRET_KEYS),
-                         {"alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url"})
+                         {"alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url"}
+                         | {k for k in als.alert_keys()
+                            if k.startswith(als.ALERT_EMAIL_PREFIX)})
 
     def test_长度上限都是正数(self):
         for k, v in als.ALERT_TEXT_MAX.items():
@@ -107,13 +124,21 @@ class ReaderCoverageTests(unittest.TestCase):
     def setUpClass(cls):
         cls.code = _app_code()
 
+    # 前缀常量给的是"怎么构造/怎么认这一组键"，它本身从不拿去 get_setting，
+    # 所以不算键名（批次52A 的 `ALERT_EMAIL_PREFIX`）。豁免只认这一种行首形态，
+    # 而"这个前缀底下确实有登记的键"由 test_batch52a 反向守着。
+    _PREFIX_CONST = re.compile(r"^[A-Z][A-Z0-9_]*_PREFIX\s*=")
+
     def test_代码里出现的alert键名都必须已登记(self):
         known = set(als.alert_keys())
         bad = {}
         for rel, code in self.code.items():
-            for key in re.findall(r'"(alert_[a-z0-9_]+)"', code):
-                if key not in known:
-                    bad.setdefault(rel, []).append(key)
+            for line in code.splitlines():
+                if self._PREFIX_CONST.match(line):
+                    continue
+                for key in re.findall(r'"(alert_[a-z0-9_]+)"', line):
+                    if key not in known:
+                        bad.setdefault(rel, []).append(key)
         self.assertEqual(bad, {}, f"未登记的键读出来就是 KeyError：{bad}")
 
     def test_每个登记的键都有读者(self):
