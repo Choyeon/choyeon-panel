@@ -404,5 +404,37 @@ class TestRepoHygiene(unittest.TestCase):
                                 "网格 pattern 缺少 patternTransform，会在卡片边缘留下贴边亮线")
 
 
+    def test_ci_的单元测试步必须有可见的超时(self):
+        """后端「单元测试」这一步必须有步级超时，backend job 也要有一个兜底上限。
+
+        没有超时的一步卡住了不会失败，只会一路烧到 GitHub 的 6 小时默认值，而中途任何一次
+        push 都会把它整块取消（实测近 40 个 run 全部 cancelled，最后一次 success 停在
+        2026-10-13）——于是交付里写的「CI 已确认」，确认的从来不是当次代码。步级超时算
+        失败，紧随其后的摘要步骤会把 ut.log 尾部贴成 GitHub 注解，卡在哪一条测试才看得见。
+        """
+        lines = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8").splitlines()
+
+        def own_timeout(marker: str) -> int:
+            idx = [k for k, ln in enumerate(lines) if ln.strip() == marker]
+            self.assertEqual(len(idx), 1, f"ci.yml 里「{marker}」出现 {len(idx)} 次")
+            base = len(lines[idx[0]]) - len(lines[idx[0]].lstrip(" "))
+            for ln in lines[idx[0] + 1:]:
+                if not ln.strip():
+                    continue
+                indent = len(ln) - len(ln.lstrip(" "))
+                if indent <= base:
+                    break
+                m = re.match(r"timeout-minutes:\s*(\d+)\s*$", ln.strip())
+                if m and indent == base + 2:
+                    return int(m.group(1))
+            self.fail(f"「{marker}」没有自己的 timeout-minutes：卡住时几小时后只剩一个 cancelled")
+
+        step = own_timeout("- name: 单元测试")
+        self.assertLessEqual(step, 30,
+                             f"单元测试上限 {step} 分钟太宽：本机 2 核 2m32s 跑完，超过 30 分钟就是卡住")
+        job = own_timeout("backend:")
+        self.assertLessEqual(job, 120, f"backend job 上限 {job} 分钟太宽：CLI 冒烟卡住同样该早点失败")
+
+
 if __name__ == "__main__":
     unittest.main()

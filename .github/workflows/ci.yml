@@ -9,6 +9,11 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
+  # main 上"新提交赢"本身没错，错的是下面这一步没有上限。单元测试会卡死（CI 上实测 55 分钟
+  # 不退出，而本机 2 核 2m32s 跑完），于是一个 run 永远赶不到下一次 push 之前跑完：近 40 个
+  # run 全部 cancelled，最后一次 success 停在 2026-10-13（2c6c5b4），交付说明里的"CI 已确认"
+  # 确认的都不是当次代码。保留抢消，改的是两处超时——让卡住在 25 分钟变成一次带日志的失败，
+  # 而不是烧满 6 小时后被静默取消。改成排队的话，那个 6 小时的僵尸 run 会挡住后面每一批。
   cancel-in-progress: true
 
 permissions:
@@ -18,6 +23,9 @@ jobs:
   backend:
     name: 后端（Python ${{ matrix.py }}）
     runs-on: ubuntu-latest
+    # 没有上限就等于"卡住也不会告诉任何人"：单元测试那步另有更紧的 25 分钟（真会卡的地方
+    # 在那儿），这里兜住 CLI 冒烟与启动冒烟，别让它们默默烧满 GitHub 的 6 小时默认值。
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: backend
@@ -57,6 +65,11 @@ jobs:
         run: mypy app || true
 
       - name: 单元测试
+        # 本机 2 核跑完 run_tests.py 实测 2m32s，而 CI 上这一步跑到 55 分钟仍不退出
+        # （2026-10-17，run 38978654102）——不是慢，是卡住。给 25 分钟上限：超时算 FAIL，
+        # 下一步把 ut.log 尾部贴成 GitHub 注解，卡在哪一条测试从此看得见；没有上限的话它
+        # 一路烧到 6 小时默认值，中途还被下一次 push 静默取消，后端 verdict 就是这么消失的。
+        timeout-minutes: 25
         # run_tests.py 是 unittest 入口：强制把 CP_DATA_DIR 指向会话临时目录并在退出时
         # 清理（unittest 不读 conftest.py，缺这两道保护会污染真实数据目录、在 /tmp 留残留）
         run: |
@@ -66,6 +79,9 @@ jobs:
       # 这样不用登录就能从 API 读到失败点（公开仓库注解是公开的）。
       - name: 单元测试失败摘要
         if: failure()
+        # 这一步在 ut.log 为空时会重跑整套测试（卡住的那套），所以它自己必须有上限：
+        # 没有上限的诊断步骤本身就是一个新的 6 小时黑洞。
+        timeout-minutes: 15
         run: |
           LOG="${{ runner.temp }}/ut.log"
           if [ ! -s "$LOG" ]; then
