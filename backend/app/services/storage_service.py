@@ -345,6 +345,30 @@ def _flag_shared_device(items: list[dict]) -> None:
         it["same_dev_as"] = None if first == it["path"] else first
 
 
+def _mounts_text() -> str:
+    """原始 /proc/mounts 文本。路径与解码方式只有这一处，读法变了两个读者不会分叉。"""
+    with open(MOUNTS_PATH, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def read_mounts() -> list[dict]:
+    """解析过的挂载表；读不到就是空表（调用方自己决定"未知"怎么显示）。"""
+    try:
+        return _parse_mounts(_mounts_text())
+    except OSError:
+        return []
+
+
+def mount_of(path: str) -> str | None:
+    """某个路径**落在哪块盘上**（挂载点），按最长前缀匹配。
+
+    概览的磁盘仪表要的是这个答案：它量的是数据目录所在分区，可标签上写
+    `/root/www/choyeon-panel/data` 既读不出是哪块盘，又把面板自己的安装路径
+    暴露到每个登录者的首页上。存储页签列的也是这张表，两处必须同一个判法。
+    """
+    return _mount_of(path, read_mounts())
+
+
 def _mounts(raw: str | None = None) -> dict:
     """逐个挂载点当场 statvfs：容量、inode、是否只读。
 
@@ -358,8 +382,7 @@ def _mounts(raw: str | None = None) -> dict:
     """
     if raw is None:
         try:
-            with open(MOUNTS_PATH, encoding="utf-8", errors="replace") as fh:
-                raw = fh.read()
+            raw = _mounts_text()
         except OSError:
             return {"ok": False, "items": [], "total": 0, "omitted": 0,
                     "panel_mount": None, "reason": "读不到 " + MOUNTS_PATH}

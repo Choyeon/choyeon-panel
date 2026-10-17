@@ -2,7 +2,9 @@
 /**
  * 通用 echarts 折线/面积封装：调用方只给 xs 与 series，颜色走 --cp-* 变量、
  * 主题切换自动重绘。每实例恰好一个 ResizeObserver，卸载时 dispose + disconnect。
- * 动画恒关（等价 prefers-reduced-motion：3s 轮询刷新时不产生持续补间）。
+ * 动画只在「这一组数据第一次画出来」和「换了另一组数据」（animKey）各播一次：
+ * 稳态是 3s 一次的增量 setOption(notMerge)，全程开着等于每 3s 把所有曲线重补间，
+ * CPU 白烧且补间永远追不上刷新节奏；全关掉则是首屏四条线凭空出现，没有生成过程。
  */
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NSkeleton } from 'naive-ui';
@@ -11,6 +13,7 @@ import { LineChart } from 'echarts/charts';
 import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import { cssVar } from '../theme';
+import { prefersReducedMotion } from '../composables/useTween';
 
 echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomComponent, LegendComponent, CanvasRenderer]);
 
@@ -42,6 +45,10 @@ const props = withDefaults(
     legend?: boolean;
     /** y 轴单位标题，1Panel 写成 "( KB/s )" 这种带括号的弱色注记 */
     yName?: string;
+    /** 换一组数据就换一个值（历史区间 1h→7d、监控「流量/磁盘 IO」）：
+     *  变了才重播一次入场动画——那是另一批数据，从零生成是诚实的；
+     *  同一个序列的 3s 增量刷新不播。 */
+    animKey?: string | number;
   }>(),
   {
     xs: () => [],
@@ -54,6 +61,7 @@ const props = withDefaults(
     dataZoom: false,
     legend: false,
     yName: undefined,
+    animKey: undefined,
   },
 );
 
@@ -98,7 +106,11 @@ let zoom = { start: 0, end: 100 };
  *  表现为"点掉『下行』之后 ≤3s 它自己又出现，永远关不掉"。 */
 let legendSelected: Record<string, boolean> | null = null;
 
-function buildOption() {
+/** 入场动画是否已经播过。theme 切换、3s 增量刷新都会重建 option，只有第一次
+ *  真正画出数据的那一帧（以及 animKey 换掉之后的那一帧）允许播。 */
+let animated = false;
+
+function buildOption(animate: boolean) {
   const label = cssVar('--cp-text-dim', '#8a90a0');
   const axisLine = cssVar('--cp-border-strong', '#2c2c33');
   const split = cssVar('--cp-line', '#eef1f7');
@@ -188,7 +200,10 @@ function buildOption() {
           ],
         }
       : {}),
-    animation: false,
+    animation: animate,
+    animationDuration: 850,
+    // as const：抽成函数后字面量会被推宽成 string，setOption 的 AnimationEasing 联合类型接不上
+    animationEasing: 'cubicOut' as const,
   };
 }
 
@@ -203,7 +218,10 @@ function render() {
     const sel: any = (chart.getOption() as any)?.legend?.[0]?.selected;
     if (sel && typeof sel === 'object') legendSelected = { ...sel };
   }
-  chart?.setOption(buildOption(), { notMerge: true });
+  // 空数据不播：给一条还不存在的线做入场动画，等到数据到货时动画早演完了。
+  const animate = !animated && props.xs.length > 0 && !prefersReducedMotion();
+  if (animate) animated = true;
+  chart?.setOption(buildOption(animate), { notMerge: true });
 }
 
 onMounted(() => {
@@ -220,6 +238,8 @@ onMounted(() => {
 });
 
 watch(() => [props.xs, props.series], render);
+// 区间/指标切换：换的是另一批数据，把入场标记放下，等下一次数据到货那一帧重播一次。
+watch(() => props.animKey, () => { animated = false; });
 
 onBeforeUnmount(() => {
   ro?.disconnect();

@@ -107,24 +107,56 @@ class DiskPartitionSourceTests(unittest.TestCase):
 
         with mock.patch.object(sm.shutil, "disk_usage", fake_usage), \
              mock.patch.object(sm.os.path, "isdir", lambda p: isdir), \
-             mock.patch.object(sm.config, "DATA_DIR", data_dir):
-            du, path = sm._disk_sample()
-        return du, path, seen
+             mock.patch.object(sm.config, "DATA_DIR", data_dir), \
+             mock.patch.object(sm, "_disk_mount", lambda p: "/mnt/cp"):
+            du, path, mount = sm._disk_sample()
+        return du, path, mount, seen
 
     def test_it_reads_the_data_dir_partition(self):
-        du, path, seen = self._capture("/srv/cp-data")
+        du, path, mount, seen = self._capture("/srv/cp-data")
         self.assertEqual(seen, ["/srv/cp-data"])
         self.assertEqual(path, "/srv/cp-data")
+        self.assertEqual(mount, "/mnt/cp", "标签要报盘；数据目录只是「我们从哪儿看的」")
         self.assertEqual((du.total, du.used), (1000, 400))
 
     def test_missing_data_dir_falls_back_and_says_which_path_it_used(self):
-        du, path, seen = self._capture("/srv/cp-data", isdir=False)
+        du, path, _mount, seen = self._capture("/srv/cp-data", isdir=False)
         self.assertEqual(seen, ["/"])
         self.assertEqual(path, "/", "退回根分区可以，但必须把实际读到的路径带出去")
 
+    def test_the_mount_name_comes_from_the_mount_table(self):
+        """盘的名字只有一个读者：/proc/mounts 那份解析在 storage_service 里。
+
+        这里不 mock `_disk_mount`，改 mock 挂载表本身，验的是「仪表那块盘确实按最长
+        前缀匹配到挂载点」，而不是又造一个只在本用例里成立的字符串。
+        """
+        raw = ("/dev/sda1 / ext4 rw 0 0\n"
+               "/dev/sdb1 /srv/cp-data ext4 rw 0 0\n"
+               "proc /proc proc rw 0 0\n")
+        with mock.patch.object(ss, "_mounts_text", lambda: raw):
+            self.assertEqual(ss.mount_of("/srv/cp-data/app.db"), "/srv/cp-data")
+            self.assertEqual(ss.mount_of("/etc/hostname"), "/")
+        with mock.patch.object(ss, "_mounts_text", mock.Mock(side_effect=OSError)):
+            self.assertIsNone(ss.mount_of("/srv/cp-data"), "读不到挂载表就是未知，不是根分区")
+
+    def test_the_mount_name_is_cached_for_the_sampling_loop(self):
+        """/system/stats 每 3s 一跳，挂载表没理由每 3s 重读一遍。"""
+        sm._mount_cache.clear()
+        calls = []
+
+        def fake_text():
+            calls.append(1)
+            return "/dev/sda1 / ext4 rw 0 0\n"
+
+        with mock.patch.object(ss, "_mounts_text", fake_text):
+            self.assertEqual(sm._disk_mount("/srv/d"), "/")
+            self.assertEqual(sm._disk_mount("/srv/d"), "/")
+        self.assertEqual(len(calls), 1, "TTL 内同一路径只读一次挂载表")
+        sm._mount_cache.clear()
+
     def test_both_sampling_paths_use_the_helper(self):
         src = (SRC / "backend/app/services/system_metrics.py").read_text(encoding="utf-8")
-        self.assertEqual(src.count("du, disk_path = _disk_sample()"), 2,
+        self.assertEqual(src.count("du, disk_path, disk_mount = _disk_sample()"), 2,
                          "psutil 与 /proc 两条采样路径都要走同一个出处")
         self.assertNotIn('disk_usage("/")', src.replace("shutil.disk_usage(path)", ""))
 
@@ -148,15 +180,21 @@ class DiskPartitionSourceTests(unittest.TestCase):
              mock.patch.object(sm.os, "getloadavg", lambda: (0.1, 0.2, 0.3)), \
              mock.patch.object(sm, "_uptime", lambda: 10.0), \
              mock.patch.object(sm, "_disk_sample",
-                               lambda: (mock.Mock(total=1000, used=400, free=600), "/srv/d")):
+                               lambda: (mock.Mock(total=1000, used=400, free=600),
+                                        "/srv/d", "/srv")):
             out = sm._proc_raw()
         self.assertEqual(out["diskPath"], "/srv/d")
         self.assertEqual(out["diskTotal"], 1000)
+        self.assertEqual(out["diskMount"], "/srv", "raw 读了哪块盘，载荷就要报哪块盘")
 
     def test_dashboard_names_the_partition_it_drew(self):
         src = (SRC / "web/src/views/Dashboard.vue").read_text(encoding="utf-8")
+        # 标签=挂载点，出处=数据目录：两个都要在，但只有前者能出现在标签上
+        self.assertIn("stat.value.diskMount", src)
         self.assertIn("stat.value.diskPath", src)
         self.assertNotIn("label: '磁盘 /'", src, "标签写死 / 就是在指着一块没读过的盘")
+        self.assertNotIn("磁盘 ${stat.value.diskPath", src,
+                         "标签报目录：读的人看不出是哪块盘，还把面板自己的安装路径摊给每个登录者")
 
     def test_snapshot_relayed_the_path_it_received(self):
         src = (SRC / "backend/app/services/system_metrics.py").read_text(encoding="utf-8")

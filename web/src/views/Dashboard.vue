@@ -10,6 +10,7 @@ import { useVisiblePoll } from '../composables/useVisiblePoll';
 import EmptyBox from '../components/EmptyBox.vue';
 import MetricChart from '../components/MetricChart.vue';
 import StatGauge from '../components/StatGauge.vue';
+import TweenNumber from '../components/TweenNumber.vue';
 import InfoList, { type InfoItem } from '../components/InfoList.vue';
 
 const router = useRouter();
@@ -102,45 +103,81 @@ const loadVal = computed(() => {
   const l = num((stat.value.load || [])[0]);
   return l != null && cores.value ? Math.round((l / cores.value) * 10000) / 100 : null;
 });
-function band(v: number | null, warn: number, err: number) {
-  if (v == null) return 'var(--cp-brand)';
+type Tone = 'brand' | 'warn' | 'err';
+const TONE_COLOR: Record<Tone, string> = {
+  brand: 'var(--cp-brand)', warn: 'var(--cp-warn)', err: 'var(--cp-err)',
+};
+/**
+ * 档位只有一个判法：环的颜色、环外侧那条警戒刻度、越线后的底光全部从这里派生。
+ * 再多一处比大小，就会出现「环已经红了、刻度却还画在环内」这种自相矛盾的仪表。
+ */
+function toneOf(v: number | null, warn: number, err: number): Tone {
   // 阈值 ≤0 一律当作"这一档没给"，不染红：载荷缺字段时宁可中性，也不要一个平白的红仪表。
-  if (err > 0 && v >= err) return 'var(--cp-err)';
-  if (warn > 0 && v >= warn) return 'var(--cp-warn)';
-  return 'var(--cp-brand)';
+  if (v == null) return 'brand';
+  if (err > 0 && v >= err) return 'err';
+  if (warn > 0 && v >= warn) return 'warn';
+  return 'brand';
 }
 const loadWord = computed(() => {
   const v = loadVal.value;
   if (v == null) return '采集中';
   return v < 70 ? '运行流畅' : v < 100 ? '有一定压力' : '负载偏高';
 });
-const gauges = computed(() => [
-  {
-    key: 'cpu', label: 'CPU', percent: cpuVal.value, text: cpuVal.value == null ? '-' : String(cpuVal.value),
-    unit: '%', detail: `${cores.value || '?'} 核`,
-    color: band(cpuVal.value, num(stat.value.cpuWarnPct) ?? 0, num(stat.value.cpuCritPct) ?? 0),
-  },
-  {
-    key: 'mem', label: '内存', percent: memVal.value, text: memVal.value == null ? '-' : String(memVal.value),
-    unit: '%', detail: `${fmtBytes(stat.value.memUsed || 0)} / ${fmtBytes(stat.value.memTotal || 0)}`,
-    color: band(memVal.value, num(stat.value.memWarnPct) ?? 0, num(stat.value.memCritPct) ?? 0),
-  },
-  {
-    key: 'load', label: '负载', percent: loadVal.value, text: loadWord.value, unit: '',
-    // 首轮采样还没到货时 text 是"采集中"，detail 不能同时写 "1min 0.00"——
-    // 同一格里两个互相矛盾的读数，用户会以为负载真的是 0。
-    detail: stat.value.load?.length ? `1min ${Number(stat.value.load[0]).toFixed(2)}` : '1min —',
-    // 这一格的两档是物理口径（相对核数：70% 已排队、100% 每核一个），不是设置页那条线：
-    // alert_load1_x 存的是饱和之上的倍数（默认 ×2 → 环要冲到 200% 才出声），
-    // 拿它当变色档位等于让负载环永远不会红。详见 alerts_service.resource_thresholds()。
-    color: band(loadVal.value, 70, 100),
-  },
-  {
-    key: 'disk', label: `磁盘 ${stat.value.diskPath || '/'}`, percent: diskVal.value, text: diskVal.value == null ? '-' : String(diskVal.value),
-    unit: '%', detail: `${fmtBytes(stat.value.diskUsed || 0)} / ${fmtBytes(stat.value.diskTotal || 0)}`,
-    color: band(diskVal.value, num(stat.value.diskWarnPct) ?? 0, num(stat.value.diskCritPct) ?? 0),
-  },
-]);
+// 标签报「哪块盘」（挂载点），不报我们从哪个目录量到的：`/root/www/choyeon-panel/data`
+// 既读不出是哪块盘，又把面板自己的安装路径摊给每个登录者。挂载表读不到时只写「磁盘」，
+// 不许在没有挂载表的那一瞬间自称 `/`；量到的目录退到 note 里，悬停和读屏仍然拿得到。
+const diskMount = computed(() => String(stat.value.diskMount || ''));
+const diskLabel = computed(() => (diskMount.value ? `磁盘 ${diskMount.value}` : '磁盘'));
+
+interface GaugeRow {
+  key: string;
+  label: string;
+  percent: number | null;
+  text: string;
+  unit: string;
+  detail: string;
+  note: string;
+  warn: number | null;
+  crit: number | null;
+}
+const gauges = computed(() => {
+  const rows: GaugeRow[] = [
+    {
+      key: 'cpu', label: 'CPU', percent: cpuVal.value, text: cpuVal.value == null ? '-' : String(cpuVal.value),
+      unit: '%', detail: `${cores.value || '?'} 核`, note: '',
+      warn: num(stat.value.cpuWarnPct), crit: num(stat.value.cpuCritPct),
+    },
+    {
+      key: 'mem', label: '内存', percent: memVal.value, text: memVal.value == null ? '-' : String(memVal.value),
+      unit: '%', detail: `${fmtBytes(stat.value.memUsed || 0)} / ${fmtBytes(stat.value.memTotal || 0)}`,
+      note: '',
+      warn: num(stat.value.memWarnPct), crit: num(stat.value.memCritPct),
+    },
+    {
+      key: 'load', label: '负载', percent: loadVal.value, text: loadWord.value, unit: '',
+      // 首轮采样还没到货时 text 是"采集中"，detail 不能同时写 "1min 0.00"——
+      // 同一格里两个互相矛盾的读数，用户会以为负载真的是 0。
+      detail: stat.value.load?.length ? `1min ${Number(stat.value.load[0]).toFixed(2)}` : '1min —',
+      note: '',
+      // 这一格的两档是物理口径（相对核数：70% 已排队、100% 每核一个），不是设置页那条线：
+      // alert_load1_x 存的是饱和之上的倍数（默认 ×2 → 环要冲到 200% 才出声），
+      // 拿它当变色档位等于让负载环永远不会红。详见 alerts_service.resource_thresholds()。
+      warn: 70, crit: 100,
+    },
+    {
+      key: 'disk', label: diskLabel.value, percent: diskVal.value,
+      text: diskVal.value == null ? '-' : String(diskVal.value),
+      unit: '%', detail: `${fmtBytes(stat.value.diskUsed || 0)} / ${fmtBytes(stat.value.diskTotal || 0)}`,
+      note: stat.value.diskPath ? `量自数据目录 ${stat.value.diskPath}` : '',
+      warn: num(stat.value.diskWarnPct), crit: num(stat.value.diskCritPct),
+    },
+  ];
+  // 判档只在 toneOf 一次，颜色和底光用的是同一个返回值——不是各自再比一遍
+  return rows.map((r) => {
+    const tone = toneOf(r.percent, r.warn ?? 0, r.crit ?? 0);
+    return { ...r, tone, color: TONE_COLOR[tone] };
+  });
+});
 
 /* ---------- 监控：网卡选择 + 流量/磁盘 IO 段选 + 拖动条曲线 ---------- */
 type MonMode = 'net' | 'io';
@@ -285,6 +322,9 @@ const diskSeries = computed(() => {
   });
   return [{ name: '使用率 %', color: '--cp-warn', data, area: true }];
 });
+// 历史那条线采的是同一个目录所在的那块盘，标题就报同一个名字——
+// 上面仪表说 `/`、下面曲线说别的，等于一页两个口径，读的人不知道信谁。
+const diskHistTitle = computed(() => `磁盘使用率（%）${diskMount.value ? ` · ${diskMount.value}` : ''}`);
 const loadSeries = computed(() => [
   { name: 'load1', color: '--cp-brand-accent', data: (hist.value?.load1 || []) as (number | null)[], area: true },
   { name: '进程数', color: '--cp-text-dim', data: (hist.value?.procs || []) as (number | null)[], axis: 1 },
@@ -487,7 +527,7 @@ onBeforeUnmount(() => {
 <template>
   <NSpace vertical :size="16">
     <!-- hero -->
-    <div class="hero">
+    <div class="hero cp-rise">
       <div style="min-width: 0">
         <div class="hero-greet">{{ greet }}，欢迎回到 <b>choyeon panel</b></div>
         <div class="hero-host">
@@ -512,7 +552,7 @@ onBeforeUnmount(() => {
     <div class="home-grid">
       <div class="home-main">
         <!-- 概览：1Panel 的卡片高 166px，格子里"标签在上、数字在下"，数字是 link 按钮 -->
-        <NCard size="small" class="ov-card">
+        <NCard size="small" class="ov-card cp-rise" style="--i:1">
           <template #header><span class="section-title">概览</span></template>
           <div class="ov-row">
             <div
@@ -521,27 +561,31 @@ onBeforeUnmount(() => {
               @click="router.push(it.to)" @keyup.enter="router.push(it.to)" @keyup.space.prevent="router.push(it.to)"
             >
               <div class="ov-label">{{ it.label }}</div>
-              <div class="ov-num">{{ it.value ?? '—' }}</div>
+              <div class="ov-num">
+                <TweenNumber v-if="it.value != null" :value="it.value" />
+                <template v-else>—</template>
+              </div>
               <div class="ov-note cp-prose">{{ ov ? it.note : (ovError || '读取中') }}</div>
             </div>
           </div>
           <EmptyBox v-if="ovError" :text="`概览计数获取失败：${ovError}，30 秒轮询会自动重试`" />
         </NCard>
 
-        <NCard size="small">
+        <NCard size="small" class="cp-rise" style="--i:2">
           <template #header><span class="section-title">状态</span></template>
           <template #header-extra>
-            <NText depth="3" class="sfoot">每 3 秒采样</NText>
+            <NText depth="3" class="sfoot"><span class="dot ok live" aria-hidden="true"></span>每 3 秒采样</NText>
           </template>
           <div class="gauge-row">
             <StatGauge
-              v-for="g in gauges" :key="g.key" :percent="g.percent" :text="g.text" :unit="g.unit"
-              :label="g.label" :detail="g.detail" :color="g.color"
+              v-for="(g, gi) in gauges" :key="g.key" class="cp-rise" :style="`--i:${gi}`"
+              :percent="g.percent" :text="g.text" :unit="g.unit" :label="g.label" :detail="g.detail"
+              :color="g.color" :tone="g.tone" :warn="g.warn" :crit="g.crit" :note="g.note"
             />
           </div>
         </NCard>
 
-        <NCard size="small">
+        <NCard size="small" class="cp-rise" style="--i:3">
           <template #header><span class="section-title">监控</span></template>
           <template #header-extra>
             <NSpace align="center" :size="8">
@@ -562,7 +606,7 @@ onBeforeUnmount(() => {
             <span v-else-if="!nicList.length" class="cp-chip down">未识别到物理网卡</span>
           </div>
           <MetricChart
-            :xs="monXs" :series="monSeries" height="383px" :loading="rtLoading"
+            :xs="monXs" :series="monSeries" height="383px" :loading="rtLoading" :anim-key="monMode"
             :y-fmt="rateAxisFmt" :tip-fmt="rateTipFmt" y-name="( B/s )" data-zoom legend
           />
           <NText depth="3" class="chart-foot">
@@ -572,13 +616,13 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="home-aside">
-        <NCard size="small">
+        <NCard size="small" class="cp-rise" style="--i:1">
           <template #header><span class="section-title">系统信息</span></template>
           <InfoList :items="sysItems" />
           <div v-if="infoError" class="cp-help">系统信息获取失败：{{ infoError }}——上面几行为空是因为没取到，不是这台机器没有该项</div>
         </NCard>
 
-        <NCard size="small">
+        <NCard size="small" class="cp-rise" style="--i:2">
           <template #header><span class="section-title">{{ appCardTitle }}</span></template>
           <template #header-extra>
             <NButton text type="primary" size="tiny" aria-label="查看全部应用" @click="router.push('/apps')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
@@ -595,7 +639,7 @@ onBeforeUnmount(() => {
           <div v-else-if="appsError" class="cp-help">应用列表最近一次获取失败：{{ appsError }}——上面是上一轮取到的结果</div>
         </NCard>
 
-        <NCard size="small">
+        <NCard size="small" class="cp-rise" style="--i:3">
           <template #header><span class="section-title">服务健康</span></template>
           <template #header-extra>
             <NButton text type="primary" size="tiny" aria-label="查看全部服务" @click="router.push('/services')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
@@ -639,16 +683,16 @@ onBeforeUnmount(() => {
           <template #header><span class="section-title">网络流量（bytes/s）</span></template>
           <EmptyBox v-if="histError" :text="`历史数据获取失败：${histError}，下个周期自动重试`" />
           <EmptyBox v-else-if="histEmpty" text="暂无历史数据：需采样器运行约 30 秒后出现首点" />
-          <MetricChart v-else :xs="histXs" :series="netSeries" height="200px" :loading="histLoading"
+          <MetricChart v-else :xs="histXs" :series="netSeries" height="200px" :loading="histLoading" :anim-key="histRange"
                        :y-fmt="rateAxisFmt" :tip-fmt="rateTipFmt" data-zoom legend />
         </NCard>
       </NGridItem>
       <NGridItem span="1">
         <NCard size="small">
-          <template #header><span class="section-title">磁盘使用率（%）</span></template>
+          <template #header><span class="section-title">{{ diskHistTitle }}</span></template>
           <EmptyBox v-if="histError" :text="`历史数据获取失败：${histError}`" />
           <EmptyBox v-else-if="histEmpty" text="暂无历史数据：等待采样器写入首点" />
-          <MetricChart v-else :xs="histXs" :series="diskSeries" height="200px" :loading="histLoading"
+          <MetricChart v-else :xs="histXs" :series="diskSeries" height="200px" :loading="histLoading" :anim-key="histRange"
                        :y-fmt="(v: number) => v + '%'" data-zoom legend />
         </NCard>
       </NGridItem>
@@ -657,7 +701,7 @@ onBeforeUnmount(() => {
           <template #header><span class="section-title">磁盘 IO（bytes/s）</span></template>
           <EmptyBox v-if="histError" :text="`历史数据获取失败：${histError}`" />
           <EmptyBox v-else-if="histEmpty" text="暂无历史数据：等待采样器写入首点" />
-          <MetricChart v-else :xs="histXs" :series="ioSeries" height="200px" :loading="histLoading"
+          <MetricChart v-else :xs="histXs" :series="ioSeries" height="200px" :loading="histLoading" :anim-key="histRange"
                        :y-fmt="rateAxisFmt" :tip-fmt="rateTipFmt" data-zoom legend />
         </NCard>
       </NGridItem>
@@ -666,7 +710,7 @@ onBeforeUnmount(() => {
           <template #header><span class="section-title">负载与进程数</span></template>
           <EmptyBox v-if="histError" :text="`历史数据获取失败：${histError}`" />
           <EmptyBox v-else-if="histEmpty" text="暂无历史数据：等待采样器写入首点" />
-          <MetricChart v-else :xs="histXs" :series="loadSeries" height="200px" :loading="histLoading" data-zoom legend />
+          <MetricChart v-else :xs="histXs" :series="loadSeries" height="200px" :loading="histLoading" :anim-key="histRange" data-zoom legend />
         </NCard>
       </NGridItem>
     </NGrid>
@@ -677,19 +721,22 @@ onBeforeUnmount(() => {
         <NCard size="small">
           <template #header><span class="section-title">进程 Top 10</span></template>
           <template #header-extra>
-            <NButton text type="primary" size="tiny" @click="procsOpen = !procsOpen">
+            <NButton text type="primary" size="tiny" :aria-expanded="procsOpen" @click="procsOpen = !procsOpen">
               {{ procsOpen ? '收起' : '展开' }}
-              <NIcon :component="icons.ChevronForwardOutline" :style="procsOpen ? 'transform: rotate(90deg)' : ''" />
+              <NIcon :component="icons.ChevronForwardOutline" class="proc-chev" :style="procsOpen ? 'transform: rotate(90deg)' : ''" />
             </NButton>
           </template>
-          <div v-show="!procsOpen" class="sfoot">
+          <!-- 折叠只做进出挂载，不给它套 out-in 模式的 <Transition>：out-in 要等离场那一拍播完才挂新内容，
+               而 transitionend 依赖帧调度——页面拿不到帧时列表就永远不出现（Shell.vue 也因「多等一拍」
+               明确不用 out-in）。展开走 cp-rise 逐行错峰，收起瞬时，不需要戏。 -->
+          <div v-if="!procsOpen" class="sfoot">
             {{ procs.length ? `CPU 最高：${procs[0]?.name || '-'}（${procs[0]?.cpu}%）· 共 ${procs.length} 条` : '暂无进程数据' }}
           </div>
-          <div v-show="procsOpen">
+          <div v-else>
             <div class="proc-row proc-head">
               <span>PID</span><span>进程</span><span class="proc-user">用户</span><span class="num">CPU</span><span class="num">内存</span>
             </div>
-            <div v-for="p in procs" :key="p.pid" class="proc-row">
+            <div v-for="(p, pi) in procs" :key="p.pid" class="proc-row cp-rise" :style="`--i:${pi}`">
               <span class="proc-pid">{{ p.pid }}</span>
               <span class="proc-name cp-break">{{ p.name }}</span>
               <span class="proc-user">{{ p.user }}</span>
@@ -765,6 +812,7 @@ onBeforeUnmount(() => {
 }
 .ov-item {
   flex: 1 1 105px;
+  position: relative;
   background: var(--cp-bg-1);
   border-bottom: 1px solid var(--cp-line);
   padding: var(--space-3) var(--space-2);
@@ -774,6 +822,15 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 .ov-item:hover, .ov-item:focus-visible { background: var(--cp-hover); }
+/* 悬停时顶部亮出一条主色细线（只缩放，不改尺寸）：这一格是「点进去」的入口，
+   仅背景加深半档读起来像整块卡片在呼吸，说不清它到底能不能点。 */
+.ov-item::after {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px;
+  background: var(--cp-brand); transform: scaleX(0); transform-origin: left;
+  transition: transform var(--dur) var(--ease);
+}
+.ov-item:hover::after, .ov-item:focus-visible::after { transform: scaleX(1); }
+.ov-item.danger::after { background: var(--cp-err); }
 .ov-item + .ov-item { border-left: 1px solid var(--cp-line); }
 .ov-item:focus-visible { outline: 2px solid var(--cp-brand); outline-offset: -2px; }
 .ov-label { font-size: var(--fs-md); color: var(--cp-text-dim); }
@@ -827,10 +884,16 @@ onBeforeUnmount(() => {
   padding: 8px 10px; min-height: 48px;
   border: 1px solid var(--cp-border); border-radius: var(--radius-xl);
   cursor: pointer;
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease),
+    transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .app-row + .app-row { margin-top: var(--space-2); }
-.app-row:hover { border-color: var(--cp-brand); background: var(--cp-hover); }
+/* hover 抬起 1px + 同色薄影：位移走 transform，不进布局，所以同一列其它行不会跟着跳。
+   键盘焦点给同一档，否则只用键盘的人整页读不到"这行能点"。 */
+.app-row:hover, .app-row:focus-visible {
+  border-color: var(--cp-brand); background: var(--cp-hover);
+  transform: translateY(-1px); box-shadow: 0 3px 12px color-mix(in srgb, var(--cp-brand) 14%, transparent);
+}
 /* 应用名 / failed 单元名交给 .cp-prose：这一格原先写着 overflow:hidden + text-overflow:ellipsis
    却没有 nowrap，所以它一直是「自然折行、永远裁不到」——那两条声明是死的，却会在下一次有人
    补上 nowrap 时立刻生效，把长单元名（unattended-upgrades.service）切成读不懂的半截。
@@ -858,6 +921,16 @@ onBeforeUnmount(() => {
 .proc-head { color: var(--cp-text-mute); font-size: var(--fs-2xs); border-bottom: 1px solid var(--cp-line); }
 .proc-pid { color: var(--cp-text-mute); }
 .proc-name { min-width: 0; }
+/* 展开箭头跟着转 90°：它指的方向就是列表出现的方向，瞬跳会让人觉得是换了个图标 */
+.proc-chev { transition: transform var(--dur) var(--ease); }
+/* 「每 3 秒采样」旁边那颗呼吸点：颜色沿用全站唯一的 .dot.ok，这里只加"它在动"。
+   这一屏确实是活的（tick 每 3s 到货），轮询在后台标签页会停，但那会儿这张屏根本不可见，
+   不会有人读到「停在原地却还在呼吸」。 */
+.dot.live { animation: live-beat 2.4s var(--ease) infinite; }
+@keyframes live-beat {
+  0%, 100% { opacity: 0.3; transform: scale(0.78); }
+  50% { opacity: 1; transform: scale(1); }
+}
 /* 手机档五列硬挤：固定四列 264px + 4×8 gap 后，进程名只剩 ~20px，整列白搭。
    ≤640px 藏掉「用户」列（PID 已能定位进程），把 72px+gap 还给进程名。 */
 @media (max-width: 640px) {
