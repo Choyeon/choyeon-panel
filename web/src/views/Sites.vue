@@ -204,7 +204,9 @@ const siteColumns: any[] = [
         ? h('span', { class: 'cell-sub' }, '非面板应用')
         : h('span', { class: `st ${r.active ? 'ok' : 'idle'}` }, [h('span', { class: `dot ${r.active ? 'ok' : 'idle'}` }), r.active ? '运行中' : '已停止']),
   },
-  { title: '代理', key: 'flags', width: 210, render: (r: any) => h(NSpace, { size: 4, wrap: false }, () => chips(r)) },
+  // 标签行整项换行，不写 wrap:false：nowrap 时最先被挤扁的是尾部标签（它会缩到 1ch 再逐字断行），
+  // 而这一列的标签组合数不固定（HTTP/HTTPS + 跳转 + WebSocket），宽度不该由装饰性标签决定。
+  { title: '代理', key: 'flags', width: 210, render: (r: any) => h(NSpace, { size: 4 }, () => chips(r)) },
   {
     title: '配置文件',
     key: 'file',
@@ -288,7 +290,10 @@ const certColumns: any[] = [
     width: 150,
     render: (c: any) => {
       const meta = SITE_STATUS[c.status] || SITE_STATUS.unknown;
-      return h(NSpace, { size: 4, wrap: false }, () => [
+      // 「即将到期」(56) + 「已吊销/过期」(76) + 间距 = 136，而 150 这一列只有 126 可用。
+      // nowrap 时这一格的最小内容宽就是 136，浏览器只能把整列撑宽（实测 150→202）并挤掉覆盖域名列；
+      // 整项换行后最小内容宽回到 76，列宽守住声明值，第二枚标签落到下一行。
+      return h(NSpace, { size: 4 }, () => [
         h(NTag, { size: 'small', bordered: false, type: meta.type }, { default: () => meta.text }),
         ...(c.invalid ? [h(NTag, { size: 'tiny', bordered: false, type: 'error' }, { default: () => '已吊销/过期' })] : []),
       ]);
