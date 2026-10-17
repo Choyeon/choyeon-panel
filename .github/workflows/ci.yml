@@ -34,7 +34,7 @@ jobs:
       matrix:
         py: ['3.11', '3.12']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -135,7 +135,7 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -170,7 +170,7 @@ jobs:
     name: Shell 脚本检查
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: ShellCheck
         run: |
           sudo apt-get update -qq
@@ -183,6 +183,6 @@ jobs:
     name: systemd unit 校验
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: systemd-analyze verify
         run: systemd-analyze verify ./deploy/choyeon-panel.service || true
