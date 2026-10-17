@@ -9,7 +9,10 @@
 
 import asyncio
 import os
+import pathlib
+import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -71,6 +74,26 @@ class FileResponseCompletionTests(unittest.IsolatedAsyncioTestCase):
         start = next(m for m in sent if m["type"] == "http.response.start")
         self.assertEqual(start["status"], 200)
         self.assertTrue(any(m["type"] == "http.response.body" and not m.get("more_body") for m in sent))
+
+
+class StaleSessionSweepTests(unittest.TestCase):
+    """看门狗用 os._exit 退出，atexit 不会跑：遗留目录必须由下一轮自己收。"""
+
+    def test_只收过期目录_还在跑的那轮不能动(self):
+        import run_tests
+
+        root = pathlib.Path(tempfile.mkdtemp(prefix="cp_unittest_"))
+        fresh = pathlib.Path(tempfile.mkdtemp(prefix="cp_unittest_"))
+        (fresh / "inner").mkdir()
+        (fresh / "inner" / "f.txt").write_text("x")
+        self.addCleanup(shutil.rmtree, fresh, True)
+        old_ts = time.time() - 2 * 86_400
+        os.utime(root, (old_ts, old_ts))
+        removed = run_tests.sweep_stale_sessions()
+        self.assertFalse(root.exists(), "超过一天的遗留树必须被收掉")
+        self.assertTrue(fresh.is_dir() and (fresh / "inner" / "f.txt").exists(),
+                        "新建的会话目录不能被上一轮的扫描误删")
+        self.assertGreaterEqual(removed, 1)
 
 
 class WatchdogWiringTests(unittest.TestCase):

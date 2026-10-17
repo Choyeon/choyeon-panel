@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -62,8 +63,31 @@ class _Runner(unittest.TextTestRunner):
         super().__init__(**kw)
 
 
+def sweep_stale_sessions(max_age_sec: int = 86_400) -> int:
+    """收掉上一轮没来得及回收的会话临时目录，返回真的删掉的个数。
+
+    `atexit` 在 `os._exit()` 与 SIGKILL 下不执行：看门狗每抓一次挂死（exit=True 走
+    `os._exit`）、每被 `timeout`/Ctrl-C 打断一次，就会在 /tmp 留一个 `cp_unittest_*`
+    整树。整套跑完不到 3 分钟，所以 24 小时以外的绝不可能是还在跑的另一轮。
+    """
+    removed = 0
+    for cand in Path(tempfile.gettempdir()).glob("cp_unittest_*"):
+        try:
+            if not cand.is_dir() or time.time() - cand.stat().st_mtime < max_age_sec:
+                continue
+            shutil.rmtree(cand, ignore_errors=True)
+        except OSError:
+            continue
+        if not cand.exists():
+            removed += 1
+    return removed
+
+
 def main() -> int:
     external_data_dir = os.environ.pop("CP_DATA_DIR", "")
+    stale = sweep_stale_sessions()
+    if stale:
+        print(f"[run_tests] 回收了 {stale} 个上一轮遗留的会话临时目录", flush=True)
     session_root = tempfile.mkdtemp(prefix="cp_unittest_")
     os.environ["TMPDIR"] = session_root
     # tempfile 会缓存解析结果，必须一起改，否则后续 mkdtemp 仍然落在 /tmp 根下。
