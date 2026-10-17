@@ -31,6 +31,11 @@ const checkedKeys = ref<string[]>([]);
 const showRename = ref(false);
 const renameFrom = ref<any>(null);
 const renameTo = ref('');
+const showPerm = ref(false);
+const permTarget = ref<any>(null);
+const permMode = ref('');
+const permOwner = ref('');
+const permGroup = ref('');
 // 搬运剪贴板只活在页面里，存的是勾选那一刻的绝对路径：之后翻目录、点面包屑，
 // 都不会把「剪切」的源换成新目录里的同名条目——那会搬错文件，而按钮看起来一模一样。
 const clip = ref<{ mode: 'copy' | 'move'; items: string[] } | null>(null);
@@ -165,10 +170,43 @@ async function confirmRename() {
     busyOp.value = '';
   }
 }
+function openPerm(e: any) {
+  permTarget.value = e;
+  // 预填当前值：用户改哪一项自己会看出来，留空即"这一项不动"。
+  permMode.value = e.octal || '';
+  permOwner.value = e.owner || '';
+  permGroup.value = e.group || '';
+  showPerm.value = true;
+}
+async function confirmPerm() {
+  const t = permTarget.value;
+  // 与改名同一口径：确定按钮连点、或回车 + 点击各一次，第二次会拿同一份旧值再写一遍。
+  if (!t || busyOp.value) return;
+  const m = permMode.value.trim();
+  const o = permOwner.value.trim();
+  const g = permGroup.value.trim();
+  const body: Record<string, string> = { path: join(t.name) };
+  if (m && m !== (t.octal || '')) body.mode = m;
+  if (o && o !== (t.owner || '')) body.owner = o;
+  if (g && g !== (t.group || '')) body.group = g;
+  // 一个字段都没变就别发：后端的"没有要修改的内容"是拦口的，不该变成弹窗的报错。
+  if (Object.keys(body).length === 1) return (showPerm.value = false);
+  busyOp.value = 'perm';
+  try {
+    const r = await postJson<any>('/files/perm', body);
+    msg.success(`已改为 ${r.perm}（${r.octal}）${r.owner}:${r.group}`);
+    showPerm.value = false;
+    reload();
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    busyOp.value = '';
+  }
+}
+
 async function mkdir() {
   const n = newFolder.value.trim();
-  if (!n || busyOp.value) return;
-  busyOp.value = 'mkdir';
+  if (!n || busyOp.value) return;  busyOp.value = 'mkdir';
   try {
     await api.fileAction('mkdir', join(n));
     newFolder.value = '';
@@ -372,7 +410,16 @@ const columns: any[] = [
   { title: '大小', key: 'size', width: 90, render: (e: any) => h('span', { class: 'mono-dim' }, fmtSize(e.size, e.isDir)) },
   { title: '修改时间 (UTC)', key: 'mtime', width: 170, render: (e: any) => h('span', { class: 'mono-dim' }, fmtDateTime(e.mtime)) },
   {
-    title: '操作', key: 'ops', width: 220, align: 'center', fixed: 'right' as const,
+    // 权限与属主共用一列两行，而不是拆成两列：这一列固定占 130px，拆两列要 210px 起，
+    // 375 档名称列（minWidth 220）就只剩横滚。两行都省略号，全文在 title 里。
+    title: '权限/属主', key: 'perm', width: 130,
+    render: (e: any) => h('div', { class: 'cell-txt' }, [
+      h('span', { class: 'mono-dim', title: e.perm ? `${e.perm}（${e.octal}）` : '读不到' }, e.perm || '—'),
+      h('span', { class: 'cell-sub', title: e.owner ? `${e.owner}:${e.group}` : '读不到' }, e.owner ? `${e.owner}:${e.group}` : '—'),
+    ]),
+  },
+  {
+    title: '操作', key: 'ops', width: 270, align: 'center', fixed: 'right' as const,
     // 下载必须是 <a>（走浏览器下载管理器）、解压/删除要 Popconfirm，所以套不上
     // CpRowActions 组件，但 .cp-ops + text/small 就是它那一套版式。
     render: (e: any) => {
@@ -387,6 +434,7 @@ const columns: any[] = [
           }),
         ]),
         h(NButton, { ...txt, type: 'primary', onClick: () => openRename(e) }, () => '改名'),
+        h(NButton, { ...txt, type: 'primary', title: `修改 ${e.name} 的权限与属主`, onClick: () => openPerm(e) }, { default: () => '权限' }),
         h(NPopconfirm, { onPositiveClick: () => del(e) }, {
           trigger: () => h(NButton, { ...txt, type: 'error', title: `删除 ${e.name}` }, { default: () => '删除' }),
           default: () => `删除 ${e.name}${e.isDir ? '（含全部子文件）' : ''}？`,
@@ -500,6 +548,42 @@ function onChecked(keys: Array<string | number>) {
         <NSpace justify="end">
           <NButton tertiary @click="showRename = false">取消</NButton>
           <NButton type="primary" class="cp-press" :loading="busyOp === 'rename'" :disabled="!!busyOp" :icon="icon('SaveOutline', 14)" @click="confirmRename">确定</NButton>
+        </NSpace>
+      </NSpace>
+    </NModal>
+
+    <NModal v-model:show="showPerm" preset="card" title="权限与属主" style="width: 420px; max-width: 94vw">
+      <template #header-extra>
+        <NText depth="3" style="font-size: var(--fs-xs)">{{ permTarget?.name }}</NText>
+      </template>
+      <NSpace vertical :size="12">
+        <NText depth="3" style="font-size: var(--fs-xs); line-height: 1.6">
+          当前 {{ permTarget?.perm || '—' }}（{{ permTarget?.octal || '—' }}）· {{ permTarget?.owner || '—' }}:{{ permTarget?.group || '—' }}。
+          只改这一个条目，不递归到子文件；留空的那一项不动。
+        </NText>
+        <NInput
+          v-model:value="permMode" placeholder="八进制权限，如 644"
+          :input-props="{ 'aria-label': '八进制权限', class: 'mono' }" @keyup.enter="confirmPerm"
+        >
+          <template #prefix><NIcon :component="icons.KeyOutline" /></template>
+        </NInput>
+        <div style="display: flex; gap: var(--space-2); width: 100%">
+          <NInput
+            v-model:value="permOwner" placeholder="所有者，如 www-data"
+            style="flex: 1; min-width: 0" :input-props="{ 'aria-label': '所有者' }" @keyup.enter="confirmPerm"
+          >
+            <template #prefix><NIcon :component="icons.PersonCircleOutline" /></template>
+          </NInput>
+          <NInput
+            v-model:value="permGroup" placeholder="属组，如 www-data"
+            style="flex: 1; min-width: 0" :input-props="{ 'aria-label': '属组' }" @keyup.enter="confirmPerm"
+          >
+            <template #prefix><NIcon :component="icons.PeopleOutline" /></template>
+          </NInput>
+        </div>
+        <NSpace justify="end">
+          <NButton tertiary @click="showPerm = false">取消</NButton>
+          <NButton type="primary" class="cp-press" :loading="busyOp === 'perm'" :disabled="!!busyOp" :icon="icon('SaveOutline', 14)" @click="confirmPerm">保存</NButton>
         </NSpace>
       </NSpace>
     </NModal>

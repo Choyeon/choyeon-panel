@@ -1,11 +1,15 @@
 import contextlib
 import datetime as _dt
 import errno
+import grp
 import os
+import pwd
+import re
 import shutil
 import stat
 import threading
 import uuid
+from functools import lru_cache
 from pathlib import Path
 
 from .. import config
@@ -70,6 +74,92 @@ def is_root(p: str) -> bool:
     return os.path.realpath(p) in ROOTS if p else False
 
 
+# 权限只有 9 个读写执行位。setuid/setgid/sticky 能把任意程序提权成 root，
+# 而面板以 root 运行：一个改权限的输入框不该有这条路径。高位由 _clean_mode 拒掉。
+MAX_PERM_MODE = 0o777
+
+
+@lru_cache(maxsize=256)
+def _user_name(uid: int) -> str:
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        # 容器与手工建的用户没有 passwd 条目很常见，按数字显示而不是显示成空。
+        return str(uid)
+
+
+@lru_cache(maxsize=256)
+def _group_name(gid: int) -> str:
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return str(gid)
+
+
+def perm_fields(st: os.stat_result) -> dict:
+    """一个条目的权限与属主，列表与改完回读共用同一个出处（格式只在这里定义一次）。"""
+    return {
+        "perm": stat.filemode(st.st_mode),
+        "octal": f"{stat.S_IMODE(st.st_mode):04o}",
+        "owner": _user_name(st.st_uid),
+        "group": _group_name(st.st_gid),
+    }
+
+
+def _clean_mode(raw) -> int:
+    s = str(raw).strip().lower().removeprefix("0o")
+    if not re.fullmatch(r"[0-7]{3,4}", s):
+        raise RuntimeError("权限要写成 3-4 位八进制，例如 644 或 0644")
+    mode = int(s, 8)
+    if mode > MAX_PERM_MODE:
+        raise RuntimeError("只能改读/写/执行九位（000-777），setuid/sticky 等高位请手工处理")
+    return mode
+
+
+def _resolve_id(raw: str, by_name, by_num, err: str) -> int:
+    """名字或数字都要在 passwd/group 里查得到才放行。"""
+    s = str(raw).strip()
+    if not (s.isdigit() or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", s)):
+        raise RuntimeError(err)
+    try:
+        return by_num(int(s)) if s.isdigit() else by_name(s)
+    except KeyError:
+        # 不接受"把文件 chown 给一个系统上不存在的 uid"：那通常是打错了，
+        # 后果是文件从此没有任何账号能读，而面板给出的成功提示看不出区别。
+        raise RuntimeError(err) from None
+
+
+def set_perms(p: str, mode=None, owner=None, group=None) -> dict:
+    """改单个条目的权限与属主。不做递归：递归 chmod 会吃掉整棵树的执行位，
+    一次误点的代价远大于在终端里多敲一条命令。"""
+    abs_ = safe_entry_path(p)
+    if not os.path.lexists(abs_):
+        raise RuntimeError("路径不存在")
+    if os.path.islink(abs_):
+        # Linux 没有 lchmod，os.chmod 会跟着链接走到目标——那可能在白名单外
+        # （应用目录里指向 /etc 的链接很常见）。改链接本身也只能改到目标上。
+        raise RuntimeError("这是符号链接：权限与属主只能改它指向的目标文件")
+    new_mode = _clean_mode(mode) if mode not in (None, "") else None
+    uid = (_resolve_id(owner, lambda n: pwd.getpwnam(n).pw_uid, pwd.getpwuid, "用户不存在")
+           if owner not in (None, "") else -1)
+    gid = (_resolve_id(group, lambda n: grp.getgrnam(n).gr_gid, grp.getgrgid, "组不存在")
+           if group not in (None, "") else -1)
+    if new_mode is None and uid < 0 and gid < 0:
+        raise RuntimeError("没有要修改的内容")
+    try:
+        if new_mode is not None:
+            os.chmod(abs_, new_mode)
+        if uid >= 0 or gid >= 0:
+            # -1 表示"这一项不动"，内核按字面处理。
+            os.chown(abs_, uid, gid)
+    except OSError as e:
+        raise RuntimeError(f"修改失败：{e.strerror or e}") from e
+    # 属主改名后缓存里的 uid→name 可能变（手工 userdel/useradd），改完清一次。
+    _user_name.cache_clear()
+    _group_name.cache_clear()
+    return {"path": abs_} | perm_fields(os.stat(abs_))
+
+
 def list_dir(p: str) -> dict:
     # 默认目录必须由服务层给出：写死 /root/www 时，改过 CP_FILE_ROOTS 的部署
     # 一进文件页就落在白名单外，报「路径超出允许范围」，用户以为是 bug。
@@ -92,14 +182,18 @@ def list_dir(p: str) -> dict:
         is_dir = False
         size = 0
         mtime = ""
+        # 读不到 stat 的条目（正在被删除、权限拒绝）权限列留空，由前端显示成「—」，
+        # 不能拿 0 去格式化——那会渲染成 0000 / "----------"，看着像真的没权限。
+        perm = {"perm": "", "octal": "", "owner": "", "group": ""}
         try:
             st = os.stat(os.path.join(abs_, name))
             is_dir = stat.S_ISDIR(st.st_mode)
             size = st.st_size
             mtime = iso_ms(st.st_mtime)
+            perm = perm_fields(st)
         except OSError:
             pass
-        entries.append({"name": name, "isDir": is_dir, "size": size, "mtime": mtime})
+        entries.append({"name": name, "isDir": is_dir, "size": size, "mtime": mtime, **perm})
     entries.sort(key=lambda e: (0 if e["isDir"] else 1, str(e["name"]).lower()))
     # 顺带回传额度：上传前先在前端拦一道，免得用户看着进度条走完才收到"超过 8MB"。
     # total/truncated/maxEntries 同理：提示文案由服务层的数拼，前端不自己抄一个上限。

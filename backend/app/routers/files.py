@@ -124,6 +124,34 @@ async def files_action(request: Request):
         return err_json(e)
 
 
+@router.post("/api/files/perm")
+async def files_perm(request: Request):
+    """权限与属主（chmod/chown）单独一个端点：它多带两个字段，塞进 /files/action
+    会让那条路由的参数变成「只有某些 action 才看」的隐式约定。"""
+    if r := need_admin(request):
+        return r
+    try:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        r = await run_in_threadpool(
+            files_service.set_perms,
+            body.get("path", ""),
+            body.get("mode"),
+            body.get("owner"),
+            body.get("group"),
+        )
+        # 改完立刻回读的样子进审计：事后追查"应用为什么读不到这个文件"时，
+        # 只记"谁点了权限按钮"回答不了最终落成了什么权限。
+        await aio_db.audit(request.state.cp_sub, "file:perm",
+                           f"{body.get('path')} -> {r['perm']} {r['owner']}:{r['group']}")
+        return r
+    except Exception as e:  # noqa: BLE001
+        return err_json(e)
+
+
 @router.post("/api/files/upload")
 async def files_upload(request: Request):
     """multipart 多文件上传到当前目录。
