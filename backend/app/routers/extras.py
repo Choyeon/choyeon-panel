@@ -14,23 +14,22 @@ from ..util import is_http_url, list_ladder, parse_limit, redact_creds
 
 router = APIRouter()
 
-ALLOWED_ALERT_KEYS = re.compile(
-    r"^alert_(telegram_bot|telegram_chat|webhook_url|disk_pct|ssl_days"
-    r"|cpu_pct|mem_pct|load1_x|probe|probe_expect|keep_days|keep_rows)$"
-)
 # 每应用覆写探活期望状态码：key 里带应用名，所以单独一条规则，且只允许安全字符
 PROBE_OVERRIDE_KEY = re.compile(r"^probe_expect:([\w.@-]{1,64})$")
 
-# 各 key 的取值约束：None 表示只做长度限制。
-# 必须在保存时就校验——`int(dbm.get_setting("alert_disk_pct") or 85)` 在巡检里，
-# 存进 "abc" 之后每次巡检都抛 ValueError，被循环吞掉，表现为「告警从此不再触发」，
+# 「面板认识哪些告警配置键」只有 alerts_service 的 ALERT_LIMITS + ALERT_TEXT_MAX。
+# 这里过去另写两份键名——一条正则的 alternation 当白名单、一份列表当读取范围——
+# 新增一个键要三处一起改才生效，漏哪一处都不报错：漏读取列表就是「网页改了没反应」，
+# 漏白名单就是 POST 静默丢掉。所以这里不许再出现任何 `alert_` 键名，
+# 白名单和读取列表都在请求时向 `alert_keys()` 要（不是 import 期快照，
+# test_batch50b 会当场往登记表里加一个键，验证路由真的跟着走）。
+# 取值约束同样只剩一处：必须在保存时就校验——`int(dbm.get_setting("alert_disk_pct") or 85)`
+# 在巡检里，存进 "abc" 之后每次巡检都抛 ValueError，被循环吞掉，表现为「告警从此不再触发」，
 # 而网页端一切正常，最难查的那种坏法。
-# 区间不在这里定义：`alerts_service.ALERT_LIMITS` 是巡检读取时用的那一份登记表，
-# 保存校验和 GET /api/settings/alerts 显示的默认值都从它来。这里再抄一份 (lo, hi)
-# 的话，两边一旦不同步就会出现「这个数页面让你存、巡检却按钳制后的值办事」。
+# 区间不在这里定义：`ALERT_LIMITS` 是巡检读取时用的那一份，这里再抄一份 (lo, hi) 的话，
+# 两边一旦不同步就会出现「这个数页面让你存、巡检却按钳制后的值办事」。
 ALERT_INT_RANGE = {k: (lo, hi) for k, (_, lo, hi) in alerts_service.ALERT_LIMITS.items()}
-ALERT_MAX_LEN = {"alert_telegram_bot": 128, "alert_telegram_chat": 64, "alert_webhook_url": 512,
-                 "alert_probe_expect": 32}
+ALERT_MAX_LEN = alerts_service.ALERT_TEXT_MAX
 
 
 async def _body(req: Request) -> dict:
@@ -181,23 +180,18 @@ async def users_delete(uid: str, req: Request):
     return {"ok": True}
 
 
-ALERT_KEYS = ["alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url", "alert_disk_pct", "alert_ssl_days",
-              "alert_cpu_pct", "alert_mem_pct", "alert_load1_x", "alert_probe", "alert_probe_expect",
-              "alert_keep_days", "alert_keep_rows"]
-
-
 @router.get("/api/settings/alerts")
 async def alerts_get(req: Request):
-    # 通知通道含密钥，仅管理员可读；只读账号返回空值以免泄露
-    secret_keys = ("alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url")
+    keys = alerts_service.alert_keys()
+    secret_keys = alerts_service.ALERT_SECRET_KEYS
     rows = await aio_db.query(
         "SELECT key,value FROM settings WHERE key IN ({}) OR key LIKE 'probe_expect:%'".format(
-            ",".join("?" * len(ALERT_KEYS))),
-        ALERT_KEYS,
+            ",".join("?" * len(keys))),
+        keys,
     )
     stored = {r["key"]: (r["value"] or "") for r in rows}
     out = {k: ("" if req.state.cp_role != "admin" and k in secret_keys else stored.get(k, ""))
-           for k in ALERT_KEYS}
+           for k in keys}
     # 按应用覆写的期望状态码：值里没有秘密，两种角色都可以看到当前覆写了哪些应用。
     out["probe_overrides"] = {key[len("probe_expect:"):]: val
                               for key, val in stored.items() if key.startswith("probe_expect:")}
@@ -231,7 +225,7 @@ def _validate_alert(k: str, val: str) -> str | None:
         lo, hi = rng
         if not lo <= n <= hi:
             return f"{k} 必须在 {lo}-{hi} 之间，收到 {n}"
-    if k == "alert_webhook_url" and not is_http_url(val):
+    if k in alerts_service.ALERT_URL_KEYS and not is_http_url(val):
         return "Webhook URL 必须以 http:// 或 https:// 开头"
     return None
 
@@ -245,7 +239,7 @@ async def alerts_save(req: Request):
     errors: list[str] = []
     for k, v in body.items():
         m = PROBE_OVERRIDE_KEY.match(k)
-        if not ALLOWED_ALERT_KEYS.match(k) and not m:
+        if k not in alerts_service.alert_keys() and not m:
             continue
         val = "" if v is None else str(v).strip()
         if m and val:

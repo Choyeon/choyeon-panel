@@ -76,6 +76,31 @@ ALERT_LIMITS: dict[str, tuple[int, int, int]] = {
     "alert_keep_rows": (2000, 100, 20000),
 }
 
+# 文本型告警配置：key → 最大字符数。它和上面的 ALERT_LIMITS 合起来就是
+# 「面板认识哪些告警配置键」的唯一登记表，`alert_keys()` 给出两者的并集。
+# 键名过去在路由里还另写两份（一条正则的 alternation + 一份读取列表），于是新增一个键
+# 要同时改三处才真正生效，而漏掉任何一处都不报错：漏进读取列表表现为
+# 「网页改了没反应、GET 永远回默认值」，漏进白名单表现为 POST 把它 continue 掉、
+# 连一条错误都不回。读取侧反过来用上没登记的键更糟——`setting_int()` 直接 KeyError，
+# 被巡检循环整轮吞掉，就是「告警从此不再响」。
+ALERT_TEXT_MAX: dict[str, int] = {
+    "alert_telegram_bot": 128,
+    "alert_telegram_chat": 64,
+    "alert_webhook_url": 512,
+    "alert_probe_expect": 32,
+}
+
+# 值必须是 http(s) URL 的键：保存时当场拒掉畸形值，比让 notify 在巡检里悄悄不发好。
+ALERT_URL_KEYS = frozenset({"alert_webhook_url"})
+
+# 值里含密钥的通道配置：非管理员读到的一律是空串，否则 bot token 从只读账号漏出去。
+ALERT_SECRET_KEYS = frozenset({"alert_telegram_bot", "alert_telegram_chat", "alert_webhook_url"})
+
+
+def alert_keys() -> tuple[str, ...]:
+    """面板认识的全部 alert_ 配置键（数值 + 文本）。加键只改上面两张表。"""
+    return tuple(ALERT_LIMITS) + tuple(ALERT_TEXT_MAX)
+
 
 def _today() -> str:
     return datetime.date.today().isoformat()
