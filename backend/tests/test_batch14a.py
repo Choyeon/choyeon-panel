@@ -889,7 +889,6 @@ COLLECT_FILES.update({
     "/proc/vmstat": VMSTAT_REAL,
     "/proc/pressure/memory": PSI_REAL,
     "/proc/swaps": SWAPS_REAL,
-    "/proc/self/cgroup": f"0::/{ROOT[1:]}/choyeon-panel.service\n",
     "/proc/sys/vm/swappiness": "10\n",
     "/proc/sys/vm/overcommit_memory": "0\n",
     "/proc/200/statm": "1000 900 0 0 0 0 0",
@@ -903,10 +902,16 @@ COLLECT_LISTS = dict(CG_LIST)
 COLLECT_LISTS["/proc"] = ["1", "200", "201", "stat"]
 
 
+# 「面板自己」钉在这里，不跟跑测试的这台机器的 cgroup 走：见
+# CollectTests.test_self_unit_comes_from_the_pinned_source（批次㊿D，CI 上红过）。
+SELF_UNIT = "choyeon-panel.service"
+
+
 class CollectTests(unittest.TestCase):
-    def _collect(self, app_map=None):
+    def _collect(self, app_map=None, self_unit=SELF_UNIT):
         with fakefs(COLLECT_FILES, COLLECT_LISTS), \
-             mock.patch.object(ms, "_cgroup_root", return_value=ROOT):
+             mock.patch.object(ms, "_cgroup_root", return_value=ROOT), \
+             mock.patch.object(ms.systemd_ops, "panel_unit", lambda: self_unit):
             return ms._collect(app_map or {}, window=0)
 
     def test_top_level_shape(self):
@@ -934,8 +939,18 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(one["severity"], ms.SEV_INFO)
         self.assertIn("memory.events", one["fix"])
 
-    def test_self_unit_resolved_from_cgroup(self):
-        self.assertEqual(self._collect()["self_unit"], "choyeon-panel.service")
+    def test_self_unit_comes_from_the_pinned_source(self):
+        """self_unit 的出处是 systemd_ops.panel_unit()，`_collect` 只负责把它带出来。
+
+        这条以前叫 `test_self_unit_resolved_from_cgroup`，读的是宿主的 /proc/self/cgroup：
+        本机在 sshd 的 scope 里跑 → panel_unit() 退回安装名 choyeon-panel.service，正好等于
+        fixture，于是它一直绿；GitHub runner 的进程跑在自己的 .service 里，同一个 commit
+        就报 'actions.runner….service' != 'choyeon-panel.service'（批次㊿D）。
+        上面那行假的 "/proc/self/cgroup" 夹具也是同一段历史的残留——`_read` 从来不去读它。
+        """
+        self.assertEqual(self._collect()["self_unit"], SELF_UNIT)
+        self.assertEqual(self._collect(self_unit="renamed-panel.service")["self_unit"],
+                         "renamed-panel.service", "改名必须立刻体现在判词上，否则这里又是影子")
 
     def test_app_map_reaches_both_tables(self):
         d = self._collect({"panel-rosetta-backend.service": "rosetta-backend"})

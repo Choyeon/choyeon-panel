@@ -742,9 +742,14 @@ class TestCronUnitResync(unittest.TestCase):
         return {"code": 0, "out": "", "err": ""}
 
     def task(self, *, enabled: int = 1, argv=None) -> int:
+        """默认 argv 用 choyeonctl：这台机器上它一定有出处（`_resolve_binary` 认
+        /usr/local/bin/choyeonctl，也认仓库内入口 `<仓库>/bin/choyeonctl`），所以任何跑
+        测试的机器都给同一个答案。原先写的是 certbot——CI runner 上没装，`_resolve_binary`
+        抛 BadInput，`sync_all_units` 如实报"这一行没落盘"，两条用例就一起变成
+        0 not greater than or equal to 1（批次㊿D）。缺二进制这件事本身有下面的用例钉。"""
         tid = dbm.execute(
             "INSERT INTO cron_task(name,expr,argv,enabled) VALUES(?,?,?,?)",
-            (_uid("t"), "0 3 * * *", json.dumps(argv or ["certbot", "renew"]), enabled),
+            (_uid("t"), "0 3 * * *", json.dumps(argv or ["choyeonctl", "backup", "run"]), enabled),
         )
         self.addCleanup(dbm.execute, "DELETE FROM cron_task WHERE id=?", (tid,))
         self._tasks.append(tid)
@@ -780,6 +785,22 @@ class TestCronUnitResync(unittest.TestCase):
         self.assertTrue(self.svc(good).exists(), "一个坏任务不该把其余任务的对账一起停掉")
         self.assertFalse(self.svc(bad).exists())
         self.assertIn(str(bad), " ".join(self.warns))
+
+    def test_whitelisted_but_absent_binary_is_warned_not_counted(self):
+        """白名单里、本机却没装的命令：跳过它、点名它，且不记成"落过盘"。
+
+        ㊿D 在 CI 上撞到的就是这个形状（runner 没有 certbot）。当时它只是一条红——现在它
+        是行为契约：一台机器卸了 certbot，不能让启动对账整批停摆，也不能把没渲染成的 unit
+        算进"已同步"的数目里。
+        """
+        if shutil.which("certbot"):
+            self.skipTest("本机装了 certbot，模拟不出「白名单里但本机没有」")
+        tid = self.task(argv=["certbot", "renew"])
+        row = dbm.query("SELECT * FROM cron_task WHERE id=?", (tid,))[0]
+        with mock.patch.object(C.dbm, "query", lambda *a, **k: [row]):
+            self.assertEqual(asyncio.run(C.sync_all_units()), 0)
+        self.assertFalse(self.svc(tid).exists(), "渲染不出来就不许留下半个 unit")
+        self.assertIn(str(tid), " ".join(self.warns), "跳过必须留下能查的判词，不能静默吞掉")
 
     def test_lifespan_resyncs_cron_units_after_backup_timers(self):
         src = Path(BACKEND, "app", "main.py").read_text(encoding="utf-8")

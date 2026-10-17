@@ -525,6 +525,23 @@
   删不掉源时点名"两处"、落位撞名报并发而不是覆盖、目录副本逐层 chown 不许 suppress。
 - 文件页加上「复制选中 / 剪切选中 / 粘贴到当前目录」，把上一批的后端能力接到界面上（批次㊽B，`Files.vue`）。剪贴板存的是勾选那一刻的绝对路径，不是文件名：翻进另一个目录再粘贴时，存名字会搬走**新目录**里的同名条目，而按钮看起来一模一样。目的地在动手前定死，逐项串行，失败项点名并原样转述后端那一句——同名冲突、搬进自己的子目录、跨分区、落盘余量的判据只有 `files_service` 一个出处，页面猜一份迟早和它分叉，何况页面根本 stat 不到真实文件系统。一次粘贴就清空剪贴板：留着再点一次会把成功过的项再搬一遍（复制撞同名、移动报原路径不存在），没成的项已在提示里点了名，重新勾选比让页面猜后端状态可靠。粘贴走页面自带的 120s 长超时，不是 `api.fileAction` 的 15s：跨分区搬一个整目录，本地先断只会让用户以为没搬成。剪贴板只活在当前页面，不落 localStorage——持久化之后换个账号、换个目录都会拿到上一个会话留下的路径。`web/tests/fileClipboard.test.mjs`（7 条）钉住绝对路径、三颗按钮的启用条件、串行与失败点名、粘贴后回源、页面不许出现第二套搬运判据，以及勾选态绑的是 naive 真认识的那套属性。整页 jsdom 探针接生产接口跑了 37 条断言：复制两项进子目录落盘且内容与源一致、在同目录粘贴被后端判「已经在目标目录里」并点名到项、剪切撞上同名条目时整批点名失败且源一个没动、符号链接按链接搬（`readlink` 仍是 `/etc/hostname`，不是抄了一份内容）、剪贴板跨目录留存且粘贴按钮的 title 跟着当前目录走。
 ### 修复
+- 后端测试不再把「这台机器在哪个 systemd 单元」当成事实来源（批次㊿D，CI 上红四处）。
+  `memory_service._collect()` 与 `load_service._collect()` 的 `self_unit` 出自
+  `systemd_ops.panel_unit()`，而它读的是**本进程**的 `/proc/self/cgroup`：本机跑测试时在 sshd
+  的 scope 里，它退回安装名 `choyeon-panel.service`，恰好等于夹具里的 `CG_PANEL`，于是两条用例
+  一直绿；GitHub runner 的进程跑在自己的 `.service` 里，同一个 commit 就变成
+  `test_self_unit_resolved_from_cgroup` 报 `'actions.runner….service' != 'choyeon-panel.service'`、
+  `test_quota_section_shape` 报 `q["units"][0]["self"]` 是 False。两处夹具现在把单元名钉在测试里
+  （`SELF_UNIT` + `_collect(self_unit=...)`），并各自加一条用例证明"换宿主不换答案、改名立刻体现"。
+  真·归属解析仍由 `test_batch50a.PanelUnitTests` 用假 cgroup 覆盖，`test_batch14a` 里那行
+  从来没人读的假 `"/proc/self/cgroup"` 夹具一并删掉——它正是这种幻觉的来源。
+- 定时任务启动对账的夹具改用 `choyeonctl backup run`：`_resolve_binary` 认 `/usr/local/bin/choyeonctl`
+  也认仓库内入口 `<仓库>/bin/choyeonctl`，任何跑测试的机器都给同一个答案。原先默认 argv 是
+  `certbot renew`，CI runner 上没装 certbot，`sync_all_units()` 如实把这一行算成"没落盘"，
+  `test_enabled_row_gets_the_flock_prefix` 与 `test_one_bad_row_does_not_stop_the_others`
+  一起报 `0 not greater than or equal to 1`。缺二进制这件事本身补了一条契约用例
+  `test_whitelisted_but_absent_binary_is_warned_not_counted`：白名单里、本机没装的命令要跳过、
+  要点名（warn 里带任务 id）、不许记进"已同步"的数目，本机装了 certbot 时如实 skip。
 - 看门狗抓到挂死后遗留的 `/tmp/cp_unittest_*` 整树由下一轮开头回收（超过 24 小时才动）：
   `exit=True` 走的是 `os._exit`，`atexit` 里那条 rmtree 在这种退出路径上不会执行。
 - CI 的「单元测试」不再莫名烧满 25 分钟：两处假 ASGI 传输（`test_review_fixes.TestStaticCacheHeaders._get`

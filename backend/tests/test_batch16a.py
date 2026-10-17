@@ -160,6 +160,8 @@ LOADAVG_REAL = "0.05 0.08 0.20 1/227 1256624\n"
 PSI_CPU_REAL = "some avg10=0.03 avg60=0.10 avg300=0.13 total=12542374460\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
 PSI_IO_REAL = "some avg10=0.20 avg60=0.07 avg300=0.01 total=817351367\nfull avg10=0.19 avg60=0.05 avg300=0.01 total=551581141\n"
 CG_PANEL = "/sys/fs/cgroup/system.slice/choyeon-panel.service"
+# 配额表的 `self` 钉在 fixture 的单元名上，不跟宿主 cgroup 走（批次㊿D）。
+SELF_UNIT = "choyeon-panel.service"
 CPU_MAX_PANEL = "80000 100000\n"
 CPU_STAT_PANEL = ("usage_usec 19294619\nuser_usec 16389932\nsystem_usec 2904686\nnice_usec 0\n"
                   "nr_periods 10571\nnr_throttled 84\nthrottled_usec 3694975\nnr_bursts 0\nburst_usec 0\n")
@@ -933,7 +935,7 @@ class CollectTests(unittest.TestCase):
                 f"{CG_PANEL}/cpu.max": CPU_MAX_PANEL, f"{CG_PANEL}/cpu.stat": CPU_STAT_PANEL,
                 f"{CG_PANEL}/cpu.weight": "100\n"}
 
-    def _collect(self, files, scan=None, dirs=None, scan_sec=1.0):
+    def _collect(self, files, scan=None, dirs=None, scan_sec=1.0, self_unit=SELF_UNIT):
         stub = scan or {"ok": True, "reason": None, "scanned": 141, "budget_hit": False,
                         "states": {"S": 94}, "busy": [], "busy_total": 0, "blocked": [],
                         "blocked_total": 0, "window_sec": 1.0}
@@ -950,6 +952,7 @@ class CollectTests(unittest.TestCase):
              mock.patch.object(ls, "_scan_procs", fake_scan), \
              mock.patch.object(ls.os, "cpu_count", lambda: 2), \
              mock.patch.object(ls.os, "sysconf", lambda n: 100), \
+             mock.patch.object(ls.systemd_ops, "panel_unit", lambda: self_unit), \
              fake_files(files):
             return ls._collect()
 
@@ -997,6 +1000,22 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(q["units"][0]["quota_cores"], 0.8)
         self.assertTrue(q["units"][0]["self"])
         self.assertEqual(q["capped_total"], 1)
+
+    def test_self_marking_is_pinned_not_inherited(self):
+        """「哪一行是面板自己」由测试给出，换宿主不许换答案。
+
+        CI 上 `units[0]["self"]` 红过一次：`_collect` 直接问 systemd_ops.panel_unit()
+        这台机器在哪个单元，本机跑在 sshd 的 scope 里 → 退回安装名，恰好等于 fixture 的
+        CG_PANEL；GitHub runner 的进程跑在自己的 .service 里 → CG_PANEL 那行不再是"自己"，
+        于是同一 commit 本机绿、CI 红（批次㊿D）。真正的归属仍由批次㊿A 的
+        test_batch50a.PanelUnitTests 用假 cgroup 覆盖。
+        """
+        mine = self._collect(self._files())["quota"]
+        self.assertEqual(mine["self_unit"], SELF_UNIT)
+        self.assertTrue(mine["units"][0]["self"])
+        other = self._collect(self._files(), self_unit="worker.service")["quota"]
+        self.assertEqual(other["self_unit"], "worker.service")
+        self.assertFalse(other["units"][0]["self"], "兄弟单元不等于面板自己")
 
     def test_units_are_capped_and_counts_stay_true(self):
         dirs = [f"/sys/fs/cgroup/system.slice/u{i}.service" for i in range(15)]
