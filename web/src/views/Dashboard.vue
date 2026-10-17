@@ -706,15 +706,15 @@ onBeforeUnmount(() => {
             <NSpace align="center" :size="8" :wrap="false">
               <span class="section-title">最近告警</span>
               <NTag size="tiny" :bordered="false" :type="alertsState === 'ready' ? 'success' : alertsState === 'error' ? 'warning' : 'default'">
-                {{ alertsState === 'ready' ? '已接入' : alertsState === 'absent' ? '未接入' : alertsState === 'error' ? '获取失败' : '检查中' }}
+                {{ alertsState === 'ready' ? '正常读取' : alertsState === 'absent' ? '接口缺失' : alertsState === 'error' ? '获取失败' : '检查中' }}
               </NTag>
             </NSpace>
           </template>
           <template #header-extra>
             <NButton text type="primary" size="tiny" aria-label="前往告警中心" @click="router.push('/alerts')">告警中心 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
           </template>
-          <EmptyBox v-if="alertsState === 'absent'" text="告警历史接口未接入：后端暂未提供可查询的告警列表接口，此处不展示伪造数据" />
-          <EmptyBox v-else-if="alertsState === 'error'" :text="`告警历史获取失败：${alertsMsg}`" />
+          <EmptyBox v-if="alertsState === 'absent'" text="这一轮没读到未确认告警：请求 /api/alerts/open 返回 404（这个后端上没有它），此处不展示伪造数据" />
+          <EmptyBox v-else-if="alertsState === 'error'" :text="`未确认告警获取失败：${alertsMsg}`" />
           <EmptyBox v-else-if="alertsState === 'loading'" text="正在读取未确认告警…" />
           <template v-else>
             <div v-for="(a, ai) in openAlerts" :key="a.id" class="alert-row cp-rise" :style="`--i:${ai}`" :title="a.message">
