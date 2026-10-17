@@ -15,7 +15,8 @@ from ..util import is_http_url, list_ladder, parse_limit, redact_creds
 router = APIRouter()
 
 # 每应用覆写探活期望状态码：key 里带应用名，所以单独一条规则，且只允许安全字符
-PROBE_OVERRIDE_KEY = re.compile(r"^probe_expect:([\w.@-]{1,64})$")
+PROBE_OVERRIDE_KEY = re.compile(
+    rf"^{re.escape(alerts_service.PROBE_EXPECT_PREFIX)}([\w.@-]{{1,64}})$")
 
 # 「面板认识哪些告警配置键」只有 alerts_service 的 ALERT_LIMITS + ALERT_TEXT_MAX。
 # 这里过去另写两份键名——一条正则的 alternation 当白名单、一份列表当读取范围——
@@ -185,16 +186,19 @@ async def alerts_get(req: Request):
     keys = alerts_service.alert_keys()
     secret_keys = alerts_service.ALERT_SECRET_KEYS
     rows = await aio_db.query(
-        "SELECT key,value FROM settings WHERE key IN ({}) OR key LIKE 'probe_expect:%'".format(
+        "SELECT key,value FROM settings WHERE key IN ({}) OR key LIKE ?".format(
             ",".join("?" * len(keys))),
-        keys,
+        [*keys, f"{alerts_service.PROBE_EXPECT_PREFIX}%"],
     )
     stored = {r["key"]: (r["value"] or "") for r in rows}
     out = {k: ("" if req.state.cp_role != "admin" and k in secret_keys else stored.get(k, ""))
            for k in keys}
     # 按应用覆写的期望状态码：值里没有秘密，两种角色都可以看到当前覆写了哪些应用。
-    out["probe_overrides"] = {key[len("probe_expect:"):]: val
-                              for key, val in stored.items() if key.startswith("probe_expect:")}
+    pfx = alerts_service.PROBE_EXPECT_PREFIX
+    out["probe_overrides"] = {key[len(pfx):]: val
+                              for key, val in stored.items() if key.startswith(pfx)}
+    # 前缀本身也给页面：拼键名这件事由后端的答案来，不在 web 里再抄一份。
+    out[alerts_service.PROBE_PREFIX_FIELD] = pfx
     # 默认值与可填区间随载荷一起给出（出处是 alerts_service.ALERT_LIMITS）：
     # 库里没写过某个键时，页面要显示的那个「默认」必须就是巡检实际使用的那个默认，
     # 输入框要拦的那条区间必须就是保存校验用的那条区间。
@@ -209,11 +213,13 @@ def _validate_alert(k: str, val: str) -> str | None:
     """返回错误信息；None 表示通过。空值等于关闭该项，直接放行。"""
     if val == "":
         return None
-    if k.startswith("probe_expect:"):
-        # 期望状态码只有 "2xx/3xx"、"200 204" 这一种形状，值短到 32 就够；
-        # 内容看不懂不影响主机健康（服务侧会回落 2xx/3xx），所以不在这里做语义校验。
-        if len(val) > 32:
-            return f"{k} 超过 32 字符"
+    if k.startswith(alerts_service.PROBE_EXPECT_PREFIX):
+        # 期望状态码只有 "2xx/3xx"、"200 204" 这一种形状，内容看不懂不影响主机健康
+        # （服务侧会回落 2xx/3xx），所以不在这里做语义校验。长度上限问服务层要（批次㊿E）：
+        # 这里以前是另一份写死的 32，而 `alert_` 键名不许出现在路由里（㊿B），所以拿的是一个函数。
+        maxlen = alerts_service.probe_expect_max()
+        if len(val) > maxlen:
+            return f"{k} 超过 {maxlen} 字符"
         return None
     if (maxlen := ALERT_MAX_LEN.get(k)) and len(val) > maxlen:
         return f"{k} 超过 {maxlen} 字符"

@@ -213,7 +213,7 @@ async function saveChan() {
   }
 }
 
-// 探活期望状态码按应用覆写：键名 probe_expect:<应用名>，服务端会核对应用是否存在，
+// 探活期望状态码按应用覆写：键名由后端给的前缀 + 应用名拼出，服务端会核对应用是否存在，
 // 所以这里不做本地白名单，写错了会被 400 挡回来并显示原因。
 // 三个动作各自要认「在哪一行上」：行内保存/删除按 name 记账，新增按整个草稿记账，
 // 否则连点会在同一个键上叠两次写、弹两条「已保存」。
@@ -225,7 +225,14 @@ async function saveProbeRow(entry: { name: string; expect: string }) {
   if (probeRowBusy.value !== null) return false;
   probeRowBusy.value = entry.name;
   try {
-    await api.saveAlerts({ [`probe_expect:${entry.name}`]: (entry.expect || '').trim() });
+    // 前缀由后端随载荷给出（probe_prefix）：页面自己拼一份的话，改名后写进去的键
+    // 在服务端一律查不到，而未知的告警键是静默忽略的——保存回 200、覆写永不生效。
+    const pfx = String(alerts.value?.probe_prefix ?? '');
+    if (!pfx) {
+      msg.error('后端没有给出覆写键前缀，已拒绝保存（否则这条覆写永远读不回来）');
+      return false;
+    }
+    await api.saveAlerts({ [`${pfx}${entry.name}`]: (entry.expect || '').trim() });
     msg.success(`已保存 ${entry.name} 的期望状态码`);
     await load();
     return true;

@@ -228,5 +228,133 @@ class RouteFollowsRegistryTests(unittest.TestCase):
             self.assertEqual(body[k], "", f"{k} 的值对只读账号可见")
 
 
+class ProbeExpectPrefixTests(unittest.TestCase):
+    """㊿E：`probe_expect:` 前缀与它的长度上限，一个事实一个出处（服务层）。
+
+    这一批延续 ㊿B 的方向：㊿B 把「面板认识哪些 alert_ 键」收成一张登记表，而按应用覆写
+    那条通道（`probe_expect:<应用名>`）当时留在外面——前缀在服务层与路由里抄了六处
+    （键名构造两处、正则一处、SQL 的 LIKE 一处、切片与 startswith 各一处），长度上限更是
+    在登记表、路由校验、告警正文里各写死了一份 32，页面还自己拼了一份键名。
+    """
+
+    WEB = BACKEND.parent / "web" / "src"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.code = _app_code()
+
+    def _literal_count(self, rel):
+        """只数带引号的前缀（注释与 docstring 已被 _code_lines 剔掉，提及不算抄本）。"""
+        code = self.code[rel]
+        return code.count('"probe_expect:"') + code.count("'probe_expect:'")
+
+    def test_前缀字面量只剩服务层那一处定义(self):
+        hits = {rel: n for rel in self.code if (n := self._literal_count(rel))}
+        self.assertEqual(hits, {"app/services/alerts_service.py": 1},
+                         f"前缀又被人抄了一份，换名字就会只改到一半：{hits}")
+
+    def test_路由的正则由同一个前缀派生(self):
+        """换前缀时正则必须跟着走，否则覆写能存进库、却再也读不出来。"""
+        self.assertIn(re.escape(als.PROBE_EXPECT_PREFIX), extras.PROBE_OVERRIDE_KEY.pattern)
+        self.assertTrue(extras.PROBE_OVERRIDE_KEY.match(als.probe_expect_key("my-api")))
+
+    def test_键名构造与清理用的是同一个出处(self):
+        """probe_marker_keys 是 forget_app 的清理依据，两处名字不同就清不掉正要清的那条。"""
+        self.assertEqual(als.probe_expect_key("api"), als.PROBE_EXPECT_PREFIX + "api")
+        self.assertEqual(als.probe_marker_keys("api")[0], als.probe_expect_key("api"))
+
+    def test_长度上限只有一个函数在给(self):
+        """路由侧不许再出现自己那份 32，也不许自己点全局键的名字（㊿B 的守卫会连带拦住键名）。"""
+        code = _code_lines((APP / "routers" / "extras.py").read_text(encoding="utf-8"))
+        self.assertIn("alerts_service.probe_expect_max()", code)
+        self.assertNotIn("if len(val) > 32:", code, "路由里还留着那份 32 的抄本")
+        svc = self.code["app/services/alerts_service.py"]
+        self.assertEqual(svc.count('ALERT_TEXT_MAX["alert_probe_expect"]'), 1,
+                         "上限的出处必须只有 probe_expect_max() 一处")
+
+    def test_页面不再自己拼键名(self):
+        """前端整棵 src 里一个前缀字面量都不许有，且必须读后端那个字段：
+        未知告警键是静默忽略的，页面抄错只会「保存成功、永不生效」。"""
+        hits = [str(p.relative_to(self.WEB)) for p in self.WEB.rglob("*")
+                if p.suffix in (".vue", ".ts", ".js", ".mjs")
+                and als.PROBE_EXPECT_PREFIX in p.read_text(encoding="utf-8")]
+        self.assertEqual(hits, [], f"页面又自己拼了一份键名：{hits}")
+        page = (self.WEB / "views" / "Settings.vue").read_text(encoding="utf-8")
+        self.assertIn(als.PROBE_PREFIX_FIELD, page, "页面没读后端给的前缀字段")
+
+
+class ProbeExpectRouteTests(unittest.TestCase):
+    """线上行为：覆写键的写入、读出、上限都认 `probe_expect_key()` 与登记表那一个数。"""
+
+    def setUp(self):
+        self.client = TestClient(main.app)
+        self.user = f"b50e_{os.getpid()}_{next(_seq)}"
+        dbm.execute("INSERT OR REPLACE INTO users(username,pass_hash,role) VALUES(?,?,?)",
+                    (self.user, security.hash_pass("Password123"), "admin"))
+        self.addCleanup(dbm.execute, "DELETE FROM users WHERE username=?", (self.user,))
+        self.addCleanup(dbm.execute, "DELETE FROM settings WHERE key LIKE ?",
+                        (als.PROBE_EXPECT_PREFIX + "%",))
+        self.h = {"Authorization": f"Bearer {security.sign_token(self.user, 'admin')}"}
+
+    def _mkapp(self, name: str) -> int:
+        """覆写要求应用真实存在（路由会查 apps 表），所以先造一行再测。"""
+        aid = dbm.execute(
+            "INSERT INTO apps(name,type,repo_url,path,start_cmd) VALUES(?,'python',?,?,?)",
+            (name, "https://example.invalid/r.git", f"/tmp/{name}", "python3 x.py"))
+        self.addCleanup(dbm.execute, "DELETE FROM apps WHERE id=?", (aid,))
+        return aid
+
+    def test_覆写存得进也读得出(self):
+        """写用 probe_expect_key()，GET 的 LIKE/切片也要按同一个前缀把它捞回来——
+        这两处任何一处没跟着前缀走，页面都会显示成「没有覆写」。"""
+        name = f"b50e-app-{next(_seq)}"
+        self._mkapp(name)
+        key = als.probe_expect_key(name)
+        r = self.client.post("/api/settings/alerts", json={key: "200 204"}, headers=self.h)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(dbm.get_setting(key), "200 204")
+        g = self.client.get("/api/settings/alerts", headers=self.h).json()
+        self.assertEqual(g["probe_overrides"], {name: "200 204"})
+
+    def test_GET载荷把前缀交给页面(self):
+        g = self.client.get("/api/settings/alerts", headers=self.h).json()
+        self.assertEqual(g[als.PROBE_PREFIX_FIELD], als.PROBE_EXPECT_PREFIX)
+
+    def test_服务侧读的就是路由写的那条(self):
+        """两头落在同一个键名上：写进去读不出来，覆写等于没配。"""
+        name = f"b50e-read-{next(_seq)}"
+        self._mkapp(name)
+        self.client.post("/api/settings/alerts",
+                         json={als.probe_expect_key(name): "418"}, headers=self.h)
+        codes, shown = als._app_expectation(name)
+        self.assertEqual(codes, {418}, shown)
+        self.assertEqual(shown, "418")
+
+    def test_告警显示的期望码不会被另一个数截短(self):
+        """展示截断以前钉死在 32：放宽登记表后，配了 40 字符的应用在通知里只发来前 32 个。"""
+        name = f"b50e-show-{next(_seq)}"
+        with mock.patch.dict(als.ALERT_TEXT_MAX, {"alert_probe_expect": 40}):
+            dbm.set_setting(als.probe_expect_key(name), "2" * 40)
+            _, shown = als._app_expectation(name)
+            self.assertEqual(shown, "2" * 40)
+
+    def test_长度上限跟着全局登记表放宽(self):
+        """这条是㊿E的核心验收：路由里那份写死的 32 换成登记表的值之后，
+        放宽 `alert_probe_expect` 时按应用覆写立刻同步放宽；旧写法会一边放宽一边继续拦。"""
+        name = f"b50e-cap-{next(_seq)}"
+        self._mkapp(name)
+        key = als.probe_expect_key(name)
+        maxlen = als.probe_expect_max()
+        r = self.client.post("/api/settings/alerts", json={key: "2" * (maxlen + 1)}, headers=self.h)
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn(str(maxlen), r.json()["error"])
+        self.assertIsNone(dbm.get_setting(key), "拒绝时不许留下半个键")
+        with mock.patch.dict(als.ALERT_TEXT_MAX, {"alert_probe_expect": maxlen + 8}):
+            w = self.client.post("/api/settings/alerts", json={key: "2" * (maxlen + 1)},
+                                 headers=self.h)
+            self.assertEqual(w.status_code, 200, w.text)
+            self.assertEqual(dbm.get_setting(key), "2" * (maxlen + 1))
+
+
 if __name__ == "__main__":
     unittest.main()

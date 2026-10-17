@@ -44,6 +44,14 @@ PROBE_HOST = "127.0.0.1"
 # 两者都叫"探针超时"但量的是不同的东西，同名会让读代码的人把 3.0 当成命令预算。
 HTTP_PROBE_TIMEOUT = 3.0
 PROBE_DEFAULT_EXPECT = "2xx/3xx"
+# 按应用覆写期望码的 settings 键前缀，唯一出处（批次㊿E）。此前 `probe_expect:` 这个字面量在
+# 服务层和路由里抄了六处——键名构造两处、正则一处、SQL 的 LIKE 一处、切片与 startswith 各一处——
+# 换前缀要找全六处，而漏掉任何一处都不报错：覆写只是悄悄不生效。
+PROBE_EXPECT_PREFIX = "probe_expect:"
+# 前缀随 GET /api/settings/alerts 的载荷交给页面，字段名也只有这一处（批次㊿E）。
+# 页面自己抄前缀的后果：未知键是静默忽略的，改名后它写进去的键服务端一律认不出来，
+# 而接口照样回 200——「覆写保存成功、永不生效」两头都不报错，比直接失败更难发现。
+PROBE_PREFIX_FIELD = "probe_prefix"
 LEVELS = ("ok", "warn", "crit")
 
 # 资源阈值要连续超标这么多轮才推送。snapshot() 的 CPU 是"距上一次采样的差值"，
@@ -532,11 +540,26 @@ def _parse_expect(raw: str) -> set[int]:
     return codes or set(range(200, 400))
 
 
+def probe_expect_key(name: str) -> str:
+    """按应用覆写期望码的 settings 键名；前缀只有 `PROBE_EXPECT_PREFIX` 这一处。"""
+    return f"{PROBE_EXPECT_PREFIX}{name}"
+
+
+def probe_expect_max() -> int:
+    """期望码文本的长度上限——就是全局键 `alert_probe_expect` 登记的那个数（批次㊿E）。
+
+    路由里以前抄的是另一份写死的 32，放宽全局键时按应用覆写会暗中继续拦 32 以上的值；
+    告警里显示的期望码也截在这同一个数上，否则页面配了 40 字符、通知只发来前 32 个。
+    路由只能经这个函数拿到它：㊿B 已规定 `alert_` 键名字面量只许待在登记表那一侧。
+    """
+    return ALERT_TEXT_MAX["alert_probe_expect"]
+
+
 def _app_expectation(name: str) -> tuple[set[int], str]:
     """每应用可用 settings 键 `probe_expect:<应用名>` 覆写，全局键 `alert_probe_expect` 兜底。"""
-    raw = (dbm.get_setting(f"probe_expect:{name}") or dbm.get_setting("alert_probe_expect")
+    raw = (dbm.get_setting(probe_expect_key(name)) or dbm.get_setting("alert_probe_expect")
            or PROBE_DEFAULT_EXPECT)
-    return _parse_expect(raw), str(raw or PROBE_DEFAULT_EXPECT)[:32]
+    return _parse_expect(raw), str(raw or PROBE_DEFAULT_EXPECT)[:probe_expect_max()]
 
 
 async def _probe_target(port: int) -> tuple[bool, int | None, str]:
@@ -577,7 +600,7 @@ def probe_marker_keys(name: str) -> tuple[str, ...]:
     算出来就不是同一份，清理会漏掉正要清的那个。
     """
     n = str(name or "")[:48]
-    return (f"probe_expect:{n}", f"sent:probe-{n}", f"streak:probe:{n}", f"notified:probe:{n}")
+    return (probe_expect_key(n), f"sent:probe-{n}", f"streak:probe:{n}", f"notified:probe:{n}")
 
 
 def forget_app(name: str) -> None:
