@@ -785,6 +785,45 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
                    f"备份任务 {a.id} 已{'关联到目标 ' + str(a.target) if int(a.target) else '取消关联异地'}")
         return {"ok": True}
 
+    if a.backup_cmd in ("cloud-list", "cloud-pull"):
+        # 这两条走的是同一组参数校验：都必须是「某条任务 + 某个异地目标」，
+        # 拉回还多一个产物名。分开写两份 if a.id/if a.target 早晚有一份漏掉 --target，
+        # 而漏掉的那一条会去 list 别的桶——「看得见」错桶比看不见更糟。
+        if not a.id:
+            Out.error(f"{a.backup_cmd} 需要 --id <备份任务 id>", EXIT_USAGE)
+        if not a.target:
+            Out.error(f"{a.backup_cmd} 需要 --target <异地目标 id>", EXIT_USAGE)
+        try:
+            if a.backup_cmd == "cloud-list":
+                res = cloud_backup.list_for_job(int(a.target), int(a.id))
+            else:
+                if not a.name:
+                    Out.error("cloud-pull 需要 --name <产物名>（先用 cloud-list 看有哪些份）", EXIT_USAGE)
+                res = cloud_backup.pull_one(int(a.target), int(a.id), a.name)
+        except Exception as e:  # noqa: BLE001
+            note = redact_creds(str(e))[:120]
+            dbm.audit("cli", f"cli:backup:{a.backup_cmd}", f"{a.id}(失败: {note})")
+            Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
+            return {}
+
+        if a.backup_cmd == "cloud-list":
+            dbm.audit("cli", "cli:backup:cloud-list", f"{a.id}@{a.target}({len(res['files'])} 份)")
+            lines = [
+                f"{f['size']:>12}  {f['modified']:<25}  {'本机有' if f['local'] else '仅异地'}  {f['name']}"
+                for f in res["files"]
+            ]
+            tail = "" if not res["truncated"] else f"（列举已达上限，桶里这个前缀共 {res['remote_total']} 个对象）"
+            Out.result(res, "\n".join(lines) or f"目标「{res['target']}」的 {res['bucket']}/{res['prefix']} "
+                                                f"下没有任务 {a.id} 名下的产物{tail}")
+            return {"ok": True, **res}
+
+        dbm.audit("cli", "cli:backup:cloud-pull", f"{a.id}({res['name']})")
+        Out.result(res, f"已从「{res['target']}」拉回 {res['name']}（{human_bytes(res['bytes'])}）"
+                        f"到 {config.BACKUP_DIR}，"
+                        + ("现在可以用 backup restore 恢复" if res["restoreable"]
+                           else "这一类产物不支持自动恢复，请手工处理"))
+        return {"ok": True, **res}
+
     Out.error(f"未知子命令: {a.backup_cmd}", EXIT_USAGE)
     return {}
 
@@ -1866,7 +1905,8 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                       "--port", "--domain", "--start-cmd", "--install-cmd", "--lines"],
              "desc": "应用全生命周期管理",
              "notes": ["create 需要 --template 或 --start-cmd 之一；用 --start-cmd 时可配 --type/--install-cmd"]},
-            {"name": "backup run|list|jobs|targets|add-target|edit-target|del-target|test-target|push|link",
+            {"name": "backup run|list|jobs|targets|add-target|edit-target|del-target|test-target"
+                     "|push|link|cloud-list|cloud-pull",
              "args": ["--id", "--target", "--yes", "--name", "--endpoint", "--bucket", "--region",
                       "--access-key", "--secret-stdin", "--prefix",
                       "--path-style", "--no-path-style",
@@ -1880,6 +1920,11 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "add-target 之后还要 link 才会真的推：目标是「这台机器往哪儿写」，"
                        "link 是「这个任务跑完交给哪个目标」",
                        "push 只补推没推过的产物（按 target+文件名判重）；link --target 0 取消关联",
+                       "cloud-list 列这条任务在远端桶里有哪几份、本机有没有同一份；"
+                       "cloud-pull --name 把仅存于远端的那一份拉回本机备份目录，"
+                       "拉回才能恢复（恢复只读本机的文件）",
+                       "cloud-pull 按块落盘并判两次大小，本机已有同名/符号链接/余量不足都在动手前拒绝；"
+                       "中途断线不留半份文件——落在临时名上，列表与恢复都认不到它",
                        "del-target 只删配置：桶里的对象与本机备份一个都不动，面板不替人删数据",
                        "推送失败不会把这次备份改判成失败——少一份异地副本是要接手的一项，"
                        "不是备份没做；原因写在 targets 列表的「上次失败」里"]},
@@ -2082,12 +2127,12 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("backup", help="备份管理与异地目标", parents=[common])
     b.add_argument("backup_cmd", choices=[
         "run", "list", "jobs", "targets", "add-target", "edit-target", "del-target",
-        "test-target", "push", "link",
+        "test-target", "push", "link", "cloud-list", "cloud-pull",
     ])
-    b.add_argument("--id", type=int, help="备份任务 id（push/link）或异地目标 id（edit/del/test-target）")
-    b.add_argument("--target", type=int, help="link/push：异地目标 id，link 用 0 取消关联")
+    b.add_argument("--id", type=int, help="备份任务 id（push/link/jobs/cloud-*）或异地目标 id（edit/del/test-target）")
+    b.add_argument("--target", type=int, help="link/push/cloud-list/cloud-pull：异地目标 id，link 用 0 取消关联")
     b.add_argument("--yes", action="store_true", help="del-target：确认删除目标配置")
-    b.add_argument("--name", help="add/edit-target：目标名")
+    b.add_argument("--name", help="add/edit-target：目标名；cloud-pull：要拉回的产物名")
     b.add_argument("--endpoint", help="add/edit-target：S3 兼容端点，如 s3.amazonaws.com、oss-cn-hangzhou.aliyuncs.com")
     b.add_argument("--bucket", help="add/edit-target：桶名")
     b.add_argument("--region", help="add/edit-target：区域，缺省 us-east-1")

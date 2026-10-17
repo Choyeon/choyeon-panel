@@ -17,8 +17,10 @@ import re
 import socket
 import sqlite3
 import ssl
+import tempfile
 import time
 import xml.etree.ElementTree as ET
+from contextlib import suppress
 from datetime import UTC, datetime
 from http.client import HTTPConnection, HTTPSConnection
 from urllib.parse import quote, unquote, urlsplit
@@ -30,6 +32,10 @@ from ..util import human_bytes, is_http_url, is_name, redact_creds
 # 单文件 PutObject 的上限是 5GiB（S3 与 MinIO 同规则）。分块上传是另一件事，
 # 面板的产物是 gz 归档，真到 5GiB 该改的是备份任务的口径而不是在这里塞一套 multipart。
 MAX_SINGLE_PUT = 5 * 1024 * 1024 * 1024
+# 拉回本机时同一条线：面板不做分块下载/断点续传，超过这条线的产物本来也不该由
+# 这条路径搬（该改的是备份范围）。拉的方向还多一道闸——声明值可以假，实读字节才算数。
+MAX_SINGLE_GET = MAX_SINGLE_PUT
+GET_CHUNK = 1024 * 1024  # 1MiB：一次 read 太少会被 socket 超时切不断，太大则上限检查粒度粗
 # 列举响应读多少字节为止：list-type=2 一页 1000 条时 XML 可能上百 KB，
 # 但我们只认自己那批 `bk<id>-` 键，读超了就如实说"没读完"，不假装 prune 成功。
 MAX_LIST_BYTES = 4 * 1024 * 1024
@@ -512,6 +518,83 @@ def delete_object(t: dict, key: str) -> None:
         raise RuntimeError(_fail_detail(status, headers, body, t))
 
 
+def get_object(t: dict, key: str, dest: str, *, limit: int = MAX_SINGLE_GET,
+               timeout: float | None = None) -> dict:
+    """流式 GET 一个对象写到 dest，声明大小与实读字节都判；任何中途失败都不留半份文件。
+
+    不能走 `_request`：它把响应整段读进内存（且只读 MAX_LIST_BYTES 那么多），
+    一份几百 MB 的归档要么先把面板进程撑爆，要么被截成一份"看着完整"的半成品。
+    这里自己开连接、按块落盘，并且判两次大小：
+    Content-Length 超过上限就在写第一个字节之前拒绝，实读字节越过上限（对端把
+    Content-Length 报小、实际发得更多）就断开删掉临时文件——后者正是"半份备份
+    躺在目录里等着被恢复"的来路。
+    """
+    ep = _check_endpoint(t["endpoint"])
+    _assert_not_metadata(ep["host"])
+    to = timeout or config.CLOUD_PUSH_TIMEOUT_SEC
+    deadline = time.monotonic() + to
+    host = ep["host"] if t["path_style"] else f"{t['bucket']}.{ep['host']}"
+    raw = f"/{t['bucket']}/{key}" if t["path_style"] else f"/{key}"
+    uri = _canonical_uri(raw)
+    headers = {"host": host, "x-amz-content-sha256": EMPTY_SHA256}
+    when = datetime.now(UTC)
+    headers["x-amz-date"] = when.strftime("%Y%m%dT%H%M%SZ")
+    auth, _ = authorization(method="GET", path=raw, query="", headers=headers,
+                            payload_hash=EMPTY_SHA256, access_key=t["access_key"],
+                            secret=t["secret_key"], region=t["region"], when=when)
+    headers["authorization"] = auth
+    conn = (HTTPSConnection(ep["host"], ep["port"], timeout=to, context=ssl.create_default_context())
+            if ep["scheme"] == "https" else HTTPConnection(ep["host"], ep["port"], timeout=to))
+    written = 0
+    try:
+        conn.request("GET", uri, headers=headers)
+        resp = conn.getresponse()
+        rheaders = {k.lower(): v for k, v in resp.getheaders()}
+        if resp.status != 200:
+            raise RuntimeError(_fail_detail(resp.status, rheaders, resp.read(200000), t))
+        declared = int(rheaders.get("content-length") or 0)
+        if declared > limit:
+            raise RuntimeError(
+                f"远端这份对象声明 {human_bytes(declared)}，超过单文件拉回上限 "
+                f"{human_bytes(limit)}：面板不做分块下载，请先在桶侧裁剪这个备份"
+            )
+        try:
+            with open(dest, "wb") as f:
+                while True:
+                    if time.monotonic() > deadline:
+                        raise RuntimeError(f"传输超过 {to} 秒未完成，已中断（对端太慢或被掐断）")
+                    chunk = resp.read(GET_CHUNK)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > limit:
+                        raise RuntimeError(
+                            f"实际已传 {human_bytes(written)}，超过上限 {human_bytes(limit)}"
+                            f"（对端声明的是 {human_bytes(declared)}）：已中断"
+                        )
+                    f.write(chunk)
+        except OSError as e:
+            raise RuntimeError(f"写到 {dest} 失败：{e.strerror or e}") from None
+        # 两条完整性判据必须在上面那个 try 之内：走到这一步的文件已经躺在磁盘上，
+        # 判完再抛就等于"报错了但半成品还在"——而它正是会被恢复按钮挑中的那一份。
+        if not written:
+            raise RuntimeError("对端返回 200 却是空对象：这份备份在桶里是 0 字节，拉回来也没用")
+        if declared and written != declared:
+            raise RuntimeError(
+                f"传输被截断：对端声明 {human_bytes(declared)}，实际收到 {human_bytes(written)}"
+                "（连接中途断开时会出现这种账），已删除半成品")
+    except Exception:  # noqa: BLE001
+        # 失败路径上这个文件一定是半成品——不管它是被写到一半、还是一个字节都没写进去
+        # 就报错（open 之后才有句柄，open 之前 dest 还不存在）。留不得。
+        with suppress(OSError):
+            os.unlink(dest)
+        raise
+    finally:
+        conn.close()
+    return {"key": key, "bytes": written, "declared": declared,
+            "request_id": rheaders.get("x-amz-request-id", "")}
+
+
 # ------------------------------------------------------------------- 业务动作
 
 def _auto_re(bid: int):
@@ -641,3 +724,90 @@ def push_now(bid: int, target_id: int | None = None) -> dict:
     if not t["enabled"]:
         raise RuntimeError(f"异地目标「{t['name']}」已停用，先启用再推送")
     return push_pending({**bk, "cloud_target_id": tid})
+
+
+def list_for_job(target_id: int, bid: int) -> dict:
+    """这条任务在远端桶里有哪几份产物，本机有没有同一份。
+
+    为什么要有这一句：`probe` 只回「这个前缀下有 N 个对象」，机器重装之后本机目录是空的，
+    管理员站在面板前看得见"桶里有 7 份"，却看不见是哪 7 份、多大、哪一份最新，
+    更没法把任何一份拉回来——而恢复只能读本机的文件。列出来才谈得上拉回。
+
+    归属判据用 `backup_service.name_owner`（本机列表用的就是它），不是 prune 那条
+    `auto_pattern`：手工上传进任务的 `bk3-manual-dump.sql` 在本机列得出来、
+    也被推到了桶里，但它不属于"自动生成的那批"，prune 永远不该删它，
+    列表与拉回却必须认它。两处判据不同是有意的，各写各的会把这个区别抹平。
+    """
+    from .backup_service import name_owner  # 函数级导入：backup_service 顶部就引了 runner
+
+    t = get_secret(target_id)
+    prefix = _norm_prefix(t["prefix"])
+    rows, truncated = list_keys(t, prefix)
+    try:
+        local = set(os.listdir(config.BACKUP_DIR))
+    except OSError:
+        local = set()  # 本机目录还不存在（重装后第一次）：一份都没有，全部可拉
+    files = []
+    for r in rows:
+        name = r["key"][len(prefix):] if r["key"].startswith(prefix) else ""
+        if name_owner(name) != int(bid):
+            continue  # 同桶里别的任务、别人的对象、以及带子目录的键都不算这一份的
+        files.append({"name": name, "key": r["key"], "size": int(r["size"] or 0),
+                      "modified": str(r["modified"] or ""), "local": name in local})
+    files.sort(key=lambda f: (f["modified"], f["name"]), reverse=True)
+    return {"ok": True, "target": t["name"], "bucket": t["bucket"], "prefix": t["prefix"],
+            "job": int(bid), "files": files, "remote_total": len(rows), "truncated": truncated}
+
+
+def pull_one(target_id: int, bid: int, name: str) -> dict:
+    """把远端的一份产物拉回本机备份目录（同名已存在就拒绝，不覆盖）。
+
+    这是「看得见」的下一步：桶里唯一的副本要能落到本机，恢复按钮才点得动。
+    四道闸都在动手之前——名字归属（不是这条任务的一律不拉，顺带挡住 `../`）、
+    远端声明大小、落盘余量（设置页那条 alert_disk_pct，与上传/解包同一个读者）、
+    以及实读字节上界。落盘走「同目录临时文件 + os.replace」：中途断线留下的是
+    一个不带 `bk<id>-` 前缀的隐藏 .tmp，列表与恢复都认不到它，不会出现
+    "半份备份躺在目录里等着被恢复"。
+    """
+    from .backup_service import _restoreable, name_owner
+    from .files_service import assert_write_budget
+
+    job = dbm.query_one("SELECT id,kind FROM backups WHERE id=?", (int(bid),))
+    if not job:
+        raise RuntimeError(f"备份任务 {bid} 不存在")
+    if name_owner(name) != int(bid):
+        raise RuntimeError(f"{name} 不是任务 {bid} 名下的产物形状（要以 bk{bid}- 开头且不带目录）")
+    t = get_secret(target_id)
+    key = f"{_norm_prefix(t['prefix'])}{name}"
+    head = head_object(t, key)
+    if not head:
+        raise RuntimeError(f"远端没有这个对象：桶 {t['bucket']} 前缀下的 {name}")
+    size = int(head["size"] or 0)
+    if size > MAX_SINGLE_GET:
+        raise RuntimeError(
+            f"远端这份产物 {human_bytes(size)} 超过单文件拉回上限 {human_bytes(MAX_SINGLE_GET)}，"
+            "面板不做分块下载：请先在桶侧裁剪这个备份")
+    dest = os.path.join(config.BACKUP_DIR, name)
+    if os.path.islink(dest):
+        # 与 save_upload 同一口径：replace 会把链接换成真文件，等于替用户把
+        # "这份备份其实躺在别处"的线索抹掉。
+        raise RuntimeError("本机同名路径是符号链接，为避免写到别处已拒绝")
+    if os.path.exists(dest):
+        raise RuntimeError(f"本机已有同名产物：{name}（要先覆盖请先删掉本机那一份）")
+    os.makedirs(config.BACKUP_DIR, exist_ok=True)
+    assert_write_budget(config.BACKUP_DIR, size, f"从远端拉回 {name}")
+    fd, tmp = tempfile.mkstemp(dir=config.BACKUP_DIR, prefix=f".{name}.", suffix=".pull.tmp")
+    os.close(fd)
+    try:
+        res = get_object(t, key, tmp)
+        os.chmod(tmp, 0o640)
+        os.replace(tmp, dest)
+    finally:
+        # replace 成功后这个 unlink 只会碰到"路径已经不在了"；真残留只发生在
+        # 进程被掐在两步之间，那几字节由下一次清理目录的人处理（同 save_upload）。
+        with suppress(OSError):
+            os.unlink(tmp)
+    return {"ok": True, "name": name, "bytes": res["bytes"], "target": t["name"],
+            "key": key, "job": int(bid), "kind": job["kind"],
+            # 能不能直接点恢复，用本机列表那同一个判据（bk0-/panel- 与 .sql.gz 走不了自动恢复）
+            "restoreable": bool(_restoreable(job["kind"], name))}

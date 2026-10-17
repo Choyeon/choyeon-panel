@@ -142,6 +142,53 @@ async def backups_files(req: Request):
     return res
 
 
+@router.get("/api/backups/{bid}/cloud-files")
+async def backups_cloud_files(bid: str, req: Request):
+    """这条任务在异地桶里有哪几份产物、本机有没有同一份。只读，不动桶里的对象。
+
+    `target=` 必填而不缺省：一条任务关联的目标可能被换成另一个桶，"看哪个桶"这件事
+    必须由点进来的人说清楚，否则界面写着目标 A、列出来的却是 B 的对象。
+    """
+    if r := need_admin(req):
+        return r
+    if not bid.isdigit():
+        return JSONResponse(status_code=400, content={"error": "任务 id 要是数字"})
+    tid = req.query_params.get("target") or ""
+    if not tid.isdigit():
+        return JSONResponse(status_code=400, content={"error": "要用 target= 指定异地目标 id"})
+    try:
+        return await run_in_threadpool(cloud_backup.list_for_job, int(tid), int(bid))
+    except Exception as e:  # noqa: BLE001
+        return err_json(e, 500)
+
+
+@router.post("/api/backups/{bid}/cloud-pull")
+async def backups_cloud_pull(bid: str, req: Request):
+    """把远端的一份产物拉回本机备份目录（本机同名已存在则拒绝，不覆盖）。
+
+    拉回来的目的就是恢复，所以这一步要留审计：桶里那一份还在，本机多出的是副本，
+    出事时得能分清"谁在什么时候把它搬到这台机器上的"。
+    """
+    if r := need_admin(req):
+        return r
+    if not bid.isdigit():
+        return JSONResponse(status_code=400, content={"error": "任务 id 要是数字"})
+    body = await _body(req)
+    tid, name = body.get("target"), str(body.get("name") or "")
+    if not str(tid or "").isdigit():
+        return JSONResponse(status_code=400, content={"error": "target 要是异地目标 id"})
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "要指定拉回哪个产物（name）"})
+    try:
+        res = await run_in_threadpool(cloud_backup.pull_one, int(tid), int(bid), name)
+        await aio_db.audit(req.state.cp_sub, "backup:cloud-pull", f"{bid}({res['name']})")
+        return res
+    except Exception as e:  # noqa: BLE001
+        await aio_db.audit(req.state.cp_sub, "backup:cloud-pull",
+                           f"{bid}(失败: {redact_creds(str(e))[:120]})")
+        return err_json(e, 500)
+
+
 @router.post("/api/backups/{bid}/restore")
 async def backups_restore(bid: str, req: Request):
     """用指定备份文件覆盖目标（不可逆）。

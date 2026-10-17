@@ -125,6 +125,21 @@ def list_backups() -> list:
 _BELONGS_RE = re.compile(r"^bk(\d+)-")
 
 
+def name_owner(name: str) -> int | None:
+    """这个名字属于哪条备份任务（`bk<id>-` 前缀），认不出来回 None。
+
+    本机列表、远端列表与拉回校验都要问同一句「这份产物是谁的」：各写一份判据的话，
+    桶里那份 `bk1-manual-dump.sql` 会在本机列得出来、在云端列表里被当别人的对象藏起来，
+    而恢复只能读本机的文件——看得见却拉不回，等于没有异地。
+    带目录的键（`bk1-a/b.gz`）在这里就判 None：远端的键要先剥掉前缀、只留文件名才走到这一步。
+    """
+    n = str(name or "")
+    if n != os.path.basename(n):
+        return None
+    m = _BELONGS_RE.match(n)
+    return int(m.group(1)) if m else None
+
+
 def list_files() -> dict:
     """所有任务的产物平铺成一页（备份文件管理页用），按时间倒序。
 
@@ -138,10 +153,9 @@ def list_files() -> dict:
         return {"dir": BACKUP_DIR, "files": files}
     jobs = {b["id"]: b for b in dbm.query("SELECT * FROM backups")}
     for name in os.listdir(BACKUP_DIR):
-        m = _BELONGS_RE.match(name)
-        if not m:
+        bid = name_owner(name)
+        if bid is None:
             continue
-        bid = int(m.group(1))
         try:
             st = os.stat(f"{BACKUP_DIR}/{name}")
         except OSError:
