@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue';
 import {
-  NAlert, NCard, NDataTable, NIcon, NModal, NPopconfirm, NSpace, NTag, NText, useMessage,
+  NAlert, NCard, NDataTable, NIcon, NModal, NPopconfirm, NSelect, NSpace, NTag, NText, useMessage,
 } from 'naive-ui';
 import { NButton } from '../ui';
 import { getRole, req, siteHref } from '../api';
@@ -25,6 +25,13 @@ const api = {
   config: (domain: string) => req(`/sites/${encodeURIComponent(domain)}/config`),
   apply: (id: number) => req(`/sites/${id}/apply`, { body: {}, timeout: 60000 }),
   remove: (id: number) => req(`/sites/${id}/vhost`, { method: 'DELETE', timeout: 60000 }),
+  // 纳管这三个动词只写面板自己的登记表：读一遍 nginx 配置（判定用）、落一行 SQLite，
+  // 既不 run nginx -t 也不 reload，所以超时按普通接口给，不必像套用/续期那样放大。
+  apps: () => req('/apps'),
+  claim: (domain: string, appId?: number | null) =>
+    req('/sites/claim', { body: { domain, app_id: appId ?? null }, timeout: 30000 }),
+  unclaim: (domain: string) => req('/sites/unclaim', { body: { domain }, timeout: 30000 }),
+  claimAll: () => req('/sites/claim-all', { body: {}, timeout: 60000 }),
   // 服务端 certbot renew 上限 600s，前端必须更慢一点才能看到真实结果
   renew: (name: string) => req(`/ssl/certs/${encodeURIComponent(name)}/renew`, { body: {}, timeout: 620000 }),
 };
@@ -44,6 +51,11 @@ const renewSummary = ref('');
 const showConfig = ref(false);
 const cfg = ref<any>(null);
 const cfgLoading = ref(false);
+// 「指定应用」这一条路只在判不出归属的行上出现，选项来自 /api/apps（点开时才第一次拉）。
+const apps = ref<any[]>([]);
+const showAssign = ref(false);
+const assignRow = ref<any>(null);
+const assignId = ref<number | null>(null);
 
 const ico = (name: string, size = 14) => icon(name, size);
 
@@ -97,12 +109,13 @@ async function loadCerts() {
   }
 }
 
-function onKey(id: number, verb: string) {
-  return busy.value?.key === `site-${id}` && busy.value?.verb === verb;
+function onKey(key: string, verb: string) {
+  return busy.value?.key === key && busy.value?.verb === verb;
 }
-// 套用/移除/续期共用 busy，但互不排斥地都写 nginx 或 certbot：一次只允许一个在飞。
+// 套用/移除/续期/纳管共用 busy，但都会碰同一批对象：一次只允许一个在飞。
 // 连点两次「续期」= 两个 certbot renew 并行抢 /etc/letsencrypt 的锁，第二个直接失败，
-// 而用户看到的第一条结果是成功的，以为无事发生。
+// 而用户看到的第一条结果是成功的，以为无事发生。连点两次「纳管」同理，只是撞的是
+// 同一行登记——第二次会把第一次的 note 覆盖掉，事后查审计看不出来发生过什么。
 const busyAny = () => busy.value !== null;
 
 async function applySite(r: any) {
@@ -166,6 +179,139 @@ async function renew(c: any) {
   }
 }
 
+/* ------------------------------------------------------------------ 站点纳管 */
+/**
+ * 归属这件事有两个出处，页面只负责把它们分开摆：登记表（`claimed`）是人或批量纳管落下的
+ * 那一条，判定（`suggest_*`）是面板按 nginx 现读出来的建议。以前这里只有「未纳管的手工配置」
+ * 一句话，既不说是谁也没说为什么认不出；现在一行一行给依据，判不出的把"要怎么做才认得出"
+ * 写在脸上（`suggest_reason`），按钮改成让人指定应用，而不是面板猜一个。
+ * 三个动词都不写 nginx：纳管只落登记，取消纳管只删登记，域名照旧由原来那份配置服务。
+ */
+const claimedCount = computed(() => sites.value.filter((r: any) => r.claimed).length);
+const unclaimedCount = computed(() => sites.value.length - claimedCount.value);
+const undecidedCount = computed(() =>
+  sites.value.filter((r: any) => !r.claimed && !r.suggest_kind).length);
+
+const claimTone = computed(() => {
+  if (!sites.value.length) return { type: 'default' as const, text: '没有站点' };
+  if (!unclaimedCount.value) return { type: 'success' as const, text: `${claimedCount.value} 个域名全部已纳管` };
+  const tail = undecidedCount.value ? `、${undecidedCount.value} 个判不出归属` : '';
+  return { type: 'warning' as const, text: `${claimedCount.value}/${sites.value.length} 已纳管${tail}` };
+});
+
+/** 一行归属的来路要能逐条质疑：登记表写的、判定给的、判不出的原因，是三种不同的话。 */
+function evidence(r: any) {
+  if (r.claimed) return r.claim_note || '已登记归属（没有留说明）';
+  if (r.suggest_note) return r.suggest_note;
+  return r.suggest_reason || 'nginx 里查不到这个域名的归属线索';
+}
+
+/** 「建议」与「已登记」不许长成同一个样子：只有 claimed 才是不用再动的那一行。 */
+function ownerLabel(r: any) {
+  if (r.claimed) return r.app || '登记的应用已不存在';
+  return r.app ? `建议 ${r.app}` : '未登记';
+}
+
+const tinyTag = (type: any, text: string) =>
+  h(NTag, { size: 'tiny', bordered: false, type }, { default: () => text });
+
+function claimTags(r: any) {
+  const out: any[] = [];
+  if (r.claimed) {
+    out.push(tinyTag('success', '已纳管'));
+    if (r.claim_source === 'manual') out.push(tinyTag('info', '手工指定'));
+    if (r.claim_stale) out.push(tinyTag('warning', '认领的文件已不在'));
+  } else if (r.suggest_kind) {
+    out.push(tinyTag('default', '待纳管'));
+  } else {
+    out.push(tinyTag('warning', '判不出归属'));
+  }
+  // 差额由后端算（site_claim_service 是端口这件事的唯一出处），页面不做减法
+  if (r.port_mismatch) out.push(tinyTag('error', `端口不符 ${r.port}≠登记 ${r.app_port}`));
+  return out;
+}
+
+async function loadApps() {
+  try {
+    const r = await api.apps();
+    apps.value = Array.isArray(r) ? r : [];
+  } catch (e: any) {
+    apps.value = [];
+    msg.error(`应用清单读不到：${e.message}`);
+  }
+}
+
+/** 返回 true 才让调用方收尾（关浮层），失败时浮层留着，用户还能改选择再试一次。 */
+async function claimOne(r: any, appId?: number | null) {
+  if (busyAny()) return false;
+  busy.value = { key: `claim-${r.domain}`, verb: 'claim' };
+  try {
+    const res = await api.claim(r.domain, appId);
+    msg.success(`已纳管 ${res.domain}：只写了登记表，nginx 配置未改动`);
+    await loadSites();
+    return true;
+  } catch (e: any) {
+    msg.error(e.message);
+    return false;
+  } finally {
+    busy.value = null;
+  }
+}
+
+async function unclaimOne(r: any) {
+  if (busyAny()) return;
+  busy.value = { key: `unclaim-${r.domain}`, verb: 'unclaim' };
+  try {
+    const res = await api.unclaim(r.domain);
+    // removed=false 不粉饰成成功：按钮只给已纳管的行，点了却说"本就没有登记"，
+    // 说明登记表和 nginx 已经对不上，这句话就是要人去看。
+    msg[res.removed ? 'success' : 'warning'](
+      res.removed ? `已取消纳管 ${res.domain}：nginx 配置一个字节都没动` : `${res.domain} 本就没有登记`,
+    );
+    await loadSites();
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    busy.value = null;
+  }
+}
+
+/** 批量纳管只带判定结果、不带 app_id：判不出的那些必须留在列表里当未纳管，而不是被猜走。 */
+async function claimAllSites() {
+  if (busyAny()) return;
+  busy.value = { key: 'claim-all', verb: 'claim-all' };
+  try {
+    const res = await api.claimAll();
+    const got = (res.claimed || []).length;
+    const miss = (res.skipped || []).length;
+    if (!got && !miss) msg.info('没有待纳管的域名：这些域名都已经登记过');
+    else if (miss) msg.warning(`已纳管 ${got} 个，${miss} 个判不出归属（理由就在每行的依据里）——面板不替你猜应用`);
+    else msg.success(`已纳管 ${got} 个域名：只写了登记表，nginx 配置未改动`);
+    await loadSites();
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    busy.value = null;
+  }
+}
+
+function openAssign(r: any) {
+  assignRow.value = r;
+  assignId.value = null;
+  showAssign.value = true;
+  if (!apps.value.length) loadApps();
+}
+
+async function confirmAssign() {
+  if (!assignRow.value || !assignId.value || busyAny()) return;
+  if (await claimOne(assignRow.value, assignId.value)) showAssign.value = false;
+}
+
+const appOptions = computed(() => apps.value.map((a: any) => ({
+  label: `${a.name}（id ${a.id}${a.port ? ` · 端口 ${a.port}` : ''}${a.domain ? ` · ${a.domain}` : ''}）`,
+  value: a.id,
+})));
+
 function chips(r: any) {
   const out: any[] = [];
   out.push(h(NTag, { size: 'tiny', bordered: false, type: r.https ? 'success' : 'default' },
@@ -179,18 +325,33 @@ const siteColumns: any[] = [
   {
     title: '站点',
     key: 'domain',
-    minWidth: 220,
+    minWidth: 230,
     render: (r: any) => {
       const href = siteHref(r.domain);
+      const why = evidence(r);
       return h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.GlobeOutline, size: 16, color: 'var(--cp-brand-soft)' })]),
         h('div', { class: 'cell-txt' }, [
           href
             ? h('a', { class: 'site-link', href, target: '_blank', rel: 'noopener noreferrer', title: `在新标签页打开 ${href}` }, r.domain)
             : h('span', { class: 'cell-name', title: r.domain }, r.domain),
-          h('div', { class: 'cell-sub cp-prose', title: r.app || 'nginx 手工配置，未纳管为面板应用' },
-            r.app || '未纳管的手工配置'),
+          // 这一行从「未纳管的手工配置」换成了归属的依据本身：同一句话既说清是谁、也说清
+          // 凭什么，判不出的那行还能把"要怎么才认得出"直接读出来。
+          h('div', { class: 'cell-sub cp-prose', title: why }, why),
         ]),
+      ]);
+    },
+  },
+  {
+    title: '归属',
+    key: 'claim',
+    minWidth: 170,
+    render: (r: any) => {
+      const label = ownerLabel(r);
+      return h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'cell-name cp-prose', title: label }, label),
+        // 标签组合数不固定（已纳管/手工指定/文件已不在/端口不符），整项换行而不是 nowrap
+        h(NSpace, { size: 4 }, () => claimTags(r)),
       ]);
     },
   },
@@ -217,7 +378,7 @@ const siteColumns: any[] = [
   {
     title: '操作',
     key: 'ops',
-    width: 170,
+    width: 210,
     align: 'center',
     fixed: 'right' as const,
     render: (r: any) => {
@@ -229,14 +390,37 @@ const siteColumns: any[] = [
           : h(NButton, { ...txt, type: 'primary', disabled: true, title: '域名不合法，无法生成外链' }, { default: () => '打开' }),
       ];
       if (isAdmin.value) btns.push(h(NButton, { ...txt, type: 'primary', onClick: () => openConfig(r) }, { default: () => '配置' }));
+      // 纳管这一组只碰登记表，紧挨着的套用/移除碰的是 nginx 本体：两句话必须写得不一样，
+      // 否则点完「纳管」的人会以为自己的生产配置被重写过了。
+      if (isAdmin.value && !r.claimed && r.suggest_kind) {
+        btns.push(
+          h(NPopconfirm, { onPositiveClick: () => claimOne(r) }, {
+            trigger: () => h(NButton, { ...txt, type: 'primary', loading: onKey(`claim-${r.domain}`, 'claim'), disabled: busyAny(), title: `按面板判定登记归属（${r.suggest_note}）` }, { default: () => '纳管' }),
+            default: () => `只往面板的登记表写这一行，并认领配置文件 ${r.file || '（未找到）'}；不写 nginx、不 reload，域名照旧由现在这份配置服务。判定依据：${r.suggest_note}`,
+          }),
+        );
+      }
+      if (isAdmin.value && !r.claimed && !r.suggest_kind) {
+        btns.push(
+          h(NButton, { ...txt, type: 'primary', onClick: () => openAssign(r), disabled: busyAny(), title: r.suggest_reason || '面板认不出这个域名归哪个应用' }, { default: () => '指定应用' }),
+        );
+      }
+      if (isAdmin.value && r.claimed) {
+        btns.push(
+          h(NPopconfirm, { onPositiveClick: () => unclaimOne(r) }, {
+            trigger: () => h(NButton, { ...txt, type: 'warning', loading: onKey(`unclaim-${r.domain}`, 'unclaim'), disabled: busyAny(), title: '只删这一行登记，nginx 的配置不动' }, { default: () => '取消纳管' }),
+            default: () => `只删除 ${r.domain} 这一行登记。${r.file ? `${r.file} 一个字节都不动，` : ''}域名照旧在 nginx 里服务，只是面板重新把它当判不出归属的配置。`,
+          }),
+        );
+      }
       if (isAdmin.value && r.app_id != null) {
         btns.push(
           h(NPopconfirm, { onPositiveClick: () => applySite(r) }, {
-            trigger: () => h(NButton, { ...txt, type: 'primary', loading: onKey(r.app_id, 'apply'), disabled: busyAny(), title: '按应用当前的域名/端口重新渲染 vhost' }, { default: () => '套用' }),
+            trigger: () => h(NButton, { ...txt, type: 'primary', loading: onKey(`site-${r.app_id}`, 'apply'), disabled: busyAny(), title: '按应用当前的域名/端口重新渲染 vhost' }, { default: () => '套用' }),
             default: () => '会重写该域名的 vhost 并 reload nginx；nginx -t 不通过时面板自动回滚。',
           }),
           h(NPopconfirm, { onPositiveClick: () => removeSite(r) }, {
-            trigger: () => h(NButton, { ...txt, type: 'error', loading: onKey(r.app_id, 'remove'), disabled: busyAny() }, { default: () => '移除' }),
+            trigger: () => h(NButton, { ...txt, type: 'error', loading: onKey(`site-${r.app_id}`, 'remove'), disabled: busyAny() }, { default: () => '移除' }),
             default: () => '移除此域名的 vhost（应用本身保留），nginx 校验通过后 reload。',
           }),
         );
@@ -475,8 +659,10 @@ const findingColumns: any[] = [
           }),
         ]),
         h('div', { class: 'cell-txt' }, [
-          h('span', { class: 'cell-name cp-prose' }, r.title),
-          h('div', { class: 'cell-sub cp-prose' }, r.detail),
+          // 判词是三行封顶（.cp-prose），不是单行 ellipsis：结论不该等人点一下才露脸。
+          // 但最长的 detail 会吃到第四行被裁掉半句，所以与同页其它 cp-prose 格一样把全文挂在 title 上。
+          h('span', { class: 'cell-name cp-prose', title: r.title }, r.title),
+          h('div', { class: 'cell-sub cp-prose', title: r.detail }, r.detail),
         ]),
       ]),
   },
@@ -507,7 +693,7 @@ onMounted(refresh);
 
 <template>
   <div>
-    <PageHeader title="网站与证书" :sub="`共 ${sites.length} 个站点 · ${certs.length} 张证书。站点信息来自 nginx 配置与应用记录的对照结果，面板不额外维护一份域名表`">
+    <PageHeader title="网站与证书" :sub="`共 ${sites.length} 个域名 · ${claimedCount} 个已纳管 · ${certs.length} 张证书。归属以面板的纳管登记表为准，登记表没有的按 nginx 现读给出建议并写明依据；纳管不改动 nginx`">
       <template #actions>
         <NTag v-if="earliest" size="small" :bordered="false" :type="earliestType">
           最早到期 {{ earliest.name }} · {{ earliest.days_left == null ? '未知' : `${earliest.days_left} 天` }}
@@ -519,9 +705,21 @@ onMounted(refresh);
 
     <NCard size="small" style="margin-bottom: var(--space-4)">
       <template #header>
-        <span class="section-title">
-          <NIcon :component="icons.GlobeOutline" :size="15" color="var(--cp-brand-soft)" /> 网站列表
-        </span>
+        <div class="sa-head">
+          <span class="section-title">
+            <NIcon :component="icons.GlobeOutline" :size="15" color="var(--cp-brand-soft)" /> 网站列表
+          </span>
+          <NTag size="small" :bordered="false" :type="claimTone.type">{{ claimTone.text }}</NTag>
+          <NPopconfirm v-if="isAdmin" @positive-click="claimAllSites">
+            <template #trigger>
+              <NButton size="small" tertiary :icon="ico('CheckmarkCircleOutline')"
+                       :loading="onKey('claim-all', 'claim-all')" :disabled="busyAny() || !unclaimedCount"
+                       title="逐条按面板判定登记归属；判不出归属的原样列出理由，不替你猜应用">全部纳管</NButton>
+            </template>
+            判得出归属的域名逐个落进登记表并认领配置文件；判不出的一个都不猜，会留在列表里写明理由。
+            这一轮不写 nginx、不 reload、不签证书——线上流量不受影响。
+          </NPopconfirm>
+        </div>
       </template>
 
       <NAlert v-if="sitesReason" type="warning" :bordered="false" size="small" style="margin-bottom: var(--space-3)">
@@ -540,6 +738,11 @@ onMounted(refresh);
           <EmptyBox :text="sitesReason ? '当前无法列出站点，原因见上方提示' : 'nginx 配置里还没有对外站点；到应用页为应用配置域名即可生成反代'" />
         </template>
       </NDataTable>
+      <div class="cp-help">
+        「纳管」= 在面板里登记这个域名归哪个应用，并认领它所在的那份配置文件；它不改写 nginx 的内容，
+        也不 reload，取消纳管同样只删这一行登记。「套用」「移除」才是重写 vhost 并 reload nginx 的那两个按钮。
+        手工指定过的归属不会被「全部纳管」改回机器判的结果。
+      </div>
     </NCard>
 
     <NCard size="small" style="margin-bottom: var(--space-4)">
@@ -667,6 +870,31 @@ onMounted(refresh);
       </NSpace>
     </NCard>
 
+    <NModal v-model:show="showAssign" preset="card" title="纳管并指定应用" style="width: 520px; max-width: 94vw">
+      <NSpace vertical :size="12">
+        <NText depth="3" style="font-size: var(--fs-sm)">
+          {{ assignRow?.domain }}：{{ assignRow?.suggest_reason || '面板认不出这个域名归哪个应用。' }}
+        </NText>
+        <div>
+          <div class="assign-cap">指定为哪个应用</div>
+          <NSelect v-model:value="assignId" :options="appOptions" placeholder="从应用清单里选一个" :disabled="busyAny()" />
+          <div v-if="!appOptions.length" class="cp-help">
+            面板里还没有登记任何应用。先把这个服务登记成应用（应用页 → 新建，端口按它实际监听的端口写），
+            再回来纳管，归属信息才有地方挂。
+          </div>
+        </div>
+        <div class="cp-help">
+          指定之后面板就按这一条登记归属，并认领配置文件 {{ assignRow?.file || '（nginx 里没找到它的文件）' }}；
+          面板自己的判定仍然作为「建议」显示，两边不一致会在归属那一列点出来。这一步不写 nginx、不 reload。
+        </div>
+        <NSpace justify="end" :size="8">
+          <NButton size="small" tertiary @click="showAssign = false">取消</NButton>
+          <NButton size="small" type="primary" :disabled="!assignId || busyAny()"
+                   :loading="onKey('claim-' + (assignRow?.domain || ''), 'claim')" @click="confirmAssign">纳管</NButton>
+        </NSpace>
+      </NSpace>
+    </NModal>
+
     <NModal v-model:show="showConfig" preset="card" :title="`vhost 配置：${cfg?.file || cfg?.domain || ''}`" style="width: 760px; max-width: 94vw">
       <NSpace vertical :size="10">
         <NText depth="3" style="font-size: var(--fs-xs)">
@@ -733,5 +961,11 @@ onMounted(refresh);
   font-size: var(--fs-2xs);
   color: var(--cp-text-mute);
   word-break: break-all;
+}
+
+.assign-cap {
+  margin-bottom: 6px;
+  font-size: var(--fs-xs);
+  color: var(--cp-text-mute);
 }
 </style>
