@@ -132,7 +132,9 @@ function appCell(r: any) {
         h(NIcon, { component: r.type === 'node' ? icons.LogoElectron : icons.LogoPython, size: 18, color: r.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)' }),
       ]),
       h('div', { class: 'cell-txt' }, [
-        h(NSpace, { size: 6, align: 'center', wrap: false }, () => [
+        // 名称行允许整项换行：200px 的名称列装不下「rosetta-frontend [前端] [同步] ↗」（自然宽 289），
+        // nowrap 会让徽章与按钮越过列边界压在类型列上。名字自己 ellipsis，附属标记折到下一行。
+        h(NSpace, { size: 6, align: 'center' }, () => [
           h(NButton, { text: true, type: 'primary', class: 'cell-name', title: r.name, onClick: () => router.push(`/apps/${r.id}`) }, () => r.name),
           ...(kids.length ? [h(NTag, { size: 'tiny', bordered: false, type: 'info' }, { default: () => `组合 ${kids.length + 1} 件` })] : []),
           repoLink(r.repo_url),
@@ -150,7 +152,7 @@ function appCell(r: any) {
           h(NIcon, { component: c.type === 'node' ? icons.LogoElectron : icons.LogoPython, size: 14, color: c.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)' }),
         ]),
         h('div', { class: 'cell-txt' }, [
-          h(NSpace, { size: 6, align: 'center', wrap: false }, () => [
+          h(NSpace, { size: 6, align: 'center' }, () => [
             h(NButton, { text: true, type: 'primary', class: 'cell-name', style: 'font-size:var(--fs-sm)', title: c.name, onClick: () => router.push(`/apps/${c.id}`) }, () => c.name),
             h(NTag, { size: 'tiny', bordered: false, type: c.component_role === 'frontend' ? 'success' : 'warning' }, { default: () => roleLabel(c) }),
             ...(!c.deploying && ct.status !== 'running'
@@ -207,23 +209,29 @@ const columns: any[] = [
         : h('span', { class: 'cell-sub' }, '—'),
   },
   {
-    title: '域名', key: 'domains', width: 210,
+    // 域名不能全塞进一行：1440 档这一列的内容宽是 186px，而三个域名的自然宽是 226px，
+    // 原先 nowrap 会把尾部条目挤到 1ch 再逐字换行（「nginx 检测」竖成一排压到状态列上）。
+    // 现在整项换行：宁可「+1」落到第二行，也不把域名本身截掉尾缀；只有单个域名长过整列时才 ellipsis。
+    // 240 是两个域名（191）+ 计数（15）+ 间距与内边距的下限；余量留给名称列，它才是需要读完整的那一列。
+    title: '域名', key: 'domains', width: 240,
     render: (r: any) => {
       const ds = (r.domains || []) as string[];
       if (!ds.length) return h('span', { class: 'cell-sub' }, '—');
-      return h(NSpace, { size: 4, wrap: false }, () => [
-        ...ds.slice(0, 2).map((d) => {
-          const href = siteHref(d);
-          return h(
-            NTag,
-            href
-              ? { size: 'small', bordered: false, type: r.domain ? 'default' : 'info', tag: 'a', href, target: '_blank', rel: 'noopener noreferrer', class: 'dom-tag', title: `在新标签页打开 ${href}` }
-              : { size: 'small', bordered: false, type: r.domain ? 'default' : 'info', class: 'dom-tag', title: d },
-            { default: () => d },
-          );
-        }),
-        ...(ds.length > 2 ? [h('span', { class: 'cell-sub' }, `+${ds.length - 2}`)] : []),
-        ...(!r.domain ? [h('span', { style: 'color:var(--cp-text-mute);font-size:var(--fs-2xs)' }, 'nginx 检测')] : []),
+      return h('div', { class: 'dom-cell' }, [
+        h('div', { class: 'dom-line' }, [
+          ...ds.slice(0, 2).map((d) => {
+            const href = siteHref(d);
+            return h(
+              NTag,
+              href
+                ? { size: 'small', bordered: false, type: r.domain ? 'default' : 'info', tag: 'a', href, target: '_blank', rel: 'noopener noreferrer', class: 'dom-tag', title: `在新标签页打开 ${href}` }
+                : { size: 'small', bordered: false, type: r.domain ? 'default' : 'info', class: 'dom-tag', title: d },
+              { default: () => d },
+            );
+          }),
+          ...(ds.length > 2 ? [h('span', { class: 'dom-more', title: ds.slice(2).join('、') }, `+${ds.length - 2}`)] : []),
+        ]),
+        ...(!r.domain ? [h('div', { class: 'dom-hint' }, 'nginx 检测')] : []),
       ]);
     },
   },
@@ -610,4 +618,10 @@ onMounted(() => {
    整标签作为 flex 项允许收缩（title 里是完整域名）。 */
 :deep(.dom-tag) { max-width: 100%; min-width: 0; }
 :deep(.dom-tag .n-tag__content) { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 域名格：标签与「+N」占一行（放不下就整项换到下一行），来源说明固定另起一行。
+   nowrap 时最先被挤扁的是注脚「nginx 检测」，它会竖成一列字符爬进状态列——注脚不该和域名抢宽度。 */
+:deep(.dom-cell) { min-width: 0; }
+:deep(.dom-line) { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+:deep(.dom-more) { flex: none; color: var(--cp-text-mute); font-size: var(--fs-2xs); }
+:deep(.dom-hint) { margin-top: 2px; color: var(--cp-text-mute); font-size: var(--fs-2xs); white-space: nowrap; }
 </style>
