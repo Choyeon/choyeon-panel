@@ -241,3 +241,67 @@ async def service_action(unit: str, verb: str) -> str:
     if r["code"] != 0:
         raise RuntimeError(r["out"] or f"systemctl {verb} failed")
     return r["out"]
+
+
+# ---------- 「这个进程属于哪个 systemd 单元」的唯一出处 ----------
+# 此前 memory / load / pending 三个服务各写了一份 /proc/<pid>/cgroup 解析，而它们的答案并不一致：
+# 同一个 `0::/user.slice/user-0.slice/user@0.service/init.scope`，pending 的正则抓整行第一个
+# `.service` 得到 user@0.service（于是「改动未生效」劝人去重启 systemd 的用户管理器），memory 与
+# load 取叶子得到 init.scope。2026-10-17 在这台生产机上 145 个进程里有 13 个属于这类形态，
+# 三个读者 13/13 全分歧。定稿时在这台机器上复测（54 个带单元形态的进程）：与旧 pending 规则的
+# 分歧只剩会话进程这一类 2 条，也就是说改的就是那一条缺陷，没有顺手改变别的归属。
+# 同一轮复测还钉住了第二个形态：`0::/system.slice/systemd-udevd.service/udev`——单元目录下再开的
+# 子组，叶子不带后缀。只看叶子会让这台正在跑的 udevd 从归因表里消失，所以规则是「最深的、带已知
+# 后缀的那一层」，而不是「叶子」。
+PANEL_SERVICE = "choyeon-panel"
+PANEL_UNIT = f"{PANEL_SERVICE}.service"
+UNIT_SUFFIXES = (".service", ".scope", ".slice")
+
+
+def unit_of_cgroup(raw: str) -> tuple[str | None, str]:
+    """/proc/<pid>/cgroup → (单元名, 类型)。
+
+    cgroup v2 只有一行 `0::/system.slice/panel-rosetta-backend.service`。**从最深的组件往前**
+    找第一个带已知后缀的：.service 是单元；.scope 是一次性会话（sshd 的 session-*.scope 就在
+    这里——它不属于任何面板应用，但内存是真占了，所以如实标成 scope 而不是丢掉）；.slice 是分组。
+
+    为什么要往前找而不是只看叶子，是两个都真实存在的形态（2026-10-17 生产机原样抓回）：
+    - `0::/user.slice/user-0.slice/user@0.service/init.scope`：叶子是 scope。只看第一个后缀会
+      答成 user@0.service——那是 root 的 systemd 用户管理器，页面会劝人 restart 它，而 restart
+      它等于踢掉这台机器上所有 ssh 会话。这就是本批要修的缺陷。
+    - `0::/system.slice/systemd-udevd.service/udev`：单元目录下再开的子组，叶子没有后缀。只认
+      叶子会答成「归不到单元」，把一台好端端在跑的 udevd 从归因表里抹掉。
+    两个要求合起来只剩一个答案：最深的、带后缀的那一层。
+
+    解析不出（整条路径都没有后缀的容器路径、v1 的多行形态、根 cgroup）给 (None, ...)，
+    让调用方按「归不到单元」处理。
+    """
+    line = ""
+    for one in (raw or "").splitlines():
+        if one.startswith("0::"):
+            line = one
+            break
+    if not line:
+        return None, "none"
+    segs = [seg for seg in line.partition("::")[2].split("/") if seg not in ("", ".")]
+    for seg in reversed(segs):
+        for suf in UNIT_SUFFIXES:
+            if seg.endswith(suf):
+                return seg, suf[1:]
+    return (None, "root") if not segs else (None, "other")
+
+
+def panel_unit() -> str:
+    """面板自己被算进哪个 systemd 单元——站内所有"面板自己"的判词只问这里。
+
+    本进程的 .service 叶子是权威：以 systemd 单元跑起来时它就是那个单元，管理员改名了判词也跟着改。
+    只认 .service 是因为"面板自己"必须是一个服务——sshd 会话的 session-*.scope、容器里的根 cgroup
+    都不是面板，而 CLI 与手工 uvicorn 恰恰就跑在那里面：那里没有"我属于哪个单元"这个事实，而这两处
+    要查的从来是"面板服务"而不是"我这条命令"，所以退回本仓库安装的单元名。
+    """
+    with suppress(OSError):
+        with open("/proc/self/cgroup", encoding="utf-8", errors="ignore") as fh:
+            name, kind = unit_of_cgroup(fh.read())
+        if name and kind == "service":
+            return name
+    return PANEL_UNIT

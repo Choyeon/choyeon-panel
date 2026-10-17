@@ -39,7 +39,7 @@ from ..util import CTRL_TIMEOUT, disk_usage_pct, run
 
 router = APIRouter()
 
-SERVICE_NAME = "choyeon-panel"
+SERVICE_NAME = systemd_ops.PANEL_SERVICE
 CLI_LINK = Path("/usr/local/bin/choyeonctl")
 
 

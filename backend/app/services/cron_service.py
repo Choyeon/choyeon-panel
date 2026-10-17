@@ -44,7 +44,6 @@ from ..util import (
 from . import systemd_ops
 from .backup_service import _unit_dir, _write_if_changed
 
-PANEL_SERVICE = "choyeon-panel"
 RUN_TIMEOUT = 600
 LOG_TAIL_BYTES = 4096
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}$")
@@ -327,7 +326,9 @@ def _managed_units() -> list[str]:
     """面板能重启的 unit：面板自身 + apps 表里的应用（含 unit_override）。"""
     from . import apps_service
 
-    units = [f"{PANEL_SERVICE}.service"]
+    # 面板自己那一项来自 systemd_ops 的唯一定义：这里再抄一遍字面量，就变成了
+    # 一份会随改名而失效的影子清单（白名单漏掉真正的单元，同时放过一个不存在的名字）。
+    units = [systemd_ops.PANEL_UNIT]
     for a in dbm.query("SELECT name, unit_override FROM apps"):
         units.append(apps_service.unit_name(a))
     return units

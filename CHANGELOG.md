@@ -525,6 +525,39 @@
   删不掉源时点名"两处"、落位撞名报并发而不是覆盖、目录副本逐层 chown 不许 suppress。
 - 文件页加上「复制选中 / 剪切选中 / 粘贴到当前目录」，把上一批的后端能力接到界面上（批次㊽B，`Files.vue`）。剪贴板存的是勾选那一刻的绝对路径，不是文件名：翻进另一个目录再粘贴时，存名字会搬走**新目录**里的同名条目，而按钮看起来一模一样。目的地在动手前定死，逐项串行，失败项点名并原样转述后端那一句——同名冲突、搬进自己的子目录、跨分区、落盘余量的判据只有 `files_service` 一个出处，页面猜一份迟早和它分叉，何况页面根本 stat 不到真实文件系统。一次粘贴就清空剪贴板：留着再点一次会把成功过的项再搬一遍（复制撞同名、移动报原路径不存在），没成的项已在提示里点了名，重新勾选比让页面猜后端状态可靠。粘贴走页面自带的 120s 长超时，不是 `api.fileAction` 的 15s：跨分区搬一个整目录，本地先断只会让用户以为没搬成。剪贴板只活在当前页面，不落 localStorage——持久化之后换个账号、换个目录都会拿到上一个会话留下的路径。`web/tests/fileClipboard.test.mjs`（7 条）钉住绝对路径、三颗按钮的启用条件、串行与失败点名、粘贴后回源、页面不许出现第二套搬运判据，以及勾选态绑的是 naive 真认识的那套属性。整页 jsdom 探针接生产接口跑了 37 条断言：复制两项进子目录落盘且内容与源一致、在同目录粘贴被后端判「已经在目标目录里」并点名到项、剪切撞上同名条目时整批点名失败且源一个没动、符号链接按链接搬（`readlink` 仍是 `/etc/hostname`，不是抄了一份内容）、剪贴板跨目录留存且粘贴按钮的 title 跟着当前目录走。
 ### 修复
+- 「改动未生效」页劝人重启一个不该重启的服务，根因是同一个事实有三个读者。
+  `/proc/<pid>/cgroup` 的解析在 `memory_service`、`load_service`、`pending_service` 里各写了一份，
+  而 `pending` 那份拿的是「整行正则抓第一个 `.service`」：于是
+  `0::/user.slice/user-0.slice/user@0.service/init.scope` 里的进程（root 的 systemd 用户管理器自己、
+  它的 (sd-pam)，以及任何跑在 ssh 会话里的进程）被归到 `user@0.service`，那一行的处置写着
+  `systemctl restart user@0.service`——照做会踢掉这台机器上所有 ssh 会话，而它管的根本不是那份没生效
+  的改动。memory 与 load 取叶子，答案是 `init.scope`。2026-10-17 在这台生产机上这类形态有 13 个进程，
+  三个读者 13/13 全分歧。现在解析只剩 `systemd_ops.unit_of_cgroup` 一份，口径是「最深的、带已知后缀的
+  那一层」：先只认叶子，本批自己的线上探针当场抓到 `0::/system.slice/systemd-udevd.service/udev`
+  （单元目录下再开子组、叶子不带后缀）会被判成「归不到单元」，一台正在跑的 udevd 从归因表里整个消失，
+  所以规则是往前找第一层带后缀的，而不是只看叶子。三个调用点按各自的用途收窄，不再互相抄：pending
+  只认 `.service`（它的动作是 restart，scope 没有这个动作），load 另外认 `.scope`（进程归因要如实显示
+  「这个进程跑在某个会话里」），memory 两者都要（内存是真占了）。
+- 「面板自己算哪个单元」收成同一个读者 `systemd_ops.panel_unit()`，并删掉 `CP_SELF_UNIT` 这个死读：
+  注释写着它能覆盖单元名，但仓库里没有任何脚本往 `.env` 写过它，管理员照着改也不生效。以 systemd 单元
+  跑起来时本进程的 cgroup 本来就是权威答案，unit 改名后站内所有「面板自己」的判词会跟着改；只认
+  `.service` 叶子是因为 CLI 与手工 uvicorn 恰好跑在 sshd 的 scope 里，那里没有「我属于哪个单元」这个
+  事实，退回安装名而不是把 `session-9855.scope` 当成面板服务（否则自检项去查一个不存在的服务并报 fail）。
+- 另一处同源缺陷在自我标记：旧写法是 `tail.startswith(self_unit)`，于是 `choyeon-panel-worker.service`
+  这种「名字以面板开头」的兄弟单元会被标成「面板自己」，跟着给出的处置是「配额写在
+  deploy/choyeon-panel.service 的 CPUQuota=，改完 `choyeonctl upgrade --no-pull` 重渲染」——指向一个
+  根本不负责限流这个进程的文件，还会让人去重渲染面板自己的 unit。改成按 cgroup 路径分段判定
+  （`_under_unit`）：兄弟不算，面板自己下面再开的子组仍算。顺带把 `cron_service` 里第三份
+  `PANEL_SERVICE = "choyeon-panel"`（定时任务能 restart 哪些 unit 的白名单）也接到同一个出处。
+- 线上复验（只读，`choyeonctl upgrade --no-pull` 之后）：`/api/pending`、`/api/load`、`/api/memory`
+  三个接口的 `self_unit` 同为 `choyeon-panel.service`；54 个带单元形态的进程里，与旧 pending 规则的分歧
+  只剩会话进程那 2 条（正是要修的那条），归属列中 `user@0.service` 出现 0 次；配额表里只有面板自己带
+  self 标记。`backend/tests/test_batch50a.py`（31 条 + 21 子用例）钉住解析、回退、分段标记与三个调用点
+  各自的收窄，并用源码 grep 钉住出处唯一：`unit_of_cgroup` 定义、`/proc/self/cgroup` 读取点、
+  `PANEL_SERVICE` 字面量各只允许出现在 `systemd_ops`，`CP_SELF_UNIT` 全线不存在。
+  全量 2940 passed + 2800 子用例；`choyeonctl doctor --json` = 16 pass / 3 warn / 2 fail，两条 fail 是
+  机器状态而非本次改动（内核 OOM 杀过 1 次进程；unattended-upgrades 装完新版安全库后进程还踩着旧映射）。
+
 - 后端一个月拿不到 CI 结论，原因写在 `.github/workflows/ci.yml` 的两行里：「单元测试」这一步没有超时，而它会卡住——本机 2 核跑完 `run_tests.py` 实测 2m32s，CI 上同一步跑到 55 分钟仍不退出（run 38978654102）。没有上限的一步不会失败，只会一路烧到 GitHub 的 6 小时默认值，而中途任何一次 push 都把它整块取消：实测近 40 个 run 全部 `conclusion=cancelled`，最后一次 `success` 停在 2026-10-13（`2c6c5b4`），也就是说此后每批交付里写的「CI 已确认」，确认的都不是当次代码，后端 3.11/3.12 矩阵、CLI 冒烟与启动冒烟没有出过一次结论。现在给「单元测试」25 分钟步级上限、backend job 90 分钟兜底：超时算失败，紧随其后的摘要步骤会把 `ut.log` 尾部贴成 GitHub 注解，卡在哪一条测试从此可见，「单元测试失败摘要」也给了 15 分钟（它在日志为空时会重跑整套测试，不给上限等于再挖一个同类的洞）；`concurrency` 保留「新提交赢」（main 上这是对的策略，前提是这一步有上限），因为改成排队会让那个 6 小时僵尸 run 挡住后面每一批。`backend/tests/test_repo_hygiene.py` 钉住两处上限（步级 ≤30、job ≤120），防止哪天又被改回无上限。
 - 文件页表格的勾选框自上线起就不存在，「打包选中」只有按钮、没有能勾的东西：`Files.vue` 把选择态绑在 `NDataTable` 的 `:row-selection` 上，而 naive-ui 没有这个属性——勾选在 naive 里是一列 `{ type: 'selection' }` 再加受控的 `:checked-row-keys` / `@update:checked-row-keys`（仓库里 `Databases.vue`、`BackupFiles.vue` 一直就是这么写的）。Vue 对组件不认的 prop 只当普通 attribute 挂上去，不报错、不渲染，所以这个洞安静地活了很久。改成 selection 列后：线上 375px 真浏览器实测表头渲染出 `n-data-table-th--selection`（修复前 `.n-data-table-tr .n-checkbox` 实测 0 个），逐行勾选框与点选后的启用态、计数、剪贴板全流程在整页 jsdom 探针里实测（表头 1 枚 + 每行 1 枚）。
 

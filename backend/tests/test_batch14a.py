@@ -37,7 +37,8 @@ import cli  # noqa: E402
 from app import aio_db, main, security, severity  # noqa: E402
 from app import database as dbm  # noqa: E402
 from app.routers import meta  # noqa: E402
-from app.services import memory_service as ms  # noqa: E402
+from app.services import memory_service as ms
+from app.services import systemd_ops as so  # noqa: E402
 from app.util import human_bytes  # noqa: E402
 
 KIB = 1024
@@ -419,26 +420,36 @@ class NumTests(unittest.TestCase):
 
 class UnitOfCgroupTests(unittest.TestCase):
     def test_service(self):
-        self.assertEqual(ms._unit_of_cgroup("0::/system.slice/panel-rosetta-backend.service"),
+        self.assertEqual(so.unit_of_cgroup("0::/system.slice/panel-rosetta-backend.service"),
                          ("panel-rosetta-backend.service", "service"))
 
     def test_scope_leaf_is_the_session(self):
         """生产机上 SSH 会话里的进程 cgroup 就是这个形态：归到 scope，不丢掉。"""
-        self.assertEqual(ms._unit_of_cgroup("0::/user.slice/user-0.slice/session-4328.scope"),
+        self.assertEqual(so.unit_of_cgroup("0::/user.slice/user-0.slice/session-4328.scope"),
                          ("session-4328.scope", "scope"))
 
     def test_root(self):
-        self.assertEqual(ms._unit_of_cgroup("0::/"), (None, "root"))
+        self.assertEqual(so.unit_of_cgroup("0::/"), (None, "root"))
 
     def test_v1_multiline_not_guessed(self):
         raw = "11:memory:/system.slice/foo.service\n2:cpu:/\n"
-        self.assertEqual(ms._unit_of_cgroup(raw), (None, "none"))
+        self.assertEqual(so.unit_of_cgroup(raw), (None, "none"))
 
     def test_unknown_leaf(self):
-        self.assertEqual(ms._unit_of_cgroup("0::/init.scope/x"), (None, "other"))
+        """整条路径里没有一个带后缀的组件，才算归不到单元（非 systemd 的 cgroup 形态）。"""
+        self.assertEqual(so.unit_of_cgroup("0::/kubepods/besteffort/pod6c1d/1f2e3d4c"),
+                         (None, "other"))
+
+    def test_单元目录下的子组归到那个单元(self):
+        """`systemd-udevd.service/udev`（生产机 pid 351 原样）：叶子没后缀，归属仍在。
+
+        只看叶子会把一台正在跑的 udevd 报成「归不到单元」，从进程归因表里整个消失。
+        """
+        self.assertEqual(so.unit_of_cgroup("0::/system.slice/systemd-udevd.service/udev"),
+                         ("systemd-udevd.service", "service"))
 
     def test_empty(self):
-        self.assertEqual(ms._unit_of_cgroup(""), (None, "none"))
+        self.assertEqual(so.unit_of_cgroup(""), (None, "none"))
 
 
 class ProcsTests(unittest.TestCase):

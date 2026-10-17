@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from .. import aio_db, probe
 from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
 from ..util import human_bytes, tallied
+from . import systemd_ops
 
 CACHE_TTL = 90.0
 RATE_WINDOW_SEC = 0.8
@@ -77,7 +78,7 @@ NOTES = (
 
 _OOM_KILL_RE = re.compile(r"Killed process (\d+) \(([^)]*)\)")
 _OOM_TASK_RE = re.compile(r"task:([^,]+),pid=(\d+)")
-_UNIT_SUFFIXES = (".service", ".scope", ".slice")
+_UNIT_SUFFIXES = systemd_ops.UNIT_SUFFIXES
 
 try:
     _PAGE = int(os.sysconf("SC_PAGE_SIZE")) or 4096
@@ -270,30 +271,6 @@ def _tunables() -> dict:
     return out
 
 
-def _unit_of_cgroup(raw: str) -> tuple[str | None, str]:
-    """/proc/<pid>/cgroup → (单元名, 类型)。
-
-    cgroup v2 只有一行 `0::/system.slice/panel-rosetta-backend.service`。取最后一个带已知后缀
-    的组件：.service 是单元；.scope 是一次性会话（sshd 的 session-*.scope 就在这里——它不属于
-    任何面板应用，但内存是真占了，所以如实标成 scope 而不是丢掉）；.slice 是分组。解析不出
-    （v1 的多行形态、根 cgroup）给 (None, ...)，让调用方按「归不到单元」处理。
-    """
-    line = ""
-    for one in (raw or "").splitlines():
-        if one.startswith("0::"):
-            line = one
-            break
-    if not line:
-        return None, "none"
-    leaf = line.partition("::")[2].strip().rstrip("/").rsplit("/", 1)[-1]
-    for suf in _UNIT_SUFFIXES:
-        if leaf.endswith(suf):
-            return leaf, suf[1:]
-    if not leaf:
-        return None, "root"
-    return None, "other"
-
-
 def _procs(limit: int = TOP_PROCS, budget: float = PROC_BUDGET_SEC) -> dict:
     """按 RSS 取前几名，并把每个进程归回它的 systemd 单元。
 
@@ -327,7 +304,7 @@ def _procs(limit: int = TOP_PROCS, budget: float = PROC_BUDGET_SEC) -> dict:
             continue
         if resident <= 0:
             continue
-        unit, kind = _unit_of_cgroup(_read(f"/proc/{pid}/cgroup"))
+        unit, kind = systemd_ops.unit_of_cgroup(_read(f"/proc/{pid}/cgroup"))
         rows.append({
             "pid": int(pid),
             "comm": (_read(f"/proc/{pid}/comm").strip() or "?")[:64],
@@ -648,7 +625,7 @@ def _collect(app_map: dict | None = None, window: float = RATE_WINDOW_SEC) -> di
     press = _psi(_read("/proc/pressure/memory"))
     rates = _rates(vm_a, vm_b, secs)
     tun = _tunables()
-    self_unit, _ = _unit_of_cgroup(_read("/proc/self/cgroup"))
+    self_unit = systemd_ops.panel_unit()
     units = _units(_cgroup_root(), app_map, self_unit)
     if units.get("ok") and mem.get("ok"):
         _decorate_units(units, mem["total"])

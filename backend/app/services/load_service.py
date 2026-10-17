@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from .. import probe
 from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
 from ..util import tallied
+from . import systemd_ops
 
 CACHE_TTL = 60.0
 SAMPLE_WINDOW_SEC = 1.0
@@ -199,19 +200,13 @@ def _pid_stat(pid: int) -> dict | None:
 
 
 def _unit_of(pid: int) -> str:
-    """从 /proc/<pid>/cgroup 认 systemd 单元名；认不出就返回空串（容器、scope、内核线程都在这）。"""
-    raw = _read(f"/proc/{pid}/cgroup")
-    tail = ""
-    for line in raw.splitlines():
-        p = line.split(":")
-        if len(p) < 3 or not p[2]:
-            continue
-        base = p[2].rstrip("/").rsplit("/", 1)[-1]
-        if base.endswith(".service"):
-            return base
-        if base not in ("", "system.slice", "user.slice", "/"):
-            tail = tail or base
-    return tail
+    """这进程落在哪个 cgroup；解析规则在 systemd_ops，这里只管本站的标签口径。
+
+    scope 留着（init.scope、session-4618.scope 说明这进程不归任何 .service 管，可 CPU 是真花了），
+    裸 slice 与解析不出给空串。
+    """
+    name, kind = systemd_ops.unit_of_cgroup(_read(f"/proc/{pid}/cgroup"))
+    return name if kind in ("service", "scope") else ""
 
 
 def _wchan(pid: int) -> str:
@@ -305,6 +300,19 @@ def _cgroup_dirs() -> list[str]:
     return out
 
 
+def _under_unit(path: str, unit: str) -> bool:
+    """这个 cgroup 目录是否落在 unit 的子树里。
+
+    旧写法是 `tail.startswith(self_unit)`，于是 choyeon-panel-worker.service 这种"名字以面板开头
+    的兄弟单元"会被标成面板自己，跟着给出改面板 CPUQuota 的处置建议。unit 目录下再开的子组
+    （比如面板自己 fork 出来的 scope）仍然算。
+    """
+    rel = os.path.relpath(path, CG_ROOT)
+    if rel.startswith(".."):
+        return False
+    return unit in [seg for seg in rel.split(os.sep) if seg not in ("", ".")]
+
+
 def _quota_scan(self_unit: str, deadline: float) -> dict:
     """每个有限额或被限流过的 cgroup，给出配额核数与窗口内的 throttle 增量。"""
     dirs = _cgroup_dirs()
@@ -341,7 +349,7 @@ def _quota_second_pass(first: dict, self_unit: str) -> list[dict]:
         rows.append({
             "unit": tail,
             "path": d,
-            "self": tail == self_unit or (self_unit and tail.startswith(self_unit)),
+            "self": _under_unit(d, self_unit),
             "capped": quota is not None,
             "quota_cores": _round(quota / per, 2) if quota else None,
             "period_us": per,
@@ -461,8 +469,10 @@ def _findings(load: dict, cpu: dict, psi: dict, procs: dict,
         sev = SEV_RISK if pct >= THROTTLE_RISK else SEV_WARN
         who = "面板自己" if r["self"] else r["unit"]
         if r["self"]:
-            fix = ("systemctl show choyeon-panel -p CPUQuotaPerSecUSec   "
-                   "# 配额写在 deploy/choyeon-panel.service 的 CPUQuota=，"
+            own = quota.get("self_unit") or systemd_ops.PANEL_UNIT
+            stem = own[: -len(".service")] if own.endswith(".service") else own
+            fix = (f"systemctl show {stem} -p CPUQuotaPerSecUSec   "
+                   f"# 配额写在 deploy/{own} 的 CPUQuota=，"
                    "改完用 choyeonctl upgrade --no-pull 重渲染（不要手工编辑 /etc/systemd 下那份）")
         else:
             fix = (f"systemctl show {r['unit']} -p CPUQuotaPerSecUSec   "
@@ -544,7 +554,7 @@ def _collect() -> dict:
     stat1 = _stat_cpu()
     load = _loadavg()
     psi = _psi()
-    self_unit = os.environ.get("CP_SELF_UNIT") or "choyeon-panel.service"
+    self_unit = systemd_ops.panel_unit()
     q1 = _quota_scan(self_unit, deadline)
     procs = _scan_procs(hz, deadline)
     stat2 = _stat_cpu()

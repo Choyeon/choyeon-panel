@@ -127,11 +127,15 @@ def _proc_start_epoch(pid: int, btime: int, hz: int) -> int | None:
 
 
 def _unit_of(pid: int) -> str:
-    for line in _read(f"/proc/{pid}/cgroup").splitlines():
-        m = re.search(r"([^/\s]+\.service)", line)
-        if m:
-            return m.group(1)
-    return ""
+    """这进程属于哪个 .service；解析规则在 systemd_ops，这里只认 .service。
+
+    处置建议是 `systemctl restart <unit>`，而 session-*.scope、init.scope 没有"重启它"这个动作，
+    所以归不到 .service 的一律留空。旧写法在整行里正则抓第一个 `.service`，于是
+    `0::/user.slice/user-0.slice/user@0.service/init.scope` 被归到 user@0.service——那是 systemd
+    的用户管理器，不是这个进程自己的单元，页面会劝人去重启它。
+    """
+    name, kind = systemd_ops.unit_of_cgroup(_read(f"/proc/{pid}/cgroup"))
+    return name if kind == "service" else ""
 
 
 def _cmd_of(pid: int) -> str:
@@ -767,18 +771,13 @@ _cache: dict = probe.new_cache()
 _LOCK = asyncio.Lock()
 
 
-def _self_unit_name() -> str:
-    """面板自己的 unit 名，用于把「面板在跑旧库」这件事说清楚。"""
-    return os.environ.get("CP_SELF_UNIT") or "choyeon-panel.service"
-
-
 async def audit(refresh: bool = False) -> dict:
     """带 TTL 的探测入口；并发与连点合并成一轮 /proc + lsof 扫描（见 app/probe.py）。"""
     return await probe.read(_cache, _LOCK, _reprobe, refresh=refresh, ttl=CACHE_TTL)
 
 
 async def _reprobe() -> dict:
-    return await asyncio.to_thread(_collect, _self_unit_name())
+    return await asyncio.to_thread(_collect, systemd_ops.panel_unit())
 
 
 def reset_cache() -> None:
