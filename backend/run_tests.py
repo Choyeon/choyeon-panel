@@ -11,12 +11,16 @@
    per-test 的 mkdtemp，单看都合理，累起来却没有回收器：每跑一轮就在 /tmp 留下一批
    `cp_*` 目录。这里把它们收进同一个会话目录，退出时删掉。
 
+③ **单条用例挂死有上限**。到点把还卡着的线程栈打出来再退出，而不是让 CI 的 step
+   超时替我们猜「哪一条没跑完」。
+
 用法（`-v` 等参数原样转给 unittest）：
 
     cd backend && .venv/bin/python run_tests.py -v
 """
 
 import atexit
+import faulthandler
 import os
 import shutil
 import sys
@@ -25,6 +29,37 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+
+# 最慢的单条用例离这个上限还差两个数量级（整套 2959 条在 2 核机上约 170 秒跑完），
+# 所以撞上它基本等于「这里有死循环」，不是「这台机器慢」。设 0 关闭。
+HANG_SECONDS = float(os.environ.get("CP_TEST_HANG_SECONDS", "240") or 0)
+
+
+class _HangWatchdogResult(unittest.TextTestResult):
+    """每条用例开始前重新定时、结束就撤销；到点仍未撤销则 dump 全部线程栈并退出。
+
+    为什么要它：2026-10-17 的 run 38984972944 把「单元测试」25 分钟跑到上限被杀，
+    日志最后一行只有 ``...test_html_revalidates_and_assets_are_immutable ...``，
+    既看不出卡在哪个文件哪一行，也分不清是没跑完还是在空转。加大 step 上限只是把
+    静默僵尸换成有名字的失败，这条把名字直接打在日志里。
+    """
+
+    def startTest(self, test):
+        super().startTest(test)
+        if HANG_SECONDS > 0:
+            faulthandler.dump_traceback_later(HANG_SECONDS, exit=True)
+
+    def stopTest(self, test):
+        if HANG_SECONDS > 0:
+            faulthandler.cancel_dump_traceback_later()
+        super().stopTest(test)
+
+
+class _Runner(unittest.TextTestRunner):
+    def __init__(self, **kw):
+        kw.setdefault("resultclass", _HangWatchdogResult)
+        super().__init__(**kw)
 
 
 def main() -> int:
@@ -45,7 +80,7 @@ def main() -> int:
 
     sys.path.insert(0, str(HERE))
     argv = [sys.argv[0], "discover", "-s", "tests", *sys.argv[1:]]
-    return unittest.main(argv=argv, module=None).exit()
+    return unittest.main(argv=argv, module=None, testRunner=_Runner).exit()
 
 
 if __name__ == "__main__":

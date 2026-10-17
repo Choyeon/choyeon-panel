@@ -41,18 +41,29 @@ def _scope(path="/api/auth/login", method="POST", headers=None, type="http"):
 
 
 class Feed:
-    """按脚本喂 http.request，并在脚本用尽后补一个终止块。"""
+    """按脚本喂 http.request：正文给完补一个终止块，之后阻塞等客户端断开。
+
+    终止块只发一次、随后挂住，是因为真服务器的 receive() 就是这个形状。
+    用尽后无限立刻回 http.request 会让 starlette 1.8 的 FileResponse 断连监听
+    循环空转不死（CI 的 25 分钟上限就是烧在那儿，见批次㊿C）。
+    """
 
     def __init__(self, chunks):
         self.chunks = list(chunks)
         self.n = 0
+        self.ended = False
+        self._client_gone = asyncio.Event()
 
     async def __call__(self):
         if self.n < len(self.chunks):
             body = self.chunks[self.n]
             self.n += 1
             return {"type": "http.request", "body": body, "more_body": self.n < len(self.chunks)}
-        return {"type": "http.request", "body": b"", "more_body": False}
+        if not self.ended:
+            self.ended = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await self._client_gone.wait()
+        return {"type": "http.disconnect"}
 
 
 class Collector:

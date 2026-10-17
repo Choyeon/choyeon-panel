@@ -554,9 +554,19 @@ class TestStaticCacheHeaders(unittest.IsolatedAsyncioTestCase):
             "root_path": "", "headers": [], "client": ("127.0.0.1", 50000), "server": ("test", 80),
         }
         sent = []
+        given = False
+        client_gone = asyncio.Event()
 
         async def receive():
-            return {"type": "http.request", "body": b"", "more_body": False}
+            # 正文只给一次，之后像真服务器一样挂着等断开：用尽后立刻再回一条
+            # http.request 不是 EOF，starlette 1.8 起 FileResponse 会为此起一个
+            # `while True: await receive()` 的断连监听任务，那种桩让它空转不死。
+            nonlocal given
+            if not given:
+                given = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await client_gone.wait()
+            return {"type": "http.disconnect"}
 
         async def send(msg):
             sent.append(msg)
