@@ -536,7 +536,33 @@ def parse_certbot(output: str) -> list[dict]:
     return certs
 
 
-async def run_checks():
+_checks_running = False
+
+
+async def run_checks() -> dict:
+    """一轮巡检的重入闸：同一个进程里只允许一轮在跑。
+
+    三个入口都会调它（后台每 30 分钟一轮、告警页「立即巡检」、设置页「运行检查」）。
+    一轮里有十几个 await（systemctl / certbot / ss / 磁盘…），连点就是两轮交错执行，
+    而 `_check` 的「今天发过没有」是**先读 `sent:` 再 notify、notify 返回后才写**：
+    两拨都读到"今天没发过"，同一件事就发两遍通知；`streak:<code>` 同样被虚增一轮，
+    去抖（RESOURCE_NOTIFY_ROUNDS）提前到位，前几轮尖峰就直接推送了。
+
+    跳过而不是排队：排队只是让第二轮紧跟着第一轮再回一次源，历史与 streak 仍在同一分钟
+    被写两遍。跳过对本轮没有损失——第一轮刚把每一项都读过一遍。
+    """
+    global _checks_running  # noqa: PLW0603
+    if _checks_running:
+        return {"ok": True, "skipped": "上一轮巡检还在执行，本轮跳过"}
+    _checks_running = True
+    try:
+        await _run_checks()
+    finally:
+        _checks_running = False
+    return {"ok": True}
+
+
+async def _run_checks():
     pct = disk_usage_pct(config.DATA_DIR)
     dth = disk_thresholds()
     disk_pct = dth["warn"]

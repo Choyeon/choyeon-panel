@@ -121,12 +121,16 @@ async def alerts_run(req: Request):
     try:
         before = await aio_db.query_one("SELECT COALESCE(MAX(id), 0) m FROM alerts_log")
         watermark = int(before["m"]) if before else 0
-        await alerts_service.run_checks()
+        ran = await alerts_service.run_checks()
         inserted = await aio_db.query(
             "SELECT id,ts,level,code,message,meta FROM alerts_log WHERE id>? ORDER BY id", (watermark,)
         )
-        await aio_db.audit(req.state.cp_sub, "alert:run", str(len(inserted)))
-        return {"ok": True, "inserted": inserted, "count": len(inserted)}
+        await aio_db.audit(req.state.cp_sub, "alert:run",
+                           f"{len(inserted)} 条" + (f"({ran['skipped']})" if ran.get("skipped") else ""))
+        out = {"ok": True, "inserted": inserted, "count": len(inserted)}
+        if ran.get("skipped"):
+            out["skipped"] = ran["skipped"]
+        return out
     except Exception as e:  # noqa: BLE001
         return await _fail(f"alerts run 失败: {type(e).__name__}: {e}", "巡检执行失败，详见面板日志")
 

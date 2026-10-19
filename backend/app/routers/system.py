@@ -515,13 +515,18 @@ async def nginx_log(request: Request):
     if not 0 <= idx < len(files):
         return _bad(f"file 序号超出范围（可用 0-{len(files) - 1}）")
     picked = files[idx]
-    items = await run_in_threadpool(web_logs.tail_file, picked["path"], lines, filt, MAX_ITEM_CHARS)
+    tail = await run_in_threadpool(web_logs.tail_file, picked["path"], lines, filt, MAX_ITEM_CHARS)
     return {
-        "items": items,
-        "count": len(items),
+        "items": tail["items"],
+        "count": len(tail["items"]),
+        "matched": tail["matched"],
+        "dropped": tail["dropped"],
+        "window_truncated": tail["window_truncated"],
         "source": picked["label"],
         "files": [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]} for i, f in enumerate(files)],
-        "truncated": len(items) >= lines,
+        # 「这一页是不是全部」要同时看两把刀：行数上限裁掉的命中（dropped），和整个文件比
+        # 单次读量大、连窗口都没读到底（window_truncated）。按返回条数判会把两者都说成完整答案。
+        "truncated": tail["dropped"] > 0 or tail["window_truncated"],
     }
 
 

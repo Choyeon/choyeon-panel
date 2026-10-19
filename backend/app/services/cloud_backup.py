@@ -637,6 +637,15 @@ def prune_remote(target_id: int, bk: dict) -> dict:
     rx = _auto_re(int(bk["id"]))
     prefix = _norm_prefix(t["prefix"])
     rows, truncated = list_keys(t, prefix)
+    if truncated:
+        # 名册没翻完就照着它删，删的是"看得见的最旧"而不是"真的最旧"：前缀下堆了几万个
+        # 对象时（同桶多个任务、多年产物、或这前缀还放着别的东西），`while len(mine) > keep`
+        # 会把翻到的近两万份一路删到只剩 keep 份——一次异地剪枝变成清空这个前缀。
+        # 所以这里不动手，只把"为什么没剪"如实交回调用方：少剪几份只是多占桶，
+        # 误删是不可逆的。
+        return {"ok": False, "deleted": [], "remote_count": len(rows), "truncated": True,
+                "skipped": f"远端清单没翻完（最多 {LIST_PAGES} 页 × 1000 个对象），"
+                           f"按不完整的名册删最旧的会删错，本轮不删"}
     mine = []
     for r in rows:
         name = r["key"][len(prefix):] if r["key"].startswith(prefix) else ""
@@ -695,8 +704,13 @@ def push_pending(bk: dict) -> dict:
         for name in todo:
             pushed.append(push_file(int(tid), bid, name))
         pruned = prune_remote(int(tid), bk)
-        return {"ok": True, "pushed": pushed, "pruned": pruned["deleted"],
-                "remote_count": pruned["remote_count"]}
+        out = {"ok": True, "pushed": pushed, "pruned": pruned["deleted"],
+               "remote_count": pruned["remote_count"]}
+        if pruned.get("skipped"):
+            # LIST_PAGES 那句注释要落到这里才有意义："翻不满就如实报 truncated，而不是把
+            # prune 当成功"。副本一份都没少删是"远端还在长"，不是"剪枝做完了"。
+            out["prune_skipped"] = pruned["skipped"]
+        return out
     except Exception as e:  # noqa: BLE001
         note = redact_creds(str(e))[:300]
         dbm.execute("UPDATE cloud_targets SET last_error=? WHERE id=?", (note, int(tid)))

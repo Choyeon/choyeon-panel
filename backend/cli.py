@@ -762,7 +762,8 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
             Out.result(res, f"未推送：{res['skipped']}")
         else:
             Out.result(res, f"已推送 {len(res['pushed'])} 份到异地"
-                            + (f"，按 keep 删掉远端最旧 {len(res['pruned'])} 份" if res.get("pruned") else ""))
+                            + (f"，按 keep 删掉远端最旧 {len(res['pruned'])} 份" if res.get("pruned") else "")
+                            + (f"；远端未剪枝：{res['prune_skipped']}" if res.get("prune_skipped") else ""))
         return {"ok": True, **res}
 
     if a.backup_cmd == "link":

@@ -200,19 +200,22 @@ class TestTailFile(unittest.TestCase):
         p = f"{d}/access.log"
         _write(p, [f"line{i} " + _line(client="10.0.0.1", path=f"/x{i}") for i in range(1, 101)])
         out = WL.tail_file(p, 5, "", 1500)
-        self.assertEqual(len(out), 5)
-        self.assertIn("line100", out[-1])
+        # 批次61 起返回四个数分开的 dict：items/matched/dropped/window_truncated
+        self.assertEqual(len(out["items"]), 5)
+        self.assertIn("line100", out["items"][-1])
+        self.assertEqual((out["matched"], out["dropped"]), (100, 95))
+        self.assertFalse(out["window_truncated"])
         # 上游脱敏口径不变：日志行里的凭据要遮住
         _write(p, ["x - - [16/Oct/2026:09:00:00 +0000] \"GET https://bob:S3cr3tT0ken@h/ HTTP/1.1\" 200 1"])
-        self.assertNotIn("S3cr3tT0ken", WL.tail_file(p, 5, "", 1500)[0])
+        self.assertNotIn("S3cr3tT0ken", WL.tail_file(p, 5, "", 1500)["items"][0])
 
     def test_filter_and_char_cap(self):
         d = tempfile.mkdtemp(prefix="cp44_tail2_")
         self.addCleanup(shutil.rmtree, d, True)
         p = f"{d}/access.log"
         _write(p, [_line(client="1.1.1.1"), _line(client="2.2.2.2"), _line(client="1.1.1.1")])
-        self.assertEqual(len(WL.tail_file(p, 50, "1.1.1.1", 1500)), 2)
-        self.assertTrue(all(len(x) <= 40 for x in WL.tail_file(p, 50, "", 40)))
+        self.assertEqual(len(WL.tail_file(p, 50, "1.1.1.1", 1500)["items"]), 2)
+        self.assertTrue(all(len(x) <= 40 for x in WL.tail_file(p, 50, "", 40)["items"]))
 
 
 class TestTimeAndRequestParsing(unittest.TestCase):

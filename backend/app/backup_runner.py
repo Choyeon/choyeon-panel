@@ -403,6 +403,11 @@ def _push_offsite(bk: dict) -> None:
         print(f"offsite: 已推送 {len(res['pushed'])} 份：" + "、".join(p["key"] for p in res["pushed"]))
         if res.get("pruned"):
             print(f"offsite: 按 keep 删掉远端最旧的 {len(res['pruned'])} 份")
+        if res.get("prune_skipped"):
+            # 副本没减是"远端还在长"，不是"剪枝做完了"：这句要进 stderr 也要进审计，
+            # 否则管理员只在网页上看到"已推送 N 份"，桶涨了几年都不知道为什么。
+            print(f"offsite: 远端没有剪枝：{res['prune_skipped']}", file=sys.stderr)
+            dbm.audit("system", "backup:push-prune-skipped", f"{bk['id']}({res['prune_skipped']})")
         dbm.audit("system", "backup:push", f"{bk['id']}({len(res['pushed'])} 份)")
     elif res.get("skipped"):
         print(f"offsite: {res['skipped']}")

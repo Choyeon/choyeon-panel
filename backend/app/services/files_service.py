@@ -180,10 +180,12 @@ def list_dir(p: str) -> dict:
     entries = []
     for name in names:
         is_dir = False
-        size = 0
-        mtime = ""
         # 读不到 stat 的条目（正在被删除、权限拒绝）权限列留空，由前端显示成「—」，
         # 不能拿 0 去格式化——那会渲染成 0000 / "----------"，看着像真的没权限。
+        # 大小同一个道理：`0` 是"确认这是一个空文件"这个结论，读不到时得回 None，
+        # 前端才印得出「—」（与 util.human_bytes 的口径一致）。
+        size = None
+        mtime = ""
         perm = {"perm": "", "octal": "", "owner": "", "group": ""}
         try:
             st = os.stat(os.path.join(abs_, name))

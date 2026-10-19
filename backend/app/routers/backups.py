@@ -125,7 +125,8 @@ async def backups_push(bid: str, req: Request):
     try:
         res = await run_in_threadpool(cloud_backup.push_now, int(bid), int(tid) if tid else 0)
         await aio_db.audit(req.state.cp_sub, "backup:push",
-                           f"{bid}({len(res.get('pushed') or [])} 份，删 {len(res.get('pruned') or [])} 份)")
+                           f"{bid}({len(res.get('pushed') or [])} 份，删 {len(res.get('pruned') or [])} 份)"
+                           + (f" 未剪枝:{res['prune_skipped']}" if res.get("prune_skipped") else ""))
         return res
     except Exception as e:  # noqa: BLE001
         # 失败也要留痕：这条路上"没推上去"最容易悄悄发生（对端换了密钥、桶被删）

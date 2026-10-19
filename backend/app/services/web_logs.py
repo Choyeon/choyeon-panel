@@ -170,19 +170,32 @@ def discovery_hint() -> str:
             "choyeonctl upgrade --no-pull 重新渲染并重启才生效。")
 
 
-def tail_file(path: str, lines: int, filt: str, max_chars: int) -> list:
+def tail_file(path: str, lines: int, filt: str, max_chars: int) -> dict:
     """从文件末尾最多读 TAIL_BYTES，再取后 lines 行（大日志不会把内存打满）。
 
     脱敏口径在这里，不在路由里：tail 出来的行会进审计、进浏览器、进截图，
     一行里带 `https://bob:S3cr3tT0ken@host` 是访问日志的常态。
+
+    过滤排在截尾**之前**：旧写法先 `[-lines:]` 再按关键词筛，于是"最近 200 行里只有 2 行
+    命中"会被当成"这个关键词只有 2 次命中"——第 201 行往前的命中永远看不见，而这正是
+    排障时最想知道的那一条。返回的四个数分开说清三件事：给了几行（items）、窗口里命中几行
+    （matched）、其中被行数上限裁掉几行（dropped）、字节窗口有没有到底
+    （window_truncated）。只有 dropped 与 window_truncated 都是 0/false 时才是完整答案。
     """
     size = os.path.getsize(path)
+    start = max(0, size - TAIL_BYTES)
     with open(path, "rb") as f:
-        f.seek(max(0, size - TAIL_BYTES))
+        f.seek(start)
         raw = f.read()
-    out = []
-    for line in raw.decode(errors="replace").splitlines()[-lines:]:
-        if filt and filt.lower() not in line.lower():
-            continue
-        out.append(redact_creds(line)[:max_chars])
-    return out
+    rows = raw.decode(errors="replace").splitlines()
+    if filt:
+        kf = filt.lower()
+        rows = [r for r in rows if kf in r.lower()]
+    matched = len(rows)
+    keep = rows[max(0, matched - lines):] if lines > 0 else []
+    return {
+        "items": [redact_creds(r)[:max_chars] for r in keep],
+        "matched": matched,
+        "dropped": matched - len(keep),
+        "window_truncated": start > 0,
+    }

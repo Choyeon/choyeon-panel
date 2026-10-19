@@ -1356,7 +1356,10 @@ async def restore_backup(bid: int, filename: str, actor: str = "system") -> dict
             # 半途失败时 log 里那句「解包中断：目录可能处于半恢复状态，服务保持停止」是用户
             # 唯一能照着处理的现场说明。旧写法只把异常往上抛，这段说明连同整个 log 一起丢了，
             # 界面上一行 "恢复失败: …"，没人知道服务其实被恢复流程停掉了、目录是半新的。
-            raise RuntimeError(f"{e}\n\n执行记录：\n" + "\n".join(log)) from e
+            # 和成功分支一样先遮一次凭据再往上抛：这条消息会被路由原样写进审计、也原样回给
+            # 浏览器（routers/backups.py 的 `失败: {e}`），而失败的那几步恰恰最容易把带连接串的
+            # 命令行留在 log 里——成功分支遮了、失败分支不遮，泄露就只在出事的时候发生。
+            raise RuntimeError(redact_creds(f"{e}\n\n执行记录：\n" + "\n".join(log))) from e
         # actor 由路由传当前登录用户：覆盖线上数据这种事记成 "system" 等于没记
         dbm.audit(actor, "backup:restore", f"{bid}:{os.path.basename(path)}")
         # 数据确实装上了，但日志里有 `!!` 行 = 有一件事要人接手（服务没起来、按最大库定位、

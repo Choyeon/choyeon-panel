@@ -856,6 +856,9 @@ class TestAlertHistoryEndpoints(_HistoryCase):
     def test_run_reports_inserted_rows(self):
         async def quiet_checks():
             await alerts_service.record("crit", self.code, "本轮新增")
+            # 批次61 起 run_checks 的契约是回 dict（{"ok": True[, "skipped": …]}），
+            # 路由要读 ran.get("skipped") 把它并进审计与响应
+            return {"ok": True}
 
         with mock.patch.object(alerts_service, "run_checks", quiet_checks):
             r = self.post("/api/alerts/run")
