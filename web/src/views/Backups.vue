@@ -149,6 +149,9 @@ const sqliteOpts = computed(() => apps.value.map((a: any) => ({ label: a.name, v
 const targetOptions = computed(() => (form.value.kind === 'sqlite' ? sqliteOpts.value : appOpts.value));
 // pg 目标下拉：真实库名 + all。列表拿不到（未装 PG / 连接失败）时留空，
 // 选择器仍可键入，不把这条路径堵死。
+// "读不到库列表"和"实例上一个库都没有"是两个事实：旧写法 catch 后 pgDbs=[]，
+// 下拉只剩 all，用户读到的是"这台机器没有 PG 库"，而实际可能是连接失败。
+const pgReadError = ref('');
 const pgOpts = computed<any[]>(() => [
   ...pgDbs.value.map((d: any) => ({ label: `${d.name}（${d.size || '大小未知'}）`, value: d.name })),
   { label: 'all（整库 pg_dumpall，只能手工恢复）', value: 'all' },
@@ -156,8 +159,10 @@ const pgOpts = computed<any[]>(() => [
 async function loadPg() {
   try {
     pgDbs.value = await api.pgDbs();
-  } catch {
+    pgReadError.value = '';
+  } catch (e: any) {
     pgDbs.value = [];
+    pgReadError.value = e?.message || String(e);
   }
 }
 
@@ -718,7 +723,10 @@ function confirmDeleteTarget(r: any) {
                   />
                   <NButton size="small" tertiary @click="form.target = 'all'">全部</NButton>
                 </NSpace>
-                <span class="cp-help">填单个库名只备份该库；选 all 备份实例内全部库。库名只校验格式，之后库不存在的话这个任务每晚都会失败。</span>
+                <span v-if="pgReadError" class="cp-help cp-help-warn">
+                  库列表读取失败（{{ pgReadError }}）：下面只有 all 一档，不代表这台实例上没有其它库。可直接键入库名，或修好连接后重新打开本弹窗。
+                </span>
+                <span v-else class="cp-help">填单个库名只备份该库；选 all 备份实例内全部库。库名只校验格式，之后库不存在的话这个任务每晚都会失败。</span>
               </NSpace>
             </NFormItem>
             <NFormItem v-else :label="form.kind === 'sqlite' ? 'SQLite 应用' : '应用'">

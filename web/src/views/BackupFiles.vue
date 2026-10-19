@@ -236,8 +236,15 @@ const restoring = ref(false);
 const restoreLog = ref('');
 const restoreWarn = ref(false);
 const restoreErr = ref('');
+// restoreLog/restoreWarn/restoreErr 是"当前打开的那个弹窗"的槽位。恢复慢的时候
+// 弹窗可以关掉了在另一个文件上再开（遮罩点击即关，行内按钮也不看请求状态），
+// 旧写法里 A 的响应回来直接写进 B 的弹窗：B 一行没动，却显示"A 的执行记录"。
+// 用序号把响应钉回它自己那一轮：弹窗已经换目标/已关闭的，迟到的响应就地丢弃，
+// 只在原请求还挂在屏上时恢复按钮的 loading 态。
+let restoreSeq = 0;
 
 function openRestore(f: any) {
+  restoreSeq += 1; // 作废上一轮还在飞的响应
   restoreTarget.value = f;
   restoreLog.value = '';
   restoreWarn.value = false;
@@ -251,10 +258,12 @@ async function doRestore() {
   if (restoring.value) return;
   const f = restoreTarget.value;
   if (!f) return;
+  const seq = restoreSeq;
   restoring.value = true;
   restoreErr.value = '';
   try {
     const r = await api.restoreBackup(f.job_id, f.name);
+    if (seq !== restoreSeq) return; // 弹窗已换目标或已关闭，这份结果不属于屏上的文件
     restoreLog.value = r.log || '恢复完成';
     // ok:true 只说明数据装上了。日志里带 `!!` 的行是"有一件事必须人来接手"
     // （服务没起来、按最大库定位、归档环境变量生效），旧写法一律报绿色"恢复完成"，
@@ -264,12 +273,24 @@ async function doRestore() {
     else msg.success('恢复完成');
     load();
   } catch (e: any) {
-    restoreErr.value = e.message;
-    msg.error(e.message);
+    if (seq === restoreSeq) {
+      restoreErr.value = e.message;
+      msg.error(e.message);
+    } else {
+      msg.error(`恢复 ${f.name} 失败：${e.message}`);
+    }
   } finally {
+    // 忙位属于"这一条请求"，不属于屏上的弹窗：迟到的响应也必须把它释放掉，
+    // 否则换过目标之后 restoring 永远挂着，任何文件都点不动「恢复覆盖」。
     restoring.value = false;
   }
 }
+
+watch(showRestore, (v) => {
+  // 关闭弹窗同样作废在飞的那一轮：否则恢复还在跑时关掉，restoring 永远挂着，
+  // 重开任何文件都会被"同一时间只允许一条恢复"的旧锁拦住。
+  if (!v) restoreSeq += 1;
+});
 
 const columns: any[] = [
   { type: 'selection', disabled: () => !isAdmin.value },

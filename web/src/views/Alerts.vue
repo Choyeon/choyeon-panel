@@ -55,6 +55,10 @@ const rows = computed<AlertRow[]>(() => {
 });
 const counts = computed<Record<string, number>>(() => openData.value?.counts || { ok: 0, warn: 0, crit: 0 });
 const openTotal = computed(() => openData.value?.total ?? 0);
+// 「读不到未确认」和「未确认是 0」是两回事。旧写法在 /alerts/open 失败时把
+// openData 留成 undefined，汇总卡照样渲染「未确认 0 条」+ 三个 0 —— 接口挂了
+// 反而是一片绿灯，正好盖住最该看见的故障。失败时数字改画成「—」并点名读取失败。
+const openFailed = computed(() => !openData.value && !!openError.value);
 
 const LEVEL: Record<string, { label: string; type: 'success' | 'warning' | 'error'; ico: string; dot: string }> = {
   crit: { label: '严重', type: 'error', ico: 'CloseCircleOutline', dot: 'err' },
@@ -203,11 +207,21 @@ async function runRound(kind: 'run' | 'probe') {
     <NCard size="small" style="margin-bottom: var(--space-4)">
       <div class="al-summary">
         <div class="al-side">
-          <NText strong class="cp-pop" style="font-size: var(--fs-sm)">未确认 {{ openTotal }} 条</NText>
+          <NText strong class="cp-pop" style="font-size: var(--fs-sm)">
+            <template v-if="openFailed">未确认 —（未确认统计读取失败）</template>
+            <template v-else>未确认 {{ openTotal }} 条</template>
+          </NText>
           <NSpace :size="12" class="al-levels">
-            <span class="st err"><span class="dot err"></span>严重 {{ counts.crit || 0 }}</span>
-            <span class="st warn"><span class="dot warn"></span>注意 {{ counts.warn || 0 }}</span>
-            <span class="st ok"><span class="dot ok"></span>恢复 {{ counts.ok || 0 }}</span>
+            <template v-if="openFailed">
+              <span class="st err"><span class="dot err"></span>严重 —</span>
+              <span class="st warn"><span class="dot warn"></span>注意 —</span>
+              <span class="st ok"><span class="dot ok"></span>恢复 —</span>
+            </template>
+            <template v-else>
+              <span class="st err"><span class="dot err"></span>严重 {{ counts.crit || 0 }}</span>
+              <span class="st warn"><span class="dot warn"></span>注意 {{ counts.warn || 0 }}</span>
+              <span class="st ok"><span class="dot ok"></span>恢复 {{ counts.ok || 0 }}</span>
+            </template>
           </NSpace>
         </div>
         <p class="al-note">
@@ -222,7 +236,7 @@ async function runRound(kind: 'run' | 'probe') {
         <template v-if="isAdmin">
           <NButton size="small" tertiary :loading="running === 'run'" :disabled="!!running || acking !== null" :icon="icon('PlayOutline', 14)" @click="runRound('run')">立即巡检</NButton>
           <NButton size="small" tertiary :loading="running === 'probe'" :disabled="!!running || acking !== null" :icon="icon('PulseOutline', 14)" @click="runRound('probe')">存活探测</NButton>
-          <NButton size="small" type="primary" :disabled="!openTotal || !!running || acking !== null" :loading="running === 'ack'" :icon="icon('CheckmarkCircleOutline', 14)" @click="ackAll">全部确认</NButton>
+          <NButton size="small" type="primary" :disabled="openFailed || !openTotal || !!running || acking !== null" :loading="running === 'ack'" :icon="icon('CheckmarkCircleOutline', 14)" @click="ackAll">全部确认</NButton>
         </template>
       </template>
       <template #right>

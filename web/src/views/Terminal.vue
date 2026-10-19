@@ -33,6 +33,10 @@ let ws: WebSocket | null = null;
 let pingTimer: number | null = null;
 let ro: ResizeObserver | null = null;
 let mo: MutationObserver | null = null;
+// 断线期间在终端里打的字以前是静默丢弃的：sendInput 返回 false 没人接，
+// xterm 又不回显（没有本地 echo，字符要 PTY 送回来才画得出来），
+// 用户看到的是"敲了没反应"，连"为什么没反应"都要靠猜。每个断线片段只点名一次。
+let inputLostNoticed = false;
 
 function termTheme() {
   return {
@@ -61,6 +65,7 @@ function connect() {
   ws.onopen = () => {
     connected.value = true;
     disconnected.value = false;
+    inputLostNoticed = false;
     term!.writeln('\x1b[32m已连接服务器终端（root shell，请谨慎操作）。下方输入框可直接粘贴并执行命令。\x1b[0m\r\n');
     ws!.send(JSON.stringify({ d: 'resize', cols: term!.cols, rows: term!.rows }));
   };
@@ -143,7 +148,16 @@ onMounted(() => {
   try {
     fit.fit();
   } catch { /* 容器尺寸为 0 时忽略 */ }
-  term.onData(sendInput);
+  term.onData((data) => {
+    if (sendInput(data)) return;
+    // socket 不可用：xterm 没有本地回显，不自己写回去的话这些字符就凭空消失。
+    // 回显让用户看见自己敲了什么，再在这个断线片段里点名一次为什么不会执行。
+    term?.write(data);
+    if (!inputLostNoticed) {
+      inputLostNoticed = true;
+      term?.writeln('\r\n\x1b[33m（终端未连接：以上按键没有发往服务器，点右上角「重新连接」后需重新输入。）\x1b[0m');
+    }
+  });
   term.onResize(({ cols, rows }) => {
     if (ws?.readyState === 1) ws.send(JSON.stringify({ d: 'resize', cols, rows }));
   });

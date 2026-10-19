@@ -36,9 +36,18 @@ const users = computed<any[]>(() => data.value ?? []);
 // 请求返回前一直读着同一份旧 `u.role`，两次同样的 PUT 把角色翻回原地还弹两声成功。
 const creating = ref(false);
 const resetting = ref(false);
-const rowOp = ref<{ id: number; verb: string } | null>(null);
-const rowBusy = (id: number) => rowOp.value?.id === id;
-const opBusy = (id: number, verb: string) => rowOp.value?.id === id && rowOp.value?.verb === verb;
+// 行内动作按行号记在一张 map 里（同 Apps.vue）。旧写法是单槽 {id, verb}：
+// B 行点一下就把 A 行在飞的那份顶掉，A 的 finally 又无条件清掉 B 的，
+// 于是两行的按钮都在自己请求还没回来时就恢复，连点会并发同一行的角色翻转/删除。
+const rowBusyMap = ref<Record<number, string>>({});
+const rowBusy = (id: number) => rowBusyMap.value[id] !== undefined;
+const opBusy = (id: number, verb: string) => rowBusyMap.value[id] === verb;
+function startRowOp(id: number, verb: string) { rowBusyMap.value = { ...rowBusyMap.value, [id]: verb }; }
+function endRowOp(id: number) {
+  const next = { ...rowBusyMap.value };
+  delete next[id];
+  rowBusyMap.value = next;
+}
 
 function reload() {
   invalidateCache('users');
@@ -66,7 +75,7 @@ async function createUser() {
 }
 async function toggleRole(u: any) {
   if (rowBusy(u.id)) return;
-  rowOp.value = { id: u.id, verb: 'role' };
+  startRowOp(u.id, 'role');
   try {
     await api.updateUser(u.id, { role: u.role === 'admin' ? 'viewer' : 'admin' });
     msg.success('角色已更新，该用户旧登录态已吊销');
@@ -74,10 +83,13 @@ async function toggleRole(u: any) {
   } catch (e: any) {
     msg.error(e.message);
   } finally {
-    rowOp.value = null;
+    endRowOp(u.id);
   }
 }
 function openReset(u: any) {
+  // 这一行的角色翻转/删除还在飞时不把它的快照放进弹窗：按钮此刻已经是禁用态，
+  // 这里再挡一道，是为了 confirmReset 不会对着一个可能已被删除的 id 发 PUT。
+  if (rowBusy(u.id)) return;
   resetTarget.value = u;
   resetPwd.value = '';
   showReset.value = true;
@@ -101,7 +113,7 @@ async function confirmReset() {
 }
 async function delUser(u: any) {
   if (rowBusy(u.id)) return;
-  rowOp.value = { id: u.id, verb: 'del' };
+  startRowOp(u.id, 'del');
   try {
     await api.deleteUser(u.id);
     msg.success('已删除');
@@ -109,13 +121,15 @@ async function delUser(u: any) {
   } catch (e: any) {
     msg.error(e.message);
   } finally {
-    rowOp.value = null;
+    endRowOp(u.id);
   }
 }
 
 const cols: any[] = [
   {
-    title: '用户', key: 'username',
+    // 弹性列必须带 minWidth：scroll-x 用 'auto' 时它拿到「总宽 − 固定列宽」，
+    // 三个固定列 + 右侧操作列一超过容器，这列就是 0 宽（同批次㊴的 Apps/Files）。
+    title: '用户', key: 'username', minWidth: 220,
     render: (u: any) => {
       // fmtDateTime 按 UTC 截断展示（见 useFormat 注释），这里不标注就会被读成浏览器本地时间。
       const sub = u.nickname

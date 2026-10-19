@@ -56,7 +56,8 @@ async function load() {
 
 const dbCols: any[] = [
   {
-    title: '数据库', key: 'name',
+    // 弹性列不带 minWidth 时，窄屏下固定列一超过容器它就是 0 宽（同批次㊴/61B）。
+    title: '数据库', key: 'name', minWidth: 180,
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.CubeOutline, size: 17, color: 'var(--cp-brand-soft)' })]),
@@ -79,7 +80,7 @@ const dbCols: any[] = [
 ];
 const roleCols: any[] = [
   {
-    title: '角色', key: 'name',
+    title: '角色', key: 'name', minWidth: 160,
     render: (r: any) =>
       h('div', { class: 'cell-main' }, [
         h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.KeyOutline, size: 16, color: r.super ? 'var(--cp-warn)' : 'var(--cp-text-mute)' })]),
@@ -220,7 +221,7 @@ const sqlOptions = computed(() => {
   return o.some((x: any) => x.value === 'postgres') ? o : [{ label: 'postgres', value: 'postgres' }, ...o];
 });
 const browseCols: any[] = [
-  { title: '表', key: 'name', render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub cp-prose', title: r.schema }, r.schema)])]) },
+  { title: '表', key: 'name', minWidth: 180, render: (r: any) => h('div', { class: 'cell-main' }, [h('span', { class: 'cell-ico' }, [h(NIcon, { component: icons.DocumentTextOutline, size: 15, color: 'var(--cp-brand-soft)' })]), h('div', { class: 'cell-txt' }, [h('span', { class: 'cell-name', title: r.name }, r.name), h('div', { class: 'cell-sub cp-prose', title: r.schema }, r.schema)])]) },
   { title: '行数（估）', key: 'row_estimate', width: 110, render: (r: any) => h('span', { class: 'mono-dim' }, String(r.row_estimate ?? '—')) },
   { title: '大小', key: 'size', width: 100, render: (r: any) => h('span', { class: 'vchip' }, r.size ?? '—') },
   { title: '操作', key: 'go', width: 80, align: 'center', render: (r: any) => h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => pickTable(r) }, () => '查看数据') },
@@ -239,7 +240,7 @@ const dataCols = computed<any[]>(() => [
 ]);
 const keyCols: any[] = [
   { type: 'selection' },
-  { title: 'Key', key: 'k', ellipsis: { tooltip: true }, render: (r: any) => h('span', { class: 'mono-dim' }, r.k) },
+  { title: 'Key', key: 'k', minWidth: 220, ellipsis: { tooltip: true }, render: (r: any) => h('span', { class: 'mono-dim' }, r.k) },
   {
     title: '操作', key: 'go', width: 60, className: 'row-ops',
     render: (r: any) => h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => inspectKey(r.k) }, () => '查看'),

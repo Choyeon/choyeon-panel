@@ -22,7 +22,10 @@ import { fileURLToPath } from 'node:url';
 
 const VIEWS = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'views');
 const COL = /(?:\{\s*)?\btitle\s*:\s*[^,\n]+,\s*key\s*:/;
-const ARR = /const\s+(\w*[Cc]olumn\w*)\s*(?::[^=]*)?=\s*\[/g;
+// 名字形状要盖住全站实际写法：`cols`（Users/Alerts/Audit/CronTasks）、`dbCols` 这类
+// 前缀+Cols（Databases/LogCenter）。旧正则只认带 column 一词的名字，整批 `cols` 数组
+// 从守卫眼里直接消失——Users 的用户列正是因此没有宽度约束也没人报警。
+const ARR = /const\s+(\w*[Cc]ol\w*)\s*(?::[^=]*)?=\s*\[/g;
 
 // 返回视图里所有「列数组」的行区间；带 scroll-x 的表才管。
 function columnArrays(src) {

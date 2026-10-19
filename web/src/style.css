@@ -693,6 +693,8 @@ html.cp-vt *::after {
   line-height: 1.6;
   margin-top: 2px;
 }
+/* 说明句的"这是一件坏事"档：读取失败/降级说明用它，普通操作指引仍用 .cp-help */
+.cp-help-warn { color: var(--cp-warn); }
 /* .card-interval：1Panel 的卡间距是 7px，不是间距标度上的任何一档 */
 .cp-card-gap { margin-top: 7px; }
 /* 图表卡标题不带竖条（.monitor-toolbar--card .title 实测 16px/500） */

@@ -15,6 +15,7 @@ import EmptyBox from '../components/EmptyBox.vue';
 import { api } from '../api';
 import { icon, icons } from '../icons';
 import { useTableHeight } from '../composables/useTableHeight';
+import { fmtDateTime } from '../composables/useFormat';
 
 type Item = { id: string; title: string; status: 'pass' | 'warn' | 'fail'; detail: string; fix: string; fixable?: boolean };
 type Report = { status: string; counts: { pass: number; warn: number; fail: number }; items: Item[] };
@@ -24,6 +25,11 @@ const msg = useMessage();
 const loading = ref(true);
 const error = ref('');
 const report = ref<Report | null>(null);
+// 重新检查失败时 report 里还是上一次的结果。旧写法只在顶部挂一条 error alert，
+// 汇总仪表与表格照常渲染，读起来像"这轮检查刚过完全通过"——一份不会自己过期的
+// 报告必须自己说清它是旧的、是什么时候的。
+const stale = ref(false);
+const checkedAt = ref('');
 const fixing = ref('');
 const filter = ref<'all' | 'warn' | 'fail'>('all');
 let readyTimer: number | null = null;
@@ -122,8 +128,13 @@ async function load() {
   error.value = '';
   try {
     report.value = (await api.doctor()) as Report;
+    stale.value = false;
+    // 后端报告里没有生成时间，前端只能记"这次读取成功的时刻"；标注 UTC 截断口径，
+    // 和表格里 fmtDateTime 的读法一致。
+    checkedAt.value = fmtDateTime(new Date().toISOString());
   } catch (e: any) {
     error.value = e?.message || '自检失败';
+    stale.value = !!report.value;
   } finally {
     loading.value = false;
   }
@@ -169,6 +180,8 @@ async function fix(it: Item) {
     }
   } catch (e: any) {
     msg.error(e.message);
+    // 修复请求本身没走通，屏幕上这份报告同样没经过这一轮验证
+    stale.value = !!report.value;
   } finally {
     fixing.value = '';
   }
@@ -192,13 +205,18 @@ onMounted(load);
       <NButton text type="primary" size="small" :icon="ico('ArrowForwardOutline')" @click="router.push('/settings')">前往设置</NButton>
     </div>
 
-    <NAlert v-if="error" type="error" :title="error" style="margin-bottom: var(--space-4)" />
+    <NAlert v-if="error" type="error" :title="error" style="margin-bottom: var(--space-4)">
+      <template v-if="stale">本次自检请求失败，下面的汇总与条目是上一次的报告，不代表当前状态。</template>
+    </NAlert>
 
     <NSkeleton v-if="loading && !report" height="96px" class="cp-shimmer" style="border-radius: 10px; margin-bottom: var(--space-4)" />
 
     <template v-if="report">
       <NCard size="small" style="margin-bottom: var(--space-4)">
-        <div class="cp-chart-title" style="margin-bottom: var(--space-2)">检查汇总</div>
+        <div class="cp-chart-title" style="margin-bottom: var(--space-2)">
+          检查汇总
+          <span class="doc-when">{{ stale ? `上一次成功读取：${checkedAt} UTC（本次读取失败）` : `读取于 ${checkedAt} UTC` }}</span>
+        </div>
         <NGrid cols="1 s:2 m:4" :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
           <NGridItem v-for="g in gauges" :key="g.key" span="1">
             <NPopover :trigger="finePointer ? 'hover' : 'click'" :width="320" :delay="150">
@@ -271,4 +289,6 @@ onMounted(load);
 .doc-pop { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 .doc-pop-item { font-size: var(--fs-sm); color: var(--cp-text); }
 .doc-pop-empty { font-size: var(--fs-sm); color: var(--cp-text-mute); }
+/* 报告时间贴在区块标题右侧：不写就没人知道这份汇算是什么时候的 */
+.doc-when { float: right; font-weight: normal; font-size: var(--fs-xs); color: var(--cp-text-mute); }
 </style>
