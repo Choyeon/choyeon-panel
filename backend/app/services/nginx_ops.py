@@ -24,6 +24,13 @@ RE_LISTEN_LINE = re.compile(r"^\s*listen\s+([^;]+);", re.M)
 # 主机名位置是变量，跳去哪个域名读不出来；而末尾的 `$request_uri` 必须留在捕获之外，
 # 否则捕获到的是 `choyeon.cc$request_uri` 这种带变量的串，跟任何 server_name 都对不上。
 RE_RETURN_HTTPS = re.compile(r"return\s+30[123]\s+https?://([^/:;$\s]+)")
+# 跳转把请求方带来的 Host 原样拼进 Location（`return 301 https://$host$request_uri`，
+# certbot 与面板模板都这么写）。写在具名域名块里是自己跳自己，无害；
+# 一旦这个块成了端口的默认档（未知 Host 也进得来，见 pick_default_servers），
+# 任何解析到本机的名字都会被送到 `https://<那个名字>/`——一条 DNS 记录就换来一次
+# 「看着像本站发起」的跨站跳转。所以 Host 位置是变量这件事本身要单独成为一类事实。
+# `(?![\w.-])` 保证只认 Host 位恰好是 `$host` 的写法，`$hostname` 之类变量名不误伤。
+RE_HOST_REFLECT = re.compile(r"\breturn\s+30[123]\s+https?://\$host(?![\w.-])")
 
 # 反代目标是"本机另一个端口"还是"别的机器"，决定了本机监听表能不能拿来对账，
 # 也决定了域名归属能不能按端口落。两处（链路对账、纳管判定）共用这一份判据。
@@ -131,7 +138,10 @@ async def cert_index() -> dict:
             # 把一个其实有证书的域名判成"没证书"会让 vhost 降级成明文，比误判成有证书严重。
             domains = [name]
         for d in domains:
-            idx.setdefault(d, name)
+            # 键一律小写：TLS 证书里的名字与 nginx 的 server_name 一样，比对前都得先折成小写
+            # （见 _analyze_block 的说明）。留原样就会让同一个域名因为证书里写成 `Blog.Example.com`
+            # 而查不到，把已经配好 HTTPS 的域名判成没证书。
+            idx.setdefault(str(d).strip().lower(), name)
     with _cert_lock:
         _cert_cache = (now, idx)
     return idx
@@ -139,6 +149,7 @@ async def cert_index() -> dict:
 
 async def cert_lineage(domain: str) -> str | None:
     """覆盖这个域名的证书在 live 下的目录名；没有则 None。"""
+    domain = (domain or "").strip().lower()
     idx = await cert_index()
     if domain in idx:
         return idx[domain]
@@ -153,7 +164,7 @@ def render_vhost(spec: dict, *, ssl_lineage: str | None = None, http2_new: bool 
     `ssl_lineage` / `http2_new` 都要由调用方**实测**后传进来（见 apply_vhost）：
     在这里默认"没证书"或"新版写法"都会让面板在旧机器/多 SAN 域名上写出 nginx 认不下的配置。
     """
-    domain = spec["domain"]
+    domain = (spec["domain"] or "").strip().lower()
     if not is_domain(domain):
         raise RuntimeError(f"invalid domain: {domain}")
     port = spec["port"]
@@ -178,9 +189,16 @@ def render_vhost(spec: dict, *, ssl_lineage: str | None = None, http2_new: bool 
         "    include /etc/letsencrypt/options-ssl-nginx.conf;\n"
         "    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;\n"
     ) if ssl else ""
+    # 跳转目标写死成这个块自己的域名，不用 `$host`。
+    # 差别的分量只有当这个块成了端口的默认档时才显出来：Debian 上 conf.d 先于 sites-enabled
+    # 加载，而没有任何 default_server 时「第一个听 80 的块」就是默认档 —— 那时未知 Host
+    # 也会进到这个块，`return 301 https://$host$request_uri` 等于把用户送到他请求头里
+    # 自带的那个域名，谁能在 DNS 上指过来一条记录，谁就拿到一次「像是本站发起」的跳转。
+    # certbot 手工改写的老配置仍可能是 `$host` 那种形状，由站点链路对账单独点名（见
+    # site_audit_service 的 default-reflect）。
     redirect = (
         f"server {{\n    listen 80;\n    listen [::]:80;\n    server_name {domain};\n"
-        "    return 301 https://$host$request_uri;\n}\n\n"
+        f"    return 301 https://{domain}$request_uri;\n}}\n\n"
     ) if ssl else ""
     security_headers = (
         "        add_header X-Content-Type-Options nosniff always;\n"
@@ -221,17 +239,25 @@ def vhost_path(name: str) -> str:
 # （nginx -t 会给一句 conflicting server name 警告，然后照样通过）。
 # 所以"这个域名有没有被别处定义"只能按**实际加载**的文件集合判断：
 # 拿 sites-available 里那些没启用的文件算会误报，拿内存里的旧配置算又会漏报。
-# nginx -T 实测 42ms，缓存 15 秒并写完即失效。
+# nginx -T 实测 42ms，缓存 15 秒并写完即失效。返回的是**列表不是集合**：
+# 谁先加载决定了同名配置谁赢、也决定了没人写 default_server 时默认档是谁（见 pick_default_servers）。
 # 拿不到集合时返回 None，domain_owner 也就无法判断（返回值同样是 None）。
 # **这是"查不了"不是"没冲突"**：面板照常写入（一次 nginx -t 不过的可解释故障，
 # 比因为读不到 -T 就拒绝所有域名操作更容易恢复），所以必须 warn 一条到面板日志，
 # 让"两份配置互相遮蔽"这种全站性后果有迹可查，而不是静默假定安全。
 _LOADED_TTL = 15.0
-_loaded_cache: tuple[float, set | None] | None = None
+_loaded_cache: tuple[float, list | None] | None = None
 _loaded_lock = threading.Lock()
 
 
-async def loaded_conf_paths() -> set | None:
+async def loaded_conf_paths() -> list[str] | None:
+    """nginx 这次真正加载的配置文件，按它读进去的先后顺序给出；读不到返回 None。
+
+    顺序是有意义的，别折成 set：同一端口上的「默认 server」是加载顺序里第一个听这个口的
+    块（没人写 default_server 时），同一个 server_name 写了两份时赢的也是先加载的那一份。
+    `nginx -T` 打出的 `# configuration file …:` 行正好就是先后顺序，直接拿来用，
+    比按目录猜 include 规则可靠（nginx.conf 里改一行顺序，猜的那套就全错）。
+    """
     global _loaded_cache
     now = time.time()
     with _loaded_lock:
@@ -240,11 +266,14 @@ async def loaded_conf_paths() -> set | None:
     r = await run("nginx", ["-T"])
     if r["code"] != 0:
         return None
-    paths = {
-        os.path.realpath(m)
-        for m in re.findall(r"^# configuration file (.+?):", r["out"] or "", re.M)
-    }
-    data = paths or None
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for m in re.findall(r"^# configuration file (.+?):", r["out"] or "", re.M):
+        rp = os.path.realpath(m)
+        if rp not in seen:
+            seen.add(rp)
+            ordered.append(rp)
+    data = ordered or None
     with _loaded_lock:
         _loaded_cache = (now, data)
     return data
@@ -255,16 +284,19 @@ async def domain_owner(domain: str, target: str) -> str | None:
 
     None 有两义：nginx -T 读不到，或确实没有别处定义。调用方用
     `loaded_conf_paths() is None` 区分并记日志，见上面那段说明。
+    按加载顺序取第一个命中的：那一份才是真正在服务这个域名的（后面的会被 nginx 以
+    conflicting server name 警告跳过）。
     """
     loaded = await loaded_conf_paths()
     if loaded is None:
         return None
     real_target = os.path.realpath(target)
-    for p in sorted(loaded):
+    low = (domain or "").strip().lower()
+    for p in loaded:
         if p == real_target:
             continue
         with suppress(OSError):
-            if domain in analyze_config(Path(p).read_text(errors="replace"))["serverNames"]:
+            if low in analyze_config(Path(p).read_text(errors="replace"))["serverNames"]:
                 return p
     return None
 
@@ -528,11 +560,26 @@ def _default_target(body: str, upstreams: dict) -> dict | None:
 
 def _analyze_block(body: str, upstreams: dict) -> dict:
     names: list[str] = []
+    catch_all = False
     for m in RE_SERVER_NAME.finditer(body):
         for n in m.group(1).strip().split():
-            if n and n != "_" and n not in names:
-                names.append(n)
+            # 一律折成小写：nginx 匹配 server_name 前把 Host 转小写，配置里写成
+            # `Video.Example.com` 的块永远按名字匹配不上（只有当默认档时才接得到请求）。
+            # 读侧不跟着折，「这个域名归谁」「有没有被别处定义」就会对同一份配置给出
+            # 跟大小写有关的答案，而纳管登记表、链路对账与 /api/sites/{domain}/config
+            # 早就都是小写口径 —— 差的那一侧就是「页面上看得见这个域名，查看配置却 404」。
+            low = n.lower()
+            if low == "_":
+                # 通配名答不了「这个块归哪个域名」，所以不进 names；但它是一类事实：
+                # 默认档写成 `server_name _` 是明摆着的「谁进来都给这一个响应」，
+                # 写成具名域名则是「没登记的 Host 也当成这个站」，两者处置完全不同，
+                # 丢掉它等于让这两种配置在对账里长得一模一样。
+                catch_all = True
+                continue
+            if low and low not in names:
+                names.append(low)
     targets, ports = _expand_targets(body, upstreams)
+    listen, wildcard, defaults = _listen_detail(body)
     size = re.search(r"client_max_body_size\s+([^;]+);", body)
     # 跳转目标域名：别名块（www / blog 跳裸域）自己没有反代目标，归属只能跟随它跳去的那个域名。
     # 只认字面量主机名，见 RE_RETURN_HTTPS 的说明。
@@ -543,7 +590,11 @@ def _analyze_block(body: str, upstreams: dict) -> dict:
         "ports": ports,
         "defaultTarget": _default_target(body, upstreams),
         "redirectTarget": redirect.group(1).lower() if redirect else "",
-        "listenPorts": _listen_ports(body),
+        "listenPorts": listen,
+        "wildcardPorts": wildcard,
+        "defaultPorts": defaults,
+        "catchAll": catch_all,
+        "hostReflect": bool(RE_HOST_REFLECT.search(body)),
         "ssl": bool(re.search(r"listen\s+443\s+ssl|ssl_certificate\s", body)),
         "websocket": bool(re.search(r"proxy_set_header\s+Upgrade", body)),
         "httpsRedirect": bool(re.search(r"return\s+30[123]\s+https", body)),
@@ -609,22 +660,100 @@ def analyze_config(content: str) -> dict:
     }
 
 
-def _listen_ports(content: str) -> list[int]:
-    """这个 server 块自己听着哪些端口。
+def pick_default_servers(rows: list[tuple[str, str]]) -> dict:
+    """按 nginx 的加载顺序算出「每个端口上的默认 server 是谁」。
 
-    `listen` 的写法五花八门（`80`、`443 ssl http2`、`[::]:443`、`listen 80 default_server`），
-    取每行第一个 token 再按最后一个冒号切端口，与 exposure_service.parse_ss 同一套取数法；
-    解析不出数字的那行直接跳过，不猜。
+    默认档就是 Host 没匹配上任何 server_name 时接住请求的那个块，规则只有两条：
+    ① 有块显式写了 `default_server` → 第一个那样的块；② 一个都没写 → **加载顺序里第一个**
+    听这个口的块。所以这道题只吃顺序，顺序取自 `nginx -T`（见 loaded_conf_paths）。
+
+    这件事必须显出来，因为它不是「一个域名的事」：Debian 上 conf.d 先于 sites-enabled 加载，
+    于是给新站写一份 `conf.d/panel-xxx.conf` 就把全站未知 Host 的归属换到了这个新站身上，
+    改的是本站的文件，动的是所有人的默认档，而且 nginx 一声不响。
+    反过来，摘掉一个 `default_server` 标记的人以为自己在删默认档，实际只是把默认档
+    让给了加载顺序里的下一个 —— 那下一个若正写着 `return 301 https://$host…`，
+    未知 Host 就从此有了出口（见 RE_HOST_REFLECT）。
+
+    只看绑全部地址的 listen（`_listen_detail`）；没写 listen 的 server 块在 nginx 里默认听 80，
+    这类块这里算不到 —— 本机的站点配置都会写 listen，宁可漏判也不猜。
     """
-    out: list[int] = []
+    first: dict[int, dict] = {}
+    explicit: dict[int, dict] = {}
+    for path, content in rows:
+        for blk in parse_blocks(content):
+            for port in blk["wildcardPorts"]:
+                if port in explicit or (port in first and port not in blk["defaultPorts"]):
+                    # 已经定了就不换：nginx 对第二个 default_server 只给一句警告，
+                    # 隐式默认档也是先到先得。
+                    continue
+                row = {
+                    "port": port,
+                    "file": os.path.basename(path),
+                    "domains": list(blk["serverNames"]),
+                    "catchAll": bool(blk["catchAll"]),
+                    "hostReflect": bool(blk["hostReflect"]),
+                    "ssl": bool(blk["ssl"]),
+                    "targets": [f"{t['host']}:{t['port']}" if t.get("port") is not None
+                                else str(t.get("host") or "") for t in blk["targets"]],
+                }
+                if port in blk["defaultPorts"]:
+                    explicit[port] = row
+                else:
+                    first[port] = row
+    ports = []
+    for port in sorted(set(first) | set(explicit)):
+        row = explicit.get(port) or first[port]
+        row["explicit"] = port in explicit
+        ports.append(row)
+    return {"ok": True, "reason": "", "ports": ports}
+
+
+async def default_servers() -> dict:
+    """默认档对账的取数入口：`nginx -T` 读不到就如实回 ok=False（判不了 ≠ 没有默认档）。"""
+    paths = await loaded_conf_paths()
+    if paths is None:
+        return {"ok": False, "reason": "nginx -T 这一轮读不到，默认 server 判不了", "ports": []}
+
+    def _read() -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for p in paths:
+            with suppress(OSError):
+                out.append((p, Path(p).read_text(errors="replace")))
+        return out
+
+    return pick_default_servers(await asyncio.to_thread(_read))
+
+
+def _listen_detail(content: str) -> tuple[list[int], list[int], list[int]]:
+    """这个 server 块的 (听着哪些端口, 其中绑全部地址的, 其中显式写了 default_server 的)。
+
+    `listen` 的写法五花八门（`80`、`443 ssl http2`、`[::]:443`、`listen 80 default_server`、
+    `listen 127.0.0.1:80`），取每行第一个 token 再按最后一个冒号切端口，与 exposure_service.parse_ss
+    同一套取数法；解析不出数字的那行直接跳过，不猜。
+    后两列只看没写地址的 listen（`80`、`[::]:80`、`*:80`）：要回答的是
+    「外网随便一个 Host 打进来落到哪个 server」，那只可能发生在绑全部地址的监听口上，
+    把 `listen 127.0.0.1:80 default_server` 算成默认档会判错（它只对回环生效）。
+    """
+    ports: list[int] = []
+    wildcard: list[int] = []
+    defaults: list[int] = []
     for m in RE_LISTEN_LINE.finditer(content):
         head = m.group(1).strip().split()
         if not head:
             continue
-        text = head[0].rpartition(":")[2]
-        if text.isdigit() and 1 <= int(text) <= 65535 and int(text) not in out:
-            out.append(int(text))
-    return sorted(out)
+        first = head[0]
+        text = first.rpartition(":")[2]
+        if not text.isdigit() or not 1 <= int(text) <= 65535:
+            continue
+        port = int(text)
+        if port not in ports:
+            ports.append(port)
+        if first.isdigit() or first.startswith("[::]:") or first.startswith("*:"):
+            if port not in wildcard:
+                wildcard.append(port)
+            if "default_server" in head[1:] and port not in defaults:
+                defaults.append(port)
+    return sorted(ports), sorted(wildcard), sorted(defaults)
 
 
 def config_dirs_present() -> bool:
@@ -706,13 +835,14 @@ def _iter_conf_files():
 
 def find_app_configs(port, domain) -> list:
     out = []
+    low = str(domain or "").strip().lower()
     for p, f in _iter_conf_files():
         try:
             c = Path(p).read_text(errors="replace")
         except OSError:
             continue
         a = analyze_config(c)
-        if (domain and domain in a["serverNames"]) or (port is not None and port in a["proxyPorts"]):
+        if (low and low in a["serverNames"]) or (port is not None and port in a["proxyPorts"]):
             out.append({"file": p, "name": f, "content": c, "analysis": a})
     return out
 
@@ -746,9 +876,17 @@ def invalidate_domain_cache() -> None:
     with _domain_lock:
         _domain_cache = None
     # "nginx 到底加载了哪些文件"也是同一批事实：面板刚写完/删掉配置，
-    # 15 秒内的旧集合会让下一次域名冲突判断看漏（或看多）刚动过的那个文件。
+    # 15 秒内的旧集合会让下一次域名冲突判断看漏（或看多）刚动过的那个文件，
+    # 默认档是谁同样会跟着变。
     with _loaded_lock:
         _loaded_cache = None
+    # 站点链路对账读的也是这一批配置（它有自己的 60 秒缓存）。留着不失效就等于
+    # 「同一个事实两个新鲜度」：刚套用完域名，站点页与自检还拿旧的一份配置说没事，
+    # 而 CLI 那几条纳管命令早就在动手后清它了。
+    # 延迟导入：site_audit_service 顶层 import 了本模块，正向导入会成环。
+    from . import site_audit_service
+
+    site_audit_service.reset_cache()
 
 
 def domains_by_port() -> dict:

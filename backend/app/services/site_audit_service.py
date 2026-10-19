@@ -8,6 +8,10 @@
    进程。于是配置正确、服务在跑、证书有效，用户拿到的却是 502，而这三页全是绿的。
 ② server 块开了 ssl，证书却不含这个域名（签的时候漏了一个子名、多域名只签下一个），以及
    同一个文件里 80 也听着、却没有 301 跳转——明文照样进得去。
+③ 默认档没人认领。Host 没匹配上任何 server_name 的请求（以及不带 SNI 的 TLS 握手）不会 404，
+   而是落到「显式写了 default_server 的第一个块」，一处都没写时落到**加载顺序里第一个**听这个口
+   的块。Debian 上 conf.d 先于 sites-enabled，所以给一个新站写配置就把全机未知 Host 的归属换掉了；
+   若那个块还写着 `return 301 https://$host…`，任何解析到本机的域名都能借它跳到自己身上。
 
 这一层不重新解析 nginx、不重新数端口、不重新算证书天数：配置走 `nginx_ops.loaded_configs()`
 （与站点列表同一个读者），监听表走 `exposure_service`，证书清单走 `cert_ops`。这里只做 join
@@ -122,7 +126,7 @@ def _targets(raw: list[dict], listen_ok: bool, listen_ports: set[int]) -> tuple[
 
 
 def _build(configs: list[dict], exp: dict, certs: dict, apps: list[dict], dirs_present: bool,
-           reg: dict[str, dict] | None = None) -> dict:
+           reg: dict[str, dict] | None, dflt: dict) -> dict:
     """join：每个 server 块一条链路 + 判词。判定全在这里，页面与 CLI 只渲染。"""
     listen_ok, listen_ports, listen_reason = _listen_state(exp)
     certs_ok, cert_names, certs_reason = _cert_state(certs)
@@ -169,7 +173,7 @@ def _build(configs: list[dict], exp: dict, certs: dict, apps: list[dict], dirs_p
             foreign_rows.append(_domains_of(link))
 
     findings = _findings(links, dead_rows, nocert_rows, plain_rows, remote_rows,
-                         foreign_rows, listen_ok, listen_reason, certs_ok, certs_reason)
+                         foreign_rows, listen_ok, listen_reason, certs_ok, certs_reason, dflt)
     names = {d for link in links for d in link["domains"]}
     return {
         "as_of": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -185,6 +189,7 @@ def _build(configs: list[dict], exp: dict, certs: dict, apps: list[dict], dirs_p
         },
         "listen": {"ok": listen_ok, "reason": listen_reason, "ports": len(listen_ports)},
         "certs": {"ok": certs_ok, "reason": certs_reason, "domains": len(cert_names)},
+        "defaults": dflt,
         "links": links,
         "findings": findings,
         "counts": _counts(findings),
@@ -192,12 +197,62 @@ def _build(configs: list[dict], exp: dict, certs: dict, apps: list[dict], dirs_p
             "只读：不 reload nginx、不改 vhost、不签证书、不重启应用；处置命令请手工执行",
             "证书只看覆盖关系，到期天数以证书项为准（同一个 alert_ssl_days 阈值）",
             "proxy_pass 指向别的机器时本机判不了，标未确认而不是没人听",
+            "默认档按 nginx -T 报出的加载顺序算：Host 没对上任何 server_name 的请求就落到它",
         ],
     }
 
 
+def _default_findings(dflt: dict) -> list[dict]:
+    """默认档的判词：Host 没对上任何 server_name 的请求（含无 SNI 的 TLS 握手）归谁。
+
+    这一档跟「某个域名配错了」不是一个量级：它影响的是**这台机器上所有没登记的域名**，
+    而改任何一个站的文件都可能把它换掉，nginx 还一声不响。所以反射 Host 的那种算要紧。
+    """
+    if not dflt.get("ok"):
+        return [{
+            "id": "default-server-unknown",
+            "severity": SEV_WARN,
+            "title": "默认 server 未确认",
+            "detail": f"{dflt.get('reason') or 'nginx -T 读不到'}，这一轮判不了"
+                      "「Host 没匹配上任何 server_name 的请求落到哪个 server」。"
+                      "这不等于「默认档没问题」——只是没查。",
+            "fix": "nginx -T | grep -n 'default_server'",
+        }]
+    out: list[dict] = []
+    for row in dflt.get("ports") or []:
+        port = row["port"]
+        who = "、".join(row["domains"][:2]) or "（server_name _）"
+        where = f"{row['file']} 里的 {who}"
+        how = "显式 default_server" if row.get("explicit") else "没人写 default_server，按加载顺序顶上"
+        if row["hostReflect"]:
+            out.append({
+                "id": f"default-reflect-{port}",
+                "severity": SEV_RISK,
+                "title": f"端口 {port} 的默认档把请求方带来的域名原样跳转出去",
+                "detail": f"未知 Host 会落到 {where}（{how}），而它跳转用的是 `return 301 https://$host…`："
+                          "Location 由请求头自己决定。任何解析到本机的名字——打错的域名、"
+                          "过期没摘的旧域、别人能改的泛解析——都会被送到 https://那个名字/，"
+                          "在用户看来这一跳是本站发起的。把跳转目标写成固定的域名就没有这条路。",
+                "fix": "nginx -T | grep -n 'return 301 https://$host'",
+            })
+        elif not row["catchAll"] and row["domains"]:
+            extra = "；没带 SNI 的 TLS 握手拿到的也是这一张证书" if row.get("ssl") else ""
+            out.append({
+                "id": f"default-named-{port}",
+                "severity": SEV_WARN,
+                "title": f"端口 {port} 的默认档是具名站点 {row['domains'][0]}",
+                "detail": f"这台机器上没有 server 块对 {port} 写 default_server，nginx 让 {where} 顶上（{how}）。"
+                          "后果是任何解析到本机的域名都会被当成这一个站点服务：访问日志、"
+                          f"应用收到的 Host 头与它自己的「我是谁」判断里会混进不属于它的名字{extra}。"
+                          f"要么在 {port} 上显式写 default_server 指定归属，"
+                          "要么补一个什么都不服务的默认档（`server_name _; return 444;`）把未知 Host 关在门外。",
+                "fix": f"nginx -T | grep -n 'listen {port}.*default_server'",
+            })
+    return out
+
+
 def _findings(links, dead_rows, nocert_rows, plain_rows, remote_rows, foreign_rows,
-              listen_ok, listen_reason, certs_ok, certs_reason) -> list[dict]:
+              listen_ok, listen_reason, certs_ok, certs_reason, dflt: dict) -> list[dict]:
     """把 join 结果折成判词：每条都带一句「为什么」和一个能复制的只读动作。"""
     out: list[dict] = []
 
@@ -268,7 +323,11 @@ def _findings(links, dead_rows, nocert_rows, plain_rows, remote_rows, foreign_ro
             "fix": "curl -sI http://" + (names[0] if names else "example.com") + " | head -1",
         })
 
-    # ⑤ 知道就好：本机看不见的目标、面板不认识 vhost。
+    # ⑤ 默认档：未知 Host 归谁。一份新站的配置就能换掉全机的这一档，所以单独判。
+    if links:
+        out.extend(_default_findings(dflt))
+
+    # ⑥ 知道就好：本机看不见的目标、面板不认识 vhost。
     if remote_rows:
         uniq = sorted(set(remote_rows))
         out.append({
@@ -321,6 +380,9 @@ async def audit(refresh: bool = False) -> dict:
 async def _reprobe() -> dict:
     present = nginx_ops.config_dirs_present()
     configs = await asyncio.to_thread(nginx_ops.loaded_configs)
+    # 默认档要按加载顺序算，顺序只有 `nginx -T` 知道（目录扫描给不出 nginx.conf 里的
+    # include 先后），所以它自己走 loaded_conf_paths 那条 15 秒缓存，不跟上面这份共用。
+    dflt = await nginx_ops.default_servers()
     exp = await exposure_service.audit()
     certs = await cert_ops.list_certs()
     apps = await _app_rows()
@@ -328,7 +390,7 @@ async def _reprobe() -> dict:
         reg = await site_claim_service.claims()
     except Exception:  # noqa: BLE001 - 登记表读不到时那一列留空，不拖累链路判定本身
         reg = {}
-    return _build(configs, exp, certs, apps, present, reg)
+    return _build(configs, exp, certs, apps, present, reg, dflt)
 
 
 def reset_cache() -> None:

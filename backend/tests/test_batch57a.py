@@ -49,9 +49,30 @@ def tearDownModule():
 
 
 def _dir() -> str:
-    d = tempfile.mkdtemp(prefix="cp57a_conf_")
-    TMP_DIRS.append(d)
-    return d
+    """一个与线上同形的 nginx 布局，返回它的 conf.d。
+
+    以前这里返回的就是"配置目录"本身，basename 既不是 conf.d 也不是 sites-available，
+    于是 `nginx_ops._iter_conf_files` 里那两条过滤（conf.d 只认 `.conf` 结尾、
+    sites-available 只认被 sites-enabled 软链指上的）在整批用例里一次都没跑过。
+    线上恰恰是那个形状：站点文件在 sites-available 里且**没有 .conf 扩展名**，
+    靠 sites-enabled 的软链生效。造出来的目录是真的，用例才谈得上"跑到了线上那段代码"。
+    """
+    root = tempfile.mkdtemp(prefix="cp57a_conf_")
+    TMP_DIRS.append(root)
+    for sub in ("conf.d", "sites-available", "sites-enabled"):
+        Path(root, sub).mkdir()
+    return f"{root}/conf.d"
+
+
+def _site_av(conf_d: str) -> str:
+    """这个布局里存放站点文件的那一侧（sites-available）。"""
+    return str(Path(conf_d).parent / "sites-available")
+
+
+def _enable(conf_d: str, fname: str) -> None:
+    """把 sites-available/<fname> 链进 sites-enabled —— Debian 上没链的草稿不生效。"""
+    av = _site_av(conf_d)
+    Path(conf_d).parent.joinpath("sites-enabled", fname).symlink_to(f"{av}/{fname}")
 
 
 def _dom(prefix: str) -> str:
@@ -139,7 +160,8 @@ def _write(d: str, fname: str, tpl: str, **kw) -> None:
 
 
 def _facts(d: str) -> list[dict]:
-    with mock.patch.object(config, "NGINX_CONF_DIRS", [d]):
+    """按线上那套加载范围取配置：conf.d 与 sites-available 都是"会读的地方"。"""
+    with mock.patch.object(config, "NGINX_CONF_DIRS", [d, _site_av(d)]):
         return nginx_ops.loaded_configs()
 
 
@@ -215,6 +237,35 @@ class TestDomainFacts(unittest.TestCase):
         f = SC.domain_facts(_facts(d))
         self.assertIn("case.choeyeon.cc", f)
         self.assertNotIn("Case.Choeyeon.CC", f)
+
+    def test_enabled_site_file_without_conf_extension_is_loaded(self):
+        """线上形态：站点在 sites-available 里且没有 .conf 后缀，靠 sites-enabled 的软链生效。
+
+        这条以前测不到——旧 fixture 的目录 basename 两边都不像，那两条过滤从没跑过。
+        漏跑的后果不是"列表少一行"：find_app_configs 会把域名解析到没启用的那份草稿上，
+        用户在应用详情里改它、nginx -t 过、reload 成功，线上一个字都没变。
+        """
+        d = _dir()
+        dom = _dom("avsite")
+        _write(_site_av(d), "choyeon-video", ROOT_ONLY, DOMAIN=dom, PORT=3100)
+        _enable(d, "choyeon-video")
+        f = SC.domain_facts(_facts(d))[dom]
+        self.assertEqual(f["file"], "choyeon-video")
+        self.assertEqual(f["target"], {"host": "127.0.0.1", "port": 3100})
+
+    def test_draft_and_leftovers_are_not_sites(self):
+        """没链上的草稿、conf.d 里的非 .conf 文件、原子写残留的 .tmp 都不算站点。"""
+        d = _dir()
+        live, draft = _dom("live"), _dom("draft")
+        _write(d, "live.conf", ROOT_ONLY, DOMAIN=live, PORT=3100)
+        _write(_site_av(d), "draft", ROOT_ONLY, DOMAIN=draft, PORT=3200)
+        Path(d, "README").write_text("给运维看的说明，不是配置\n", encoding="utf-8")
+        Path(d, f".live.conf.{os.getpid()}.tmp").write_text(
+            ROOT_ONLY.replace("__DOMAIN__", draft).replace("__PORT__", "3200"), encoding="utf-8")
+        self.assertEqual({r["name"] for r in _facts(d)}, {"live.conf"})
+        f = SC.domain_facts(_facts(d))
+        self.assertNotIn(draft, f, "没生效的文件不能进来占一个域名")
+        self.assertIn(live, f)
 
     def test_subpath_only_target_has_no_root_attribution(self):
         """只有 /health 反代的探测块：不许把它当成这个域名的主体去认领归属。"""

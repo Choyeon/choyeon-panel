@@ -69,9 +69,19 @@ def _cfg(name, *, doms=(), listen=(80, 443), ssl=True, targets=(), redirect=True
             "analysis": analysis, "blocks": blocks}
 
 
-def _build(cfgs, exp=None, certs=None, apps=(), present=True, reg=None):
+def _dflt(ports=(), ok=True, reason=""):
+    """默认档那一档的入参形状（由 `nginx_ops.default_servers()` 给出，见批次 60A）。
+
+    这里默认「读到了，但这个端口集合没东西可判」，因为本模块的用例盯着原来的四段账；
+    默认档自己的判定在 test_batch60a.py 里测，包括 ok=False 那条"读不到就说读不到"。
+    """
+    return {"ok": ok, "reason": reason, "ports": list(ports)}
+
+
+def _build(cfgs, exp=None, certs=None, apps=(), present=True, reg=None, dflt=None):
     return SA._build(cfgs, _exp() if exp is None else exp,
-                     _certs() if certs is None else certs, list(apps), present, reg)
+                     _certs() if certs is None else certs, list(apps), present, reg,
+                     _dflt() if dflt is None else dflt)
 
 
 def _sev(payload, sev):
@@ -306,10 +316,10 @@ class PayloadShape(unittest.TestCase):
         self.assertEqual(sum(p["counts"].values()), len(p["findings"]))
         self.assertGreaterEqual(p["counts"]["risk"], 1)
 
-    def test_three_notes_are_documented(self):
+    def test_limitation_notes_are_documented(self):
         joined = " ".join(_build([_cfg("a.conf", doms=["a.com"])])["notes"])
-        self.assertEqual(len(_build([_cfg("a.conf", doms=["a.com"])])["notes"]), 3)
-        for phrase in ("不 reload nginx", "到期天数以证书项为准", "标未确认"):
+        self.assertEqual(len(_build([_cfg("a.conf", doms=["a.com"])])["notes"]), 4)
+        for phrase in ("不 reload nginx", "到期天数以证书项为准", "标未确认", "加载顺序"):
             self.assertIn(phrase, joined)
 
 
@@ -452,9 +462,14 @@ class OneFactOneReader(unittest.TestCase):
         certs = mock.AsyncMock(return_value=_certs())
         rows = mock.AsyncMock(return_value=[{"id": 1, "name": "api", "port": 3000, "domain": "a.com"}])
         claims = mock.AsyncMock(return_value={})
+        # 默认档同样只走 nginx_ops 那一个读者（它自己去读 `nginx -T` 的加载顺序）。
+        # 不 mock 掉的话，这一条用例的答案就取决于跑它的机器上 nginx 配了什么——
+        # 本机绿、CI 红，而且红的原因是「这台机器真有一个反射 Host 的默认档」。
+        dflt = mock.AsyncMock(return_value=_dflt())
         sc = SA.site_claim_service
         with mock.patch.object(SA.nginx_ops, "loaded_configs", loaded), \
              mock.patch.object(SA.nginx_ops, "config_dirs_present", present), \
+             mock.patch.object(SA.nginx_ops, "default_servers", dflt), \
              mock.patch.object(SA.exposure_service, "audit", exp), \
              mock.patch.object(SA.cert_ops, "list_certs", certs), \
              mock.patch.object(sc, "app_rows", rows), \
@@ -463,6 +478,7 @@ class OneFactOneReader(unittest.TestCase):
             data = asyncio.run(SA._reprobe())
         self.assertEqual(loaded.call_count, 1)
         self.assertEqual(present.call_count, 1)
+        dflt.assert_awaited_once()
         exp.assert_awaited_once()
         certs.assert_awaited_once()
         claims.assert_awaited_once()

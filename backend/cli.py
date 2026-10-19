@@ -1603,6 +1603,17 @@ def _site_audit_text(d: dict) -> str:
                           else f"读不到（{li.get('reason')}），这一轮的反代目标都标未确认"))
     lines.append("证书：" + ("清单已读到，只看覆盖关系（到期天数见证书项）" if ce.get("ok")
                          else f"读不到（{ce.get('reason')}），覆盖关系未确认"))
+    de = d.get("defaults") or {}
+    if not de.get("ok"):
+        lines.append(f"默认档：读不到（{de.get('reason') or 'nginx -T 失败'}），未知 Host 归谁未确认")
+    elif de.get("ports"):
+        lines.append("默认档（Host 没对上任何 server_name 的请求落到谁）：" + "；".join(
+            f"{r.get('port')}→{r.get('file')}"
+            f"({('、'.join(r.get('domains') or [])) or 'server_name _'}"
+            f"{'' if r.get('explicit') else ', 隐式'}{', 反射Host' if r.get('hostReflect') else ''})"
+            for r in de["ports"]))
+    else:
+        lines.append("默认档：加载的配置里没有绑全部地址的 80/443 server 块")
     for f in d.get("findings") or []:
         lines.append(f"[{f['severity']}] {f['title']}")
         lines.append(f"    {f['detail']}")
