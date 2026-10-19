@@ -447,6 +447,19 @@ class CliContract(unittest.TestCase):
                        "证书：读不到（certbot 不在）", "3100", "(没人听)"):
             self.assertIn(phrase, text, phrase)
 
+    def test_human_text_keeps_a_portless_proxy_target(self):
+        """proxy_pass 没写端口（默认 80、命名上游、unix 套接字）照样是反代目标。
+
+        渲染层过去按 `port is not None` 筛一遍，整行的目标串就空了，落回 "非反代" 那句——
+        与站点页对同一份判定给出相反的话，而"这条 location 没在反代"恰好是误导人的那半句。
+        """
+        d = _build([_cfg("a.conf", doms=["a.com"],
+                         targets=[{"host": "unix:/run/app.sock", "port": None}])])
+        text = cli._site_audit_text(d)
+        self.assertIn("(未写端口)", text)
+        self.assertIn("(未确认)", text)
+        self.assertNotIn("· 非反代", text)
+
 
 class OneFactOneReader(unittest.TestCase):
     def test_reprobe_only_joins_existing_readers(self):

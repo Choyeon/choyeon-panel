@@ -127,10 +127,17 @@ const appStatus = computed(() => {
 });
 
 async function loadUnit() {
+  const requested = id;
   try {
-    unitInfo.value = await api.appUnit(id);
-    unitContent.value = unitInfo.value.content || unitInfo.value.defaultTemplate;
+    const r = await api.appUnit(requested);
+    // 组合项目条在 /apps/1 ↔ /apps/2 之间复用本组件，切页只换 id、不取消 in-flight 请求：
+    // 上一个应用的回包晚一步回来，就会盖到当前这一页的 unit 全文上——那是别的应用的
+    // Environment= 凭据与路径，而且「保存」会把这份内容写回现在这个应用。
+    if (requested !== id) return;
+    unitInfo.value = r;
+    unitContent.value = r.content || r.defaultTemplate;
   } catch (e: any) {
+    if (requested !== id) return;
     msg.error(e.message);
   }
 }
@@ -153,19 +160,27 @@ function restoreDefaultTpl() {
   unitContent.value = unitInfo.value?.defaultTemplate || '';
 }
 async function loadProc() {
+  const requested = id;
   try {
-    proc.value = await api.appProc(id);
+    const r = await api.appProc(requested);
+    if (requested !== id) return;
+    proc.value = r;
     procErr.value = '';
   } catch (e: any) {
     // 不弹 toast：卡片就在这一页上，就地写清"这一次没取到"比刷屏强
+    if (requested !== id) return;
     procErr.value = e?.message || '进程读数获取失败';
   }
 }
 async function loadNginx() {
+  const requested = id;
   try {
-    ngx.value = await api.appNginx(id);
-    if (ngx.value.configs?.length) selConfig(ngx.value.configs[0]);
+    const r = await api.appNginx(requested);
+    if (requested !== id) return;
+    ngx.value = r;
+    if (r.configs?.length) selConfig(r.configs[0]);
   } catch (e: any) {
+    if (requested !== id) return;
     msg.error(e.message);
   }
 }
@@ -217,9 +232,11 @@ async function loadPg() {
 const ico = (name: string, size = 14) => icon(name, size);
 
 async function load() {
+  const requested = id;
   loadErr.value = '';
   try {
-    const data = await api.app(id);
+    const data = await api.app(requested);
+    if (requested !== id) return;
     if (!data) {
       loadErr.value = '未找到该应用，可能已被删除';
       return;
@@ -228,8 +245,13 @@ async function load() {
     edit.value = { ...app.value, port: app.value.port ? String(app.value.port) : '' };
     env.value = JSON.parse(app.value.env || '[]');
     dbSel.value = (app.value.db_names || '').split(',').filter(Boolean);
-    deps.value = await api.deployments(id);
+    const list = await api.deployments(requested);
+    if (requested !== id) return;
+    deps.value = list;
   } catch (e: any) {
+    // 切走之后这一轮的失败已经不属于当前页了：把 loadErr 设上会把 B 的详情页
+    // 整页换成「未找到该应用，可能已被删除」这种针对 A 的错误。
+    if (requested !== id) return;
     loadErr.value = e.message || '加载应用详情失败';
     return;
   }
@@ -310,27 +332,41 @@ async function sync() {
   }
 }
 async function pollDeps() {
+  const requested = id;
   // 轮询是 setTimeout 里跑的，失败若不在这里吞掉就变成未处理的 promise rejection：
   // 界面上部署记录停在旧数据、也没有任何提示。
+  let list: any;
   try {
-    deps.value = await api.deployments(id);
+    list = await api.deployments(requested);
   } catch (e: any) {
+    if (requested !== id) return;
     msg.error(`部署记录获取失败：${e.message}`);
     return;
   }
+  if (requested !== id) return;
+  deps.value = list;
   // 头部徽标看的是 app.deploying：只换记录列表的话「部署中」要等手动刷新才出现
+  let fresh: any;
   try {
-    app.value = await api.app(id);
+    fresh = await api.app(requested);
   } catch {
     /* 保留上一帧，下个周期自动重试 */
   }
+  if (requested !== id) return;
+  if (fresh) app.value = fresh;
   // 还有 running 记录就继续轮：部署是后台任务，不轮询用户只能反复点「刷新」才知道跑完了
   if (deps.value.some((d: any) => d.status === 'running')) later(pollDeps, 5000);
 }
 async function viewDep(depId: number) {
+  const requested = id;
   try {
-    depLog.value = await api.deployment(id, depId);
+    const r = await api.deployment(requested, depId);
+    // 浮层是按 depLog 有没有值弹出的：切到别的应用后旧应用的日志回包会把浮层再顶出来，
+    // 标题写的是现在这个应用，内容却是上一个的部署日志。
+    if (requested !== id) return;
+    depLog.value = r;
   } catch (e: any) {
+    if (requested !== id) return;
     msg.error(`部署日志获取失败：${e.message}`);
   }
 }
@@ -365,12 +401,16 @@ async function ssl() {
 }
 function purge() {
   // 1Panel 的删除走 OpDialog：标题 + 被操作对象名单 + 一句后果，页面里不再现写弹窗
+  const target = id;
   opRef.value?.acceptParams({
     title: '彻底删除应用',
     names: [app.value?.name, app.value?.unit, app.value?.path].filter(Boolean),
     msg: '此操作将删除面板配置、systemd unit 与目录文件，不可恢复，是否继续？',
     api: async () => {
-      await api.deleteApp(id, true);
+      // 弹窗挂在页面外面：开着它经组合项目条跳到 /apps/2，确认按钮读到的 id 已经是另一个应用，
+      // 而标题里点名的还是 A 的名字与目录——那是照着 A 的名单删 B。跳页就作废这一次确认。
+      if (target !== id) throw new Error('已经切换到别的应用，这次删除作废；要删请回到那个应用再点一次');
+      await api.deleteApp(target, true);
       router.push('/apps');
     },
     successMsg: '已删除并清理文件',
@@ -580,8 +620,10 @@ watch(
             >
               <NIcon :component="icons.GlobeOutline" :size="15" :color="c.analysis.ssl ? 'var(--cp-ok)' : 'var(--cp-text-mute)'" />
               <div style="min-width: 0">
-                <div class="ngx-name cp-prose">{{ c.name }}</div>
-                <div class="ngx-dom cp-prose">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}</div>
+                <div class="ngx-name cp-prose" :title="c.name">{{ c.name }}</div>
+                <!-- 域名多于两个时原先一刀砍掉，看起来就像「这份配置只管这两个域名」；
+                     计数补齐 +N，完整清单挂在 title 上，点进来右侧就是这份配置的全文。 -->
+                <div class="ngx-dom cp-prose" :title="c.analysis.serverNames.join(', ') || '（无 server_name）'">{{ c.analysis.serverNames.slice(0, 2).join(', ') || '（无 server_name）' }}<template v-if="c.analysis.serverNames.length > 2"> +{{ c.analysis.serverNames.length - 2 }}</template></div>
               </div>
             </div>
             <div v-if="ngxFile" style="margin-top: var(--space-3); display: flex; flex-wrap: wrap; gap: var(--space-2)">

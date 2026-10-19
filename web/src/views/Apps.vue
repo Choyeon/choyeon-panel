@@ -250,11 +250,21 @@ const columns: any[] = [
 ];
 
 const loading = ref(false);
-// 行内动作要记住"是哪个 verb 在跑"：verb 决定名称列的「同步」该不该转圈，
-// 操作列的文字按钮没有加载态，靠 rowBusy 整行置灰挡住连点。
-const busy = ref<{ id: number; verb: string } | null>(null);
-const busyOn = (id: number, verb: string) => busy.value?.id === id && busy.value?.verb === verb;
-const rowBusy = (id: number) => busy.value?.id === id;
+/**
+ * 行内动作按 id 各占一格，verb 决定名称列的「同步」该不该转圈，
+ * 操作列的文字按钮没有加载态，靠 rowBusy 整行置灰挡住连点。
+ * 以前是一个单槽 `{id, verb}`：B 行点一下就把 A 行在飞的那份顶掉，A 的 finally 又清掉 B 的，
+ * 于是两行的按钮都在自己的请求还没回来时就恢复，连点会并发同一份部署/回滚。
+ */
+const busy = ref<Record<number, string>>({});
+const busyOn = (id: number, verb: string) => busy.value[id] === verb;
+const rowBusy = (id: number) => busy.value[id] !== undefined;
+function startBusy(id: number, verb: string) { busy.value = { ...busy.value, [id]: verb }; }
+function endBusy(id: number) {
+  const next = { ...busy.value };
+  delete next[id];
+  busy.value = next;
+}
 // 后端 deps.py 对所有 MUTATION 全局拦 403，只读账号点这些按钮必然失败：
 // 按钮直接不进 DOM，而不是留一个按不动的入口；整列都没有可用动作时连列头一起收掉，
 // 免得留一条 209px 的空白列，看着像表格没加载出来。
@@ -294,7 +304,7 @@ async function loadQuiet() {
 }
 async function rollback(r: any) {
   if (rowBusy(r.id)) return;
-  busy.value = { id: r.id, verb: 'rollback' };
+  startBusy(r.id, 'rollback');
   try {
     const res = await api.appAction(r.id, 'rollback');
     msg.success(`已回滚到 ${res.commit || '上一版本'}`);
@@ -302,12 +312,12 @@ async function rollback(r: any) {
   } catch (e: any) {
     msg.error(e.message);
   } finally {
-    busy.value = null;
+    endBusy(r.id);
   }
 }
 async function sync(r: any) {
   if (rowBusy(r.id)) return;
-  busy.value = { id: r.id, verb: 'sync' };
+  startBusy(r.id, 'sync');
   try {
     const res = await api.appSync(r.id);
     msg.success(res.changed ? `已同步到 ${res.commit || '最新版本'} 并重启` : `远端无新提交（${res.commit || '当前版本'}）`);
@@ -315,12 +325,12 @@ async function sync(r: any) {
   } catch (e: any) {
     msg.error(e.message);
   } finally {
-    busy.value = null;
+    endBusy(r.id);
   }
 }
 async function act(id: number, verb: string) {
   if (rowBusy(id)) return;
-  busy.value = { id, verb };
+  startBusy(id, verb);
   try {
     if (verb === 'deploy') await api.deploy(id);
     else await api.appAction(id, verb);
@@ -329,7 +339,7 @@ async function act(id: number, verb: string) {
   } catch (e: any) {
     msg.error(e.message);
   } finally {
-    busy.value = null;
+    endBusy(id);
   }
 }
 const templates = ref<any[]>([]);

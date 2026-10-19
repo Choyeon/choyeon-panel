@@ -57,6 +57,9 @@ const critHint = (k: string) => {
 
 const alerts = ref<any>(normalizeAlerts({}));
 const fw = ref<any>(null);
+// 两块读失败后各自留下的原因，空串表示这一块这次读到了。
+const alertsError = ref('');
+const fwError = ref('');
 const probeList = ref<{ name: string; expect: string }[]>([]);
 const probeDraft = ref({ name: '', expect: '' });
 
@@ -87,22 +90,26 @@ function mask(v: any) {
   return s ? `${s.slice(0, 4)}****` : '';
 }
 
-async function grab(fn: () => Promise<any>, set: (v: any) => void) {
+async function grab(fn: () => Promise<any>, set: (v: any) => void, err?: typeof fwError) {
   // 每个数据块各自兜错：以前是一条链，只读账号在第一步就收到 403，
   // 于是后面的防火墙状态根本没被请求，卡片永远停在"检测中…"。
+  // 兜下来的那条错误同时记进 `err`：只弹一条 toast 的话，飘过去之后页面照样是空的，
+  // 用户分不清"还没读到"和"读到了但是空的"——告警区间和防火墙状态就正是这两种长相。
   try {
     set(await fn());
+    if (err) err.value = '';
   } catch (e: any) {
+    if (err) err.value = e.message;
     msg.error(e.message);
   }
 }
 async function load() {
   // 两步验证是每个账号自己的事，只读账号也要能开：这一条不在 isAdmin 里面。
   await grab(() => api.twofa(), (v) => (twofa.value = v));
-  if (isAdmin.value) await grab(() => api.alertSettings(), (v) => (alerts.value = normalizeAlerts(v)));
+  if (isAdmin.value) await grab(() => api.alertSettings(), (v) => (alerts.value = normalizeAlerts(v)), alertsError);
   // 防火墙规则表（开了哪些端口、来源地址）按 admin 收口，与后端 /api/firewall 同一口径；
   // 少了这个判断，只读账号一进设置页就吃到一条 403 报错。
-  if (isAdmin.value) await grab(() => api.firewall(), (v) => (fw.value = v));
+  if (isAdmin.value) await grab(() => api.firewall(), (v) => (fw.value = v), fwError);
 }
 async function renew() {
   // 连点会并发拉起两个 certbot，第二个直接被它自己的锁挡下、报一条看不懂的错。
@@ -295,7 +302,11 @@ async function testAlert() {
   if (testing.value) return;
   testing.value = true;
   try {
-    await api.saveAlerts(alerts.value);
+    // 这里只发测试，不顺手 PUT 整个 alerts 对象：每一个字段在改动时就已经各自存过了，
+    // 而 normalizeAlerts 会把「库里从没写过」的键填成后端默认值再发回去，
+    // 一次点测试就把默认值落成了显式配置——以后后端改默认值对这台机器就不再生效。
+    // 更糟的是 saveAlerts 全量校验（要么全合法要么全拒），某个键今天不再合法时，
+    // 这句会先抛错，测试通知一条都发不出去，用户看到的却是一条配置报错。
     await api.alertTest();
     msg.success('测试通知已发送（若未收到请检查配置/通道）');
   } catch (e: any) {
@@ -456,6 +467,13 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           </NSpace>
         </div>
         <span class="cp-help">每 30 分钟自动巡检：磁盘、CPU、内存、负载、服务 failed、SSL 剩余天数，以及逐个应用的 HTTP 探活（只连 127.0.0.1 的端口，看它有没有应答）。触发后经 Telegram Bot、通用 Webhook 或邮件（SMTP）推送，同类告警每天最多一次；资源类阈值要连续两轮超标才推送，历史里当轮就留痕。</span>
+        <!-- 阈值区间跟 /api/settings/alerts 的 limits 一起下发；这一轮没读到时下面八个数字框
+             既没有值也没有可填区间（lim() 只能回退成 0..0），步进器点了不动。不说清楚，
+             看起来像"这个页面坏了"或"这些阈值就是 0"。 -->
+        <NAlert v-if="alertsError" type="error" :show-icon="false" style="margin-top: var(--space-3)" :title="alertsError">
+          告警配置这一轮没读到，下面的阈值区间是空的、暂时改不了。刷新这一页或等后端恢复后再来；
+          这期间巡检仍然按服务端的默认阈值跑，不会因为页面显示不出来就不告警。
+        </NAlert>
         <NForm class="cp-set-form" size="small" :label-width="isMobile ? undefined : 150" :label-placement="isMobile ? 'top' : 'left'" style="margin-top: var(--space-3)">
           <CpSettingRow label="Telegram Bot Token" :value="mask(alerts.alert_telegram_bot)" @edit="openChan('alert_telegram_bot')" />
           <CpSettingRow label="Telegram Chat ID" :value="mask(alerts.alert_telegram_chat)" @edit="openChan('alert_telegram_chat')" />
@@ -540,11 +558,14 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       <section v-if="isAdmin">
         <div class="sec-head">
           <h2 class="sec-title">防火墙</h2>
-          <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? `${fw.tool === 'firewalld' ? 'firewalld' : fw.tool === 'ufw' ? 'ufw' : '未检测到'} ${fw.active ? '已启用' : '未启用'}` : '检测中…' }}</span>
+          <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? `${fw.tool === 'firewalld' ? 'firewalld' : fw.tool === 'ufw' ? 'ufw' : '未检测到'} ${fw.active ? '已启用' : '未启用'}` : fwError ? '状态没读到' : '检测中…' }}</span>
         </div>
         <span class="cp-help">规则的增删与启停在侧栏「运维工具 → 防火墙」页做，这里只留状态摘要，避免两个入口改同一份配置。那一页会拒绝删掉 SSH、面板入口与你当前访问所用端口的唯一放行来源，所以不必担心一次误删把自己关在门外。</span>
         <NSpace vertical :size="12" style="margin-top: var(--space-3)">
           <div v-if="fw?.output" class="log-view" style="max-height: 220px">{{ fw.output }}</div>
+          <!-- 摘要读不到时这里不能空着：空着和「还没读到」长得一样，而这一页只给摘要，
+               真正的规则表在防火墙页，所以要点明去那一页看得到逐条原因。 -->
+          <EmptyBox v-else-if="fwError" text="防火墙状态这一轮没读到，这里只能留空" :hint="fwError" />
           <EmptyBox v-else-if="fw" text="既没有 ufw 也没有 firewalld；装好任意一个后到「防火墙」页管理规则" />
         </NSpace>
       </section>

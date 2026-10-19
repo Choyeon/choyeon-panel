@@ -316,7 +316,7 @@ const banColumns: any[] = [
     title: '地址', key: 'ip', minWidth: 220,
     render: (r: any) => h('div', { class: 'cell-txt' }, [
       h('span', { class: 'cell-name mono cp-break' }, r.ip),
-      h('div', { class: 'cell-sub cp-prose' }, r.comment || banMarker.value),
+      h('div', { class: 'cell-sub cp-prose', title: r.comment || banMarker.value }, r.comment || banMarker.value),
     ]),
   },
   {
@@ -2161,7 +2161,10 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
             刷新
           </NButton>
         </div>
-        <NAlert v-if="banNote" :type="banNote.type" :bordered="false" class="cp-prose" style="margin-bottom: 6px">
+        <!-- 这一段说的是「封禁与解除为什么被锁住」，是三行封顶就看不完的那种话：
+             挂 cp-prose 会把句尾的修复指引正好裁掉，而它才是用户当下最需要的半句。
+             说明盒不折行、让它自己长，比让人读半句结论有用。 -->
+        <NAlert v-if="banNote" :type="banNote.type" :bordered="false" style="margin-bottom: 6px">
           {{ banNote.text }}
         </NAlert>
         <NDataTable

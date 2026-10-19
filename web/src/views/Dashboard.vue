@@ -18,6 +18,9 @@ const isAdmin = getRole() === 'admin';
 const info = ref<any>({});
 const infoError = ref('');
 const stat = ref<any>({});
+// /system/stats 一直失败时，四个仪表会停在「-」而旁边照样亮着脉冲绿点写「每 3 秒采样」——
+// 那是把"这一轮没读到"演成"读到了但是空的"。失败要有失败的样子。
+const statError = ref('');
 const apps = ref<any[]>([]);
 const appsError = ref('');
 const failedUnits = ref<string[]>([]);
@@ -288,6 +291,8 @@ const samplerTag = computed(() => {
   // 探针失败时不能拿上一帧的 samplerAlive 画成绿色"运行中"，也不能反过来
   // 断言"未运行"——那一刻我们对采样器一无所知，就照实说未知。
   if (mstatError.value) return { type: 'warning' as const, text: '采样器状态未知' };
+  // 第一帧还没回来同样不能断言：此刻既不是"运行中"也不是"未运行"，是"还没问到"。
+  if (!mstat.value) return { type: 'default' as const, text: '检查中' };
   if (mstat.value?.samplerAlive) return { type: 'success' as const, text: '采样器运行中' };
   return { type: 'warning' as const, text: '采样器未运行' };
 });
@@ -343,6 +348,7 @@ async function tick() {
     const s = await api.stats();
     if (disposed) return;
     stat.value = s;
+    statError.value = '';
     const net: Record<string, [number, number]> = {};
     let ar = 0;
     let at = 0;
@@ -353,8 +359,12 @@ async function tick() {
     }
     const point: MonPoint = { t: Date.now(), net, all: [ar, at], ioR: s.ioRead || 0, ioW: s.ioWrite || 0 };
     monBuf.value = [...monBuf.value.slice(-(MON_CAP - 1)), point];
-  } catch {
-    return; // 401 时 api 层已跳转登录；网络抖动等下个周期自动恢复
+  } catch (e: any) {
+    // 401 时 api 层已跳转登录；网络抖动等下个周期自动恢复。
+    // 但不许什么都不留：这一轮失败时 stat 保持上一帧（首帧就是空对象），
+    // 而旁边照样亮着脉冲绿点写「每 3 秒采样」，读起来像"采样正常、只是没负载"。
+    if (!disposed) statError.value = e?.message || '状态采样获取失败';
+    return;
   } finally {
     if (!disposed) rtLoading.value = false;
   }
@@ -565,7 +575,7 @@ onBeforeUnmount(() => {
                 <TweenNumber v-if="it.value != null" :value="it.value" />
                 <template v-else>—</template>
               </div>
-              <div class="ov-note cp-prose">{{ ov ? it.note : (ovError || '读取中') }}</div>
+              <div class="ov-note cp-prose" :title="ov ? it.note : (ovError || '读取中')">{{ ov ? it.note : (ovError || '读取中') }}</div>
             </div>
           </div>
           <EmptyBox v-if="ovError" :text="`概览计数获取失败：${ovError}，30 秒轮询会自动重试`" />
@@ -574,7 +584,10 @@ onBeforeUnmount(() => {
         <NCard size="small" class="cp-rise" style="--i:2">
           <template #header><span class="section-title">状态</span></template>
           <template #header-extra>
-            <NText depth="3" class="sfoot"><span class="dot ok live" aria-hidden="true"></span>每 3 秒采样</NText>
+            <NText v-if="statError" depth="3" class="sfoot" :title="statError">
+              <span class="dot err" aria-hidden="true"></span>采样中断，显示的是上一帧
+            </NText>
+            <NText v-else depth="3" class="sfoot"><span class="dot ok live" aria-hidden="true"></span>每 3 秒采样</NText>
           </template>
           <div class="gauge-row">
             <StatGauge
@@ -631,7 +644,7 @@ onBeforeUnmount(() => {
                :aria-label="`查看应用 ${a.name}`"
                @click="router.push(`/apps/${a.id}`)" @keyup.enter="router.push(`/apps/${a.id}`)" @keyup.space.prevent="router.push(`/apps/${a.id}`)">
             <NIcon :component="a.type === 'node' ? icons.LogoElectron : icons.LogoPython" :size="18" :color="a.type === 'node' ? 'var(--cp-node)' : 'var(--cp-python)'" />
-            <span class="app-name cp-prose">{{ a.name }}</span>
+            <span class="app-name cp-prose" :title="a.name">{{ a.name }}</span>
             <span class="dot" :class="a.running ? 'ok' : 'idle'"></span>
             <NText depth="3" style="font-size: var(--fs-xs)">{{ a.running ? '运行中' : a.deploying ? '部署中' : '已停止' }}</NText>
           </div>

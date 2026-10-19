@@ -9,7 +9,9 @@
 //    suggest_note、suggest_reason。折成一句空话，用户就没法逐行质疑归属。
 // 3) 判不出的行不给「纳管」按钮，只给「指定应用」。批量「全部纳管」也不带 app_id——
 //    面板不许替管理员猜一个应用。
-// 4) 写操作只在 admin 下出现；每个动作先抢 busy 再发请求，且 busy 的键带域名。
+// 4) 写操作只在 admin 下出现；每个动作先抢自己那一类锁再发请求，且锁的键带域名。
+//    锁按对象分两把：nginx 写类（套用/移除/续期）与登记表类（纳管系）不碰同一个东西，
+//    合成一把时一次 certbot renew（620s）会把纳管按钮锁死十分钟。
 // 5) 端口差额、标签组合都由后端给，页面不做减法、不数标签。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -59,7 +61,7 @@ test('判不出的行只给「指定应用」，判得出的才给「纳管」',
   assert.match(src, /onClick: \(\) => openAssign\(r\)/);
   assert.match(src, /default: \(\) => '指定应用'/);
   assert.match(claim, /async function claimOne\(r: any, appId\?: number \| null\)/);
-  assert.match(claim, /assignId\.value \|\| busyAny\(\)\) return/, '没选应用不许提交');
+  assert.match(claim, /assignId\.value \|\| regBusyAny\(\)\) return/, '没选应用不许提交');
   assert.match(claim, /if \(await claimOne\(assignRow\.value, assignId\.value\)\) showAssign\.value = false/,
     '失败时浮层留着让人改选择，成功才关');
 });
@@ -79,15 +81,29 @@ test('写操作锁 admin，且一次只有一个在飞、键带域名', () => {
   };
   for (const fn of ['claimOne', 'unclaimOne', 'claimAllSites']) {
     const body = bodyOf(fn);
-    assert.ok(body.includes('busyAny()'), `${fn} 没先抢 busy：连点两次会往同一行登记写两次`);
-    assert.ok(body.includes('busy.value = { key:'), `${fn} 没有 busy 认领`);
-    assert.ok(body.includes('busy.value = null;'), 'finally 里要释放，否则整页按钮永久 disabled');
+    assert.ok(body.includes('regBusyAny()'), `${fn} 没先抢登记表那把锁：连点两次会往同一行登记写两次`);
+    assert.ok(body.includes('regBusy.value = { key:'), `${fn} 没有 regBusy 认领`);
+    assert.ok(body.includes('regBusy.value = null;'), 'finally 里要释放，否则整页按钮永久 disabled');
     assert.ok(body.includes('msg.error(e.message)'), `${fn} 失败要说出来，不能静默`);
     if (fn !== 'claimAllSites') {
-      assert.ok(body.includes('${r.domain}'), `${fn} 的 busy 键必须带域名，不然 A 行的浮层会锁住 B 行`);
+      assert.ok(body.includes('${r.domain}'), `${fn} 的锁键必须带域名，不然 A 行的浮层会锁住 B 行`);
     }
   }
   assert.match(claim, /await loadSites\(\)/, '写完就重读列表：登记表是唯一出处，页面不自己改内存里那一行');
+});
+
+test('纳管与 nginx 写类分持两把锁：一次十分钟的续期不许锁死登记', () => {
+  // 这条锁的就是"合成一把 busy"的那个退化：renew 走服务端 _nginx_section()，前端超时给到 620s，
+  // 如果纳管也挤在同一格里，那十分钟里登记表改不动，页面表现成"点了没反应"。
+  const slots = /const busy = ref<\{ key: string; verb: string \} \| null>\(null\);\nconst regBusy = ref<\{ key: string; verb: string \} \| null>\(null\);/.exec(src);
+  assert.ok(slots, 'busy 与 regBusy 必须是两个槽，不是一个');
+  const claimSeg = src.slice(src.indexOf('站点纳管 */'), src.indexOf('function chips(r: any)'));
+  assert.ok(!/busy\.value = \{/.test(claimSeg.replace(/regBusy\.value = \{/g, '')),
+    '纳管那一段不许往 nginx 写类那一格里放锁');
+  for (const verb of ['apply', 'remove', 'renew']) {
+    assert.ok(src.includes(`verb: '${verb}'`), `nginx 写类动作 ${verb} 要在 busy 槽里`);
+  }
+  assert.ok(!src.includes("regBusy.value = { key: `cert-"), '续期占的是 nginx 那一格，不是登记那一格');
 });
 
 test('取消纳管不许把「本就没有登记」粉饰成成功', () => {
@@ -114,7 +130,7 @@ test('窄屏契约：归属列走 minWidth 弹性、标签整项换行', () => {
 });
 
 test('「全部纳管」要确认、要禁用，图标在共享清单里', () => {
-  assert.match(src, /:disabled="busyAny\(\) \|\| !unclaimedCount"/, '没有待纳管域名时不给可点的批量按钮');
+  assert.match(src, /:disabled="regBusyAny\(\) \|\| !unclaimedCount"/, '没有待纳管域名时不给可点的批量按钮');
   assert.match(src, /:loading="onKey\('claim-all', 'claim-all'\)"/);
   const at = src.indexOf('全部纳管</NButton>');
   assert.ok(at > 0, '全部纳管按钮要在');

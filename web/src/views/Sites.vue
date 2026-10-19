@@ -45,7 +45,28 @@ const certs = ref<any[]>([]);
 const certsInfo = ref<any>({ source: 'none', reason: null, timer: null, hint: '', earliest: null });
 const loadingSites = ref(false);
 const loadingCerts = ref(false);
+/**
+ * 两把单飞锁，按「动的是不是同一批对象」分，而不是按按钮长得像不像分：
+ * - `busy`：nginx 写类（套用、移除、续期）。服务端都排在 `_nginx_section()` 那把锁后面，
+ *   一次只有一份配置在改；前端 abort 也不会取消服务端已经排队的活儿，所以同类的连点必须挡。
+ * - `regBusy`：登记表类（纳管、取消纳管、全部纳管、指定应用）。三个动词只往面板自己的
+ *   SQLite 写一行，既不 nginx -t 也不 reload，跟 nginx 写类不碰同一个对象。
+ * 合成一把的话，一次 `certbot renew`（前端超时 620s）会把纳管按钮锁死十分钟——
+ * 那十分钟里登记表根本改不动，用户看到的就是"点了没反应"。
+ * 同类里仍然只允许一个在飞：连点两次「续期」= 两个 certbot 并行抢 /etc/letsencrypt 的锁，
+ * 第二个直接失败，而用户看到的第一条结果是成功的，以为无事发生；连点两次「纳管」撞的是
+ * 同一行登记，第二次会把第一次的 note 覆盖掉，事后查审计看不出来发生过什么。
+ */
 const busy = ref<{ key: string; verb: string } | null>(null);
+const regBusy = ref<{ key: string; verb: string } | null>(null);
+
+function onKey(key: string, verb: string) {
+  // 两把槽的 key 前缀不重叠（site-/cert- 对 claim-/unclaim-/claim-all），一个函数够用
+  return (busy.value?.key === key && busy.value?.verb === verb)
+    || (regBusy.value?.key === key && regBusy.value?.verb === verb);
+}
+const busyAny = () => busy.value !== null;
+const regBusyAny = () => regBusy.value !== null;
 const renewLog = ref('');
 const renewSummary = ref('');
 const showConfig = ref(false);
@@ -53,6 +74,7 @@ const cfg = ref<any>(null);
 const cfgLoading = ref(false);
 // 「指定应用」这一条路只在判不出归属的行上出现，选项来自 /api/apps（点开时才第一次拉）。
 const apps = ref<any[]>([]);
+const appsError = ref('');
 const showAssign = ref(false);
 const assignRow = ref<any>(null);
 const assignId = ref<number | null>(null);
@@ -108,15 +130,6 @@ async function loadCerts() {
     loadingCerts.value = false;
   }
 }
-
-function onKey(key: string, verb: string) {
-  return busy.value?.key === key && busy.value?.verb === verb;
-}
-// 套用/移除/续期/纳管共用 busy，但都会碰同一批对象：一次只允许一个在飞。
-// 连点两次「续期」= 两个 certbot renew 并行抢 /etc/letsencrypt 的锁，第二个直接失败，
-// 而用户看到的第一条结果是成功的，以为无事发生。连点两次「纳管」同理，只是撞的是
-// 同一行登记——第二次会把第一次的 note 覆盖掉，事后查审计看不出来发生过什么。
-const busyAny = () => busy.value !== null;
 
 async function applySite(r: any) {
   if (busyAny()) return;
@@ -235,16 +248,20 @@ async function loadApps() {
   try {
     const r = await api.apps();
     apps.value = Array.isArray(r) ? r : [];
+    appsError.value = '';
   } catch (e: any) {
     apps.value = [];
+    // 读失败要留个痕：浮层里那句「面板里还没有登记任何应用」只有真的空清单时才成立，
+    // 接口挂了也显示同一句，用户就会去新建一个其实已经存在的应用。
+    appsError.value = e.message;
     msg.error(`应用清单读不到：${e.message}`);
   }
 }
 
 /** 返回 true 才让调用方收尾（关浮层），失败时浮层留着，用户还能改选择再试一次。 */
 async function claimOne(r: any, appId?: number | null) {
-  if (busyAny()) return false;
-  busy.value = { key: `claim-${r.domain}`, verb: 'claim' };
+  if (regBusyAny()) return false;
+  regBusy.value = { key: `claim-${r.domain}`, verb: 'claim' };
   try {
     const res = await api.claim(r.domain, appId);
     msg.success(`已纳管 ${res.domain}：只写了登记表，nginx 配置未改动`);
@@ -254,13 +271,13 @@ async function claimOne(r: any, appId?: number | null) {
     msg.error(e.message);
     return false;
   } finally {
-    busy.value = null;
+    regBusy.value = null;
   }
 }
 
 async function unclaimOne(r: any) {
-  if (busyAny()) return;
-  busy.value = { key: `unclaim-${r.domain}`, verb: 'unclaim' };
+  if (regBusyAny()) return;
+  regBusy.value = { key: `unclaim-${r.domain}`, verb: 'unclaim' };
   try {
     const res = await api.unclaim(r.domain);
     // removed=false 不粉饰成成功：按钮只给已纳管的行，点了却说"本就没有登记"，
@@ -272,14 +289,14 @@ async function unclaimOne(r: any) {
   } catch (e: any) {
     msg.error(e.message);
   } finally {
-    busy.value = null;
+    regBusy.value = null;
   }
 }
 
 /** 批量纳管只带判定结果、不带 app_id：判不出的那些必须留在列表里当未纳管，而不是被猜走。 */
 async function claimAllSites() {
-  if (busyAny()) return;
-  busy.value = { key: 'claim-all', verb: 'claim-all' };
+  if (regBusyAny()) return;
+  regBusy.value = { key: 'claim-all', verb: 'claim-all' };
   try {
     const res = await api.claimAll();
     const got = (res.claimed || []).length;
@@ -291,7 +308,7 @@ async function claimAllSites() {
   } catch (e: any) {
     msg.error(e.message);
   } finally {
-    busy.value = null;
+    regBusy.value = null;
   }
 }
 
@@ -303,7 +320,7 @@ function openAssign(r: any) {
 }
 
 async function confirmAssign() {
-  if (!assignRow.value || !assignId.value || busyAny()) return;
+  if (!assignRow.value || !assignId.value || regBusyAny()) return;
   if (await claimOne(assignRow.value, assignId.value)) showAssign.value = false;
 }
 
@@ -395,20 +412,20 @@ const siteColumns: any[] = [
       if (isAdmin.value && !r.claimed && r.suggest_kind) {
         btns.push(
           h(NPopconfirm, { onPositiveClick: () => claimOne(r) }, {
-            trigger: () => h(NButton, { ...txt, type: 'primary', loading: onKey(`claim-${r.domain}`, 'claim'), disabled: busyAny(), title: `按面板判定登记归属（${r.suggest_note}）` }, { default: () => '纳管' }),
+            trigger: () => h(NButton, { ...txt, type: 'primary', loading: onKey(`claim-${r.domain}`, 'claim'), disabled: regBusyAny(), title: `按面板判定登记归属（${r.suggest_note}）` }, { default: () => '纳管' }),
             default: () => `只往面板的登记表写这一行，并认领配置文件 ${r.file || '（未找到）'}；不写 nginx、不 reload，域名照旧由现在这份配置服务。判定依据：${r.suggest_note}`,
           }),
         );
       }
       if (isAdmin.value && !r.claimed && !r.suggest_kind) {
         btns.push(
-          h(NButton, { ...txt, type: 'primary', onClick: () => openAssign(r), disabled: busyAny(), title: r.suggest_reason || '面板认不出这个域名归哪个应用' }, { default: () => '指定应用' }),
+          h(NButton, { ...txt, type: 'primary', onClick: () => openAssign(r), disabled: regBusyAny(), title: r.suggest_reason || '面板认不出这个域名归哪个应用' }, { default: () => '指定应用' }),
         );
       }
       if (isAdmin.value && r.claimed) {
         btns.push(
           h(NPopconfirm, { onPositiveClick: () => unclaimOne(r) }, {
-            trigger: () => h(NButton, { ...txt, type: 'warning', loading: onKey(`unclaim-${r.domain}`, 'unclaim'), disabled: busyAny(), title: '只删这一行登记，nginx 的配置不动' }, { default: () => '取消纳管' }),
+            trigger: () => h(NButton, { ...txt, type: 'warning', loading: onKey(`unclaim-${r.domain}`, 'unclaim'), disabled: regBusyAny(), title: '只删这一行登记，nginx 的配置不动' }, { default: () => '取消纳管' }),
             default: () => `只删除 ${r.domain} 这一行登记。${r.file ? `${r.file} 一个字节都不动，` : ''}域名照旧在 nginx 里服务，只是面板重新把它当判不出归属的配置。`,
           }),
         );
@@ -584,9 +601,17 @@ const auditTone = computed(() => {
 
 /** 反代目标一格三种答案：有人听 / 没人听 / 判不了。「判不了」绝不折成「没人听」。 */
 function targetMarks(link: any) {
-  const rows = (link.targets || []).filter((t: any) => t.port !== null && t.port !== undefined);
+  const rows = link.targets || [];
   if (!rows.length) return [h('span', { class: 'sa-plain' }, '非反代（静态或 root）')];
   return rows.map((t: any) => {
+    // 端口为空是这条反代地址根本没写端口（默认 80、命名上游、或者 unix 套接字）：
+    // 它照样是一个反代目标，丢掉它就会把这行谎报成「非反代」。
+    if (t.port === null || t.port === undefined) {
+      return h('span', {
+        class: 'sa-mark mute mono',
+        title: '这条反代地址没写端口（默认 80、命名上游或 unix 套接字），本机监听表判不了它',
+      }, `${t.host || '?'} 未确认`);
+    }
     const label = `${t.host}:${t.port}`;
     if (t.listening === true) return h('span', { class: 'sa-mark ok mono' }, label);
     if (t.listening === false) return h('span', { class: 'sa-mark err mono' }, `${label} 没人听`);
@@ -713,7 +738,7 @@ onMounted(refresh);
           <NPopconfirm v-if="isAdmin" @positive-click="claimAllSites">
             <template #trigger>
               <NButton size="small" tertiary :icon="ico('CheckmarkCircleOutline')"
-                       :loading="onKey('claim-all', 'claim-all')" :disabled="busyAny() || !unclaimedCount"
+                       :loading="onKey('claim-all', 'claim-all')" :disabled="regBusyAny() || !unclaimedCount"
                        title="逐条按面板判定登记归属；判不出归属的原样列出理由，不替你猜应用">全部纳管</NButton>
             </template>
             判得出归属的域名逐个落进登记表并认领配置文件；判不出的一个都不猜，会留在列表里写明理由。
@@ -877,8 +902,12 @@ onMounted(refresh);
         </NText>
         <div>
           <div class="assign-cap">指定为哪个应用</div>
-          <NSelect v-model:value="assignId" :options="appOptions" placeholder="从应用清单里选一个" :disabled="busyAny()" />
-          <div v-if="!appOptions.length" class="cp-help">
+          <NSelect v-model:value="assignId" :options="appOptions" placeholder="从应用清单里选一个" :disabled="regBusyAny()" />
+          <div v-if="appsError" class="cp-help">
+            应用清单这一次没读到（{{ appsError }}），下拉是空的并不等于面板里没有应用。
+            关掉这个浮层重新点一次「指定应用」重试。
+          </div>
+          <div v-else-if="!appOptions.length" class="cp-help">
             面板里还没有登记任何应用。先把这个服务登记成应用（应用页 → 新建，端口按它实际监听的端口写），
             再回来纳管，归属信息才有地方挂。
           </div>
@@ -889,7 +918,7 @@ onMounted(refresh);
         </div>
         <NSpace justify="end" :size="8">
           <NButton size="small" tertiary @click="showAssign = false">取消</NButton>
-          <NButton size="small" type="primary" :disabled="!assignId || busyAny()"
+          <NButton size="small" type="primary" :disabled="!assignId || regBusyAny()"
                    :loading="onKey('claim-' + (assignRow?.domain || ''), 'claim')" @click="confirmAssign">纳管</NButton>
         </NSpace>
       </NSpace>

@@ -1623,10 +1623,12 @@ def _site_audit_text(d: dict) -> str:
                      "反代目标都在监听、证书都覆盖、明文都跳转")
     for link in (d.get("links") or [])[:20]:
         doms = "、".join(link.get("domains") or []) or "（无 server_name）"
+        # 端口为空是 proxy_pass 没写端口（默认 80、命名上游、unix 套接字），照样是反代目标；
+        # 把它筛掉会让整行显示成「非反代」，与站点页同一份判定给出相反的话。
         tgt = "、".join(
-            f"{t['host']}:{t['port']}" + ("(没人听)" if t["listening"] is False
-                                          else "(未确认)" if t["listening"] is None else "")
-            for t in link.get("targets") or [] if t.get("port") is not None) or "非反代"
+            ((f"{t['host']}:{t['port']}" if t.get("port") is not None else f"{t.get('host') or '?'}(未写端口)")
+             + ("(没人听)" if t["listening"] is False else "(未确认)" if t["listening"] is None else ""))
+            for t in link.get("targets") or []) or "非反代"
         lines.append(f"  {link['file']} · {doms} · 听 {link.get('listen')} · {tgt}"
                      + (f" · 应用 {link['app']}" if link.get("app") else ""))
     for n in d.get("notes") or []:
