@@ -338,6 +338,95 @@ class TestGetObject(_Case):
         self.assertIn("元数据", str(ctx.exception))
         conn.assert_not_called()
 
+    def test_budget_gate_is_checked_at_get_when_the_caller_asks_for_it(self):
+        """HEAD 没给大小时，拉回前那道余量预检就落在这里：第一个字节写下去之前。"""
+        seen = {}
+
+        def spy(path, size, label):
+            seen.update({"path": path, "size": size, "label": label})
+
+        body = b"hello"
+        with mock.patch("app.services.files_service.assert_write_budget", spy):
+            self._get([body, b""], {"Content-Length": str(len(body))},
+                      budget_dir=_bak_dir(), budget_label="从远端拉回 bk56.tar.gz")
+        self.assertEqual(seen["size"], 5, "预检用的必须是 GET 声明的那个数，不是 0")
+        self.assertEqual(seen["path"], _bak_dir())
+        self.assertIn("bk56", seen["label"])
+
+    def test_refused_budget_leaves_no_file(self):
+        def boom(_path, _size, _label):
+            raise RuntimeError("落盘余量不足")
+
+        with mock.patch("app.services.files_service.assert_write_budget", boom):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._get([b"hello", b""], {"Content-Length": "5"},
+                          budget_dir=_bak_dir(), budget_label="x")
+        self.assertIn("余量", str(ctx.exception))
+        self.assertFalse(os.path.exists(self.dest), "拒绝要发生在写第一个字节之前")
+
+    def test_declared_size_absent_means_no_gate_and_no_fabricated_zero(self):
+        calls = []
+        with mock.patch("app.services.files_service.assert_write_budget", lambda *a: calls.append(a)):
+            res, _ = self._get([b"abc", b""], {}, budget_dir=_bak_dir(), budget_label="x")
+        self.assertEqual(calls, [], "对端没声明大小就没有可预检的数，不许拿 0 假装检过")
+        self.assertIsNone(res["declared"], "返回给调用方的也得是「读不到」，不是 0")
+        self.assertEqual(res["bytes"], 3)
+
+
+# ------------------------------------------------ 1b. 大小读不到 ≠ 0
+
+class TestRemoteSizeUnknown(_Case):
+    """有的 S3 兼容实现 LIST 不带 `<Size>`、HEAD 不带 `Content-Length`，这是真实的差异。
+
+    把「读不到」折成 0 会让三处一起说谎：远端清单那一格印成看着正常的「0 B」，
+    `probe` 的合计少算那一份却报出一个具体的数，拉回的落盘余量预检因为"只要 0 字节"
+    当场通过。三处的正确读法都是「不知道」。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.t = _tgt()
+
+    def _rows(self, xml: bytes):
+        with mock.patch.object(C, "_request", lambda *a, **kw: (200, {}, xml)):
+            return C.list_keys(self.t, "")[0]
+
+    def test_listing_without_size_is_none_while_a_real_zero_stays_zero(self):
+        xml = (b'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+               b'<Contents><Key>bk1-a.gz</Key></Contents>'
+               b'<Contents><Key>bk1-b.gz</Key><Size>0</Size></Contents>'
+               b'<Contents><Key>bk1-c.gz</Key><Size>12</Size></Contents>'
+               b'<IsTruncated>false</IsTruncated></ListBucketResult>')
+        rows = self._rows(xml)
+        self.assertIsNone(rows[0]["size"], "没给大小却写成 0，界面就把它印成「0 B」的空对象")
+        self.assertEqual([r["size"] for r in rows[1:]], [0, 12], "真的是 0 字节的那份照旧是 0")
+
+    def test_garbage_size_is_also_unknown(self):
+        rows = self._rows(b'<ListBucketResult><Contents><Key>a</Key>'
+                          b'<Size>not-a-number</Size></Contents></ListBucketResult>')
+        self.assertIsNone(rows[0]["size"], "读不出一个数就是读不到，不能让 int() 的异常变成 500")
+
+    def test_head_without_content_length_is_none(self):
+        with mock.patch.object(C, "_request", lambda *a, **kw: (200, {}, b"")):
+            self.assertIsNone(C.head_object(self.t, "a")["size"])
+        with mock.patch.object(C, "_request",
+                               lambda *a, **kw: (200, {"content-length": "7"}, b"")):
+            self.assertEqual(C.head_object(self.t, "a")["size"], 7)
+
+    def test_probe_total_is_unknown_when_any_object_has_no_size(self):
+        tid = _mktarget()
+        rows = [{"key": "panel/bk1-a.gz", "size": 5, "modified": ""},
+                {"key": "panel/bk1-b.gz", "size": None, "modified": ""}]
+        with (mock.patch.object(C, "get_secret", return_value=_tgt(id=tid)),
+              mock.patch.object(C, "head_bucket",
+                                return_value={"addressing": "path-style", "request_id": "R"}),
+              mock.patch.object(C, "list_keys", return_value=(rows, False))):
+            res = C.probe(tid)
+        self.assertIsNone(res["bytes_under_prefix"],
+                          "少一条大小就报整体未知：报一个偏小的数，读起来像「桶里就这么多」")
+        self.assertEqual(res["size_unknown_objects"], 1, "说清是几条没给，别只说一句未知")
+        self.assertEqual(res["objects_under_prefix"], 2)
+
 
 # ------------------------------------------------ 2. 云端列表
 
@@ -387,6 +476,12 @@ class TestListForJob(_Case):
         flags = {f["name"]: f["local"] for f in res["files"]}
         self.assertTrue(flags[name])
         self.assertFalse(flags[only], "重装后「仅异地」这一格就是拉回的动机，判反了等于没有这个功能")
+
+    def test_unknown_size_reaches_the_page_as_null(self):
+        res = self._run([{"key": f"panel/bk{self.bid}-a.gz", "size": None,
+                          "modified": "2026-10-16T03:41:00.000Z"}])
+        self.assertIsNone(res["files"][0]["size"],
+                          "「读不到大小」要一路到界面，中途被折成 0 就变成了一句假话")
 
     def test_missing_local_dir_is_not_an_error(self):
         with tempfile.TemporaryDirectory() as gone:
@@ -468,6 +563,27 @@ class TestPullOne(_Case):
         with self.assertRaises(RuntimeError) as ctx:
             self._pull(head=False)
         self.assertIn("远端没有这个对象", str(ctx.exception))
+
+    def test_head_silent_about_size_hands_the_budget_gate_to_the_download(self):
+        """HEAD 不给大小 ≠ 这份是 0 字节：预检不能在拉回这一侧消失，只能换个地方做。"""
+        seen = {}
+
+        def fake_get(_t, key, d, **kw):
+            seen.update(kw)
+            Path(d).write_bytes(b"hello")
+            return {"bytes": 5, "declared": 5, "key": key, "request_id": "R"}
+
+        with (mock.patch.object(C, "get_secret", return_value=_tgt(id=self.tid)),
+              mock.patch.object(C, "head_object",
+                                return_value={"key": f"panel/{self.name}", "size": None}),
+              mock.patch.object(C, "get_object", side_effect=fake_get),
+              mock.patch("app.services.files_service.assert_write_budget") as budget):
+            res = C.pull_one(self.tid, self.bid, self.name)
+        self.assertTrue(res["ok"])
+        budget.assert_not_called()
+        self.assertEqual(seen.get("budget_dir"), _bak_dir(),
+                         "把闸门交给 get_object：它在声明大小之后、第一个字节之前补判")
+        self.assertIn(self.name, str(seen.get("budget_label")))
 
     def test_oversize_is_refused_before_writing(self):
         with self.assertRaises(RuntimeError) as ctx:
@@ -664,6 +780,31 @@ class TestCliContract(_Case):
         self.assertIn(f"bk{bid}-a.tar.gz", so.getvalue())
         self.assertIn("仅异地", so.getvalue(), "「本机没有」必须直接可读，这是拉回的理由")
         self.assertNotIn("bk9-b", so.getvalue())
+
+    def test_cloud_list_survives_a_remote_that_will_not_size_its_objects(self):
+        # 线上第一天就撞到的：对端 LIST 不带 <Size>，那一栏是 None。
+        # `{None:>12}` 会让整条命令在一份好端端的产物上崩掉（退出码 1，别的份也一并看不到），
+        # 而把它折成 0 就是说"桶里这份是空对象"。两个都不许：写「未知」。
+        bid = _mkjob()
+        tid = _mktarget()
+        files = [{"name": f"bk{bid}-a.tar.gz", "key": f"panel/bk{bid}-a.tar.gz", "size": None,
+                  "modified": "", "local": False},
+                 {"name": f"bk{bid}-b.tar.gz", "key": f"panel/bk{bid}-b.tar.gz", "size": 4096,
+                  "modified": "2026-10-16T03:41:00.000Z", "local": True}]
+        with (mock.patch.object(C, "list_for_job",
+                                return_value={"ok": True, "target": "t", "bucket": "offsite",
+                                              "prefix": "panel/", "job": bid, "files": files,
+                                              "remote_total": 2, "truncated": False}),
+              mock.patch.object(dbm, "audit"),
+              contextlib.redirect_stdout(io.StringIO()) as so):
+            res = asyncio.run(cmd_backup(argparse.Namespace(backup_cmd="cloud-list",
+                                                            id=bid, target=tid, name=None)))
+        out = so.getvalue()
+        self.assertTrue(res["ok"], "读不到大小不是失败：这一份照样要列出来")
+        self.assertIn("未知", out)
+        self.assertIn(human_bytes(4096), out, "读得到的那一份不许被一起拖成未知")
+        self.assertIn("本机有", out)
+        self.assertNotIn("None", out)
 
     def test_cloud_pull_reports_the_restore_next_step(self):
         bid = _mkjob()

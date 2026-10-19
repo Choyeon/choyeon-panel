@@ -307,6 +307,11 @@ const columns: any[] = [
           ...(isAdmin && r.cloud_target_id
             ? [{ label: pushing.value === r.id ? '推送中…' : '补推异地', run: () => pushNow(r), disabled: pushing.value !== null || busy.value !== null || !r.files.length }]
             : []),
+          // 目标被删了就不给这个入口：桶都没了，"重新列举"也列不出任何东西，
+          // 而「异地」那一格已经写着"目标已删除"，这里再给一个必然失败的按钮只会误导。
+          ...(isAdmin && r.cloud_target_id && tgById.value[r.cloud_target_id]
+            ? [{ label: '远端清单', run: () => openCloudFiles(r), disabled: busy.value === r.id }]
+            : []),
           ...(isAdmin
             ? [
                 { label: '编辑', run: () => openEdit(r), disabled: busy.value === r.id },
@@ -547,6 +552,181 @@ async function pushNow(r: any) {
   }
 }
 
+// ---------------------------------------------------------------- 远端清单
+//
+// 「这个前缀下有 N 个对象」（批次㊸B 的连通性测试）和「是哪几份、多大、本机还有没有」
+// 是两个事实。机器重装之后本机备份目录是空的，界面看得见"桶里有 7 份"却一份都摸不到，
+// 而恢复只读本机的文件——看不见就等于没有异地。这里把 56A 的两个接口接上：
+// 列出这条任务名下的远端产物，并把「仅异地」的那一份拉回本机。
+const cfShow = ref(false);
+const cfW = useDrawerWidth(0.62);
+const cfTitle = ref('');
+const cfJob = ref(0);
+const cfTargetId = ref(0);
+const cfData = ref<any | null>(null);
+const cfErr = ref('');
+const cfLoading = ref(false);
+const cfPulling = ref('');
+// 迟到的一轮列举不许盖进另一条任务的抽屉（与批次61B 的恢复弹窗同一类竞态：
+// 慢的那一拍落在快的那一拍上面，界面就把 A 桶的清单显示在 B 的标题下）。
+let cfSeq = 0;
+
+async function loadCloudFiles(job: number, target: number) {
+  const seq = ++cfSeq;
+  cfLoading.value = true;
+  // 新一轮开始就把上一轮的"读不到"放下：否则重试进行中还挂着旧错误，
+  // 界面同时说"读不到"和"正在读"两句话。
+  cfErr.value = '';
+  try {
+    const r = await api.cloudFiles(job, target);
+    if (seq !== cfSeq) return;
+    cfData.value = r;
+  } catch (e: any) {
+    if (seq !== cfSeq) return;
+    // 「读不到」不是「远端没有」：错误原文留着，空表格一并不渲染——
+    // 一份都不显示却写着"没有产物"，人就会去点补推，把同一个失败再走一遍。
+    cfData.value = null;
+    cfErr.value = e?.message || String(e);
+  } finally {
+    // 忙位归最新那一轮：旧响应不能把新请求的转圈灯放下，否则界面显示"读完了"而数据还没到
+    if (seq === cfSeq) cfLoading.value = false;
+  }
+}
+
+function openCloudFiles(r: any) {
+  const t = tgById.value[r.cloud_target_id];
+  if (!t) return;
+  cfJob.value = r.id;
+  cfTargetId.value = r.cloud_target_id;
+  cfTitle.value = displayName(r);
+  cfData.value = null;
+  cfErr.value = '';
+  cfShow.value = true;
+  void loadCloudFiles(r.id, r.cloud_target_id);
+}
+
+// 关抽屉就作废这一轮在飞的请求并放下两把灯：不放 cfPulling，下一条任务的抽屉一进来
+// 「拉回」就是灰的；不推进 cfSeq，上一次列举的返回会盖到新抽屉里。
+watch(cfShow, (v) => {
+  if (v) return;
+  cfSeq += 1;
+  cfPulling.value = '';
+  cfLoading.value = false;
+});
+
+function reloadCloud() {
+  if (cfLoading.value || !cfJob.value) return;
+  void loadCloudFiles(cfJob.value, cfTargetId.value);
+}
+
+const cfStillMine = (job: number, target: number) =>
+  cfShow.value && cfJob.value === job && cfTargetId.value === target;
+
+async function pullCloud(f: any) {
+  if (cfPulling.value !== '') return;
+  const job = cfJob.value;
+  const target = cfTargetId.value;
+  cfPulling.value = f.name;
+  try {
+    const res = await api.cloudPull(job, target, f.name);
+    if (cfStillMine(job, target)) {
+      // 能不能直接点恢复由服务端用本机列表那同一个判据给（bk0-/panel- 与 .sql.gz 走不了自动恢复），
+      // 这里只翻译，不自己按扩展名再判一次。
+      msg.success(res.restoreable
+        ? `已拉回 ${res.name}（${fmtBytes(res.bytes)}），在「备份文件」页可以恢复`
+        : `已拉回 ${res.name}（${fmtBytes(res.bytes)}），这一类产物不支持自动恢复，要手工处理`);
+      await loadCloudFiles(job, target);
+    }
+  } catch (e: any) {
+    // 服务端已经遮过凭据，错误原文可以直接显示。"没拉回来"绝不能静默：
+    // 那一行还写着「仅异地」，人不点第二次永远不知道按钮刚才失败过。
+    msg.error(`拉回失败：${e.message}`);
+  } finally {
+    if (cfPulling.value === f.name) cfPulling.value = '';
+    // 拉回来的是本机的一个新产物：任务行的产物数、目标计数、审计留痕都变了，
+    // 两张表一律重读（本机列表是唯一出处，页面不自己往 files[] 里插一行）。
+    void reload().catch(() => undefined);
+  }
+}
+
+const cfHead = computed<any[]>(() => {
+  const d = cfData.value;
+  if (!d) return [];
+  const t = tgById.value[cfTargetId.value];
+  const items: any[] = [
+    { k: '目标', v: t && !t.enabled ? `${d.target}（已停用：只影响推送，不影响拉回）` : d.target },
+    { k: '桶 / 前缀', v: `${d.bucket} / ${d.prefix || '（根）'}`, mono: true },
+    { k: '这条任务名下的产物', v: `${d.files.length} 份，其中本机已有 ${d.files.filter((x: any) => x.local).length} 份` },
+    // remote_total 是"翻到的对象数"，不是"桶里的总数"：列举有翻页上限，两者必须分开写
+    { k: '这个前缀下读到的对象', v: `${d.remote_total} 个${d.truncated ? '（已达翻页上限，可能还有更多）' : ''}`, mono: false },
+  ];
+  return items;
+});
+
+// 空清单有三种读法，必须由服务端给的数分开说，不能都写成"没有产物"
+const cfEmptyText = computed(() => {
+  const d = cfData.value;
+  if (!d) return '远端清单还没读到';
+  if (!d.remote_total) {
+    return `目标「${d.target}」的 ${d.bucket}/${d.prefix || ''} 下没有任何对象：这条任务还没推上异地副本`;
+  }
+  return `这个前缀下读到 ${d.remote_total} 个对象，但没有一条属于本任务（产物名要以 bk${d.job}- 开头）`;
+});
+
+const cfColumns: any[] = [
+  {
+    // 弹性列必须给 minWidth：抽屉在 375px 档是全屏宽，右侧固定列合计已经 ~410px，
+    // 没有下限的话最先被挤成 0 宽的就是产物名——那正是这一行唯一的身份。
+    title: '产物', key: 'name', minWidth: 200,
+    render: (f: any) =>
+      h('div', { class: 'cell-txt' }, [
+        h('span', { class: 'mono-dim cp-break', title: f.name }, f.name),
+        // 完整对象键也留在格子里：前缀写错时"桶里那份到底在哪个键下"只有这一处能读出来
+        h('div', { class: 'cell-sub cp-prose', title: f.key }, f.key),
+      ]),
+  },
+  {
+    title: '大小', key: 'size', width: 88,
+    // 对端 LIST 没带 Size 时后端给的是 null（不是 0）：写成「0 B」会被读成
+    // "桶里这份是空对象"，而真正的事实是"我们没读到大小"——两者处置完全不同。
+    // cp-break：88px 装不下 "1023.9 MiB" 这种长档时，宁可在空格处折一行，也不吃掉尾数
+    render: (f: any) => h('span', { class: 'mono-dim cp-break', title: f.size === null ? '对端未返回大小' : '' },
+      f.size === null ? '未知' : fmtBytes(f.size)),
+  },
+  {
+    title: '远端时间', key: 'modified', width: 140,
+    render: (f: any) => h('span', { class: 'mono-dim cp-break', title: f.modified || '对端未返回修改时间' },
+      // 读不到时间就写未知，不拿"现在"补一个看起来正常的日期
+      f.modified ? fmtDateTime(f.modified) : '未知'),
+  },
+  {
+    title: '本机', key: 'local', width: 88,
+    render: (f: any) =>
+      f.local
+        ? h(NTag, { size: 'tiny', round: true, bordered: false, type: 'success' }, () => '本机有')
+        : h(NTag, { size: 'tiny', round: true, bordered: false, type: 'warning' }, () => '仅异地'),
+  },
+  {
+    // 只读这一份，不动桶里的对象：界面上没有删除远端副本的入口，那是桶侧的事
+    title: '操作', key: 'ops', width: 96, align: 'center', fixed: 'right' as const,
+    render: (f: any) =>
+      f.local
+        ? h('span', { class: 'cell-sub cp-break' }, '—')
+        : h(NButton, {
+            size: 'tiny', type: 'primary', tertiary: true, class: 'cp-press',
+            loading: cfPulling.value === f.name,
+            disabled: cfPulling.value !== '' && cfPulling.value !== f.name,
+            onClick: () => pullCloud(f),
+          }, () => (cfPulling.value === f.name ? '拉回中…' : '拉回')),
+  },
+];
+
+const cfLocalGone = computed(() => {
+  const d = cfData.value;
+  if (!d || !d.files.length) return false;
+  return d.files.every((x: any) => !x.local);
+});
+
 function openTargetCreate() {
   tgEditingId.value = null;
   tgForm.value = { ...blankTarget(), _masked_ak: '' };
@@ -637,8 +817,11 @@ async function testTarget(r: any) {
       { k: '前缀', v: res.prefix || '（根）', mono: true },
       { k: '寻址方式', v: res.addressing === 'path-style' ? 'path-style（endpoint/桶/对象）' : 'virtual-host（桶.endpoint/对象）' },
       { k: '前缀下对象数', v: `${res.objects_under_prefix} 个` },
-      { k: '前缀下合计大小', v: fmtBytes(res.bytes_under_prefix || 0) },
-      { k: '列表是否读完', v: res.list_truncated ? '没读完（对象很多，只看到前 1000 个）' : '已读完' },
+      { k: '前缀下合计大小', v: res.bytes_under_prefix === null
+        // 少一条大小就报整体未知：报一个偏小的合计，读的人以为桶里就这么多
+        ? `未知（${res.size_unknown_objects} 个对象对端没给大小）`
+        : fmtBytes(res.bytes_under_prefix) },
+      { k: '列表是否读完', v: res.list_truncated ? '没读完（对象太多，翻页到上限就停了）' : '已读完' },
       { k: '对端请求号', v: res.request_id || '（对端未返回）', mono: true },
     ];
     probeShow.value = true;
@@ -877,6 +1060,52 @@ function confirmDeleteTarget(r: any) {
       <NDrawerContent :title="`连通性测试 - ${probeTitle}`" closable>
         <InfoList :items="probeItems" />
         <span class="cp-help" style="display: block; margin-top: var(--space-3)">这里只读不写：HeadBucket 验桶与凭据，ListObjects 验我们写的键看得见。测通了不代表下一次备份一定推得上去，对端随时可能换密钥。</span>
+      </NDrawerContent>
+    </NDrawer>
+
+    <NDrawer v-if="isAdmin" v-model:show="cfShow" :width="cfW">
+      <NDrawerContent :title="`远端清单 - ${cfTitle}`" closable>
+        <NSpace vertical :size="12">
+          <NSpace align="center" :size="8">
+            <NButton size="small" tertiary :loading="cfLoading" :icon="icon('RefreshOutline', 14)" @click="reloadCloud">重新列举</NButton>
+            <span v-if="cfPulling" class="cell-sub cp-prose">正在把 {{ cfPulling }} 拉回本机：按块落盘，最长约 15 分钟，别关掉这一页。</span>
+          </NSpace>
+
+          <!-- 三条路各说各的话：读不到 / 读到了但一条都不属于本任务 / 读到了。
+               把前两条合并成"没有产物"，界面就在替远端的健康状况说谎。 -->
+          <NAlert v-if="cfErr" type="error" :bordered="false" size="small">
+            远端清单没读到：{{ cfErr }}
+            <span class="cp-help" style="display: block; margin-top: var(--space-2)">
+              这是「读不到」，不是「桶里没有副本」。可以在「异地备份目标」那一张表点「测试连通」确认桶与凭据，再回来点「重新列举」。
+            </span>
+          </NAlert>
+
+          <template v-else-if="cfData">
+            <InfoList :items="cfHead" />
+            <NAlert v-if="cfData.truncated" type="warning" :bordered="false" size="small">
+              列举翻到上限就停了：这个前缀下读到 {{ cfData.remote_total }} 个对象，清单可能不完整。
+              这里看不到某一份产物，不等于远端没有那一份。
+            </NAlert>
+            <NAlert v-if="cfLocalGone" type="warning" :bordered="false" size="small">
+              远端有 {{ cfData.files.length }} 份，本机一份都没有。恢复只读本机的文件，要先把需要的那一份「拉回」。
+            </NAlert>
+            <NDataTable
+              :columns="cfColumns" :data="cfData.files" size="small" :bordered="false"
+              :loading="cfLoading" :scroll-x="'auto'" :row-key="(f: any) => f.name"
+            >
+              <template #empty>
+                <EmptyBox :text="cfEmptyText" />
+              </template>
+            </NDataTable>
+            <span class="cp-help">
+              这一页只读远端、只往本机写：面板不删桶里的对象，也不覆盖本机已有的同名产物（要换一份请先在「备份文件」页删掉本机那一份）。「本机有 / 仅异地」按备份目录里此刻的文件判，与「备份文件」页同源。
+            </span>
+          </template>
+
+          <NAlert v-else type="info" :bordered="false" size="small">
+            {{ cfLoading ? '正在列举这个前缀下的对象，对象多时要一页一页翻……' : '还没有读到清单，点上方「重新列举」。' }}
+          </NAlert>
+        </NSpace>
       </NDrawerContent>
     </NDrawer>
 

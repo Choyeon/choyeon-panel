@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -456,6 +457,25 @@ class TargetClean(unittest.TestCase):
         self.assertEqual(C.update_target(tid, {})["changed"], [])
         with self.assertRaises(RuntimeError):
             C.update_target(999999, {"region": "us-west-2"})
+
+    def test_name_conflict_is_named_even_when_the_patch_has_no_name(self):
+        """撞唯一约束时那句判词不许写死成 `c["name"]`。
+
+        只 patch 别的列也会走到这一支，读一个不存在的键得到的判词是
+        KeyError: 'name'——库里那次写被拒了（这是对的），但人读到的是一句内部错误。
+        """
+        tid = _mktarget()
+        other = _mktarget()
+        with self.assertRaises(RuntimeError) as ctx:
+            C.update_target(other, {"name": dbm.query_one(
+                "SELECT name FROM cloud_targets WHERE id=?", (tid,))["name"]})
+        self.assertIn("已存在", str(ctx.exception))
+        with mock.patch.object(dbm, "execute",
+                               side_effect=sqlite3.IntegrityError("UNIQUE constraint failed")):
+            with self.assertRaises(RuntimeError) as ctx:
+                C.update_target(tid, {"region": "us-west-2"})
+        self.assertIn("唯一约束", str(ctx.exception))
+        self.assertNotIn("KeyError", str(ctx.exception))
 
     def test_create_refuses_a_body_missing_any_required_field(self):
         """少任何一栏都只是一句人话的错误，不许变成 500，也不许建出一半的目标。"""
@@ -1155,6 +1175,28 @@ class CliContract(unittest.TestCase):
                 asyncio.run(cmd_backup(args))
         dbm.execute("DELETE FROM backups WHERE id=?", (bid,))
 
+    def test_edit_target_success_reports_the_columns_it_changed(self):
+        """批次56B 线上实证撞出来的那条：写成功了，文案却去读一个从不返回的列。
+
+        `choyeonctl backup edit-target --id 2 --path-style` 返回 ok:false + 退出码 1
+        （KeyError: 'name'），而 path_style 那一位其实已经落库。对写操作来说，
+        把成功说成失败比失败本身更糟：管理员只会再写一次。
+        """
+        tid = _mktarget()
+        args = self.parser.parse_args(["backup", "edit-target", "--id", str(tid),
+                                       "--region", "ap-south-1"])
+        with mock.patch.object(Out, "json_mode", False), \
+             mock.patch.object(sys, "stdout", new_callable=io.StringIO) as out:
+            data = asyncio.run(cmd_backup(args))
+        self.assertTrue(data["ok"], "改一列必须按成功返回")
+        self.assertEqual(dbm.query_one("SELECT region FROM cloud_targets WHERE id=?",
+                                       (tid,))["region"], "ap-south-1", "落库的就是这次改的那一列")
+        text = out.getvalue()
+        self.assertIn("已更新", text)
+        self.assertIn("region", text, "成功句要点名改了哪几列，那才是这次写的事实")
+        self.assertNotIn("KeyError", text)
+        self.assertNotIn(SK, text)
+
     def test_schema_documents_the_stdin_only_rule(self):
         with mock.patch.object(Out, "json_mode", True), \
              mock.patch.object(sys, "stdout", new_callable=io.StringIO):
@@ -1232,6 +1274,13 @@ class CrossLayerTimeout(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as ctx:
                     C.put_object(t, "k", p)
                 self.assertIn("不一致", str(ctx.exception))
+            with mock.patch.object(C, "_request", return_value=(200, {"x-amz-request-id": "R"}, b"")), \
+                 mock.patch.object(C, "head_object", return_value={"key": "k", "size": None}):
+                # 对端收了请求却不肯确认字节数：报"推上去了"就是把异地副本记成假账
+                with self.assertRaises(RuntimeError) as ctx:
+                    C.put_object(t, "k", p)
+                self.assertIn("没给大小", str(ctx.exception))
+                self.assertNotIn("不一致", str(ctx.exception), "读不到与对不上是两件事，判词得能分开")
             with mock.patch.object(C, "_request", return_value=(200, {"x-amz-request-id": "R"}, b"")), \
                  mock.patch.object(C, "head_object", return_value={"key": "k", "size": 7}):
                 out = C.put_object(t, "k", p)

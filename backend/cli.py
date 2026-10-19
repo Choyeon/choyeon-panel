@@ -717,7 +717,12 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         except Exception as e:  # noqa: BLE001
             Out.error(public_message(e) or type(e).__name__, EXIT_FAIL)
             return {}
-        Out.result(t, f"异地目标已{'创建' if a.backup_cmd == 'add-target' else '更新'}：{t['name']}")
+        # 改目标返回的是「改了哪几列」，那一份里没有 name：拿不存在的一列做文案，
+        # 症状是库里已经写完、命令却以 KeyError 退出 1——管理员读到"失败"只会再改一次。
+        if a.backup_cmd == "add-target":
+            Out.result(t, f"异地目标已创建：{t['name']}")
+        else:
+            Out.result(t, f"异地目标 #{a.id} 已更新：" + ("、".join(t["changed"]) or "这次没有要改的字段"))
         return {"ok": True, "target": t}
 
     if a.backup_cmd == "del-target":
@@ -744,8 +749,11 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
             Out.error(f"连通性测试失败：{public_message(e) or type(e).__name__}", EXIT_FAIL)
             return {}
         dbm.audit("cli", "cli:backup:target:test", str(res["target"]))
+        tot = res["bytes_under_prefix"]
+        size_note = (human_bytes(tot) if tot is not None else
+                     f"大小未知：{res['size_unknown_objects']} 个对象对端没给大小")
         Out.result(res, f"{res['target']}：桶可读，前缀下 {res['objects_under_prefix']} 个对象"
-                       f"（{human_bytes(res['bytes_under_prefix'])}）")
+                       f"（{size_note}）")
         return {"ok": True, **res}
 
     if a.backup_cmd == "push":
@@ -812,7 +820,11 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         if a.backup_cmd == "cloud-list":
             dbm.audit("cli", "cli:backup:cloud-list", f"{a.id}@{a.target}({len(res['files'])} 份)")
             lines = [
-                f"{f['size']:>12}  {f['modified']:<25}  {'本机有' if f['local'] else '仅异地'}  {f['name']}"
+                # 对端 LIST 不给 Size/LastModified 时那两栏是 None 与 ""：`{None:>12}` 会直接把这条
+                # 命令崩在一份好端端的产物上，折成 0 又会把"没读到"说成"桶里是份空对象"。
+                # 与网页那张清单同一个说法：读不到就写「未知」。
+                f"{(human_bytes(f['size']) if f['size'] is not None else '未知'):>12}  "
+                f"{(f['modified'] or '未知'):<25}  {'本机有' if f['local'] else '仅异地'}  {f['name']}"
                 for f in res["files"]
             ]
             tail = "" if not res["truncated"] else f"（列举已达上限，桶里这个前缀共 {res['remote_total']} 个对象）"

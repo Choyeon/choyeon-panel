@@ -272,6 +272,16 @@ export const api = {
   // 前端超时必须更长：推一半被本地 abort，远端对象已经落桶，用户再点一次就是重复上传。
   pushBackup: (id: number, targetId?: number) =>
     req(`/backups/${id}/push`, { body: targetId ? { target_id: targetId } : {}, timeout: 930000 }),
+  // 远端清单要翻页：服务端最多 LIST_PAGES(20) 页 × CP_CLOUD_PROBE_TIMEOUT_SEC(20s)，
+  // 最坏是一次 400s 的列举。给它比单发探测(30s)长一截的预算，否则前 19 页刚读完就被本地
+  // abort，界面留下的是"清单读不到"，而远端其实好着。target 必填：看哪个桶得说清楚。
+  cloudFiles: (id: number, targetId: number) =>
+    req(`/backups/${id}/cloud-files?target=${targetId}`, { timeout: 430000 }),
+  // 拉回在服务端受 CP_CLOUD_PUSH_TIMEOUT_SEC(900s) 的整体 deadline 约束（含 HeadObject 20s），
+  // 与补推同一档。本地先超时就是"这边以为没拉回来、盘上却多了一份"，第二次点会被同名拒绝，
+  // 看起来像界面出错，其实是两份账对不上。
+  cloudPull: (id: number, targetId: number, name: string) =>
+    req(`/backups/${id}/cloud-pull`, { body: { target: targetId, name }, timeout: 930000 }),
   files: (path: string) => req(`/files?path=${encodeURIComponent(path)}`),
   fileContent: (path: string) => req(`/files/content?path=${encodeURIComponent(path)}`),
   saveFile: (path: string, content: string | ArrayBuffer) =>

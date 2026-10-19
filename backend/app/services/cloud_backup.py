@@ -60,6 +60,20 @@ _DENY_HOSTS = {
 
 # ---------------------------------------------------------------- 校验与目标表
 
+def _size_or_none(raw) -> int | None:
+    """对端没给大小就是 None，不许折成 0。
+
+    S3 兼容实现并不都守约定：有的网关 LIST 不带 `<Size>`，有的 HEAD 不带
+    `Content-Length`。折成 0 之后，「远端清单」那一格会印成看着正常的「0 B」，
+    拉回的落盘余量预检会因为"只要 0 字节"而当场通过，上传后的字节核对会变成
+    「远端 0 与本地 N 不一致」——三种症状都是把「读不到」说成了一个具体的数。
+    """
+    s = str(raw or "").strip()
+    if not (s.isascii() and s.isdigit()):
+        return None
+    return int(s)
+
+
 def _norm_prefix(p) -> str:
     s = str(p or "").strip().lstrip("/")
     if not s:
@@ -258,7 +272,10 @@ def update_target(tid: int, body: dict) -> dict:
     try:
         dbm.execute(f"UPDATE cloud_targets SET {sets} WHERE id=?", (*c.values(), int(tid)))
     except sqlite3.IntegrityError:
-        raise RuntimeError(f"目标名 {c['name']} 已存在") from None
+        # 只 patch 别的列也会走到这里：判词不能写死 `c["name"]`，否则名字冲突以外的
+        # 约束问题会被读成一句内部错误（KeyError: 'name'），而那次 UPDATE 其实被拒了。
+        raise RuntimeError(
+            f"目标名 {c['name']} 已存在" if "name" in c else "这次改动撞上库里的唯一约束，已拒绝") from None
     return {"ok": True, "id": int(tid), "changed": sorted(c)}
 
 
@@ -466,7 +483,7 @@ def list_keys(t: dict, prefix: str) -> tuple[list[dict], bool]:
         for c in root.findall(f"{ns}Contents"):
             out.append({
                 "key": c.findtext(f"{ns}Key") or "",
-                "size": int(c.findtext(f"{ns}Size") or 0),
+                "size": _size_or_none(c.findtext(f"{ns}Size")),
                 "modified": c.findtext(f"{ns}LastModified") or "",
             })
         truncated = (root.findtext(f"{ns}IsTruncated") or "false").lower() == "true"
@@ -484,7 +501,7 @@ def head_object(t: dict, key: str) -> dict | None:
         return None
     if status != 200:
         raise RuntimeError(_fail_detail(status, headers, body, t))
-    return {"key": key, "size": int(headers.get("content-length") or 0)}
+    return {"key": key, "size": _size_or_none(headers.get("content-length"))}
 
 
 def put_object(t: dict, key: str, path: str, timeout: float | None = None) -> dict:
@@ -508,6 +525,12 @@ def put_object(t: dict, key: str, path: str, timeout: float | None = None) -> di
     if not got:
         raise RuntimeError("上传后 HEAD 读不到这个对象：对端收了请求却没留下文件，先查桶权限与生命周期规则")
     if got["size"] != size:
+        if got["size"] is None:
+            # 传了却不给核对：这一份是不是按原样落进桶里，面板无法确认。
+            # 报成功会把"异地有副本"写成假账，而备份这件事的全部意义就是这本账。
+            raise RuntimeError(
+                f"上传后 HEAD 没给大小：{human_bytes(size)} 的本地文件没法与远端核对字节，"
+                "本次不算推送成功（对端 HEAD 应返回 Content-Length，请检查网关或换 path-style 再试）")
         raise RuntimeError(f"远端大小 {got['size']} 与本地 {size} 不一致，本次不算推送成功")
     return {"key": key, "bytes": size, "request_id": headers.get("x-amz-request-id", "")}
 
@@ -519,7 +542,8 @@ def delete_object(t: dict, key: str) -> None:
 
 
 def get_object(t: dict, key: str, dest: str, *, limit: int = MAX_SINGLE_GET,
-               timeout: float | None = None) -> dict:
+               timeout: float | None = None, budget_dir: str = "",
+               budget_label: str = "") -> dict:
     """流式 GET 一个对象写到 dest，声明大小与实读字节都判；任何中途失败都不留半份文件。
 
     不能走 `_request`：它把响应整段读进内存（且只读 MAX_LIST_BYTES 那么多），
@@ -552,12 +576,17 @@ def get_object(t: dict, key: str, dest: str, *, limit: int = MAX_SINGLE_GET,
         rheaders = {k.lower(): v for k, v in resp.getheaders()}
         if resp.status != 200:
             raise RuntimeError(_fail_detail(resp.status, rheaders, resp.read(200000), t))
-        declared = int(rheaders.get("content-length") or 0)
-        if declared > limit:
+        declared = _size_or_none(rheaders.get("content-length"))
+        if declared is not None and declared > limit:
             raise RuntimeError(
                 f"远端这份对象声明 {human_bytes(declared)}，超过单文件拉回上限 "
                 f"{human_bytes(limit)}：面板不做分块下载，请先在桶侧裁剪这个备份"
             )
+        if budget_dir and declared:
+            # 对端 HEAD 不给大小时，落盘余量这道闸就在第一个字节写下去之前在这里补上；
+            # 这里也读不到大小（分块传输）就只能靠上限与写失败的报错兜底，不假装检过了。
+            from .files_service import assert_write_budget
+            assert_write_budget(budget_dir, declared, budget_label or "写入这份对象")
         try:
             with open(dest, "wb") as f:
                 while True:
@@ -570,7 +599,8 @@ def get_object(t: dict, key: str, dest: str, *, limit: int = MAX_SINGLE_GET,
                     if written > limit:
                         raise RuntimeError(
                             f"实际已传 {human_bytes(written)}，超过上限 {human_bytes(limit)}"
-                            f"（对端声明的是 {human_bytes(declared)}）：已中断"
+                            f"（对端声明的是"
+                            f"{'「读不到」' if declared is None else human_bytes(declared)}）：已中断"
                         )
                     f.write(chunk)
         except OSError as e:
@@ -579,7 +609,7 @@ def get_object(t: dict, key: str, dest: str, *, limit: int = MAX_SINGLE_GET,
         # 判完再抛就等于"报错了但半成品还在"——而它正是会被恢复按钮挑中的那一份。
         if not written:
             raise RuntimeError("对端返回 200 却是空对象：这份备份在桶里是 0 字节，拉回来也没用")
-        if declared and written != declared:
+        if declared is not None and written != declared:
             raise RuntimeError(
                 f"传输被截断：对端声明 {human_bytes(declared)}，实际收到 {human_bytes(written)}"
                 "（连接中途断开时会出现这种账），已删除半成品")
@@ -668,10 +698,14 @@ def probe(target_id: int) -> dict:
     t = get_secret(target_id)
     res = head_bucket(t)
     rows, truncated = list_keys(t, _norm_prefix(t["prefix"]))
+    # 合计只有在每一条都读到大小时才是"这个前缀下的总量"：少一条就只能整体报未知，
+    # 并说清是几条没给——报一个偏小的数会让人以为桶里就这么多。
+    unknown_sizes = sum(1 for r in rows if r["size"] is None)
     res.update({
         "target": t["name"], "bucket": t["bucket"], "endpoint": t["endpoint"], "region": t["region"],
         "prefix": t["prefix"], "objects_under_prefix": len(rows),
-        "bytes_under_prefix": sum(r["size"] for r in rows), "list_truncated": truncated,
+        "bytes_under_prefix": None if unknown_sizes else sum(r["size"] for r in rows),
+        "size_unknown_objects": unknown_sizes, "list_truncated": truncated,
     })
     dbm.execute("UPDATE cloud_targets SET last_error='' WHERE id=?", (int(target_id),))
     return res
@@ -766,7 +800,7 @@ def list_for_job(target_id: int, bid: int) -> dict:
         name = r["key"][len(prefix):] if r["key"].startswith(prefix) else ""
         if name_owner(name) != int(bid):
             continue  # 同桶里别的任务、别人的对象、以及带子目录的键都不算这一份的
-        files.append({"name": name, "key": r["key"], "size": int(r["size"] or 0),
+        files.append({"name": name, "key": r["key"], "size": r["size"],
                       "modified": str(r["modified"] or ""), "local": name in local})
     files.sort(key=lambda f: (f["modified"], f["name"]), reverse=True)
     return {"ok": True, "target": t["name"], "bucket": t["bucket"], "prefix": t["prefix"],
@@ -796,8 +830,8 @@ def pull_one(target_id: int, bid: int, name: str) -> dict:
     head = head_object(t, key)
     if not head:
         raise RuntimeError(f"远端没有这个对象：桶 {t['bucket']} 前缀下的 {name}")
-    size = int(head["size"] or 0)
-    if size > MAX_SINGLE_GET:
+    size = head["size"]
+    if size is not None and size > MAX_SINGLE_GET:
         raise RuntimeError(
             f"远端这份产物 {human_bytes(size)} 超过单文件拉回上限 {human_bytes(MAX_SINGLE_GET)}，"
             "面板不做分块下载：请先在桶侧裁剪这个备份")
@@ -809,11 +843,15 @@ def pull_one(target_id: int, bid: int, name: str) -> dict:
     if os.path.exists(dest):
         raise RuntimeError(f"本机已有同名产物：{name}（要先覆盖请先删掉本机那一份）")
     os.makedirs(config.BACKUP_DIR, exist_ok=True)
-    assert_write_budget(config.BACKUP_DIR, size, f"从远端拉回 {name}")
+    if size is not None:
+        # 对端 HEAD 没给大小时这里判不了，交给 get_object 在 GET 声明大小之后、
+        # 第一个字节落盘之前补判——拿 0 去预检等于把这道闸假装检过了。
+        assert_write_budget(config.BACKUP_DIR, size, f"从远端拉回 {name}")
     fd, tmp = tempfile.mkstemp(dir=config.BACKUP_DIR, prefix=f".{name}.", suffix=".pull.tmp")
     os.close(fd)
     try:
-        res = get_object(t, key, tmp)
+        res = get_object(t, key, tmp, budget_dir=config.BACKUP_DIR,
+                         budget_label=f"从远端拉回 {name}")
         os.chmod(tmp, 0o640)
         os.replace(tmp, dest)
     finally:
