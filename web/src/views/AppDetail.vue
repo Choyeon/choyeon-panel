@@ -734,7 +734,7 @@ watch(
 .dep-item :deep(.cp-status) { flex-shrink: 0; }
 .dep-item:hover { background: var(--cp-hover); }
 .dep-item.active { background: var(--cp-selected); }
-.dep-log { flex: 1; min-width: 0; min-height: 420px; max-height: calc(100vh - 320px); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03); }
+.dep-log { flex: 1; min-width: 0; min-height: 420px; max-height: calc(var(--viewport-h) - 320px); box-shadow: var(--shadow-log-inset); }
 .dep-log-empty { color: var(--cp-text-mute); }
 .ngx-list { width: 260px; flex-shrink: 0; border-right: 1px solid var(--cp-border); padding-right: var(--space-3); }
 .ngx-item { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius); cursor: pointer; transition: background var(--dur-fast) var(--ease); }

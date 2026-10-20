@@ -217,8 +217,7 @@ async function submit() {
 
 <style scoped>
 .wrap {
-  min-height: 100vh;
-  min-height: 100dvh;
+  min-height: var(--viewport-h);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -235,9 +234,19 @@ async function submit() {
   filter: blur(120px);
   opacity: 0.22;
   pointer-events: none;
+  /* 两团光斑慢慢游动：登录页是面板的第一眼，纯静的渐变底看着像没加载完。
+     只动 transform（blur 结果在合成层里缓存，不重算滤镜），22s 一轮慢到
+     不被察觉成"动画"，只留下"这页是活的"。系统开了减少动效时由全局规则停掉。 */
+  animation: cp-glow-drift 22s var(--ease) infinite;
+}
+@keyframes cp-glow-drift {
+  0%,
+  100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(4%, -5%, 0) scale(1.08); }
 }
 .g1 { width: 520px; height: 520px; background: var(--cp-brand); top: -140px; left: -120px; }
-.g2 { width: 460px; height: 460px; background: var(--cp-brand-accent); bottom: -160px; right: -100px; }
+/* 反向相位：两团同起同落会像整屏在呼吸，错开半轮才是"各自漂" */
+.g2 { width: 460px; height: 460px; background: var(--cp-brand-accent); bottom: -160px; right: -100px; animation-delay: -11s; }
 .left { max-width: 460px; min-width: 0; }
 .right { width: 360px; max-width: 100%; }
 .brand {

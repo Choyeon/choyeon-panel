@@ -2992,9 +2992,9 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
 
 /* 1Panel 日志盒参数压过 LogStream 的行内高度（组件根上的类，:deep 到 .log-view） */
 .svc-log :deep(.log-view) {
-  height: calc(100vh - 320px) !important;
+  height: calc(var(--viewport-h) - 320px) !important;
   min-height: 420px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  box-shadow: var(--shadow-log-inset);
 }
 /* 移动端日志盒：420px 最小高在 667px 屏上吃掉 63% 竖向空间，降到 160px 仍可滚动。 */
 @media (max-width: 640px) {

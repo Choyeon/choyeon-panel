@@ -27,6 +27,10 @@
   --radius-pill: 20px;
   --shadow-glow: 0 4px 18px rgba(61, 142, 255, 0.45);
   --shadow-pop: 0 20px 60px rgba(0, 0, 0, 0.28);
+  /* 日志盒的内发丝线。原先两处各写 `rgba(255,255,255,0.03)`：暗色下是 barely-there
+     的高光，亮色下白上叠白等于没有——同一个盒子换主题就少一条边。混 --cp-text 让它
+     在两套主题下都是"比底色深/浅一点点"的同一种效果，两处也只剩这一个出处。 */
+  --shadow-log-inset: inset 0 0 0 1px color-mix(in srgb, var(--cp-text) 5%, transparent);
 
   /* 间距标度 */
   --space-1: 4px;
@@ -79,6 +83,20 @@
      --chrome-extra 是各页自己的工具条 / 筛选行 / 卡片内边距（集中在 .tbl-* 里给值）。 */
   --page-pad: 20px;
   --chrome-head: 108px;
+
+  /* ---------- 视口高度（唯一出处，见 --viewport-h） ---------- */
+  /* 手机浏览器的 100vh 是「地址栏收起后」的大视口：面板是 height:100vh + 内部
+     .cp-scroll 滚动的固定壳，页脚与表格底部因此压在地址栏下面够不着。dvh 才是
+     当前可见高度。这里不能像普通属性那样写两行（100vh; 100dvh;）让浏览器自己挑：
+     自定义属性不参与解析期校验，老浏览器会把 "100dvh" 原样存下来，等到 calc()
+     用时才算非法——整条声明作废，比不认识 dvh 更糟。所以走 @supports。 */
+  --viewport-h: 100vh;
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --viewport-h: 100dvh;
+  }
 }
 
 /* 暗色（默认）。取值来自 1Panel v2 的 dark 灰阶（element-dark.scss）：页面 #2e313d，
@@ -194,8 +212,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* 选中色跟着主题走：原来写死 rgba(79,124,255,.35)，亮色主题下它比 --cp-brand
+   (#005eeb) 淡一档，选中一段文字看到的蓝和按钮上的蓝不是同一个蓝。 */
 ::selection {
-  background: rgba(79, 124, 255, 0.35);
+  background: color-mix(in srgb, var(--cp-brand) 32%, transparent);
 }
 
 /* 键盘可见焦点：统一焦点环，不影响鼠标点击观感 */
@@ -210,7 +230,12 @@ a:focus-visible,
   outline-offset: 3px;
 }
 
-/* 滚动条 */
+/* 滚动条：webkit 一家独大不行——Firefox 只认 scrollbar-width/scrollbar-color，
+   此前它在暗色面板上画一条系统默认的浅灰粗滚动条，是唯一一处不吃主题的地方。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--cp-scroll-thumb) transparent;
+}
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -243,7 +268,7 @@ a:focus-visible,
 /* 抽屉里的执行日志：只在全局盒子上补高度（1Panel LogFile 的 calc(100vh - 420px)）
    和 <pre> 的默认外边距。备份页与定时任务页原先各抄了一份完整定义，
    连 14px/16px 的紧凑行高也一起抄了两遍——现在六块日志区是同一个形态。 */
-.log-drawer { margin: 0; height: max(220px, calc(100vh - 420px)); }
+.log-drawer { margin: 0; height: max(220px, calc(var(--viewport-h) - 420px)); }
 .mono {
   font-family: var(--font-mono);
 }
@@ -460,7 +485,7 @@ button.cell-name > .n-button__content {
    注意：.cp-tbl 声明在表格元素上，比 .cp-scroll 更靠近使用处，两者同时存在时以本类的 calc 为准；
    已接入 useTableHeight 的页面不要再往同一张表上加 .cp-tbl。 */
 .cp-tbl {
-  --table-h: calc(100vh - var(--header-h) - var(--page-pad) * 2 - var(--chrome-head) - var(--chrome-extra, 0px));
+  --table-h: calc(var(--viewport-h) - var(--header-h) - var(--page-pad) * 2 - var(--chrome-head) - var(--chrome-extra, 0px));
 }
 .tbl-apps { --chrome-extra: 0px; }
 .tbl-services { --chrome-extra: 44px; }

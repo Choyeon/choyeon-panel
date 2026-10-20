@@ -476,7 +476,7 @@ function toggleTheme(ev: MouseEvent) {
 </template>
 
 <style scoped>
-.cp-shell { height: 100vh; }
+.cp-shell { height: var(--viewport-h); }
 .cp-sider { background: var(--cp-menu-bg); }
 /* 菜单胶囊：1Panel 的每一项都是独立圆角块（42px、4px 圆角、7px 上下间距、
    0 0 4px 外阴影），选中项再加 2px 内描边 + 竖条。naive 的 Menu themeOverrides
@@ -541,7 +541,7 @@ function toggleTheme(ev: MouseEvent) {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: var(--viewport-h);
   overflow: hidden;
 }
 .cp-header {
@@ -596,15 +596,26 @@ function toggleTheme(ev: MouseEvent) {
   right: var(--pad-scroll);
   pointer-events: none;
 }
+/* 基准规则必须写在两个断点块**前面**：媒体查询不加特异度，同权重靠先后决胜。
+   此前这条排在 ≤640px 那块之后，把窄屏的 font-size 又改回 12px——那一档只剩
+   font-weight 生效，「手机上标题大一号」是从来没生效过的。 */
+.cp-title { font-size: var(--fs-xs); letter-spacing: 0.02em; }
 @media (max-width: 900px) {
-  .cp-header { padding: 0 var(--space-4); }
-  .cp-scroll { --pad-scroll: var(--space-5); }
+  /* index.html 写了 viewport-fit=cover，所以刘海/灵动岛与底部 home 指示条会压在
+     内容上：横屏时标题和账号胶囊躲进圆角里，竖屏时表格最后一行贴着指示条。
+     这里按 env() 让出安全区——非全面屏上 env() 是 0，版式一寸不动。 */
+  .cp-header {
+    padding: 0 max(var(--space-4), env(safe-area-inset-right)) 0 max(var(--space-4), env(safe-area-inset-left));
+  }
+  .cp-scroll {
+    --pad-scroll: var(--space-5);
+    padding-bottom: calc(var(--pad-scroll) + env(safe-area-inset-bottom));
+  }
 }
 @media (max-width: 640px) {
   .cp-title { font-size: var(--fs-sm); font-weight: 600; }
   .cp-scroll { --pad-scroll: var(--space-4); }
 }
-.cp-title { font-size: var(--fs-xs); letter-spacing: 0.02em; }
 
 .user-chip {
   display: flex;
@@ -616,7 +627,10 @@ function toggleTheme(ev: MouseEvent) {
   background: var(--cp-hover);
   color: var(--cp-text-dim);
   cursor: pointer;
-  transition: all var(--dur) var(--ease);
+  /* 不写 transition: all —— 这个胶囊的高度由断点规则给（窄屏 min-height:44px），
+     `all` 会把宽高内边距一起补间，转场那一帧整条顶栏跟着抖。只补 hover 真会改的三样。 */
+  transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
   font-family: inherit;
   font-size: var(--fs-sm);
   line-height: 1;
