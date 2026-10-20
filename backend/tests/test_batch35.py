@@ -132,8 +132,9 @@ class TestLogBoxSingleSource(unittest.TestCase):
             ["height", "margin"],
             "抽屉里只补高度与 <pre> 边距，多余的外观声明就是第二份定义",
         )
-        self.assertIn("max(220px, calc(100vh - 420px))", body,
-                      "裸 calc() 在 420px 高的窗口（手机横屏）会算出负数、日志盒塌成 0")
+        self.assertIn("max(220px, calc(var(--viewport-h) - 420px))", body,
+                      "裸 calc() 在 420px 高的窗口（手机横屏）会算出负数、日志盒塌成 0；"
+                      "视口高度也只能走 --viewport-h（批次64 起全站一个出处，@supports 里换成 100dvh）")
 
 
 class TestTokenContract(unittest.TestCase):
