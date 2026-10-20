@@ -257,7 +257,7 @@ LICENSE                MIT
 make backend-dev     # 后端 127.0.0.1:3210
 make web-dev         # 前端 5173，/api 代理到 3210
 make test            # 后端 unittest
-make lint            # ruff + mypy + vue-tsc
+make lint            # ruff（阻断）+ mypy（提示）+ vue-tsc（阻断）
 make build           # 前端生产构建
 make help            # 查看全部命令
 ```

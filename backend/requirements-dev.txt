@@ -9,8 +9,14 @@
 #   旧 httpx 时才退化成 deprecation warning。所以本地绿 ≠ CI 绿，
 #   CI 必须显式安装本文件（见 .github/workflows/ci.yml 的「安装依赖」步骤）。
 httpx2>=2.0
-# 与 CI 同一套静态检查（.github/workflows/ci.yml 原来在这里之外内联 `pip install ruff mypy`，
-# 于是 CI 与开发机是两套工具集，"本地复现 CI"没有落点；现在两边只读这一份清单）
+# 静态检查与审计工具的唯一版本出处：CI 的 ruff / mypy / pip-audit 和 `make lint` 都从
+# 这里取（ci.yml 原来在这里之外还内联 `pip install ruff mypy`，两边各装一套，
+# "本地复现 CI"就没有落点）。
+# 但**生产 venv 里没有 mypy 与 pip-audit，这是刻意的**：venv_create() 只装
+# requirements.txt（见 scripts/common.sh），而 pip-audit 会连带 requests / cachecontrol /
+# cyclonedx-python-lib 等三十个包进面板这个 root 进程的 import 路径。2026-10-20 在
+# 207.57.127.6 实测：那份 venv 只有 ruff。要在服务器上手跑 mypy 或审计，另建一个 venv，
+# 别往线上这份里装。
 ruff>=0.17
 mypy>=1.11
 # 依赖漏洞审计（ci.yml 的后端 job 用它审 requirements.txt，阻断项）。

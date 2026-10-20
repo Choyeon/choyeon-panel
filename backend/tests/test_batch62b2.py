@@ -15,6 +15,11 @@
   （psutil、python-multipart 整份缺席），版本号还写着 1.0.0。它不进任何安装路径，
   却进 GitHub 的依赖图与 Dependabot —— 那两个包的 CVE 从此看不见，
   "没登记"被念成"没有漏洞"（AGENTS.md §7.8 禁止伪造自检结果，同一句话适用于门禁）。
+- **`make lint` 把 ruff 也 `|| true` 掉了**：ruff 在 CI 是阻断项，本地这条却是永绿的，
+  而 PR 模板把它列为提交前勾选项——勾上它的人等于什么都没核对。
+- **requirements-dev.txt 的注释承诺"保证服务器 venv 也有"**：与同一文件开头"装测试包会
+  污染线上环境"自相矛盾，且与实测不符（生产 venv 只有 ruff）。按它排查的人会在机器上
+  找不到 mypy。
 """
 
 from __future__ import annotations
@@ -215,6 +220,17 @@ class DegradedStepsStayVisible(unittest.TestCase):
                          "「这一步好像过了」")
         self.assertIn("run: mypy app", body)
 
+    def test_failure_summary_shows_the_traceback(self):
+        """失败摘要只有测试名字 = 还是要靠猜。
+
+        2026-10-20 run 39398186981：后端 job 红了，注解里只有一句
+        `ERROR: test_the_gate_actually_bites`——unittest 的 traceback 在那行往下十几行，
+        而摘要取的是 `tail -80`，尾部已被后面的 CLI 冒烟输出占满，永远够不着。
+        """
+        body = _step_body(CI, "单元测试失败摘要")
+        self.assertIn("grep -A 22 -E '^(FAIL|ERROR): '", body,
+                      "必须按名字往下把 traceback 取出来，只 grep 标题等于没摘要")
+
     def test_audit_steps_are_blocking(self):
         for name in ("依赖漏洞审计（后端）", "依赖漏洞审计（前端）"):
             body = _step_body(CI, name)
@@ -239,6 +255,61 @@ class DevToolchainHasOneSource(unittest.TestCase):
         self.assertNotIn("install -q ruff", body, "工具集必须只来自 requirements-dev.txt")
         self.assertNotRegex(body, r"pip install -q (ruff|mypy)")
         self.assertIn("-r requirements-dev.txt", body)
+
+    def test_it_does_not_claim_the_production_venv_has_them(self):
+        """本文件开头自己就写着「装测试包会污染线上环境」，注释却不能反过来承诺线上有。
+
+        2026-10-20 在 207.57.127.6 实测：生产 venv 里只有 ruff，mypy 与 pip_audit 都 import 不到。
+        上一版注释写的是"这里保证服务器 venv 也有"——那是一句做不到的承诺，
+        照着它排查的人会在机器上找不到 mypy 然后怀疑接口坏了。
+        """
+        text = (BACKEND / "requirements-dev.txt").read_text(encoding="utf-8")
+        self.assertNotIn("保证服务器 venv 也有", text)
+        self.assertRegex(text, r"(生产 venv|venv_create)",
+                         "要说清楚这些工具在哪儿跑：CI 装全量，生产 venv 故意不装")
+
+    def test_venv_create_installs_only_production_requirements(self):
+        """上一条承诺的根据：装机脚本只装 requirements.txt。若哪天有人把 dev 清单塞进去，
+        pip-audit 连带的那三十个包就进了 root 进程的 import 路径——那句话随之变成假话。"""
+        text = (REPO / "scripts" / "common.sh").read_text(encoding="utf-8")
+        m = re.search(r"^venv_create\(\)\s*\{(.*?)^\}", text, re.S | re.M)
+        assert m, "scripts/common.sh 里找不到 venv_create()"
+        self.assertNotIn("requirements-dev", m.group(1),
+                         "生产安装路径不能带上开发工具集（见 requirements-dev.txt 顶部说明）")
+
+
+class LocalGateMirrorsCi(unittest.TestCase):
+    """make lint 是「本地复现 CI」的落点：每一步的阻断性必须和 CI 里那一步一样。"""
+
+    def _lint_recipe(self) -> str:
+        text = (REPO / "Makefile").read_text(encoding="utf-8")
+        m = re.search(r"^lint:.*?\n((?:\t.*\n)+)", text, re.M)
+        assert m, "Makefile 里没有 lint 目标"
+        return m.group(1)
+
+    def test_ruff_is_blocking_locally(self):
+        recipe = self._lint_recipe()
+        self.assertNotRegex(recipe, r"ruff check[^\n]*\|\| true",
+                            "ruff 在 CI 是阻断项，本地却 `|| true`：勾过 PR 模板那条复选框的"
+                            "人其实什么都没核对，直到 CI 红才发现")
+        self.assertIn("ruff check .", recipe)
+
+    def test_mypy_stays_advisory_and_says_so(self):
+        recipe = self._lint_recipe()
+        m = re.search(r"mypy app[^\n]*", recipe)
+        assert m, "make lint 里没有 mypy"
+        self.assertIn("提示", m.group(0), "mypy 不阻断这件事要当场说出来，别让人以为它过了")
+
+    def test_docs_describe_the_same_blockingness(self):
+        for rel in ("README.md", "CONTRIBUTING.md", ".github/PULL_REQUEST_TEMPLATE.md"):
+            text = (REPO / rel).read_text(encoding="utf-8")
+            hits = [ln for ln in text.splitlines() if "make lint" in ln]
+            self.assertTrue(hits, f"{rel} 里提不到 make lint")
+            # 说明行不必每处都写全（正文里可能只是顺带一提），但必须至少有一处讲清
+            # 这一步会不会阻断，否则勾选项读起来像"跑过就算核对过"。
+            self.assertTrue(any("阻断" in ln for ln in hits),
+                            f"{rel}：{len(hits)} 处提到 make lint 却没有一处说明谁会阻断——"
+                            "说明句必须和 Makefile/CI 的实际阻断性同源")
 
 
 class DependencyManifestsAgree(unittest.TestCase):

@@ -54,8 +54,8 @@ build-web: ## 仅构建前端
 test: ## 后端单元测试（用 .venv；测试依赖见 backend/requirements-dev.txt）
 	cd backend && .venv/bin/python run_tests.py -v
 
-lint: ## 静态检查（ruff + mypy + vue-tsc）
-	cd backend && (ruff check . || true) && (mypy app || true)
+lint: ## 静态检查（ruff 阻断、mypy 提示、vue-tsc 阻断——与 CI 各步的阻断性一致）
+	cd backend && ruff check . && { mypy app || echo "mypy 没通过（或本机没装 mypy）：它在 CI 里也是提示项，不阻断，但新增错误请修"; }
 	cd web && npm run typecheck
 
 fmt: ## 格式化（ruff）

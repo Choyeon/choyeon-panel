@@ -102,6 +102,14 @@ jobs:
           fi
           echo "::error ::log-lines=$(wc -l < "$LOG")"
           grep -E "^(FAIL|ERROR): " "$LOG" | head -8 | sed "s/^/::error ::/" || true
+          # 只有名字等于还是看不见：unittest 的 traceback 在 "ERROR: xxx" 那行往下十几行，
+          # 而日志尾部被后面的 CLI 冒烟输出盖掉，tail -80 根本够不着它（2026-10-20 run
+          # 39398186981 就是这样：摘要里只有 "ERROR: test_the_gate_actually_bites"，
+          # 是超时、是权限、还是断言，全靠猜）。按名字往下取，才叫失败摘要。
+          TB="$(grep -A 22 -E '^(FAIL|ERROR): ' "$LOG" | head -80 | tr '\n' '|' | head -c 3500)"
+          if [ -n "$TB" ]; then
+            echo "::error ::traceback=$TB"
+          fi
           rm -f /tmp/chunk_*
           tail -80 "$LOG" | split -l 20 - /tmp/chunk_
           i=0

@@ -10,7 +10,7 @@
 
 **构建通过不等于功能修好了。** 请如实填写实际做过的验证，没做的项直接删掉，不要留空打勾。
 
-- [ ] `make lint`（ruff + mypy + vue-tsc）
+- [ ] `make lint`（ruff 会阻断，mypy 是提示项，vue-tsc 会阻断——与 CI 各步一致）
 - [ ] `make test`（后端 unittest；**不要带 `CP_DATA_DIR` 环境变量运行**）
 - [ ] `cd web && npm run build`（前端改动）
 - [ ] `bash -n` / shellcheck（脚本改动）
