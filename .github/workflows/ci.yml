@@ -51,8 +51,10 @@ jobs:
           # 测试依赖与生产依赖分开：starlette 1.x 的 TestClient 硬依赖 httpx2，
           # 干净环境缺它会 RuntimeError（本地 venv 有旧 httpx 只报 warning，
           # 所以本地绿不代表 CI 绿）
+          # 这一份清单是 CI 与开发机唯一的差异来源：原来这里还内联 `pip install ruff mypy`，
+          # 于是 CI 装的工具集和服务器 venv 各自一套，"本地复现 CI"这句话没有落点。
+          # 现在 ruff / mypy / pip-audit 一律来自 requirements-dev.txt。
           python -m pip install -q -r requirements-dev.txt
-          python -m pip install -q ruff mypy
 
       - name: 语法编译
         run: python -m compileall -q app tests
@@ -61,8 +63,17 @@ jobs:
         run: ruff check --output-format=github .
 
       - name: Mypy 类型检查（提示性，不阻断）
+        # 只有 continue-on-error 这一层降级：`run: mypy app || true` 在它之上再把退出码
+        # 抹成 0，日志里连"这一步其实没通过"都读不出来。它是提示项，不是门，
+        # 但提示项的失败必须看得见。
         continue-on-error: true
-        run: mypy app || true
+        run: mypy app
+
+      - name: 依赖漏洞审计（后端）
+        # 阻断项：面板以 root 跑在这台机器上，requirements.txt 里一个已知 CVE 就是本机入口。
+        # 按本仓库的规矩，"没核对成"不许当绿灯——pip-audit 拿不到漏洞源时非零退出，
+        # 这一步就跟着红，而不是跳过审计后宣布通过。
+        run: pip-audit -r requirements.txt
 
       - name: 单元测试
         # 本机 2 核跑完 run_tests.py 实测 2m32s，而 CI 上这一步跑到 55 分钟仍不退出
@@ -136,6 +147,9 @@ jobs:
   frontend:
     name: 前端（类型检查 + 构建）
     runs-on: ubuntu-latest
+    # 没有 job 级上限时，npm ci / vite build 卡住会一路烧到 GitHub 的 6 小时默认值，
+    # 再被下一次 push 静默取消——和后端 verdict 当初消失的原因是同一个。
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: web
@@ -150,6 +164,13 @@ jobs:
 
       - name: 安装依赖
         run: npm ci --no-audit --fund=false
+
+      - name: 依赖漏洞审计（前端）
+        # `npm ci --no-audit` 关掉了安装期的隐式审计，这条把它显式补回来并让它阻断。
+        # 阈值 high：2026-10-20 实测唯一已知项是 echarts 的 moderate XSS（GHSA-fgmj-fm8m-jvvx，
+        # 修它要跨 echarts 大版本，属破坏性升级，另开批次处理），把它算成红只会让这条门
+        # 在第二天被 `|| true` 按住——门的价值首先是"今天就能通过并且真的会红"。
+        run: npm audit --audit-level=high
 
       - name: 单元测试（composable 时序回归）
         # Node 22.18+ 默认按类型擦除跑 .ts；--experimental-strip-types 让 22.6~22.17
@@ -174,6 +195,7 @@ jobs:
   shell:
     name: Shell 脚本检查
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
@@ -187,7 +209,54 @@ jobs:
   systemd:
     name: systemd unit 校验
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: systemd-analyze verify
-        run: systemd-analyze verify ./deploy/choyeon-panel.service || true
+      - name: systemd-analyze verify（校验真正会装上去的那份 unit）
+        # 旧写法是 `systemd-analyze verify ./deploy/choyeon-panel.service || true`。
+        # 模板里写死了 /root/choyeon-panel/backend/.venv/bin/python，任何 runner 上都没有
+        # 这个路径，verify 必定报 "Command ... is not executable" 退 1，于是当初用 `|| true`
+        # 把它按住——从那一刻起这条门对 unit 的任何真实错误都无感（拼错的指令名、
+        # 无效的执行行、写坏的 cgroup 上限，全都会绿）。
+        # 2026-10-20 在生产机上实测同一份 unit：可执行文件缺失时 rc=1，补齐后 rc=0，
+        # 证明那个 1 从来只是路径缺失，不是 unit 有问题——门可以真的阻断。
+        # 现在校验的是 render_unit 渲染出来的那份（部署时装上去的就是它），
+        # 而不是模板原文：验的和装上去的必须是同一个文件。
+        run: |
+          set -euo pipefail
+          ROOT="${{ runner.temp }}/unit-check"
+          # 伪造一个"安装目录"：render_unit 会把模板里的 /root/choyeon-panel 换成 $PREFIX，
+          # 这里让那个前缀真实存在，ExecStart 指向的解释器也造出来，
+          # 剩下的报错就只可能是 unit 本身的问题。
+          mkdir -p "$ROOT/repo/deploy" "$ROOT/repo/backend/.venv/bin" "$ROOT/repo/data"
+          cp deploy/choyeon-panel.service "$ROOT/repo/deploy/"
+          printf '#!/bin/sh\nexit 0\n' > "$ROOT/repo/backend/.venv/bin/python"
+          chmod +x "$ROOT/repo/backend/.venv/bin/python"
+          UNIT_OUT="$ROOT/choyeon-panel.service"
+          # 覆盖 UNIT_FILE 必须发生在 source 之后：common.sh 第 77 行无条件把它赋成
+          # /etc/systemd/system/...，非 root 的 runner 在 source 前传环境变量进去会被盖掉，
+          # 于是渲染直接写不进临时目录。
+          CP_PREFIX="$ROOT/repo" bash -c '
+            source scripts/common.sh >/dev/null 2>&1
+            UNIT_FILE="$1"
+            render_unit >/dev/null
+          ' _ "$UNIT_OUT"
+          test -s "$UNIT_OUT"
+          # render_unit 把模板里的 /root/choyeon-panel 换成 $PREFIX（就是 $ROOT/repo），
+          # 断言指着那个前缀，才证明校验的确实是渲染后的这份而不是模板。
+          grep -q "^ExecStart=$ROOT/repo/backend/\.venv/bin/python" "$UNIT_OUT"
+          # verify 的退出码不够用：2026-10-20 在生产机上实测，MemoryMax=512Q 与
+          # Restart=maybe 都只打印一句"ignoring"然后退 0——写错的 cgroup 上限照样"通过"。
+          # 所以任何输出都算失败，只放行 runner 的 systemd 版本比生产旧造成的 Unknown key
+          # （那不是 unit 的错，是 runner 的）。
+          RC=0
+          OUT="$(systemd-analyze verify "$UNIT_OUT" 2>&1)" || RC=$?
+          if [ -n "$OUT" ]; then
+            printf '%s\n' "$OUT"
+            if printf '%s\n' "$OUT" | grep -qiv "Unknown key"; then
+              echo "::error ::unit 校验有告警以上输出（见上），修好再合"
+              exit 1
+            fi
+            echo "只有版本差异造成的 Unknown key，按通过处理"
+          fi
+          [ "$RC" -eq 0 ] || { echo "::error ::systemd-analyze verify 退 $RC"; exit "$RC"; }
