@@ -145,18 +145,34 @@ export const api = {
   status: () => req('/auth/status'),
   ready: () => req('/ready'),
   doctor: () => req('/doctor'),
-  // 系统补丁：服务端有 30 分钟 TTL，refresh=true 强制回源（apt list 在包多的机器上要几秒）
-  updates: (refresh = false) => req(`/updates${refresh ? '?refresh=1' : ''}`),
+  // 七个只读对账的浏览器等待上限，一律 ≥ 服务端那一轮的子进程预算：
+  // 浏览器先撒手的话，服务端那一轮仍在持有各自的锁往下跑，画面却只剩「请求超时」，
+  // 而下一发读取拿到的正是那一轮刚落地的缓存——用户据此反复点「重新探测」，
+  // 每次都只是排到同一把锁后面。每一档的预算由 backend/tests/test_batch63.py 按
+  // 服务端常量算一遍并对账（改大后端常量却忘了这里，那条门就红）。
+  // 具体口径（同一轮里串行跑的逐条相加，并发的那几条取最坏一支；由那条门按后端常量重算）：
+  //   updates   RHEL 一支两条包管理器命令 × DNF_TIMEOUT(180s) + 三个候选 unit × PROBE_TIMEOUT(5s) = 375s
+  //   ports     ss 一条 + firewalld 三条，各 × CTRL_TIMEOUT(20s) = 80s
+  //   ssh-audit 并发读 sshd -T(10s)/journalctl(25s)/systemctl(5s) 取最坏 25s，再串一次
+  //             端口对账 80s（这一页真的会把 ports 那一轮跑一遍） = 105s
+  //   pending   dpkg 系列每条 × SUBPROCESS_TIMEOUT(6s)：内核包比对按 8 个旧内核算、
+  //             被替换映射按 MAX_PKG_LOOKUPS(12) 个路径各两条，另加 systemctl 两条，
+  //             最后 nginx -T 一条 20s = 230s
+  //   storage   journalctl --disk-usage(5s) + 每个登记目录 × ROOT_BUDGET_SEC(2s)：默认四个根，
+  //             根的个数由 CP_FILE_ROOTS 决定，这里按默认口径给结论 = 13s
+  //   memory    0.8s 采样窗口 + 进程扫描 2s 预算 + 真要读 kernel 日志时 journalctl 8s = 10.8s
+  //   load      扫描预算 3s + 采样窗口 1s = 4s（两者都是硬 deadline）
+  updates: (refresh = false) => req(`/updates${refresh ? '?refresh=1' : ''}`, { timeout: 420000 }),
   // 端口暴露面：服务端 5 分钟 TTL，refresh=true 重新跑一次 ss + 防火墙对账
-  ports: (refresh = false) => req(`/ports${refresh ? '?refresh=1' : ''}`),
+  ports: (refresh = false) => req(`/ports${refresh ? '?refresh=1' : ''}`, { timeout: 95000 }),
   // 登录安全：服务端 5 分钟 TTL，refresh=true 重跑 sshd -T + 24h 认证日志 + 公钥扫描（全程只读）
-  sshAudit: (refresh = false) => req(`/ssh-audit${refresh ? '?refresh=1' : ''}`),
-  storage: (refresh = false) => req(`/storage${refresh ? '?refresh=1' : ''}`),
+  sshAudit: (refresh = false) => req(`/ssh-audit${refresh ? '?refresh=1' : ''}`, { timeout: 125000 }),
+  storage: (refresh = false) => req(`/storage${refresh ? '?refresh=1' : ''}`, { timeout: 60000 }),
   // 内存压力：服务端 90 秒 TTL，速率只有 0.8 秒的采样窗口；refresh=1 是重新开一次窗口，不是重新分配内存
-  memory: (refresh = false) => req(`/memory${refresh ? '?refresh=1' : ''}`),
+  memory: (refresh = false) => req(`/memory${refresh ? '?refresh=1' : ''}`, { timeout: 30000 }),
   // 负载归因：服务端 60 秒 TTL；refresh=1 是重新开一个 1 秒采样窗口，不是让机器多干活
-  load: (refresh = false) => req(`/load${refresh ? '?refresh=1' : ''}`),
-  pending: (refresh = false) => req(`/pending${refresh ? '?refresh=1' : ''}`),
+  load: (refresh = false) => req(`/load${refresh ? '?refresh=1' : ''}`, { timeout: 25000 }),
+  pending: (refresh = false) => req(`/pending${refresh ? '?refresh=1' : ''}`, { timeout: 260000 }),
   // 一键修复：前端构建项在服务端最长跑 900s，超时会让人误以为失败又点一次
   doctorFix: (id: string) => req('/doctor/fix', { body: { id }, timeout: 960000 }),
   templates: () => req('/templates'),

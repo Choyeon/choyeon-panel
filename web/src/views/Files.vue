@@ -53,6 +53,12 @@ watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
 const entries = computed<any[]>(() => data.value?.entries ?? []);
 const roots = computed<string[]>(() => data.value?.roots ?? []);
+// 单文件的字节额度只有服务端那一份：config.CP_MAX_UPLOAD_MB，列表接口按 maxUploadBytes 回传，
+// 在线打开（read_text）与保存（写盘）比的也是同一个常量。这里两处判断都读这一份。
+// 以前 open() 里另写死 1MB：8MB 的额度被本地提前拒掉一半，一个 3MB 的日志/SQL 明明能开、
+// 能存，却先收到一句「文件过大，请使用下载」——而且那两句话术还不是同一份，
+// 用户看到两处限制会以为是两回事。
+const capBytes = computed<number>(() => Number(data.value?.maxUploadBytes || 0));
 const path = computed(() => String(data.value?.path ?? reqPath.value));
 // 条目被服务层截断时「当前 N 项」必须是"目录里真有 N 项"，不是"表格里渲染了几行"；
 // 上限也从服务层的回传里取，前端不抄一份，CP_MAX_DIR_ENTRIES 改完文案跟着改。
@@ -107,7 +113,11 @@ function join(name: string) {
 async function open(e: any) {
   const p = join(e.name);
   if (e.isDir) return load(p);
-  if (e.size > 1024 * 1024) return msg.warning('文件过大，请使用下载');
+  // 额度读服务端那一份（见 capBytes）；读不到额度时不在本地猜一个上限，
+  // 让服务端的 read_text 自己答复——它拒的那句带的是它自己的数。
+  if (capBytes.value && e.size > capBytes.value) {
+    return msg.warning(`文件超过 ${fmtSize(capBytes.value)}，请使用下载`);
+  }
   try {
     const r = await api.fileContent(p);
     // 后端只在严格 UTF-8 时下发内容：二进制没有 content，直接引导到下载。
@@ -262,7 +272,7 @@ async function uploadFiles(files: File[], overwrite = false) {
   if (uploading.value) return;
   // 服务端会拒收超限文件，但那是在浏览器把整个文件传完之后：几百 MB 的误选
   // 白占一轮带宽和磁盘缓存，最后只换来一句"超过 8MB"。额度由列表接口带回来。
-  const cap = Number(data.value?.maxUploadBytes || 0);
+  const cap = capBytes.value;
   if (cap) {
     const over = files.filter((f) => f.size > cap).map((f) => f.name);
     if (over.length) {
