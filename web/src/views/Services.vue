@@ -159,7 +159,13 @@ const loginAttempts = computed<any>(() => loginData.value?.attempts ?? {});
 const guardInfo = computed<any>(() => loginData.value?.guard ?? {});
 const guardRunning = computed(() => guardInfo.value.status === 'guarded');
 const guardLine = computed(() => guardInfo.value.phrase || '这一项没核对成');
+// 认证日志读不到时 failed / distinct_ips / accepted 全是服务层那份占位（0 与空表），
+// 照原样念出来就成了"一夜零次失败、没人成功登录过"，而这一格恰恰没说上这件事。
+// 判据用服务端给的 attempts.ok，与上面那条横幅同一个：不许一处写"读不到"、另一处写"0 次"。
+const attemptsLine = computed(() => (loginAttempts.value.ok ? `${loginAttempts.value.failed} 次` : '读不到'));
+const sourcesLine = computed(() => (loginAttempts.value.ok ? `${loginAttempts.value.distinct_ips} 个` : '读不到'));
 const acceptedLine = computed(() => {
+  if (!loginAttempts.value.ok) return '读不到';
   const list = loginAttempts.value.accepted ?? [];
   return list.length ? list.map((a: any) => `${a.method} ${a.count}`).join('、') : '无成功记录';
 });
@@ -2123,9 +2129,9 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         <span class="ls-chip" :class="{ err: loginCounts.risk > 0 }"><i>要紧</i>{{ loginCounts.risk }} 项</span>
         <span class="ls-chip" :class="{ warn: loginCounts.warn > 0 }"><i>值得处理</i>{{ loginCounts.warn }} 项</span>
         <span class="ls-chip"><i>知道就好</i>{{ loginCounts.note }} 项</span>
-        <span class="ls-chip"><i>24h 失败认证</i>{{ loginAttempts.failed ?? '—' }} 次</span>
-        <span class="ls-chip"><i>来源地址</i>{{ loginAttempts.distinct_ips ?? '—' }} 个</span>
-        <span class="ls-chip"><i>成功登录</i>{{ acceptedLine }}</span>
+        <span class="ls-chip" :class="{ warn: !loginAttempts.ok }"><i>24h 失败认证</i>{{ attemptsLine }}</span>
+        <span class="ls-chip" :class="{ warn: !loginAttempts.ok }"><i>来源地址</i>{{ sourcesLine }}</span>
+        <span class="ls-chip" :class="{ warn: !loginAttempts.ok }"><i>成功登录</i>{{ acceptedLine }}</span>
         <span class="ls-chip" :class="{ warn: !guardRunning }"><i>爆破防护</i>{{ guardLine }}</span>
         <span class="ls-chip"><i>公钥</i>{{ loginData.keys.total_keys }} 把 / {{ loginData.keys.scanned }} 个文件</span>
         <span class="ls-chip" :class="{ err: loginData.sshd.reachable === true }">

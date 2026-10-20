@@ -191,7 +191,9 @@ async def pg_row_write(db: str, req: Request):
         await aio_db.audit(req.state.cp_sub, f"db:row-{action}", f"{db}.{schema}.{table} ×{r['affected']}")
         return r
     except Exception as e:  # noqa: BLE001
-        await aio_db.audit(req.state.cp_sub, f"db:row-{action}", f"{db}.{schema}.{table}(失败: {str(e)[:120]})")
+        # 驱动报错的原文经常把带凭据的连接信息或整条语句回显出来，而审计表跟着 panel.db 推异地
+        await aio_db.audit(req.state.cp_sub, f"db:row-{action}",
+                           f"{db}.{schema}.{table}(失败: {redact_creds(str(e))[:120]})")
         return err_json(e)
 
 

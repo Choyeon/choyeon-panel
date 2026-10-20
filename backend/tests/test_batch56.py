@@ -820,7 +820,11 @@ class TestCliContract(_Case):
         self.assertEqual(p.call_args[0], (tid, bid, name))
         self.assertTrue(res["ok"])
         self.assertIn(human_bytes(4096), so.getvalue(), "拉回了多少字节要说得出")
-        self.assertIn("restore", so.getvalue(), "拉回之后的下一步就是恢复，判词要说到位")
+        # 下一句要指一个真的存在的入口：backup 的子命令表里没有 restore，
+        # 照着「用 backup restore 恢复」去敲只会得到 exit 2，而恢复恰恰是这条链路的落点。
+        out = so.getvalue()
+        self.assertIn("备份文件", out, "恢复只有网页那一页，提示要指到它")
+        self.assertNotIn("backup restore", out, "不许指一条不存在的命令")
 
     def test_failure_exits_and_audits_without_the_secret(self):
         bid = _mkjob()

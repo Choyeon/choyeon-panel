@@ -833,9 +833,11 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
             return {"ok": True, **res}
 
         dbm.audit("cli", "cli:backup:cloud-pull", f"{a.id}({res['name']})")
+        # 提示里不能出现不存在的命令：backup 子命令表里没有 restore（恢复只有网页那条路），
+        # 照这句话敲就得到一个 exit 2，而"从异地恢复"恰恰是这条链路唯一没验证过的动作。
         Out.result(res, f"已从「{res['target']}」拉回 {res['name']}（{human_bytes(res['bytes'])}）"
                         f"到 {config.BACKUP_DIR}，"
-                        + ("现在可以用 backup restore 恢复" if res["restoreable"]
+                        + ("在网页「备份文件」页可以恢复" if res["restoreable"]
                            else "这一类产物不支持自动恢复，请手工处理"))
         return {"ok": True, **res}
 
@@ -1138,11 +1140,15 @@ def _ssh_audit_text(d: dict) -> str:
     kk = d.get("keys") or {}
     acc = d.get("accounts") or {}
     reach = {True: "对外可达", False: "仅本机或内网", None: "可达性判不出"}[ssh.get("reachable")]
+    # ok=false 时 failed / distinct_ips 是"读不到"那一份的占位 0，念出来就成了"一夜没人试、
+    # 零个来源"——这句恰恰把最该看的那件事说成已核对过。与网页那条横幅同一个口径。
+    att_line = (f"过去 24 小时失败认证 {att.get('failed', 0)} 次（{att.get('distinct_ips', 0)} 个来源地址）"
+                if att.get("ok")
+                else f"过去 24 小时认证日志读不到（{att.get('note') or '原因未知'}）")
     lines = [
         f"登录安全对账（配置来源：{ssh.get('source') or '—'} · sshd 端口 {ssh.get('port') or '—'} · {reach}）",
         f"概览：要紧 {counts.get('risk', 0)} 项 · 值得处理 {counts.get('warn', 0)} 项 · "
-        f"知道就好 {counts.get('note', 0)} 项 · 过去 24 小时失败认证 {att.get('failed', 0)} 次"
-        f"（{att.get('distinct_ips', 0)} 个来源地址）",
+        f"知道就好 {counts.get('note', 0)} 项 · {att_line}",
     ]
     for f in d.get("findings") or []:
         sev = severity.SEV_LABEL.get(f["severity"], f["severity"])

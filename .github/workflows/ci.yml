@@ -106,7 +106,12 @@ jobs:
         run: |
           python cli.py schema --json > /dev/null
           python cli.py app templates
-          python cli.py user create ci-admin --password 'CiSmoke12345' --json
+          # 口令当场生成、只走标准输入：AGENTS.md 第 7 条把 --password 列为禁止写法（argv 里的
+          # 口令同机用户 ps 可见、还留在 shell 历史），CI 原来却一直用被禁的那条——
+          # 于是文档里唯一的正规入口在 CI 从没被跑过，写坏了也没人知道。
+          PW="$(python -c 'import secrets,string;print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(20)))')"
+          printf '%s' "$PW" | python cli.py user create ci-admin --password-stdin --json
+          python cli.py user list
           python cli.py status --json || true
           python cli.py doctor || true
 

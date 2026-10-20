@@ -267,20 +267,32 @@ async def _check_permissions() -> dict:
         (Path(config.DATA_DIR) / "panel.db", "0600"),
     )
     bad = []
+    unread = []
     for p, want in targets:
         try:
             mode = p.stat().st_mode & 0o777
-        except OSError:
+        except FileNotFoundError:
             continue  # 不存在的不判（开发机上根本没有 .env）
+        except OSError as e:
+            # 除了"没有这个对象"以外的读不到（权限不够、路径中某一段不是目录）不能折进绿灯：
+            # 这一项看的正是 panel.db 会不会被同机别的账户读走，stat 失败就说"权限正常"，
+            # 等于用一次探测失败换一条好消息。数据目录本身变成一个文件也落在这一档里。
+            unread.append((p, type(e).__name__))
+            continue
         if mode & 0o077:
             bad.append((p, mode, want))
-    if not bad:
-        return {"status": "pass", "detail": ".env 与数据目录权限正常", "fix": ""}
-    return {
-        "status": "warn",
-        "detail": "；".join(f"{p} 是 {oct(m)}，同机其他用户可读" for p, m, _ in bad),
-        "fix": " && ".join(f"chmod {w} {p}" for p, _, w in bad),
-    }
+    if bad:
+        return {
+            "status": "warn",
+            "detail": "；".join(f"{p} 是 {oct(m)}，同机其他用户可读" for p, m, _ in bad),
+            "fix": " && ".join(f"chmod {w} {p}" for p, _, w in bad),
+        }
+    if unread:
+        return {"status": "warn",
+                "detail": "权限读不到，这一项没核对成："
+                          + "、".join(f"{p}（{why}）" for p, why in unread),
+                "fix": " ".join(f"ls -ld '{p}'" for p, _ in unread)}
+    return {"status": "pass", "detail": ".env 与数据目录权限正常", "fix": ""}
 
 
 async def _check_cli() -> dict:
@@ -309,7 +321,10 @@ async def _check_cert_renewal() -> dict:
     """
     if not shutil.which("certbot"):
         return {"status": "pass", "detail": "未安装 certbot，无续期需求", "fix": ""}
-    live = Path("/etc/letsencrypt/live")
+    # 证书清单读 config.TLS_DIR，与站点页那个读者同源：这里硬编码 /etc/letsencrypt/live 的话，
+    # 换了目录（CP_TLS_DIR）的机器上这一项永远看见"零张证书"，直接 pass 掉，
+    # 于是「有证书但没人续期」这件事在任何界面上都不再出现。
+    live = Path(config.TLS_DIR)
     certs = sorted(p.parent.name for p in live.glob("*/fullchain.pem")) if live.is_dir() else []
     if not certs:
         return {"status": "pass", "detail": "certbot 已装但暂无证书", "fix": ""}

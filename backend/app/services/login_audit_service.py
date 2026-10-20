@@ -788,13 +788,22 @@ def doctor_item(data: dict) -> dict:
     if counts["warn"]:
         return {"status": "warn", "detail": f"没有要紧项，另有 {counts['warn']} 项加固建议",
                 "fix": "choyeonctl ssh-audit", "fixable": False}
-    detail = f"sshd 端口 {data['sshd']['port']} 的登录方式没有要紧项；24h 失败认证 {data['attempts']['failed']} 次"
     if data["guard"]["status"] in ("unknown", "no-systemd"):
         # 没核对成不等于没问题：绿灯不能说"这台机器没人撞库也不怕"，
         # 而爆破防护恰恰是这句话里唯一还没验证的那一半。
         return {"status": "warn",
                 "detail": f"登录方式没有要紧项，但爆破防护是否在跑没核对成（{data['guard']['phrase']}）",
                 "fix": "choyeonctl ssh-audit", "fixable": False}
+    if not data["attempts"]["ok"]:
+        # 同一个道理，落在句子里的另一半：读不到认证日志时 failed 是 _no_attempts 的占位 0，
+        # 照原样念出来就成了"这 24 小时一个人都没试进来"——恰恰是这台机器最需要知道、
+        # 而这一次没查到的那件事。日志写去别处（syslog、远程）的机器上，绿灯最容易出现。
+        return {"status": "warn",
+                "detail": "登录方式没有要紧项，但这 24 小时的登录尝试读不到"
+                          f"（{data['attempts'].get('note') or '没有可读的 sshd 日志'}），"
+                          "有没有人在撞库无从核对",
+                "fix": "choyeonctl ssh-audit", "fixable": False}
+    detail = f"sshd 端口 {data['sshd']['port']} 的登录方式没有要紧项；24h 失败认证 {data['attempts']['failed']} 次"
     if not data["as_root"]:
         detail += "（非 root，空口令与他人的 authorized_keys 未核对）"
     return {"status": "pass", "detail": detail, "fix": "", "fixable": False}

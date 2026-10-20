@@ -206,7 +206,8 @@ async def backups_restore(bid: str, req: Request):
         return await backup_service.restore_backup(int(bid), name, actor=req.state.cp_sub)
     except Exception as e:  # noqa: BLE001
         # 只记任务与文件名，备份内容本身不进审计
-        await aio_db.audit(req.state.cp_sub, "backup:restore", f"{bid}:{name}(失败: {e})")
+        await aio_db.audit(req.state.cp_sub, "backup:restore",
+                           f"{bid}:{name}(失败: {redact_creds(str(e))[:120]})")
         return err_json(e)
 
 
@@ -292,5 +293,8 @@ async def backups_run(bid: str, req: Request):
         # 定时任务侧（cron_service）早已统一遮过，这个手动入口是同一个口径。
         return {"code": r["code"], "log": redact_creds(r["out"])}
     except Exception as e:  # noqa: BLE001
-        await aio_db.audit(req.state.cp_sub, "backup:run", f"{bid}(失败: {e})")
+        # 备份失败的原文里最常出现的就是连接串（pg_dump 会把带口令的 URI 回显出来），
+        # 审计表又跟着 panel.db 一起推去异地——同文件另外四处失败留痕早就遮过，这两个入口不该漏。
+        await aio_db.audit(req.state.cp_sub, "backup:run",
+                           f"{bid}(失败: {redact_creds(str(e))[:120]})")
         return err_json(e, 500)

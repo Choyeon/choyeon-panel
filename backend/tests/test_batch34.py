@@ -417,7 +417,7 @@ class LoginGuardVerdictTests(unittest.TestCase):
                                                      "verdict": "expected", "reason": ""},
                 "settings": [], "keys": {"files": [], "truncated": False},
                 "accounts": {"empty_password": [], "uid0_extra": []},
-                "attempts": {"failed": 0}, "counts": {"risk": 0, "warn": 0, "note": 0},
+                "attempts": {"ok": True, "failed": 0}, "counts": {"risk": 0, "warn": 0, "note": 0},
                 "findings": [], "notes": [],
                 "guard": {"status": "unknown", "phrase": "这一项没核对成", "units": []}}
         item = login_audit_service.doctor_item(data)
@@ -430,7 +430,7 @@ class LoginGuardVerdictTests(unittest.TestCase):
                                                      "verdict": "expected", "reason": ""},
                 "settings": [], "keys": {"files": [], "truncated": False},
                 "accounts": {"empty_password": [], "uid0_extra": []},
-                "attempts": {"failed": 0}, "counts": {"risk": 0, "warn": 0, "note": 0},
+                "attempts": {"ok": True, "failed": 0}, "counts": {"risk": 0, "warn": 0, "note": 0},
                 "findings": [], "notes": [],
                 "guard": {"status": "guarded", "phrase": "fail2ban 正在跑",
                           "units": [self.unit("fail2ban", self.st("active"))]}}
@@ -447,7 +447,7 @@ class LoginGuardVerdictTests(unittest.TestCase):
         data = {
             "sshd": {"source": "sshd -T", "port": 22, "reachable": False},
             "counts": {"risk": 0, "warn": 0, "note": 0},
-            "attempts": {"failed": 0, "distinct_ips": 0, "top": [], "accepted": []},
+            "attempts": {"ok": True, "failed": 0, "distinct_ips": 0, "top": [], "accepted": []},
             "keys": {"files": [], "total_keys": 0, "scanned": 0},
             "accounts": {"login_count": 1, "empty_password": [], "uid0_extra": []},
             "findings": [], "settings": [], "notes": [],

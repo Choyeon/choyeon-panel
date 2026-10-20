@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 
 from .. import database as dbm
 from .. import probe
-from ..util import CTRL_TIMEOUT, run
+from ..util import CTRL_TIMEOUT, redact_creds, run
 from . import firewall_service
 
 CACHE_TTL = 300.0
@@ -131,13 +131,18 @@ def parse_ss(text: str) -> list[dict]:
     return sorted(rows, key=lambda r: r["port"])[:MAX_PORTS]
 
 
-def _app_ports() -> list[dict]:
-    """面板登记过的应用端口：它们是"最该只监听回环"的一群——前面有 nginx。"""
+def _app_ports() -> tuple[list[dict], str]:
+    """面板登记过的应用端口：它们是"最该只监听回环"的一群——前面有 nginx。
+
+    读不到时不能只交一张空表：应用端口认不出来就会被判成"陌生的对外端口"（可能误报
+    exposed），而页面上"登记的应用"空着读起来像这台机器一个应用都没登记。
+    返回的那句说明会进 notes，与防火墙读不到走同一条通道。
+    """
     try:
         rows = dbm.query("SELECT id, name, port, domain FROM apps") or []
-    except Exception:  # noqa: BLE001 - 表还没建好时不该让整个探测失败
-        return []
-    return [r for r in rows if r.get("port")]
+    except Exception as e:  # noqa: BLE001 - 表还没建好时不该让整个探测失败
+        return [], f"面板的应用表没读到（{redact_creds(str(e))[:80]}）：这一轮认不出哪些端口属于登记的应用"
+    return [r for r in rows if r.get("port")], ""
 
 
 async def _firewall() -> tuple[dict, object]:
@@ -270,7 +275,9 @@ async def _collect() -> dict:
 
     protected, reasons = firewall_service.protected_ports()
     expected = {int(p): reasons.get(p, "") for p in protected}
-    app_rows = _app_ports()
+    app_rows, apps_note = _app_ports()
+    if apps_note:
+        notes.append(apps_note)
     app_by_port = {int(r["port"]): r for r in app_rows}
 
     ports: list[dict] = []
