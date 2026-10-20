@@ -349,6 +349,16 @@ class DocsNeverRecommendArgvPassword(unittest.TestCase):
         self.assertNotIn("user create alice --password 'xxx'", src)
         self.assertIn("user create alice --password-stdin", src)
 
+    def test_cli_design_convention_does_not_recommend_argv(self):
+        """模块 docstring 的「设计约定」是智能体读的第一份契约。
+
+        它原先写"口令、端口等都通过参数传入"，等于在用法入口教人写 §7.2 禁止的
+        `--password`——和 RUNBOOK 那一行是同一个毛病的另一半。
+        """
+        head = (BACKEND / "cli.py").read_text(encoding="utf-8").split('"""')[1]
+        self.assertNotIn("口令、端口等都通过参数传入", head)
+        self.assertIn("--password-stdin", head)
+
     def test_key_fingerprint_cell_has_no_bare_null(self):
         """网页那一栏和 CLI 那一行必须说同一句话：读不到就说读不到。
 
