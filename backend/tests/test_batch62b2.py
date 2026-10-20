@@ -93,13 +93,26 @@ def _job_names(text: str) -> list[str]:
             if re.match(r"^  [A-Za-z_][A-Za-z0-9_-]*:\s*$", ln)]
 
 
-def _real_warnings(text: str) -> list[str]:
+def _real_warnings(text: str, unit_name: str = "") -> list[str]:
     """verify 输出里真正说明问题的行。
 
-    "Unknown key" 单独排除：runner 的 systemd 常比生产旧，生产合法的新指令在旧版本上会被
-    报成不认识——那是 runner 的版本差异，不是这份 unit 的错，把它算成红只会逼人来一句 `|| true`。
+    两类要放行，因为它们说的是这台机器，不是这份 unit：
+
+    - "Unknown key"：runner/开发机的 systemd 常比生产旧，合法的新指令在旧版本上会被报成
+      不认识。把它算成红只会逼人来一句 `|| true`。
+    - "Failed to open /etc/systemd/system/<别人的>.service: Permission denied"：
+      verify 会顺带加载依赖图里的其它 unit，调用方没有读那个目录的权限时它逐条打这句
+      （2026-10-20 在本机以 nobody 实测，退 0 且打出两条别的应用的 unit）。
     """
-    return [ln for ln in text.splitlines() if ln.strip() and "Unknown key" not in ln]
+    out = []
+    for ln in text.splitlines():
+        if not ln.strip() or "Unknown key" in ln:
+            continue
+        m = re.search(r"Failed to open \S*/(?:etc|run)/systemd/system/([^:\s]+):", ln)
+        if m and unit_name and m.group(1) != unit_name:
+            continue
+        out.append(ln)
+    return out
 
 
 class SystemdGateIsReal(unittest.TestCase):
@@ -152,7 +165,7 @@ class SystemdGateIsReal(unittest.TestCase):
 
         g = self._verify(good)
         self.assertEqual(g["rc"], 0, f"当前这份 unit 本该干净通过：{g['out']!r}")
-        self.assertEqual(_real_warnings(g["out"]), [],
+        self.assertEqual(_real_warnings(g["out"], g["name"]), [],
                          "干净通过不该有任何非版本差异的输出——有的话这条门在 runner 上就是假红")
 
         # 1) 坏值：systemd 打印一句 "ignoring" 就可能退 0 —— 只有"输出也算失败"这条判据抓得到
@@ -161,7 +174,7 @@ class SystemdGateIsReal(unittest.TestCase):
             text = good.replace(f"{key}=512M" if key == "MemoryMax" else f"{key}=always", frag)
             self.assertNotEqual(text, good, f"替身没换上 {frag}，这条反证等于没跑")
             v = self._verify(text)
-            caught = [ln for ln in _real_warnings(v["out"]) if val in ln]
+            caught = [ln for ln in _real_warnings(v["out"], v["name"]) if val in ln]
             self.assertTrue(caught,
                             f"{frag} 既没被退出码也没被输出抓住（rc={v['rc']}，输出={v['out']!r}）："
                             "这条门只会看退出码的话，写错的资源上限照样算通过")
@@ -171,14 +184,30 @@ class SystemdGateIsReal(unittest.TestCase):
         v = self._verify(moved)
         self.assertNotEqual(v["rc"], 0, "解释器都不存在了还退 0，这条门没有意义")
 
-        # 3) 模板原文（旧门的校验对象）：它写死 /root/choyeon-panel，在没装过面板的机器上
-        #    必然退 1 —— 那正是 `|| true` 当年的由来，也是它后来一直空转的原因。
+        # 3) 旧门的校验对象（模板原文）写死了"只有装过面板的那台机器才有"的路径：
+        #    ExecStart=/root/choyeon-panel/...。这条只能在这台机器确实"看得见且看不见那个
+        #    路径"时才成立——`Path.exists()` 不吞 PermissionError，而 CI runner 上 /root 是
+        #    0700（uid=1001 直接 EACCES，不是 ENOENT），2026-10-20 run 39400729839 的
+        #    后端 job 就是这么红的：探测本身炸掉，门禁没跑到，红得毫无信息量。
+        #    读不到就如实按"无法判定"处理（AGENTS.md §7.8 同一条规矩也适用于测试自己）。
         template = (REPO / "deploy" / "choyeon-panel.service").read_text(encoding="utf-8")
-        if not Path("/root/choyeon-panel/backend/.venv/bin/python").exists():
+        exec_line = next((ln for ln in template.splitlines() if ln.startswith("ExecStart=")), "")
+        self.assertIn("/root/choyeon-panel/backend/.venv/bin/python", exec_line,
+                      "模板 ExecStart 不再写死安装前缀，那这条反证的前提变了，"
+                      "要连带改掉上面「校验渲染后那份」的理由")
+        try:
+            absent = not Path("/root/choyeon-panel/backend/.venv/bin/python").exists()
+            why = ""
+        except OSError as exc:
+            absent = False
+            why = f"（这台机器读不到 /root：{exc.__class__.__name__}，无法判定，跳过 rc 反证）"
+        if absent:
             v = self._verify(template)
             self.assertNotEqual(v["rc"], 0,
                                 "模板原文在这台机器上也能过，说明校验对象选错了这件事"
                                 "还没被这条反证钉住")
+        elif why:
+            print(why)
 
     def _verify(self, text: str) -> dict:
         d = Path(tempfile.mkdtemp(prefix="cp_b62b2_unit_"))
@@ -187,7 +216,8 @@ class SystemdGateIsReal(unittest.TestCase):
         f.write_text(text, encoding="utf-8")
         r = subprocess.run(["systemd-analyze", "verify", str(f)],
                            capture_output=True, text=True, timeout=60)
-        return {"rc": r.returncode, "out": (r.stdout or "") + (r.stderr or "")}
+        return {"rc": r.returncode, "out": (r.stdout or "") + (r.stderr or ""),
+                "name": f.name}
 
 
 class EveryJobHasATimeout(unittest.TestCase):
