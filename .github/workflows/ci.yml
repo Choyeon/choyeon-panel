@@ -34,7 +34,7 @@ jobs:
       matrix:
         py: ['3.11', '3.12']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -154,7 +154,7 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -197,7 +197,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: ShellCheck
         run: |
           sudo apt-get update -qq
@@ -211,7 +211,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: systemd-analyze verify（校验真正会装上去的那份 unit）
         # 旧写法是 `systemd-analyze verify ./deploy/choyeon-panel.service || true`。
         # 模板里写死了 /root/choyeon-panel/backend/.venv/bin/python，任何 runner 上都没有
