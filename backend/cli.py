@@ -11,7 +11,7 @@
     choyeonctl deploy                # 一键部署（含依赖安装与前端构建）
     choyeonctl status --json         # 面板运行状态
     choyeonctl doctor [--json]       # 安全与健康自检
-    choyeonctl user create alice --password 'xxx' [--role admin]
+    printf '%s' "$PW" | choyeonctl user create alice --password-stdin [--role admin]
     choyeonctl app list|create|deploy|rollback|logs
     choyeonctl backup run|list|jobs|targets|add-target|push|link
     choyeonctl firewall list|allow|deny|remove|on|off
@@ -134,6 +134,20 @@ def health_url(port: int | None = None) -> str:
     return f"http://127.0.0.1:{port or config.PORT}/api/health"
 
 
+def script_tail(r: dict, lines: int = 15, limit: int = 1800) -> str:
+    """部署/升级脚本失败时喂给 JSON 的末段输出：先脱敏，再按行、按字符双重截断。
+
+    --json 模式下脚本自身的输出不会打印（cmd_deploy 只在非 JSON 模式 echo），
+    失败若只报「退出码 1」，智能体从 error 里读不到任何原因，只能再手工跑一遍脚本；
+    而 install.sh/update.sh 的日志里会出现仓库 URL、.env 里的键值，
+    所以这段必须过 redact_creds —— panel.db 与交付消息都可能带上它。
+    """
+    joined = "\n".join(x for x in (r.get("err", ""), r.get("out", "")) if x).strip()
+    if not joined:
+        return ""
+    return redact_creds("\n".join(joined.splitlines()[-lines:]))[-limit:]
+
+
 async def http_json(path: str, timeout: int = 10, port: int | None = None) -> tuple[int, dict | str]:
     """用 curl 取后端 JSON；curl 不可用时返回 (0, '')。"""
     if not shutil.which("curl"):
@@ -245,7 +259,12 @@ async def cmd_deploy(a: argparse.Namespace) -> dict:
         Out.error(f"{timeout_note(Path(script).name, DEPLOY_TIMEOUT_SEC)}；"
                   f"可手工执行 bash {script} 看卡在哪一步", EXIT_FAIL)
     if r["code"] != 0:
-        Out.error(f"安装脚本退出码 {r['code']}", EXIT_FAIL)
+        # 非 JSON 模式上面已经把 out/err 原样打印过，这里只补 --json 那条路径（它是静默的）。
+        t = script_tail(r) if Out.json_mode else ""
+        Out.error(f"安装脚本退出码 {r['code']}"
+                  + (f"；脚本末尾输出：\n{t}" if t
+                     else "；脚本没有任何输出，请手工执行 bash " + str(script)),
+                  EXIT_FAIL)
 
     ok_health = await wait_health(30, port=port)
     admins = _user_count(data_dir / "panel.db")
@@ -550,7 +569,10 @@ async def cmd_app(a: argparse.Namespace) -> dict:
         try:
             app = apps_service.create_app(apply_template(payload))
         except Exception as e:  # noqa: BLE001 统一把业务校验错误转成 CLI 失败
-            Out.error(str(e), EXIT_FAIL)
+            # 遮凭据但不像 public_message 那样把绝对路径换成 <路径>、把程序 bug 换成兜底文案：
+            # 这是 root 在终端里跑的排障入口，路径和真实异常名正是他要看的，
+            # 而仓库 URL 里的 token（https://user:tok@host）必须挡掉——这段输出常被贴进工单。
+            Out.error(redact_creds(str(e)) or type(e).__name__, EXIT_FAIL)
         dbm.audit("cli", "app:create", app["name"])
         Out.result(app, f"已创建应用 #{app['id']} {app['name']}")
         return app
@@ -606,13 +628,24 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         script = ROOT / "scripts" / "backup.sh"
         if not script.exists():
             Out.error(f"缺少 {script}", EXIT_PRECONDITION)
+        dest = Path(config.BACKUP_DIR) / "manual"
+        # 「备份完成」的唯一判据是**多出来一份新产物**，不是脚本退出码：
+        # 数据目录不存在、磁盘写满、tar 被跳过时脚本照样可能退 0，目录里留下的还是旧那一份，
+        # 旧写法回一句「备份完成：None」+ ok:true 就交付了。备份是唯一一个"假成功"
+        # 足以造成不可逆损失的环节——真出事那天才发现一份都没有。
+        prev = sorted(dest.glob("panel-*.tar.gz"), key=os.path.getmtime)
+        prev_latest = str(prev[-1]) if prev else ""
         r = await sh(["bash", str(script)], timeout=300, stdin_devnull=True)
         if r["code"] == 124:
             Out.error("备份脚本超时（>300s），已终止", EXIT_FAIL)
         if r["code"] != 0:
-            Out.error(r["err"] or "备份失败", EXIT_FAIL)
-        files = sorted(Path(config.BACKUP_DIR).glob("manual/panel-*.tar.gz"), key=os.path.getmtime)
-        latest = str(files[-1]) if files else None
+            Out.error(f"备份脚本退出码 {r['code']}：{script_tail(r) or '脚本没有任何输出'}", EXIT_FAIL)
+        now = sorted(dest.glob("panel-*.tar.gz"), key=os.path.getmtime)
+        latest = str(now[-1]) if now else ""
+        if not latest or latest == prev_latest:
+            gone = f"（最新的仍是 {prev_latest}）" if prev_latest else "（目录里一份都没有）"
+            Out.error(f"备份脚本退出码 0，但 {dest} 里没有新增 panel-*.tar.gz{gone}；"
+                      f"脚本末尾输出：{script_tail(r) or '（无输出）'}", EXIT_FAIL)
         Out.result({"ok": True, "file": latest}, f"备份完成：{latest}")
         return {"ok": True, "file": latest}
 
@@ -887,7 +920,10 @@ async def cmd_upgrade(a: argparse.Namespace) -> dict:
         Out.error(f"{timeout_note(Path(script).name, DEPLOY_TIMEOUT_SEC)}；"
                   "升级失败时脚本本应自动回滚，请先 choyeonctl status 确认现场", EXIT_FAIL)
     if r["code"] != 0:
-        Out.error(r["err"] or "升级失败（脚本已尝试自动回滚）", EXIT_FAIL)
+        # 只把 r["err"] 当原因会把「npm/vite 在 stdout 里报的错」整段丢掉，
+        # 退出码也不见了，而 update.sh 失败时是否真的回滚成功只有它的日志能回答。
+        t = script_tail(r) or "脚本没有任何输出"
+        Out.error(f"升级失败：脚本退出码 {r['code']}（已尝试自动回滚）；脚本末尾输出：\n{t}", EXIT_FAIL)
     healthy = await wait_health(30)
     data = {"ok": healthy, "healthy": healthy}
     Out.result(data, "升级完成" if healthy else "升级后健康检查未通过")
@@ -1176,7 +1212,12 @@ def _ssh_audit_text(d: dict) -> str:
         lines.append(f"  {p['user']}  {p['path']}（{p['mode']} · 属主 {p['owner']}）")
         for k in p.get("keys") or []:
             tail = " · 算法偏弱" if k.get("weak") else ""
-            lines.append(f"    {k['algo']} {k['bits']}位  {k['comment'] or '（无备注）'}  {k['fp']}{tail}")
+            # 认不出来的那一行（服务给的 algo="?"、bits/fp 都是 None）不能打印成
+            # 「? None位 … None」：None 是"这项没解析出来"，念出来像密钥真有个叫 None 的位数，
+            # 而这一栏的用途正是让人判断这把钥匙能不能登录。
+            bits = f"{k['bits']}位" if k.get("bits") else "位数未知"
+            fp = k.get("fp") or "指纹读不到"
+            lines.append(f"    {k.get('algo') or '?'} {bits}  {k.get('comment') or '（无备注）'}  {fp}{tail}")
         for flag in p.get("flags") or []:
             lines.append(f"    注意：{flag}")
 

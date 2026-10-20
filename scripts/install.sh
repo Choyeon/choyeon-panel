@@ -71,12 +71,14 @@ if have_systemd; then
     systemd-analyze verify "$UNIT_FILE" >/dev/null 2>&1 || warn "systemd-analyze 给出告警（不影响运行）：systemd-analyze verify $UNIT_FILE"
   fi
   unit_restart
-  if wait_health 30; then
-    ok "服务已启动并通过健康检查"
-  else
-    err "健康检查失败，查看日志：journalctl -u $SERVICE_NAME -n 50 --no-pager"
-    exit 1
-  fi
+  rc=0
+  wait_health 30 || rc=$?
+  case "$rc" in
+    0) ok "服务已启动并通过健康检查" ;;
+    2) warn "服务已启动，但健康状态没核对成（无 curl/wget）：请安装 curl 后执行 choyeonctl status --json 确认 healthy" ;;
+    *) err "健康检查失败，查看日志：journalctl -u $SERVICE_NAME -n 50 --no-pager"
+       exit 1 ;;
+  esac
 else
   warn "无 systemd：请手动启动 -> $VENV/bin/python -m app.main（工作目录 $BACKEND_DIR）"
 fi

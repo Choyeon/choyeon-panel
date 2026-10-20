@@ -679,7 +679,7 @@ const keyColumns: any[] = [
         r.keys.length
           ? r.keys.map((k: any) =>
               h('div', { class: 'ls-key' }, [
-                h('span', { class: 'mono cp-break ls-fp', title: k.fp }, k.fp),
+                h('span', { class: 'mono cp-break ls-fp', title: k.fp || '指纹读不到' }, k.fp || '指纹读不到'),
                 h('span', { class: 'ls-key-name' }, k.comment || '无备注'),
                 k.weak ? h(NTag, { size: 'tiny', type: 'warning', bordered: false }, () => '算法偏弱') : null,
                 k.unparsed ? h(NTag, { size: 'tiny', bordered: false }, () => '无法解析') : null,

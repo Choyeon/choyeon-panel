@@ -244,14 +244,16 @@ class WriteRefusesBlindReadCase(unittest.IsolatedAsyncioTestCase):
         """防火墙停着、permanent 里写好了 SSH 放行：这台机器该能启用，不被「运行期表读不到」挡住。
 
         这是两个判词分家的另一半——只在一侧分开会修成新的误拒。
+        这里只把运行期那张表钉成读不到（252）：firewalld 的启用前检查用的是 permanent 那份，
+        它读不到运行期表也不该拒绝。`--state` 用默认的 running——批次62B 给写完加了复核，
+        而这条路只有写完那一次会问状态，把这里也钉成 not running 就成了「启用没生效」。
         """
         p = _use(self, _fw_answers(**{
-            "firewall-cmd --state": _res(252, "not running\n"),
             "firewall-cmd --list-all": _res(252, "FirewallD is not running\n"),
         }))
         out = await fw.set_enabled(True, fw.FIREWALLD)
         self.assertTrue(out["active"])
-        self.assertEqual(p.calls[-1][0], "systemctl enable --now firewalld")
+        self.assertIn("systemctl enable --now firewalld", p.keys())
 
     async def test_enable_refuses_when_permanent_has_no_ssh(self):
         _use(self, _fw_answers(**{

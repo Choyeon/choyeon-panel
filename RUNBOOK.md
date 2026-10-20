@@ -19,7 +19,7 @@
 | 重启 | `systemctl restart choyeon-panel` |
 | 备份 | `choyeonctl backup run` |
 | 升级（失败自动回滚） | `choyeonctl upgrade` |
-| 重置管理员口令 | `choyeonctl user reset admin --password '<新口令>'` |
+| 重置管理员口令 | `printf '%s' "$新口令" \| choyeonctl user reset admin --password-stdin`（AGENTS.md §7.2：`--password` 会把口令留在 `ps`、`/proc` 和 shell 历史里） |
 | 卸载 | `/root/choyeon-panel/scripts/uninstall.sh` |
 
 ---

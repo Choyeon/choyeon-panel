@@ -705,13 +705,19 @@ class UfwWriteCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([c for c in m.calls if c[1][:1] == ["enable"]], "不能用不带 --force 的 enable 赌一把")
 
     async def test_enable_and_disable_use_force(self):
+        """--force 是唯一允许的写法；但"最后一条命令"不再是它。
+
+        批次62B 给 set_enabled 加了写完复核：`ufw --force enable` 退 0 而状态仍 inactive
+        时不能回「已启用」，所以后面必然跟着 `ufw status`。按下标取会取到探测，
+        与上面 add/reload 那条同一个道理。
+        """
         m = _use_ufw(self, [_rule(port=22), _rule(port=22, family="ipv6")], active=False)
         out = await fw.set_enabled(True, fw.UFW)
         self.assertTrue(out["active"])
-        self.assertEqual(m.calls[-1], ("ufw", ["--force", "enable"]))
+        self.assertIn(("ufw", ["--force", "enable"]), m.calls)
         self.assertTrue(m.active)
         await fw.set_enabled(False, fw.UFW)
-        self.assertEqual(m.calls[-1], ("ufw", ["--force", "disable"]))
+        self.assertIn(("ufw", ["--force", "disable"]), m.calls)
         self.assertFalse(m.active)
 
     async def test_read_shape_and_protection_flags(self):
@@ -827,9 +833,9 @@ class FirewalldWriteCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(m.running)
         m2 = _use_firewalld(self, permanent={"services": ["ssh"]}, running=False)
         await fw.set_enabled(True, fw.FIREWALLD)
-        self.assertEqual(m2.calls[-1], ("systemctl", ["enable", "--now", "firewalld"]))
+        self.assertIn(("systemctl", ["enable", "--now", "firewalld"]), m2.calls)
         await fw.set_enabled(False, fw.FIREWALLD)
-        self.assertEqual(m2.calls[-1], ("systemctl", ["disable", "--now", "firewalld"]))
+        self.assertIn(("systemctl", ["disable", "--now", "firewalld"]), m2.calls)
 
 
 # --------------------------------------------------------------------- 路由

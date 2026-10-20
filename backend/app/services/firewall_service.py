@@ -1011,4 +1011,18 @@ async def set_enabled(active: bool, tool: str, request=None) -> dict:
             r = await run("systemctl", ["disable", "--now", "firewalld"], timeout=90)
     if r["code"] != 0:
         raise ExecFailed(_tool_message(r.get("out") or "", tool))
-    return {"ok": True, "active": active, "detail": (r.get("out") or "").strip()[:200]}
+    # 写完必须再问一次同一个读者：`ufw enable` 在 iptables 缺失、内核模块没加载、
+    # ufw-init 报错时照样退 0，只凭退出码就把「防火墙已启用」回给浏览器和 CLI，
+    # 等于在最要命的开关上粉饰绿灯（与批次㊻ 给 ban 立的同一规矩：返回 0 但对象不在
+    # 表里按失败处理）。判据与防火墙页、自检项、暴露面对账共用 `read()`，不在这再拼一遍。
+    after = await read(tool, request)
+    got = after["active"]
+    detail = (r.get("out") or "").strip()[:200]
+    verb = "启用" if active else "停用"
+    if got is None:
+        raise ExecFailed(f"命令已执行，但防火墙状态读不到（{unread(after) or '状态没读到'}），"
+                         f"无法确认这次{verb}是否生效；请用 choyeonctl firewall list 复核")
+    if got is not active:
+        raise ExecFailed(f"命令返回成功，但防火墙仍是{'启用' if got else '停用'}状态，"
+                         f"本次{verb}没有生效" + (f"：{detail}" if detail else ""))
+    return {"ok": True, "active": active, "detail": detail}

@@ -102,14 +102,20 @@ fi
 
 restart_and_check() {
   unit_restart
-  if wait_health 40; then
-    ok "健康检查通过"
-    return 0
-  fi
-  return 1
+  local rc=0
+  wait_health 40 || rc=$?
+  case "$rc" in
+    0) ok "健康检查通过" ;;
+    2) warn "健康状态没核对成（无 curl/wget），本次不判定为升级失败、也不自动回滚" ;;
+    *) err "等待 40s 后 /api/health 仍未返回 ok" ;;
+  esac
+  return "$rc"
 }
 
-if ! restart_and_check; then
+rc=0
+restart_and_check || rc=$?
+
+if [ "$rc" -eq 1 ]; then
   err "升级后健康检查失败，开始回滚"
   err "最近日志："
   have_systemd && journalctl -u "$SERVICE_NAME" -n 20 --no-pager || true
@@ -126,10 +132,20 @@ if ! restart_and_check; then
     fi
     web_build
     unit_restart
-    if wait_health 40; then ok "已回滚到 ${OLD_SHA:0:8} 且服务恢复正常"; else err "回滚后仍未就绪，请人工介入（数据备份：$BK）"; fi
+    rc2=0
+    wait_health 40 || rc2=$?
+    case "$rc2" in
+      0) ok "已回滚到 ${OLD_SHA:0:8} 且服务恢复正常" ;;
+      2) warn "代码已回滚到 ${OLD_SHA:0:8}，但健康状态没核对成（无 curl/wget），请自行确认服务是否在跑" ;;
+      *) err "回滚后仍未就绪，请人工介入（数据备份：$BK）" ;;
+    esac
   fi
   exit 1
 fi
 
-ok "升级完成：${OLD_SHA:0:8} -> ${NEW_SHA:0:8}"
+if [ "$rc" -eq 2 ]; then
+  warn "升级步骤已完成：${OLD_SHA:0:8} -> ${NEW_SHA:0:8}，但服务健康状态没核对成（见上方 warn）"
+else
+  ok "升级完成：${OLD_SHA:0:8} -> ${NEW_SHA:0:8}"
+fi
 have_systemd && systemctl --no-pager -l status "$SERVICE_NAME" | head -n 6 || true

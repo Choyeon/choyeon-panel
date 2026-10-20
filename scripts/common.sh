@@ -521,17 +521,24 @@ env_sync_all() {
 }
 
 # ---------- 健康检查 ----------
-# 最多等待 $1 秒（默认 30），直到 /api/health 返回 ok
+# 最多等待 $1 秒（默认 30），直到 /api/health 返回 ok。
+# 退出码三档，调用方必须区分，不能只写 `if wait_health`：
+#   0 = 探到 ok:true；1 = 等到超时也没探到；2 = 机器上没有 curl/wget，根本没探。
+# 旧写法在最后一档 return 0，于是「没有探测工具」被 install.sh 念成「服务已启动并通过健康检查」、
+# 被 update.sh 念成「健康检查通过」——AGENTS.md §7.8 禁止伪造自检结果，而这里伪造的是部署验收本身：
+# 服务其实没起来时脚本会报成功，唯一能发现异常的自动环节（健康检查）被自己的前置条件缺失关掉了。
 wait_health() {
   local timeout="${1:-30}" i=0
   local url="http://127.0.0.1:${PORT}/api/health"
+  if ! have_cmd curl && ! have_cmd wget; then
+    warn "无 curl/wget，无法探测 $url —— 健康状态未核对"
+    return 2
+  fi
   while [ "$i" -lt "$timeout" ]; do
     if have_cmd curl; then
       if curl -fsS --max-time 3 "$url" 2>/dev/null | grep -q '"ok":true'; then return 0; fi
-    elif have_cmd wget; then
-      if wget -qO- --timeout=3 "$url" 2>/dev/null | grep -q '"ok":true'; then return 0; fi
     else
-      warn "无 curl/wget，跳过健康探测"; return 0
+      if wget -qO- --timeout=3 "$url" 2>/dev/null | grep -q '"ok":true'; then return 0; fi
     fi
     i=$((i + 1)); sleep 1
   done
