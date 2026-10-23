@@ -242,7 +242,7 @@ async function load() {
       return;
     }
     app.value = data;
-    edit.value = { ...app.value, port: app.value.port ? String(app.value.port) : '' };
+    edit.value = { ...app.value, port: app.value.port ? String(app.value.port) : '', unit_override: app.value.unit_override || '' };
     env.value = JSON.parse(app.value.env || '[]');
     dbSel.value = (app.value.db_names || '').split(',').filter(Boolean);
     const list = await api.deployments(requested);
@@ -479,7 +479,12 @@ watch(
     </div>
     <p class="ad-sub">
       {{ app.unit }}
-      <span v-if="app.unitMissing" class="ad-missing">本机 systemd 里没有这个单元，服务从未部署成功或已被改名；「启动/重启」都无效，请重新立即部署</span>
+      <span v-if="app.suggestUnit" class="ad-missing">
+        本机没有 {{ app.unit }}，但有一个同名 unit {{ app.suggestUnit }} 在 systemd 里——这个应用大概率本来就是外部 unit 在服务，
+        只是没登记纳管。请在下方「配置」页的「已有 unit」里填 {{ app.suggestUnit }} 并保存；
+        不要点「立即部署」：那会新建 {{ app.unit }} 去抢同一个端口，把正在服务的进程挤掉。
+      </span>
+      <span v-else-if="app.unitMissing" class="ad-missing">本机 systemd 里没有这个单元，服务从未部署成功或已被改名；「启动/重启」都无效，请重新立即部署</span>
     </p>
 
     <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive style="margin-bottom: var(--space-4)">
@@ -534,6 +539,21 @@ watch(
             <NFormItem label="启动命令"><NInput v-model:value="edit.start_cmd" :readonly="!isAdmin" :input-props="{ 'aria-label': '启动命令', class: 'mono' }" /></NFormItem>
             <NFormItem label="端口"><NInput v-model:value="edit.port" :readonly="!isAdmin" placeholder="留空表示无端口" :input-props="{ 'aria-label': '监听端口' }" /></NFormItem>
             <NFormItem label="域名"><NInput v-model:value="edit.domain" :readonly="!isAdmin" :input-props="{ 'aria-label': '域名' }" /></NFormItem>
+            <!-- 新建表单里有这一栏，详情页原来却没有：unit_override 只在新建时能填，
+                 之后再也改不动（保存载荷带着它，输入框却不存在）。于是一个把外部服务登记成
+                 面板托管的应用，列表会永远红着「单元不存在」，而唯一能改的那个入口不在界面上。 -->
+            <NFormItem label="已有 unit">
+              <NInput v-model:value="edit.unit_override" :readonly="!isAdmin" placeholder="纳管用：如 rosetta-backend.service，填了则不覆写 unit" :input-props="{ 'aria-label': '已有 systemd unit', class: 'mono' }" />
+              <template #feedback>
+                <span v-if="app.suggestUnit" class="ad-missing">
+                  面板找的是 {{ app.unit }}，本机没有；但有一个同名 unit {{ app.suggestUnit }}。
+                  <NButton v-if="isAdmin" text type="primary" size="tiny" @click="edit.unit_override = app.suggestUnit">填入 {{ app.suggestUnit }}</NButton>
+                  填这里就是告诉面板「这个应用由那个外部 unit 服务」，状态、日志与启停会跟着它走；
+                  留空则表示交给面板托管 panel-{{ app.name }}.service。服务正在运行时保存会重启一次生效。
+                </span>
+                <span v-else>外部 unit 纳管用：填了面板就不再生成 panel-{{ app.name }}.service，只写环境变量与 drop-in。</span>
+              </template>
+            </NFormItem>
             <NFormItem label="关联数据库">
               <NSelect v-model:value="dbSel" :disabled="!isAdmin" multiple filterable tag :options="pgOptions" placeholder="选择该应用使用的 PostgreSQL 数据库，便于项目管理与备份联动" aria-label="关联数据库" style="width: 100%" />
               <template #feedback>

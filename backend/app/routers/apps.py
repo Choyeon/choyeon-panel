@@ -60,6 +60,9 @@ async def app_get(app_id: int, req: Request):
     running = st["active"]
     port = a["port"] if a["port"] is not None else (await apps_service.detect_port(unit) if st["busy"] else None)
     out = {**a, "running": running, "unit": unit, "unitState": st["state"], "unitMissing": st["missing"],
+           # 与列表接口同一个读者、同一个字段名：详情页的判词要指出「同名 unit 存在但没纳管」，
+           # 只在列表算会让两个页面在同一个事实上说法不一（批次㉜ 的同一类问题）。
+           "suggestUnit": apps_service.suggest_unit(a, st["missing"]),
            "port": port, "portAuto": a["port"] is None and port is not None}
     # 列表接口算了 deploying（apps_service.list_apps），详情接口一直没算，
     # 而 AppDetail 判断的正是 app.deploying —— 于是详情页标题永远显示"运行中/已停止"、

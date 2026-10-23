@@ -74,6 +74,22 @@ def unit_name(app: dict) -> str:
     return app.get("unit_override") or f"panel-{app['name']}.service"
 
 
+def suggest_unit(app: dict, missing: bool) -> str | None:
+    """面板那个 unit 本机不存在时，看看是不是有一个**同名**的外部 unit 才是这个应用真正在跑的。
+
+    线上实测的形态：`choyeonctl app create` 或建应用表单没填「纳管 unit」，而服务本来就在
+    `choyeon-book.service` 下面跑着。于是面板按 panel-<名称>.service 去问，问到一个不存在的
+    unit，列表一片红，启停与日志全打在错的名字上——判词却只说「单元不存在，请重新立即部署」，
+    而照着部署会新建第二个 unit 去抢同一个端口，把还在服务的站点挤下线。
+    这里只回答"同名 unit 文件在不在"，与 `ensure_env_link` 判 no-unit 用的是同一个读者
+    （UNIT_DIR 下的文件存在），不猜"是不是它"——名字对得上就叫用户去纳管，对不对由用户看。
+    """
+    if not missing or app.get("unit_override"):
+        return None
+    cand = f"{app['name']}.service"
+    return cand if (Path(UNIT_DIR) / cand).is_file() else None
+
+
 def render_unit_from(tpl: str, app: dict) -> str:
     return (
         tpl.replace("{{name}}", app["name"])
@@ -400,6 +416,7 @@ async def list_apps() -> list:
             # 于是正在启动、上次启动失败、这台机器上根本没有这个 unit，全都被说成"已停止"。
             unitState=st["state"],
             unitMissing=st["missing"],
+            suggestUnit=suggest_unit(a, st["missing"]),
             port=port,
             portAuto=a["port"] is None and detected is not None,
             domains=domains,

@@ -240,6 +240,11 @@ const columns: any[] = [
     render: (r: any) => {
       if (r.deploying) return h(CpStatusTag, { status: 'deploying', text: '部署中' });
       const t = unitTag(r);
+      // 「未纳管」要说清未纳管的是哪个名字，否则用户只能猜；进详情页有完整判词与「已有 unit」输入框。
+      if (r.suggestUnit)
+        return h('span', { title: `本机有同名 unit ${r.suggestUnit}，在详情页「已有 unit」里登记纳管` }, [
+          h(CpStatusTag, { status: t.status, text: t.text }),
+        ]);
       return h(CpStatusTag, { status: t.status, text: t.text });
     },
   },

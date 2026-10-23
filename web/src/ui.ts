@@ -97,7 +97,13 @@ const UNIT_TAG: Record<string, { status: string; text: string; tone: string }> =
   inactive: { status: 'stopped', text: UNIT_STATE_LABELS.inactive, tone: 'idle' },
 };
 
-export function unitTag(r: { unitState?: string; unitMissing?: boolean }): { status: string; text: string; tone: string } {
-  if (r.unitMissing) return { status: 'notfound', text: '单元不存在', tone: 'err' };
+export function unitTag(r: { unitState?: string; unitMissing?: boolean; suggestUnit?: string }): { status: string; text: string; tone: string } {
+  // 「单元不存在」原话只说了一半：本机 panel-<名称>.service 确实没有，但同名 unit 就在 systemd 里
+  // 跑着（应用其实活着）。那种情况判成红色「不存在」会把人推向「立即部署」——而部署写的是第二个
+  // unit，和正在服务的那个抢同一个端口。说法改成「未纳管」，指向配置页的「已有 unit」。
+  if (r.unitMissing)
+    return r.suggestUnit
+      ? { status: 'conflict', text: '未纳管', tone: 'warn' }
+      : { status: 'notfound', text: '单元不存在', tone: 'err' };
   return UNIT_TAG[r.unitState || ''] || { status: 'unknown', text: '状态未知', tone: 'idle' };
 }
