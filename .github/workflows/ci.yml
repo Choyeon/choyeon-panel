@@ -178,6 +178,10 @@ jobs:
         # 阈值 high：2026-10-20 实测唯一已知项是 echarts 的 moderate XSS（GHSA-fgmj-fm8m-jvvx，
         # 修它要跨 echarts 大版本，属破坏性升级，另开批次处理），把它算成红只会让这条门
         # 在第二天被 `|| true` 按住——门的价值首先是"今天就能通过并且真的会红"。
+        # 这道门确实在第二天红过：2026-10-24 一批 vite 公告（GHSA-587h-7wmj-h5pm 等，
+        # 影响 <=6.4.3）把它压红。vite 只是 devDependency，公告说的是开发服务器与
+        # launch-editor，不在生产链路里——但 CI 装的就是这份 lock，所以处置是把它升到
+        # 同大版本的补丁 6.4.5（lock 里两行），而不是放宽阈值或 `|| true`。
         run: npm audit --audit-level=high
 
       - name: 单元测试（composable 时序回归）

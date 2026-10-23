@@ -2012,6 +2012,32 @@
   CI 两档后端 job 因此红了一次。守卫的意图一条没减（max 兜底仍在、裸 100vh 仍不许回来），
   冲突的只是字面量本身——改 CSS 同样是在改后端测试的输入，`backend/tests` 里有 25 个文件直接读
   `web/src` 当契约输入，定位不必等 CI：`grep -rn "<改动的 CSS 字面量>" backend/tests/` 一步就找到。
+- 批次65：`unit_override` 填错之后改不回来，而屏幕给的建议会让两个 unit 抢同一个端口。
+  现场是 `choyeon-book`（app id 40）在应用列表里红色「单元不存在」，而 book.choyeon.cc 返回 200、
+  3400 有人 listen、`choyeon-book.service` enabled+active 正在服务：这条记录没有 `unit_override`，
+  面板就按派生名 `panel-choyeon-book.service` 去问 systemd——一个从来不存在的名字，状态、运行日志、
+  unit 页签、启停全部打在错的名字上。写入口也不在界面上：`unit_override` 只有「新建应用」表单能填，
+  详情页的保存载荷带着这个键（`AppDetail.vue` 的 `edit.value` 从 app 整份展开），配置页却没有对应
+  输入框，于是它永远是原值；CLI 的 `app` 子命令同样没有这个参数。判词「请重新立即部署」照做会更糟——
+  `render_unit` 写出第二个 unit，ExecStart 指向同一个目录、同一个 3400，带 `Restart=always`
+  和正在服务的那个外部 unit 抢端口。修法是让同名外部 unit 成为一个读出来的事实而不是猜：
+  `apps_service.suggest_unit()` 只在「面板那个名字不存在且本机能找到 `<名称>.service` 这个文件」时给出
+  建议，列表与详情两个接口用同一个读者、同一个字段名，前端 `unitTag` 据此从红色「不存在」改成
+  琥珀色「未纳管」，详情页说明句点名该填哪个名字并明说不要点部署，配置页补上「已有 unit」输入框
+  与一键填入按钮。A/B：把同名 unit 文件从临时 UNIT_DIR 里删掉，`suggestUnit` 立即回到 `null`、
+  判词回到「单元不存在」，另外四个应用在任何情况下都是 `null`（无误判）。`test_batch65.py`（15 条）。
+  生产数据仍未修：`choyeon-book` 要在页面上填 `choyeon-book.service` 并保存，保存会重启一次正在服务
+  的 book，属管理员自己掌握时机的动作。
+
+### 安全
+- `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
+  在批次65 推上去后红了一次，`npm audit --audit-level=high` 实测退出码 1，报的是当天新公开的一批
+  vite 公告（GHSA-587h-7wmj-h5pm / GHSA-9jrq-w75r-8gcw / GHSA-rq7h-c2jc-7f22 等，影响范围
+  `<=6.4.3`，都在 launch-editor 与开发服务器的 `server.fs.allow`、自定义中间件上）。vite 是
+  devDependency，生产链路里跑的是 `vite build` 出来的静态产物，这些公告不在请求路径上；但 CI 装的
+  就是这份 lock，所以处置是升到同大版本的补丁而不是放宽阈值或给这一步加 `|| true`。升完
+  `npm audit` 退出码回到 0，只剩既有的 echarts moderate（修它要跨大版本，仍未处理）；
+  `test:unit` 76/76、`typecheck`、`build` 全部重跑通过。
 
 ## [1.1.10] - 2026-10-12
 
