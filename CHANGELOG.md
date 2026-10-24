@@ -2048,6 +2048,14 @@
   就是这份 lock，所以处置是升到同大版本的补丁而不是放宽阈值或给这一步加 `|| true`。升完
   `npm audit` 退出码回到 0，只剩既有的 echarts moderate（修它要跨大版本，仍未处理）；
   `test:unit` 76/76、`typecheck`、`build` 全部重跑通过。
+- `undici` 8.11.2 → 8.12.3（仅 `web/package-lock.json`，transitive 依赖，非 `package.json` 直接项）。
+  CI 的「依赖漏洞审计（前端）」在批次65 附带提交（`bd0cfc4`）后又一次 `--audit-level=high` 退出码 1，
+  报的是当天新公开的 undici 公告（GHSA-4qv8-2p9j-2685 事件源解析无界内存 DoS /
+  GHSA-f72v-6w45-q472 非小写算法 token 绕过 SRI / GHSA-xjj6-f33q-929c 过多 content-encoding 未处理错误
+  DoS，影响 `8.0.0 - 8.12.1`）。undici 由 jsdom 30.1.1 带进来，只在 `node --test` 的单元测试里用到，
+  不进产物、不在请求路径上；`npm audit fix` 在同 major 内升到 8.12.3，不放宽阈值也不给这一步加
+  `|| true`。升完 `npm audit` 退出码回 0（只剩既有 echarts moderate，修它要跨大版本，仍未处理），
+  `test:unit` 80/80 复跑通过。
 
 ## [1.1.10] - 2026-10-12
 
