@@ -830,13 +830,18 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
     if new_app.get("unit_override"):
         r = await _apply_external_unit(old, new_app, renamed)
         if not old.get("unit_override") and not renamed:
-            # 名字没变就从"面板托管"切到"外部纳管"：panel-<name>.service 还留在 systemd 里
-            # 带着旧 ExecStart 继续跑，而面板已经认为这个应用归外部 unit 了。删它等于停服务，
-            # 不能在一次保存里顺手做，只能把残留态说清楚。
-            _append_note(r, (
-                f"已切为外部 unit 纳管，但面板此前写的 {unit_name(old)} 还在 systemd 里运行"
-                "（确认外部 unit 已接管后，到「systemd 单元」页停用并删除它）"
-            ))
+            # 名字没变就从"面板托管"切到"外部纳管"。此前这里无条件写下「panel-<name>.service
+            # 还在 systemd 里运行」，但那个文件未必存在（应用可能从没成功部署过，或早已被手工
+            # 删掉），判词凭空捏造了一个残留 unit，把用户引去 systemd 页找一个根本没有的东西。
+            # 只核实事实：文件在才提示，且分「还在跑」与「没在跑」两档——前者删它等于停服务，
+            # 不能在一次保存里顺手做；后者只是配置残留，语气也相应放轻。
+            stale = unit_name(old)
+            if (Path(UNIT_DIR) / stale).is_file():
+                state = "（当前还在运行）" if await is_active(stale) else "（当前未运行）"
+                _append_note(r, (
+                    f"已切为外部 unit 纳管，但面板此前写的 {stale} 还留在 systemd 里{state}"
+                    "，带着旧的 ExecStart；确认外部 unit 已接管后，到「systemd 单元」页停用并删除它"
+                ))
         return r
     if old.get("unit_override"):
         # 从外部 unit 切回面板托管：unit 名换了（panel-<name>.service），旧 unit 的

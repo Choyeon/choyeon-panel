@@ -263,6 +263,34 @@ class TestApplyEditedExternal(Case):
         self.assertTrue(Path(self.units, "panel-vid2.service").is_file())
         self.assertTrue(out["applied"])
 
+    # 托管→外部纳管（名字没变）时的「旧 panel unit 残留」提示：只有那个文件真的还在才说，
+    # 且要分「还在跑」与「没在跑」——原缺陷是无条件断言 panel-vid.service「还在运行」，
+    # 而它可能从没被创建（应用没成功部署过）或早已被手工删除，凭空让用户去 systemd 页找一个不存在的东西。
+    def test_stale_unit_note_absent_when_file_missing(self):
+        self.write_unit()  # 只写 their.service，不写 panel-vid.service
+        old = self.app(unit_override=None, env="[]")
+        new = {**old, "unit_override": "their.service", "env": json.dumps([{"k": "A", "v": "1"}])}
+        out = self._apply(old, new)
+        self.assertNotIn("已切为外部 unit 纳管", out["note"], "panel-vid.service 根本不在磁盘上，不该说它还残留")
+
+    def test_stale_unit_note_says_running_when_active(self):
+        self.write_unit()
+        self.write_unit(name="panel-vid.service")
+        old = self.app(unit_override=None, env="[]")
+        new = {**old, "unit_override": "their.service", "env": json.dumps([{"k": "A", "v": "1"}])}
+        out = self._apply(old, new, active=True)
+        self.assertIn("panel-vid.service", out["note"])
+        self.assertIn("当前还在运行", out["note"], "文件在、服务在跑，删它等于停服务，必须说清")
+
+    def test_stale_unit_note_says_not_running_when_inactive(self):
+        self.write_unit()
+        self.write_unit(name="panel-vid.service")
+        old = self.app(unit_override=None, env="[]")
+        new = {**old, "unit_override": "their.service", "env": json.dumps([{"k": "A", "v": "1"}])}
+        out = self._apply(old, new, active=False)
+        self.assertIn("panel-vid.service", out["note"])
+        self.assertIn("当前未运行", out["note"], "服务没在跑只是配置残留，不该说成还在运行")
+
 
 class TestDeployAndDeletePaths(Case):
     def test_deploy_step_also_links_the_env_file(self):

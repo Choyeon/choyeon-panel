@@ -2028,8 +2028,16 @@
   判词回到「单元不存在」，另外四个应用在任何情况下都是 `null`（无误判）。`test_batch65.py`（15 条）
   钉后端两个接口与两个视图的接线，`web/tests/unitTag.test.mjs`（4 条）在 jsdom 里把真 `ui.ts` 引进来
   跑判词本身——拿 HEAD~ 那份 `ui.ts` 复跑，第一条立刻红，证明它盯的是这次的说法。
-  生产数据仍未修：`choyeon-book` 要在页面上填 `choyeon-book.service` 并保存，保存会重启一次正在服务
-  的 book，属管理员自己掌握时机的动作。
+- 批次65 附带：`choyeon-book` 的生产数据已修（管理员在详情页填入 `choyeon-book.service` 后走
+  `PATCH /api/apps/40`；因预先写入了与面板一致的 `.panel.env`，`write_env_file` 返回 `unchanged`
+  而不重启正在服务的 book，MainPID 未变、站点 200、列表转 active）。修复过程中暴露出
+  `apply_edited` 托管→外部纳管那段的第二个判词缺陷：它**无条件**写下「面板此前写的
+  `panel-<名称>.service` 还在 systemd 里运行」，可那个文件未必存在——`choyeon-book` 就从没被面板
+  部署过，`systemctl` 直接回 `Unit panel-choyeon-book.service could not be found`。判词凭空造了一个
+  残留 unit，把用户引去 systemd 页停用删除一个根本没有的东西。修法和这条批次同一个原则：只核实
+  事实——`(Path(UNIT_DIR)/stale).is_file()` 为真才提示，且分「（当前还在运行）」与「（当前未运行）」
+  两档（前者删它等于停服务，语气要重；后者只是配置残留）。`test_batch20.py` 补三条（文件缺失→不提示、
+  存在且在跑→「还在运行」、存在但没跑→「当前未运行」）；把这处改回原来那段无提示版复跑，三条一起红。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
