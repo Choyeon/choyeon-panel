@@ -416,6 +416,9 @@ async function toggleEnabled(r: any) {
   toggling.value = r.id;
   try {
     await api.updateBackup(r.id, { enabled: !r.enabled });
+    // 启用/停用原来只有失败才弹 toast，成功只靠列表那一列自己变；补一句按名字的回执，
+    // 免得点了「停用」要盯住 timer 列才确认状态真的翻过去了。
+    msg.success(`备份任务「${r.name}」已${r.enabled ? '停用' : '启用'}`);
     await reload();
   } catch (e: any) {
     msg.error(e.message);
@@ -795,6 +798,7 @@ async function toggleTarget(r: any) {
   tgToggling.value = r.id;
   try {
     await api.updateCloudTarget(r.id, { enabled: !r.enabled });
+    msg.success(`异地目标「${r.name}」已${r.enabled ? '停用' : '启用'}`);
     await reloadTargets();
   } catch (e: any) {
     msg.error(e.message);

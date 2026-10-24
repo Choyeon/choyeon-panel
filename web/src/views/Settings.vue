@@ -368,6 +368,9 @@ async function startTwofa() {
     twSecret.value = { secret: String(r.secret ?? ''), otpauth: String(r.otpauth ?? '') };
     twStep.value = 'scan';
     await renderQr(twSecret.value.otpauth);
+    // 二维码出现本身就是画面变了，但这句话交代清楚「这一步只是生成密钥、还没生效」，
+    // 用户不会以为扫完码就开好了而关掉抽屉。
+    msg.success('验证密钥已生成，请在 App 里扫码后填入动态口令');
   } catch (e: any) {
     msg.error(e.message);
   } finally {

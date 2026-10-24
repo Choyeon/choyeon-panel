@@ -377,6 +377,9 @@ async function act(verb: string) {
   acting.value = verb;
   try {
     await api.appAction(id, verb);
+    // 启停/重启原来只有出错才吭声，成功只靠 600ms 后状态列自己变；
+    // 补一句按动词命名的回执，点了「重启」就知道重启这一下送出去了。
+    msg.success({ start: '已启动服务', stop: '已停止服务', restart: '已重启服务' }[verb] || `已执行 ${verb}`);
     later(load, 600);
   } catch (e: any) {
     msg.error(e.message);

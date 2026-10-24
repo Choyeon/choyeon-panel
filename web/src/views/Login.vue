@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { NInput, NSpace, NIcon, NAlert } from 'naive-ui';
+import { NInput, NSpace, NIcon, NAlert, useMessage } from 'naive-ui';
 import { NButton } from '../ui';
 import { api, saveLoginData } from '../api';
 import { icons } from '../icons';
 import LogoMark from '../components/LogoMark.vue';
 
 const router = useRouter();
+// 登录/初始化的错误已经有就地 NAlert 说明错在哪；成功原来只靠跳转体现，
+// 补一句 toast 让「进去了」这件事有一个明确的回执（provider 在 App.vue，跨路由不丢）。
+const msg = useMessage();
 const needsSetup = ref(false);
 const username = ref('');
 const password = ref('');
@@ -89,6 +92,7 @@ async function submit() {
     } catch {
       /* 存不下不影响登录 */
     }
+    msg.success(needsSetup.value ? '管理员已创建，已自动登录' : '登录成功，欢迎回来');
     router.replace('/dashboard');
   } catch (e: any) {
     if (!acceptTotpError(e)) err.value = e.message || '请求失败';

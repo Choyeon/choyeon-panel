@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
-  NAlert, NCard, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, NText,
+  NAlert, NCard, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, NText, useMessage,
 } from 'naive-ui';
 import { NButton, useDrawerWidth } from '../ui';
 import { req, getRole } from '../api';
@@ -36,6 +36,9 @@ type Options = {
 type Preview = { expr: string; human: string; oncalendar: string | null; error: string | null };
 
 const err = ref('');
+// 写操作的成功走 toast：列表页的错误已经有 err NAlert 就地说明「错在哪」，
+// 但「保存好了/这一轮跑完了/开关切了」原来只靠表格自己变，用户得盯着行才看得出动静。
+const msg = useMessage();
 // 后端 deps.py 对全部 MUTATION 拦 403：新建/编辑/删除/执行/启停对只读账号必然失败，
 // 这些入口就不进 DOM（与 Apps / Services / Backups 同一口径）。
 const isAdmin = getRole() === 'admin';
@@ -245,6 +248,7 @@ async function save() {
     if (editing.value) await req(`/cron/${editing.value.id}`, { method: 'PATCH', body, timeout: 60000 });
     else await req('/cron', { body, timeout: 60000 });
     showForm.value = false;
+    msg.success(editing.value ? `任务「${body.name}」已更新` : `任务「${body.name}」已创建`);
     await reload();
   } catch (e: any) {
     err.value = e.message || String(e);
@@ -262,6 +266,9 @@ async function runNow(r: Task) {
   try {
     const res = await req(`/cron/${r.id}/run`, { body: {}, timeout: 660000 });
     await reload();
+    // 执行结论先说清楚：这一轮到底是 ok、timeout 还是 exit N，用户点完就该知道，
+    // 而不是只把输出塞进抽屉、要再点开才看得见。
+    msg.success(`「${r.name}」执行完成：${res?.status || '已运行'}`);
     // 手动这一轮由面板当场捕获输出，直接放进抽屉，不必再回读 journald（那里没有它）。
     // 开始时间取刷新后的行：run 的响应里没有它，写死空串会让抽屉显示"未执行"。
     const row = rows.value.find((i) => i.id === r.id);
@@ -301,6 +308,7 @@ async function toggle(r: Task, val: boolean) {
   togglingId.value = r.id;
   try {
     await req(`/cron/${r.id}`, { method: 'PATCH', body: { enabled: val }, timeout: 60000 });
+    msg.success(val ? `「${r.name}」已启用` : `「${r.name}」已停用`);
     await reload();
   } catch (e: any) {
     err.value = e.message || String(e);

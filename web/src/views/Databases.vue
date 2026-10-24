@@ -159,6 +159,9 @@ async function runSql() {
   try {
     const r = await api.pgQuery(sql.value, sqlDb.value || 'postgres');
     sqlOut.value = r.result || '(无返回)';
+    // 服务端在 ON_ERROR_STOP 下 returncode!=0 会抛错走 catch，能走到这里就是真的执行完了；
+    // 结果虽然写进了输出框，但一句「跑完了、在哪个库」的回执让人不用盯着小框确认。
+    msg.success(`SQL 已在库「${r.db || sqlDb.value || 'postgres'}」执行完成`);
   } catch (e: any) {
     sqlOut.value = '错误: ' + e.message;
   } finally {
