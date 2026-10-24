@@ -2048,6 +2048,14 @@
   Shell 退出登录的吊销失败原来是个空 `catch {}`：本地退了、服务端那张票据这一轮没吊销（默认 12 小时内仍有效），
   却被静默吞掉，改给 `msg.warning` 说清「本机已退出，但凭证未在服务端吊销」，同时照旧清本地并跳登录，不把人锁在面板里。
   `web/tests/batch66.test.mjs`（7 条源码契约）逐个钉住每处回执，删掉任意一条对应的用例会红。
+- 批次67，AppDetail 的「保存后重启服务」按钮真正先保存再重启。批次66 补完回执时留下一个更实的坑：
+  unit 页签那颗 warning 按钮标签写的是「保存后重启服务」，`@click` 却直接是 `act('restart')`——它一个字
+  都没把 textarea 里的改动落盘，服务按旧 unit 重启，用户以为刚编辑的内容生效了（不点旁边「保存 Unit」
+  就白改）。改法是新增 `saveAndRestart`：先调 `saveUnitFile`，而 `saveUnitFile` 现在回报是否真的落盘并
+  通过 `systemd-analyze verify`（成功 true / 并发早退与失败 false）；只有 `true` 才接着 `act('restart')`，
+  verify 失败绝不重启——那等于把回滚后的旧内容当成新改动确认了一遍。按钮的 loading/disabled 同时跟着
+  保存与重启两段（`unitSaving || acting === 'restart'`）。`web/tests/batch67.test.mjs`（3 条源码契约）
+  钉住这三处形态；把按钮改回直接 `act('restart')` 复跑，第三条即红。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」

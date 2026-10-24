@@ -144,17 +144,27 @@ async function loadUnit() {
 async function saveUnitFile() {
   // 保存 unit 是「写文件 + systemd-analyze verify」两段：连点的第二次会在第一次还没校验完时
   // 把文件换掉，报出来的语法错误对应的是另一份内容。
-  if (unitSaving.value) return;
+  // 返回是否真的落盘并通过校验，供「保存后重启服务」判断要不要接着重启。
+  if (unitSaving.value) return false;
   unitSaving.value = true;
   try {
     await api.saveUnit(id, unitContent.value);
     msg.success('已保存并通过 systemd-analyze verify，重启服务后生效');
     await loadUnit();
+    return true;
   } catch (e: any) {
     msg.error(e.message);
+    return false;
   } finally {
     unitSaving.value = false;
   }
+}
+async function saveAndRestart() {
+  // 这颗按钮写的是「保存后重启服务」，原来却只调 act('restart')：textarea 里没点「保存 Unit」的
+  // 改动一个字都没落盘，服务按旧 unit 重启，用户以为刚编辑的内容生效了。先真正保存并通过 verify，
+  // 再重启；verify 失败绝不重启——那等于把回滚后的旧内容当成新改动确认了一遍。
+  if (!(await saveUnitFile())) return;
+  await act('restart');
 }
 function restoreDefaultTpl() {
   unitContent.value = unitInfo.value?.defaultTemplate || '';
@@ -697,7 +707,7 @@ watch(
               <NSpace size="small">
                 <NButton size="small" tertiary round :icon="ico('RefreshOutline')" @click="loadUnit">重新读取</NButton>
                 <NButton v-if="unitInfo?.managed" size="small" tertiary round @click="restoreDefaultTpl">恢复面板默认模板</NButton>
-                <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :loading="acting === 'restart'" :disabled="!!acting" :icon="ico('SyncOutline')" @click="act('restart')">保存后重启服务</NButton>
+                <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :loading="unitSaving || acting === 'restart'" :disabled="!!acting || unitSaving" :icon="ico('SyncOutline')" @click="saveAndRestart">保存后重启服务</NButton>
               </NSpace>
               <NButton type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed || unitSaving" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
             </NSpace>
