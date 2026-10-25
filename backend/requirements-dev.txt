@@ -18,7 +18,7 @@ httpx2>=2.0
 # 207.57.127.6 实测：那份 venv 只有 ruff。要在服务器上手跑 mypy 或审计，另建一个 venv，
 # 别往线上这份里装。
 ruff>=0.17
-mypy>=1.11
+mypy>=2.4.0
 # 依赖漏洞审计（ci.yml 的后端 job 用它审 requirements.txt，阻断项）。
 # 审计对象是 requirements.txt 里那份范围声明解析出来的版本——那正是新机器装上去的东西。
 pip-audit>=2.7
