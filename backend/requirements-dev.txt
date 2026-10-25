@@ -21,4 +21,4 @@ ruff>=0.17
 mypy>=1.11
 # 依赖漏洞审计（ci.yml 的后端 job 用它审 requirements.txt，阻断项）。
 # 审计对象是 requirements.txt 里那份范围声明解析出来的版本——那正是新机器装上去的东西。
-pip-audit>=2.7
+pip-audit>=2.10.1
