@@ -8,7 +8,7 @@
 #   RuntimeError（"requires the httpx2 package"），只有本地 venv 恰好带着
 #   旧 httpx 时才退化成 deprecation warning。所以本地绿 ≠ CI 绿，
 #   CI 必须显式安装本文件（见 .github/workflows/ci.yml 的「安装依赖」步骤）。
-httpx2>=2.0
+httpx2>=2.16.0
 # 静态检查与审计工具的唯一版本出处：CI 的 ruff / mypy / pip-audit 和 `make lint` 都从
 # 这里取（ci.yml 原来在这里之外还内联 `pip install ruff mypy`，两边各装一套，
 # "本地复现 CI"就没有落点）。
