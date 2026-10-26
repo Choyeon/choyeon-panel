@@ -25,6 +25,8 @@ const app = ref<any>(null);
 const env = ref<{ k: string; v: string }[]>([]);
 const edit = ref<any>({});
 const deps = ref<any[]>([]);
+// 部署记录读取失败的第三态：空列表和"读不到"不是一回事，画成"暂无部署记录"会让人以为应用从没部署过。
+const depsErr = ref('');
 const depLog = ref<any>(null);
 // 延迟刷新走共享实现：本页多处写成 `await api.xxx(); later(load, 600)`，
 // 自建 timers 数组在 dispose 时定时器往往还没挂上，接口回来照样刷新，
@@ -255,15 +257,23 @@ async function load() {
     edit.value = { ...app.value, port: app.value.port ? String(app.value.port) : '', unit_override: app.value.unit_override || '' };
     env.value = JSON.parse(app.value.env || '[]');
     dbSel.value = (app.value.db_names || '').split(',').filter(Boolean);
-    const list = await api.deployments(requested);
-    if (requested !== id) return;
-    deps.value = list;
   } catch (e: any) {
     // 切走之后这一轮的失败已经不属于当前页了：把 loadErr 设上会把 B 的详情页
     // 整页换成「未找到该应用，可能已被删除」这种针对 A 的错误。
     if (requested !== id) return;
     loadErr.value = e.message || '加载应用详情失败';
     return;
+  }
+  // 部署记录单独 try/catch：应用主体已经取到手了，/deployments 抖动不该把整页
+  // 从可读可操作换成「加载应用详情失败」——那是把一次副数据读取失败说成主数据没了。
+  try {
+    const list = await api.deployments(requested);
+    if (requested !== id) return;
+    deps.value = list;
+    depsErr.value = '';
+  } catch (e: any) {
+    if (requested !== id) return;
+    depsErr.value = e?.message || '部署记录读取失败';
   }
   loadNginx();
   loadPg();
@@ -350,11 +360,13 @@ async function pollDeps() {
     list = await api.deployments(requested);
   } catch (e: any) {
     if (requested !== id) return;
+    depsErr.value = `部署记录读取失败：${e.message}`;
     msg.error(`部署记录获取失败：${e.message}`);
     return;
   }
   if (requested !== id) return;
   deps.value = list;
+  depsErr.value = '';
   // 头部徽标看的是 app.deploying：只换记录列表的话「部署中」要等手动刷新才出现
   let fresh: any;
   try {
@@ -629,7 +641,7 @@ watch(
                 <CpStatusTag :status="d.status === 'running' ? 'installing' : d.status" :text="d.status" />
               </NSpace>
             </div>
-            <EmptyBox v-if="!deps.length" text="暂无部署记录" />
+            <EmptyBox v-if="!deps.length" :text="depsErr || '暂无部署记录'" />
             <NButton size="small" tertiary round :icon="ico('RefreshOutline')" style="margin-top: var(--space-2)" @click="pollDeps">刷新</NButton>
           </div>
           <div class="log-view dep-log" :class="{ 'dep-log-empty': !depLog }">{{ depLog?.log || '点击左侧记录查看部署日志' }}</div>

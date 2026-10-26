@@ -25,6 +25,9 @@ const isAdmin = computed(() => getRole() === 'admin');
 const dir = ref('');
 const files = ref<any[]>([]);
 const loading = ref(false);
+// 备份目录读取失败的第三态：files 空是因为没读到，画成「还没有任何备份产物」并引导去备份，
+// 会让人以为产物丢了——实际可能只是这一次列表没取回来。
+const loadFailed = ref('');
 const jobFilter = ref('all');
 const kindFilter = ref('all');
 const pattern = ref('');
@@ -113,7 +116,9 @@ async function load() {
     dir.value = r.dir || '';
     files.value = r.files || [];
     checked.value = checked.value.filter((n) => files.value.some((f) => f.name === n));
+    loadFailed.value = '';
   } catch (e: any) {
+    loadFailed.value = e.message || '备份文件列表读取失败';
     msg.error(e.message);
   } finally {
     loading.value = false;
@@ -384,7 +389,7 @@ onMounted(() => {
         :max-height="tableH"
         :row-key="(f: any) => f.name"
       >
-        <template #empty><EmptyBox :text="files.length ? '没有匹配当前筛选的备份文件' : '还没有任何备份产物，先到备份任务页立即备份一次'" /></template>
+        <template #empty><EmptyBox :text="files.length ? '没有匹配当前筛选的备份文件' : (loadFailed ? '备份文件列表读取失败，点上方「刷新」重试' : '还没有任何备份产物，先到备份任务页立即备份一次')" /></template>
       </NDataTable>
     </CpToolbarCard>
 

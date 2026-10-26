@@ -418,7 +418,9 @@ async function toggleEnabled(r: any) {
     await api.updateBackup(r.id, { enabled: !r.enabled });
     // 启用/停用原来只有失败才弹 toast，成功只靠列表那一列自己变；补一句按名字的回执，
     // 免得点了「停用」要盯住 timer 列才确认状态真的翻过去了。
-    msg.success(`备份任务「${r.name}」已${r.enabled ? '停用' : '启用'}`);
+    // 名字走 displayName(r)：备份任务这一张表没有 name 列（pg/app/sqlite 只有 kind+target），
+    // 批次66 这里写成 r.name，每次切换都弹「备份任务「undefined」」。
+    msg.success(`备份任务「${displayName(r)}」已${r.enabled ? '停用' : '启用'}`);
     await reload();
   } catch (e: any) {
     msg.error(e.message);

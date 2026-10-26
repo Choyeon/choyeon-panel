@@ -59,6 +59,8 @@ const openTotal = computed(() => openData.value?.total ?? 0);
 // openData 留成 undefined，汇总卡照样渲染「未确认 0 条」+ 三个 0 —— 接口挂了
 // 反而是一片绿灯，正好盖住最该看见的故障。失败时数字改画成「—」并点名读取失败。
 const openFailed = computed(() => !openData.value && !!openError.value);
+// 历史这一侧同样的第三态：读取失败时 data 是空，画成「暂无告警历史」会把"没读到"说成"没有告警"。
+const histFailed = computed(() => !data.value && !!error.value);
 
 const LEVEL: Record<string, { label: string; type: 'success' | 'warning' | 'error'; ico: string; dot: string }> = {
   crit: { label: '严重', type: 'error', ico: 'CloseCircleOutline', dot: 'err' },
@@ -273,7 +275,7 @@ async function runRound(kind: 'run' | 'probe') {
         :row-key="(r: AlertRow) => r.id"
       >
         <template #empty>
-          <EmptyBox :text="kw || level ? '没有符合筛选条件的告警记录' : '暂无告警历史，点「立即巡检」跑一轮'" />
+          <EmptyBox :text="histFailed ? '告警历史读取失败，点「刷新」重试' : (kw || level ? '没有符合筛选条件的告警记录' : '暂无告警历史，点「立即巡检」跑一轮')" />
         </template>
       </NDataTable>
     </CpToolbarCard>

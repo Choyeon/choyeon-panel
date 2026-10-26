@@ -110,6 +110,7 @@ function reload() {
 function join(name: string) {
   return path.value === '/' ? `/${name}` : `${path.value}/${name}`;
 }
+let openSeq = 0;
 async function open(e: any) {
   const p = join(e.name);
   if (e.isDir) return load(p);
@@ -118,8 +119,12 @@ async function open(e: any) {
   if (capBytes.value && e.size > capBytes.value) {
     return msg.warning(`文件超过 ${fmtSize(capBytes.value)}，请使用下载`);
   }
+  const seq = ++openSeq;
   try {
     const r = await api.fileContent(p);
+    // 连开两个文件（或大文件慢响应）时，先发的慢响应后到会把编辑器整段换成前一个文件，
+    // 用户接着点保存就写坏了当前这个文件。响应只认领最后那一次 open。
+    if (seq !== openSeq) return;
     // 后端只在严格 UTF-8 时下发内容：二进制没有 content，直接引导到下载。
     // 以前这里会把图片/zip 解成 U+FFFD 塞进编辑器，点保存就把原文件写坏了。
     if (r.binary) return msg.warning('二进制文件，无法在线编辑，请使用下载');
@@ -127,6 +132,7 @@ async function open(e: any) {
     editContent.value = r.content;
     editing.value = true;
   } catch (err: any) {
+    if (seq !== openSeq) return;
     msg.error(err.message);
   }
 }
@@ -321,6 +327,10 @@ function pickFiles() {
 
 const ARCHIVE_RE = /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
 async function extract(e: any) {
+  // 解压/打包都是分钟级的服务端写操作，且共用 busyOp 这把锁：和 del/rename/perm/mkdir/paste
+  // 一样要重入守卫，否则删除在飞时点解压会让两个写操作并发，先回来的那个把 busyOp 清空、
+  // 又放行第三个并发写。
+  if (busyOp.value) return;
   busyOp.value = 'extract';
   try {
     const r = await postJson<{ files: number; dest: string }>('/files/extract', { path: join(e.name) });
@@ -333,6 +343,7 @@ async function extract(e: any) {
   }
 }
 async function pack() {
+  if (busyOp.value) return;
   const names = checkedKeys.value;
   if (!names.length) return;
   busyOp.value = 'archive';
@@ -439,7 +450,7 @@ const columns: any[] = [
         ...(e.isDir ? [] : [h(NButton, { ...txt, type: 'primary', onClick: () => open(e) }, () => '编辑')]),
         ...(e.isDir || !ARCHIVE_RE.test(String(e.name)) ? [] : [
           h(NPopconfirm, { onPositiveClick: () => extract(e) }, {
-            trigger: () => h(NButton, { ...txt, type: 'primary', loading: busyOp.value === 'extract', title: `解压 ${e.name}` }, { default: () => '解压' }),
+            trigger: () => h(NButton, { ...txt, type: 'primary', loading: busyOp.value === 'extract', disabled: !!busyOp.value, title: `解压 ${e.name}` }, { default: () => '解压' }),
             default: () => `把 ${e.name} 解压到当前目录？同名文件会被覆盖。`,
           }),
         ]),
@@ -469,7 +480,7 @@ function onChecked(keys: Array<string | number>) {
       <template #actions>
         <NButton size="small" tertiary :icon="icon('RefreshOutline', 14)" @click="load()">刷新</NButton>
         <NButton
-          size="small" tertiary :disabled="!checkedKeys.length" :loading="busyOp === 'archive'"
+          size="small" tertiary :disabled="!!busyOp || !checkedKeys.length" :loading="busyOp === 'archive'"
           :icon="icon('CubeOutline', 14)" @click="pack"
         >
           打包选中{{ checkedKeys.length ? `（${checkedKeys.length}）` : '' }}

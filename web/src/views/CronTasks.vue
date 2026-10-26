@@ -57,6 +57,7 @@ const drawerW = useDrawerWidth(0.5);
 // 手动执行写得出，被定时器唤醒的那一轮在 journald 里，只读 log_tail 会把"天天在跑"显示成"从未执行"。
 const logData = ref<RunLog | null>(null);
 const logLoading = ref(false);
+let logSeq = 0;
 // 正在跑的那一轮还没有退出码，按"执行中"显示，而不是空成"未执行"。
 const logStatusText = computed(() => (logData.value?.running ? '执行中…' : logData.value?.status || '—'));
 
@@ -285,17 +286,24 @@ async function runNow(r: Task) {
 }
 
 async function openLog(r: Task) {
+  // 连点两行「输出」是两次并发 GET：慢的那条响应回来时抽屉标题早就换成后点的行了，
+  // 原来无守卫会把 A 的日志画进标着 B 的抽屉里，而 finally 无条件熄灭 loading 更是把
+  // "还在加载"的错觉固化下来——看着像 B 真的跑成了 A 那样。同款单调序号，迟到的直接丢弃。
+  const seq = ++logSeq;
   logRow.value = r;
   logData.value = null;
   logLoading.value = true;
   err.value = '';
   try {
-    logData.value = (await req(`/cron/${r.id}/log`, { timeout: 30000 })) as RunLog;
+    const data = (await req(`/cron/${r.id}/log`, { timeout: 30000 })) as RunLog;
+    if (seq !== logSeq) return;
+    logData.value = data;
   } catch (e: any) {
+    if (seq !== logSeq) return;
     err.value = e.message || String(e);
     logRow.value = null;
   } finally {
-    logLoading.value = false;
+    if (seq === logSeq) logLoading.value = false;
   }
 }
 

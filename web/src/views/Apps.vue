@@ -255,6 +255,9 @@ const columns: any[] = [
 ];
 
 const loading = ref(false);
+// 首帧读取失败的第三态：读不到时 rows 是空数组，空态本来会写「还没有应用」并引导新建——
+// 那是把一次接口失败粉饰成"这台机器没应用"，用户还可能照着提示建一个和真实应用重名的。
+const loadFailed = ref('');
 /**
  * 行内动作按 id 各占一格，verb 决定名称列的「同步」该不该转圈，
  * 操作列的文字按钮没有加载态，靠 rowBusy 整行置灰挡住连点。
@@ -293,7 +296,9 @@ async function load() {
   loading.value = true;
   try {
     rows.value = await api.apps();
+    loadFailed.value = '';
   } catch (e: any) {
+    loadFailed.value = e.message || '应用列表读取失败';
     msg.error(e.message);
   } finally {
     loading.value = false;
@@ -467,7 +472,7 @@ onMounted(() => {
 
       <NDataTable :columns="visColumns" :data="filtered" :bordered="false" size="small" :row-key="(r: any) => r.id" :loading="loading" :scroll-x="'auto'" class="cp-tbl tbl-apps" :max-height="'var(--table-h)'">
         <template #empty>
-          <EmptyBox :text="rows.length ? '没有匹配的应用' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目'" />
+          <EmptyBox :text="rows.length ? '没有匹配的应用' : (loadFailed ? '应用列表读取失败，点上方「刷新」重试' : '还没有应用 —— 点击「新建应用」接入你的第一个 Node / Python 项目')" />
         </template>
       </NDataTable>
     </CpToolbarCard>

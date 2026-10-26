@@ -214,7 +214,7 @@ const filtered = computed(() => {
 
     <NCard size="small">
       <NDataTable size="small" :bordered="false" :loading="loading" :scroll-x="'auto'" :row-key="(u: any) => u.id" :pagination="paging" :columns="cols" :data="filtered">
-        <template #empty><EmptyBox text="暂无用户" /></template>
+        <template #empty><EmptyBox :text="error ? '用户列表读取失败，点上方「刷新」重试' : '暂无用户'" /></template>
       </NDataTable>
     </NCard>
 

@@ -2056,6 +2056,18 @@
   verify 失败绝不重启——那等于把回滚后的旧内容当成新改动确认了一遍。按钮的 loading/disabled 同时跟着
   保存与重启两段（`unitSaving || acting === 'restart'`）。`web/tests/batch67.test.mjs`（3 条源码契约）
   钉住这三处形态；把按钮改回直接 `act('restart')` 复跑，第三条即红。
+- 批次68，前端「读不到」第三态与迟到响应/重入竞态收口（含批次66 引入的一处 undefined）。三类：
+  ①列表读取失败被显示成空态——Apps/Users/Alerts/BackupFiles/AppDetail 的 `<EmptyBox>` 原来只看行数，
+  网络/后端抖动一次就谎报「暂无 XX，点新建」，用户以为数据真没了。改用 `loadFailed`/复用的 `error`/
+  新增 `histFailed`/`depsErr` 标志，失败时如实显示「XX读取失败，点刷新重试」；AppDetail 把 `/deployments`
+  拆进独立 try/catch，副数据抖动不再把整页换成「加载应用详情失败」。②批次66 给 Backups 启用/停用补的
+  toast 引用了备份任务表根本没有的 `r.name`（这张表只有 kind+target），当场弹「备份任务「undefined」已启用」，
+  改用 `displayName(r)`。③并发/迟到：Files 的 `open()`、CronTasks 的 `openLog()` 缺单调序号，连点两行时
+  慢响应会把上一个文件/上一行日志画进已经换掉的编辑器/抽屉，CronTasks 的 `finally` 还会无条件熄灭新行的
+  loading——各补 `openSeq`/`logSeq` 只认领最后一次；Files 的 `extract()`/`pack()` 缺 `busyOp` 重入守卫，
+  删除在飞时点解压会让两个分钟级写操作并发（先回来的清空锁、又放行第三个）——补守卫并让按钮随 `busyOp` 锁住。
+  `web/tests/batch68.test.mjs`（8 条源码契约）逐个钉住，把任一处改回旧形态（如 CronTasks 的 `finally` 去掉
+  `seq === logSeq`）复跑即红。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」

@@ -73,7 +73,10 @@ test('Settings.vue 生成 2FA 密钥这一步补引导性成功回执', () => {
 
 test('Backups.vue 任务与异地目标的启停用名补成功回执', () => {
   const s = read('views/Backups.vue');
-  assert.match(fnBody(s, 'toggleEnabled'), /msg\.success\(`备份任务「\$\{r\.name\}」已\$\{r\.enabled \? '停用' : '启用'\}`\)/);
+  // 批次66 这里写成 r.name，但备份任务这张表没有 name 列（pg/app/sqlite 只有 kind+target），
+  // 每次切换都弹「备份任务「undefined」」；批次68 改用 displayName(r)。
+  assert.match(fnBody(s, 'toggleEnabled'), /msg\.success\(`备份任务「\$\{displayName\(r\)\}」已\$\{r\.enabled \? '停用' : '启用'\}`\)/);
+  // 异地目标那张表确实有 name 列，仍按 r.name
   assert.match(fnBody(s, 'toggleTarget'), /msg\.success\(`异地目标「\$\{r\.name\}」已\$\{r\.enabled \? '停用' : '启用'\}`\)/);
 });
 
