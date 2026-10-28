@@ -21,6 +21,7 @@ from .. import database as dbm
 from ..log import warn
 from ..services import (
     alerts_service,
+    apps_service,
     backup_service,
     cert_ops,
     exposure_service,
@@ -566,6 +567,46 @@ async def _check_env_file() -> dict:
     }
 
 
+async def _check_app_env() -> dict:
+    """每个纳管应用的 .panel.env 是不是真的还是面板显示的那份。
+
+    面板把应用的环境变量存在数据库里，只在「保存配置」和「部署」这两步才写进
+    `<安装目录>/.panel.env`；unit 那行是 `EnvironmentFile=-…`，开头的 `-` 告诉 systemd
+    "文件不存在不算错"。于是安装目录被手工换过（重新 git clone、换目录、从别处恢复）之后，
+    文件没了、systemd 静默跳过、进程读的是别处的值，界面却照常显示数据库里那份——用户照着
+    界面上的口令去登后台，只会得到「密码错误」，而这台机器上没有任何地方说过这两份不是同一份。
+    之前也没有任何代码比较过这两份（`write_env_file` 只在自己要写时顺手比一下内容，
+    从不告诉调用方"原来不一致"），所以漂移只能靠人肉发现。
+    """
+    d = apps_service.env_drift()
+    if not d["drift"]:
+        return {
+            "status": "pass",
+            "detail": f"{d['total']} 个纳管应用的环境变量落盘一致，且 unit 都引用了 .panel.env",
+            "fix": "",
+        }
+    parts = []
+    for x in d["drift"]:
+        n = x["vars"]
+        if x["disk"] == "missing":
+            why = f"记录里有 {n} 个变量，安装目录下却没有 .panel.env，systemd 静默跳过这一行"
+        elif x["disk"] == "differs":
+            why = f"磁盘上的 .panel.env 与记录里那 {n} 个变量不一致"
+        elif x["disk"] == "unreadable":
+            why = "读不了安装目录下的 .panel.env，没法确认进程拿到的是哪份"
+        elif x["disk"] == "no-dir":
+            why = f"安装目录已经不存在，{n} 个变量无处落地"
+        else:  # 磁盘那份是对的，没人读它
+            why = f"{n} 个变量写得对，但它的 unit 没有引用 .panel.env，进程一个都读不到"
+        parts.append(f"{x['name']}：{why}")
+    return {
+        "status": "fail",
+        "detail": "；".join(parts) + "——面板显示的环境变量和进程实际读到的不是同一份",
+        "fix": "进这些应用的「详情 → 环境变量」页点「重新写入并重启」（只重存现有配置，不改值）；"
+               "急着重录全量配置也可以在「应用」页重新部署一次",
+    }
+
+
 _CHECKS = [
     ("listen", "监听地址", _check_listen),
     ("admin", "管理员账号", _check_admin),
@@ -588,6 +629,7 @@ _CHECKS = [
     ("pending", "改动未生效", _check_pending),
     ("load", "负载与CPU", _check_load),
     ("sites", "站点链路", _check_sites),
+    ("app-env", "应用环境变量", _check_app_env),
 ]
 
 # 可一键修复的项：只放"执行固定命令、无歧义、失败可重试"的操作。

@@ -2068,6 +2068,26 @@
   删除在飞时点解压会让两个分钟级写操作并发（先回来的清空锁、又放行第三个）——补守卫并让按钮随 `busyOp` 锁住。
   `web/tests/batch68.test.mjs`（8 条源码契约）逐个钉住，把任一处改回旧形态（如 CronTasks 的 `finally` 去掉
   `seq === logSeq`）复跑即红。
+- 批次69，「面板显示的环境变量」与「进程实际读到的值」对账。应用键值对存在 SQLite 里，落盘只在
+  「保存配置」和「部署」那两步；unit 写的是 `EnvironmentFile=-<目录>/.panel.env`，开头的 `-` 表示
+  文件不存在也不报错。线上实测：`/root/www/choyeon-video` 在 2026-10-18 被换成新的 git clone，
+  那一步删掉了 `.panel.env`，而数据库记录最后一次保存是 10-14，于是详情页照常显示
+  `ADMIN_PASSWORD=…`（六个字符），进程用的是 `/etc/choyeon-video.env` 里另一个九字符值——照着界面
+  输口令只会「密码错误」，四个纳管应用都可能是这种状态，且没有任何一处说过这两份已经分家。
+  此前也没有代码比较过这两份（`write_env_file` 只在自己要写时顺手比一下内容，从不回报"原来不一致"）。
+  补上只读读者 `apps_service.env_state(app)`：把 `env_body()` 与磁盘那份逐字节对比，给出
+  `disk`（match / missing / differs / no-dir / unreadable）、`vars`（有效键数，不含值）与
+  `unitReads`（unit 本体或 drop-in 里有没有引用这个绝对路径），`GET /api/apps/{id}` 以 `envState`
+  带回——只有键数和状态，viewer 也能看。详情页环境变量页据此显示横幅：`missing`/`differs`/
+  `unitReads` 为假是 error，`no-dir` 是 warning，修复按钮复用既有 `save()`（PATCH 重写
+  `.panel.env`、需要时补 drop-in，服务在跑就顺带重启），不改任何一个值；在跑与没在跑分别写清楚，
+  不再让用户以为界面上的就是生效的。自检加第 22 项「应用环境变量落盘」（`id=app-env`），
+  只列本机已有 unit 文件的应用（没部署过的应用没有进程可说谎），disk 漂移与"有变量却没人读"两条线
+  都算 fail，`fix` 指向那一枚按钮；不给一键修复，因为重启服务会断正在跑的请求。
+  `backend/tests/test_batch69.py` 钉住五态判定（含"两边都空算一致"、键名非法不计入、
+  `EnvironmentFile` 写成注释不算引用、指向旧安装目录不算引用）、漂移清单的过滤与
+  `GET /api/apps/{id}` 确实带着 `envState`；`web/tests/batch69.test.mjs` 钉住横幅形态。
+  文档口径同步：AGENTS.md §4、README（三处）、SECURITY.md 的自检项数 21 → 22。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」

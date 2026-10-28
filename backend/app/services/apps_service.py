@@ -233,6 +233,75 @@ def unit_reads_env_file(app: dict) -> bool:
     return False
 
 
+def env_state(app: dict) -> dict:
+    """只读对账：数据库里那份环境变量与磁盘上的 .panel.env 到底一不一致。
+
+    面板把每个应用的键值对存在 SQLite 里，只在"保存配置"和"部署"这两步才写进
+    安装目录下那份 .panel.env。安装目录被手工替换过（换目录、git clean、从别处重新克隆）
+    之后那份文件就没了，而 unit 里写的是 `EnvironmentFile=-…`——开头的 `-` 表示
+    "文件不存在也不算错"，systemd 直接跳过，进程于是读的是别处来的值，界面却照常显示
+    数据库里那份。两边各自都对，合起来是假的：用户在面板上看到的密码跟登录用的
+    密码不是同一个，怎么试都"密码错误"，且没有任何地方说过这件事。
+
+    此前没有任何代码做过这个比较（write_env_file 只在自己要写的时候顺手比一下内容，
+    从不告诉调用方"原来不一致"），所以漂移只能靠人肉发现。这一函数补上那个读者。
+
+    disk 各档：
+    - match：磁盘上就是数据库里那份（含"两边都空"这种——没有需要同步的东西）。
+    - missing：数据库里有变量，文件却不存在。unit 带 `-` 前缀时这条最危险：
+      进程静默地一个变量都读不到。
+    - differs：文件存在但内容与数据库不同（手工改过、或保存失败留下的半份）。
+    - no-dir：安装目录还不存在（应用没部署过），谈不上漂移。
+    - unreadable：文件在但读不了（权限 / 是目录 / 软链坏了），如实单独一档，
+      不能把它当成 missing 提示"重新写入"——那等于要覆盖一个看不见的东西。
+    """
+    body = env_body(app)
+    unit_reads = unit_reads_env_file(app)
+    if not app.get("path"):
+        return {"disk": "no-dir", "vars": len(body.splitlines()), "unitReads": unit_reads}
+    target = env_file_path(app)
+    if not target.parent.is_dir():
+        disk = "no-dir"
+    elif target.is_file():
+        try:
+            disk = "match" if target.read_text(encoding="utf-8", errors="replace") == body + "\n" else "differs"
+        except OSError:
+            disk = "unreadable"
+    elif target.exists() or target.is_symlink():
+        # 那个位置上确有东西（目录、悬空软链、读不了的 inode）：说成 missing 会引导人点
+        # "重新写入"，而那一步会当场失败——先把"这里有个读不了的东西"如实分开。
+        disk = "unreadable"
+    else:
+        disk = "match" if not body else "missing"
+    return {"disk": disk, "vars": len(body.splitlines()), "unitReads": unit_reads}
+
+
+def env_drift() -> dict:
+    """自检用的汇总：{"total": 纳管应用数, "drift": [漂移的那几个]}。
+
+    算漂移的两条线，缺一条就漏一半：
+    - 磁盘那份不对（missing / differs / unreadable）：界面显示的键值对压根没进进程。
+    - unit 不读它（vars > 0 且 unitReads 为假）：文件写得一模一样，systemd 却没人引用，
+      这是同一件事的另一半——纳管外部 unit 时面板不写 unit 本体，全靠那枚 drop-in，
+      drop-in 被 `systemctl edit --revert` 或手工清理掉，文件还在、值还是读不到。
+
+    只看本机已经有 unit 文件的应用（与 `ensure_env_link` 判 no-unit 用同一个读者）：
+    建了记录还没部署过的应用既没进程也没 unit，.panel.env 不在磁盘上不是漂移而是
+    "还没落地"，把它列进失败项只会让人开始忽略这一项。
+    """
+    drift = []
+    rows = dbm.query("SELECT id, name, path, env FROM apps ORDER BY name")
+    for a in rows:
+        if not (Path(UNIT_DIR) / unit_name(a)).is_file():
+            continue
+        st = env_state(a)
+        bad_disk = st["disk"] in ("missing", "differs", "unreadable")
+        not_read = st["vars"] > 0 and not st["unitReads"]
+        if bad_disk or not_read:
+            drift.append({"id": a["id"], "name": a["name"], **st})
+    return {"total": len(rows), "drift": drift}
+
+
 async def ensure_env_link(app: dict) -> str:
     """保证面板写的 .panel.env 真的会被这个 unit 读进来，返回本次动作。
 

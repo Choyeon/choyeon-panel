@@ -63,7 +63,11 @@ async def app_get(app_id: int, req: Request):
            # 与列表接口同一个读者、同一个字段名：详情页的判词要指出「同名 unit 存在但没纳管」，
            # 只在列表算会让两个页面在同一个事实上说法不一（批次㉜ 的同一类问题）。
            "suggestUnit": apps_service.suggest_unit(a, st["missing"]),
-           "port": port, "portAuto": a["port"] is None and port is not None}
+           # 数据库里那份环境变量与磁盘上的 .panel.env 对不对得上、unit 读不读它。
+           # 只有键数与状态，不含任何值，所以 viewer 也能看：这一项说的正是
+           # "界面上显示的密码跟真正生效的密码不是同一个"，藏在管理员视线里最容易坏事。
+           "port": port, "portAuto": a["port"] is None and port is not None,
+           "envState": apps_service.env_state(a)}
     # 列表接口算了 deploying（apps_service.list_apps），详情接口一直没算，
     # 而 AppDetail 判断的正是 app.deploying —— 于是详情页标题永远显示"运行中/已停止"、
     # 「一键同步」永不置灰，用户点了才收到"部署进行中，不能同步"。
