@@ -2084,6 +2084,10 @@
   不再让用户以为界面上的就是生效的。自检加第 22 项「应用环境变量落盘」（`id=app-env`），
   只列本机已有 unit 文件的应用（没部署过的应用没有进程可说谎），disk 漂移与"有变量却没人读"两条线
   都算 fail，`fix` 指向那一枚按钮；不给一键修复，因为重启服务会断正在跑的请求。
+  部署后线上复验补一处：`env_drift()` 的投影原本只有 `id, name, path, env`，纳管外部 unit 的应用
+  于是按 `panel-<name>.service` 去问 systemd，那个名字压根没有文件，正好被上面那道噪声闸门当成
+  "还没部署过"跳过——详情接口报 `choyeon-video` 是 `missing`，自检却一声不响。投影加上
+  `unit_override`，并把这条钉成用例（漏列就红）。
   `backend/tests/test_batch69.py` 钉住五态判定（含"两边都空算一致"、键名非法不计入、
   `EnvironmentFile` 写成注释不算引用、指向旧安装目录不算引用）、漂移清单的过滤与
   `GET /api/apps/{id}` 确实带着 `envState`；`web/tests/batch69.test.mjs` 钉住横幅形态。

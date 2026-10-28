@@ -288,9 +288,13 @@ def env_drift() -> dict:
     只看本机已经有 unit 文件的应用（与 `ensure_env_link` 判 no-unit 用同一个读者）：
     建了记录还没部署过的应用既没进程也没 unit，.panel.env 不在磁盘上不是漂移而是
     "还没落地"，把它列进失败项只会让人开始忽略这一项。
+
+    投影里必须带 `unit_override`：纳管外部 unit 的应用如果按 `panel-<name>.service` 去问，
+    那个名字压根没有文件，它就会被上面那条噪声闸门当成"还没部署过"直接跳过——上线第一天
+    video 的详情接口报 `missing`、自检却一声不响，差的就是这一列。
     """
     drift = []
-    rows = dbm.query("SELECT id, name, path, env FROM apps ORDER BY name")
+    rows = dbm.query("SELECT id, name, path, env, unit_override FROM apps ORDER BY name")
     for a in rows:
         if not (Path(UNIT_DIR) / unit_name(a)).is_file():
             continue

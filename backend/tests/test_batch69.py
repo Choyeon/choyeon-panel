@@ -194,6 +194,32 @@ class EnvDriftTests(unittest.TestCase):
         self.app["env"] = "[]"
         self.assertEqual(self._drift()["drift"], [])
 
+    def test_override_app_is_judged_by_its_real_unit(self):
+        """纳管外部 unit 的应用要按 unit_override 那个名字去问，所以那一列必须查出来。
+
+        上线第一天实测：详情接口报 video 是 missing，doctor 却一声不响——SELECT 里没带
+        unit_override，于是按 panel-video.service 去问，那个名字压根没有文件，它被
+        "还没部署过"那道噪声闸门跳过了。漂移最要命的正是这类应用。
+        """
+        seen = {}
+
+        def fake_query(stmt):
+            seen["stmt"] = stmt
+            return []
+
+        with mock.patch.object(apps_service.dbm, "query", fake_query):
+            apps_service.env_drift()
+        self.assertIn("unit_override", seen["stmt"], "漏了这一列，纳管应用会从自检里整个消失")
+
+        ext = _app(id=7, name="video", path=self.dir, unit_override="video.service",
+                   env=_env([("A", "1")]))
+        Path(self.units, "video.service").write_text(
+            f"[Service]\nEnvironmentFile=-{self.dir}/.panel.env\n", encoding="utf-8")
+        Path(self.dir, ".panel.env").write_text('A="999"\n', encoding="utf-8")
+        got = self._drift([ext])
+        self.assertEqual(got["drift"][0]["disk"], "differs")
+        self.assertEqual(got["drift"][0]["name"], "video")
+
 
 class DoctorItemTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_as_the_22nd_check(self):
