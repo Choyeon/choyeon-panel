@@ -2068,6 +2068,14 @@
   删除在飞时点解压会让两个分钟级写操作并发（先回来的清空锁、又放行第三个）——补守卫并让按钮随 `busyOp` 锁住。
   `web/tests/batch68.test.mjs`（8 条源码契约）逐个钉住，把任一处改回旧形态（如 CronTasks 的 `finally` 去掉
   `seq === logSeq`）复跑即红。
+- 批次70，抽屉/弹窗的迟到响应竞态收口（批次68 把 logSeq/openSeq 加在了读取函数上，这一批补进同样写
+  这块状态的两个执行/配置函数）。①CronTasks.runNow：手动执行最长 660s，跑完直接把它塞进抽屉是设计，
+  但这十几分钟里用户点了别的任务的「输出」（openLog 会 ++logSeq）后，A 迟到完成会连标题一起把 B 的抽屉
+  换成 A——runNow 与 openLog 共用同一把 `logSeq`，成功写 `logData`/`logRow` 与 catch 都只认领最后一次，
+  完成回执仍照发。②Sites.openConfig：点 A「配置」→关→点 B，A 的慢响应覆盖 `cfg`（后到赢而非最后点赢），
+  弹窗显示 B 却画 A 的 vhost；A 失败分支的 `showConfig=false` 关掉用户正开着的 B，A 的 `finally` 熄灭 B
+  的加载态——补 `cfgSeq` 单调序号，成功/失败/finally 三处都判 `seq === cfgSeq`。`web/tests/batch70.test.mjs`
+  （2 条源码契约）钉住两处形态；把 Sites 的 `finally` 去掉守卫复跑即红。
 - 批次69，「面板显示的环境变量」与「进程实际读到的值」对账。应用键值对存在 SQLite 里，落盘只在
   「保存配置」和「部署」那两步；unit 写的是 `EnvironmentFile=-<目录>/.panel.env`，开头的 `-` 表示
   文件不存在也不报错。线上实测：`/root/www/choyeon-video` 在 2026-10-18 被换成新的 git clone，

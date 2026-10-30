@@ -264,12 +264,17 @@ async function runNow(r: Task) {
   if (runningId.value !== null || togglingId.value !== null || saving.value) return;
   runningId.value = r.id;
   err.value = '';
+  // 这一轮最长跑到 660s：跑完直接把它塞进抽屉是设计（不必回读 journald）。但用户在这十几分钟里
+  // 可能点了别的任务的「输出」（openLog 会 ++logSeq），抽屉早就换到 B 了；这一轮的迟到写入会把
+  // B 的画面连标题一起换成 A。与 openLog 共用同一把 logSeq，只认领最后一次。
+  const seq = ++logSeq;
   try {
     const res = await req(`/cron/${r.id}/run`, { body: {}, timeout: 660000 });
     await reload();
     // 执行结论先说清楚：这一轮到底是 ok、timeout 还是 exit N，用户点完就该知道，
     // 而不是只把输出塞进抽屉、要再点开才看得见。
     msg.success(`「${r.name}」执行完成：${res?.status || '已运行'}`);
+    if (seq !== logSeq) return;
     // 手动这一轮由面板当场捕获输出，直接放进抽屉，不必再回读 journald（那里没有它）。
     // 开始时间取刷新后的行：run 的响应里没有它，写死空串会让抽屉显示"未执行"。
     const row = rows.value.find((i) => i.id === r.id);
@@ -279,6 +284,7 @@ async function runNow(r: Task) {
     };
     logRow.value = row || r;
   } catch (e: any) {
+    if (seq !== logSeq) return;
     err.value = e.message || String(e);
   } finally {
     runningId.value = null;

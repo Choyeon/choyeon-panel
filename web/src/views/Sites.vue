@@ -72,6 +72,7 @@ const renewSummary = ref('');
 const showConfig = ref(false);
 const cfg = ref<any>(null);
 const cfgLoading = ref(false);
+let cfgSeq = 0;
 // 「指定应用」这一条路只在判不出归属的行上出现，选项来自 /api/apps（点开时才第一次拉）。
 const apps = ref<any[]>([]);
 const appsError = ref('');
@@ -160,16 +161,23 @@ async function removeSite(r: any) {
 }
 
 async function openConfig(r: any) {
+  // 点 A 的「配置」→ 关掉 → 点 B：A 的慢响应后到会把 cfg 整个换成 A（后到的赢，不是最后点的赢），
+  // 弹窗标题读 cfg.file/domain 于是显示着 B 却画着 A 的 vhost；A 失败分支的 showConfig=false 还会
+  // 把用户正开着的 B 弹窗直接关掉，A 的 finally 又熄灭 B 的「读取中」。单调序号，只认领最后一次点击。
+  const seq = ++cfgSeq;
   cfg.value = { domain: r.domain, file: '', content: '' };
   showConfig.value = true;
   cfgLoading.value = true;
   try {
-    cfg.value = await api.config(r.domain);
+    const data = await api.config(r.domain);
+    if (seq !== cfgSeq) return;
+    cfg.value = data;
   } catch (e: any) {
+    if (seq !== cfgSeq) return;
     msg.error(e.message);
     showConfig.value = false;
   } finally {
-    cfgLoading.value = false;
+    if (seq === cfgSeq) cfgLoading.value = false;
   }
 }
 
