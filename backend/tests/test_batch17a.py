@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -238,10 +239,15 @@ class RebootVerdictTests(unittest.TestCase):
         self.assertIn("无法比对", why)
 
     def test_rhel_uses_its_own_flag(self):
-        with mock.patch.object(us, "REBOOT_FLAG", _Flag(True)):
-            self.assertTrue(_aio(us._reboot_verdict(us.RHEL))[0])
-        with mock.patch.object(us, "REBOOT_FLAG", _Flag(False)):
+        # 批次75 起这条判定走 os.stat（三态门禁），`_Flag` 那种替身给不出真的 stat，
+        # 所以改用临时目录里的真文件：present/absent 两档的语义与以前完全一致。
+        base = tempfile.mkdtemp(prefix="cp_b17_run_")
+        self.addCleanup(shutil.rmtree, base, True)
+        flag = Path(base, "reboot-required")
+        with mock.patch.object(us, "REBOOT_FLAG", flag):
             self.assertFalse(_aio(us._reboot_verdict(us.RHEL))[0])
+            flag.write_text("reboot\n", encoding="utf-8")
+            self.assertTrue(_aio(us._reboot_verdict(us.RHEL))[0])
 
     def test_other_families_are_not_judged(self):
         req, _why = _aio(us._reboot_verdict(us.ARCH))
@@ -461,7 +467,8 @@ class CliUpdatesTextTests(unittest.TestCase):
         self.assertIn("待装 0 个", t)
 
     def test_undecidable_reboot_says_so_on_debian(self):
-        t = self._text({"probe_error": None, "pending_total": 0, "security_count": 0,
+        # supported 是真读者（_collect）一定会给的键；批次75 起 CLI 那句按它而不是按家族名硬编码放行
+        t = self._text({"supported": True, "probe_error": None, "pending_total": 0, "security_count": 0,
                         "reboot_required": None, "reboot_reason": "自定义内核，无法比对"})
         self.assertIn("判不出", t)
         self.assertNotIn("上次更新要求重启", t)

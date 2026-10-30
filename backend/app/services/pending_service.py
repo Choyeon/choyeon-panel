@@ -421,6 +421,10 @@ def _nginx_state(btime: int, hz: int) -> dict:
     try:
         pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
     except OSError:
+        # 这一节和 sshd 那一节共用同一个 guard，也必须共用同一句原因：
+        # 只 return 不写 reason，页面拿到的就是「nginx 没查成」后面空一句话，
+        # 而自检那句「nginx/sshd/systemd 都没有待重载」照样把它粉饰成查过了。
+        out["reason"] = "读不到 /proc，nginx 的 worker 启动时刻与配置新旧无从比对"
         return out
     master = None
     workers = []
@@ -484,7 +488,14 @@ def _sshd_state(btime: int, hz: int) -> dict:
            "files": [], "newest_file": None, "newest_mtime": None, "newest_mtime_iso": None,
            "pending": None}
     pid = None
-    for cand in [int(p) for p in os.listdir("/proc") if p.isdigit()]:
+    # 同文件另两处 /proc 遍历都带 guard，只有这里裸着：hidepid 或降权运行的机器上
+    # 它抛出去就是 GET /api/pending 整个 500，页面从"这一节没查成"变成"这一页打不开"
+    try:
+        cands = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        out["reason"] = "读不到 /proc，sshd 的启动时刻与配置文件新旧无从比对"
+        return out
+    for cand in cands:
         if _read(f"/proc/{cand}/comm").strip() != "sshd":
             continue
         cmd = _cmd_of(cand)
@@ -808,7 +819,14 @@ def doctor_item(data: dict) -> dict:
                 "detail": tallied([f["title"] for f in warns], " 项改动可能还没生效"),
                 "fix": "choyeonctl pending"}
     info = int(counts.get("info") or 0)
-    detail = f"改动都生效了：内核 {kernel.get('running')}，没有踩旧映射的服务，nginx/sshd/systemd 都没有待重载"
+    # 「nginx/sshd/systemd 都没有待重载」是一个覆盖三节的结论，只有三节都真读到过才可以说。
+    # 这一句以前是硬编码的：sshd 那节读不到时自检照样 pass 并宣称 sshd 没问题，
+    # 而下面那句「读不到的节：sshd」和它写在同一条 detail 里互相打脸。
+    reloads = data.get("reloads") or {}
+    read = [k for k, v in reloads.items() if v.get("ok")]
+    detail = f"改动都生效了：内核 {kernel.get('running')}，没有踩旧映射的服务"
+    if read:
+        detail += f"，{'/'.join(read)} 都没有待重载"
     if info:
         detail += f"（另有 {info} 条只是让你知道）"
     if data.get("unreadable"):

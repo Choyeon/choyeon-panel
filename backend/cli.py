@@ -1126,8 +1126,10 @@ def _updates_text(d: dict) -> str:
     lines.append(head)
     if d.get("reboot_required"):
         lines.append("上次更新要求重启才生效")
-    elif d.get("family") == "debian" and d.get("reboot_required") is None:
-        lines.append(f"要不要重启判不出：{d.get('reboot_reason') or '读不到已装内核列表'}")
+    elif d.get("supported") and d.get("reboot_required") is None and d.get("reboot_reason"):
+        # 判据在 service 层，家族白名单不该抄到这里：以前只认 debian，于是 RHEL 上
+        # 标记读不动（同样返回 None）时终端把这件事整个吞掉，而网页那一页照样显示"判不出"。
+        lines.append(f"要不要重启判不出：{d['reboot_reason']}")
     for n in d.get("notes") or []:
         lines.append(f"[note] {n}")
     age = d.get("index_age_hours")

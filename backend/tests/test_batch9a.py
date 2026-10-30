@@ -82,12 +82,27 @@ def _fake_run(table):
 
 
 class _Path:
-    """够用的 Path 替身：只用到 exists / read_text / glob。"""
+    """够用的 Path 替身：exists / read_text / glob。
+
+    批次75 起生产代码不再问 `exists()`，改用 `os.stat` 做三态门禁（在 / 确认不在 / 读不动），
+    而 `os.stat` 只认真路径。所以替身把 exists_flag 落到临时目录里一个真文件上：
+    True 就建出来（stat 得到"在"），False 就不建（stat 得到 FileNotFoundError = 确认不在），
+    两种情况下 `read_text` 都仍回本次用例钉住的那份文本。
+    """
+
+    _dir = tempfile.mkdtemp(prefix="cp_b9a_paths_")
 
     def __init__(self, text="", exists_flag=True, files=None):
         self.text = text
         self.exists_flag = exists_flag
         self.files = files or []
+        self._real = os.path.join(self._dir, f"p{id(self)}")
+        if exists_flag:
+            with open(self._real, "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    def __fspath__(self):
+        return self._real
 
     def exists(self):
         return self.exists_flag

@@ -415,6 +415,38 @@ def disk_usage_pct(path: str) -> int | None:
         return None
 
 
+# 「在不在」这个问题 Path.exists() / is_dir() 只有两个答案，现实里有三个：在、确认不在、
+# 读不动所以确认不了。exists() 把 PermissionError 折成 False，而本项目里 False 一路传下去的
+# 意思从来是"确认没有"——自检因此给绿灯、页面因此念"本机没有证书"。三态门禁只留这一处。
+def path_state(path) -> tuple[bool | None, str]:
+    """stat 视角：True 在 / False 确认不在 / None 确认不了（只带异常类型，不拼绝对路径）。"""
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False, ""
+    except OSError as e:
+        return None, type(e).__name__
+    return True, ""
+
+
+def dir_state(path) -> tuple[bool | None, list[str], str]:
+    """这个目录列不列得动：True + 条目名 / False（确认不存在）+ [] / None（确认不了）+ 原因。
+
+    `os.scandir` 在 opendir 那一刻就抛，不必遍历到第一个条目才知道读不读得动；glob 与
+    iterdir 会把同一个异常吞成空列表，所以"目录能不能读"不能拿它们当探针。
+    原因只带异常类型：这些字符串会进接口响应，绝对路径（/etc/letsencrypt/…）不外泄。
+    """
+    try:
+        it = os.scandir(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False, [], ""
+    except OSError as e:
+        return None, [], type(e).__name__
+    with it:
+        names = [e.name for e in it]
+    return True, names, ""
+
+
 # 字节数折成人话：存储占用与内存压力两页原来各写一份，单位表一份到 TB、一份到 PB，
 # 非数字时一个回 "—"、一个回 "0B"。同一个数量在两个页签里差一个数量级的写法，
 # 用户对照着看就会怀疑是不是自己看错了盘。

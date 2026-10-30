@@ -36,7 +36,7 @@ from ..services import (
     updates_service,
 )
 from ..templates import list_templates
-from ..util import CTRL_TIMEOUT, disk_usage_pct, run
+from ..util import CTRL_TIMEOUT, dir_state, disk_usage_pct, run
 
 router = APIRouter()
 
@@ -326,8 +326,29 @@ async def _check_cert_renewal() -> dict:
     # 换了目录（CP_TLS_DIR）的机器上这一项永远看见"零张证书"，直接 pass 掉，
     # 于是「有证书但没人续期」这件事在任何界面上都不再出现。
     live = Path(config.TLS_DIR)
-    certs = sorted(p.parent.name for p in live.glob("*/fullchain.pem")) if live.is_dir() else []
+    readable, entries, why = dir_state(live)
+    if readable is None:
+        # 读不动时 glob 只会回一张空表，而这张空表在这里被念成"本机没有证书"：
+        # 「有证书、没人续期、而面板连查都查不了」这条最要紧的事就彻底从自检里消失了。
+        return {
+            "status": "warn",
+            "detail": f"读不到证书目录（{why}），本机有没有证书、有没有人续期都确认不了",
+            "fix": "让面板服务保持 root（deploy/choyeon-panel.service 默认就是），"
+                   "或放开该目录的读权限；手工核对：certbot certificates",
+        }
+    # lineage 目录逐个点名，README 之类的散文件不算证书，免得无证书的机器被误报
+    lineages = [n for n in entries if (live / n).is_dir()]
+    certs = sorted(n for n in lineages if (live / n / "fullchain.pem").is_file())
     if not certs:
+        if lineages:
+            # 看得见目录、看不见证书：fullchain.pem 在子目录里读不动（或装坏了），
+            # 说成"暂无证书"就是把"没查成"翻译成"没有"
+            return {
+                "status": "warn",
+                "detail": f"证书目录有 {len(lineages)} 个 lineage，但一个都读不出 fullchain.pem，"
+                          f"续期与否确认不了",
+                "fix": "手工核对：certbot certificates",
+            }
         return {"status": "pass", "detail": "certbot 已装但暂无证书", "fix": ""}
     names = ", ".join(certs[:5])
     t = await cert_ops.timer_status()
@@ -375,7 +396,17 @@ async def _check_timer_units() -> dict:
     unit 却没了（恢复备份、手工删文件），界面显示"已挂表"但它永远不会跑。
     """
     unit_dir = Path(config.UNIT_DIR)
-    if not unit_dir.is_dir():
+    readable, _entries, why = dir_state(unit_dir)
+    if readable is None:
+        # 和批次72 那条同一句话：读不动不等于"盘上干净"。这一项查的就是
+        # 「盘上的 unit 与库里的行对不对得上」，目录看不见时它对任何一边都无从置词。
+        return {
+            "status": "warn",
+            "detail": f"读不到 systemd 单元目录（{why}），这一轮定时器对账没有做成",
+            "fix": "让面板服务保持 root（deploy/choyeon-panel.service 默认就是），"
+                   "或放开该目录的读权限；手工核对：systemctl list-timers --all",
+        }
+    if not readable:
         return {"status": "pass", "detail": "本机无 systemd 单元目录，跳过定时器对账", "fix": ""}
     orphans: list[str] = []
     missing: list[str] = []

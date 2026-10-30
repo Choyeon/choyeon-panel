@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import probe
-from ..util import PROBE_TIMEOUT, run
+from ..util import PROBE_TIMEOUT, path_state, run
 from . import pending_service
 
 CACHE_TTL = 1800.0
@@ -375,12 +375,32 @@ async def _reboot_verdict(family: str) -> tuple[bool | None, str | None]:
             return None, k.get("reason") or "读不到已装内核列表，重启与否判不出"
         return bool(req), k.get("reason")
     if family == RHEL:
-        return REBOOT_FLAG.exists(), None
+        # 这里不能用 REBOOT_FLAG.exists()：exists() 把 PermissionError 折成 False，
+        # 而 False 在这一页的意思从头到尾是"确认不用重启"。/run 的权限被收紧过
+        # （或面板降权运行）的机器上，它会稳定报"不用重启"，而真话是"看不了"。
+        state, why = path_state(REBOOT_FLAG)
+        if state is None:
+            return None, f"确认不了 {REBOOT_FLAG}（{why}），重启与否这一轮不作数"
+        return bool(state), None
     return None, "该发行版的重启判定不由面板负责"
 
 
 async def _collect() -> dict:
-    meta = parse_os_release(OS_RELEASE.read_text(encoding="utf-8", errors="ignore")) if OS_RELEASE.exists() else {}
+    osr_text = ""
+    osr_unreadable = ""
+    # 不能用 OS_RELEASE.exists() 当闸门：exists() 把 PermissionError 折成"不在"，
+    # 于是一台 /etc 读不动的机器会被说成"这机器没有 os-release"。三态门禁同批其它处。
+    state, why = path_state(OS_RELEASE)
+    if state is None:
+        osr_unreadable = why
+    elif state:
+        try:
+            osr_text = OS_RELEASE.read_text(encoding="utf-8", errors="ignore")
+        except OSError as e:
+            # _stat 过了不等于读得动（ACL / 挂载选项 / 读到一半被换掉），
+            # 裸 read_text 在这里抛出去就是 GET /api/updates 直接 500
+            osr_unreadable = type(e).__name__
+    meta = parse_os_release(osr_text) if osr_text else {}
     available = {c for c in PKG_CMDS if shutil.which(c)}
     family = family_of(meta, available)
     notes: list[str] = []
@@ -389,6 +409,11 @@ async def _collect() -> dict:
     security_known = False
     probe_error: str | None = None
     index_age: float | None = None
+
+    if osr_unreadable:
+        # 不把"读不到"说成"这机器没有 os-release"：页面至少要让人看见判词是哪一路来的
+        notes.append(f"读不到 {OS_RELEASE}（{osr_unreadable}）："
+                     f"发行版名与家族这轮只按包管理器命令判，页面上的发行版名可能为空")
 
     if family == DEBIAN:
         r = await run("apt", ["list", "--upgradable"], timeout=APT_TIMEOUT)
