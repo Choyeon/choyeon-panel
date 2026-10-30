@@ -356,12 +356,18 @@ class RealPermissionTests(unittest.TestCase):
         self.assertNotIn("REFUSED-other", out, f"拒绝的理由必须是「拿不到快照」：{out[:600]}")
         self.assertEqual(out.count("=REFUSED-nosnapshot"), 3, f"三条读写路径都要拒绝：{out[:600]}")
 
+    def _assert_disk_untouched(self):
+        """比对盘上那份之前先把权限还回来：CI 的 job 不是 root，
+        拿着 000 去 read_text 只会测出「我自己也读不到」，而不是「面板没动过」。"""
+        os.chmod(self.path, 0o644)
+        self.assertEqual(Path(self.path).read_text(), self.DISK_TEXT, "面板一个字都没动盘上那份")
+
     def test_file_itself_unreadable(self):
         if os.path.realpath(self.path) != self.path:
             self.skipTest(f"{self.base} 里有符号链接组件，守卫会先按路径拒绝，复现不到读不到这一档")
         out = self._fork_probe()
         self._assert_refused(out)
-        self.assertEqual(Path(self.path).read_text(), self.DISK_TEXT, "面板一个字都没动盘上那份")
+        self._assert_disk_untouched()
         self.assertEqual(sorted(os.listdir(self.conf)), ["panel-demo.conf"], "不留临时文件")
 
     def test_parent_dir_unreadable_is_not_read_as_absent(self):
@@ -371,7 +377,7 @@ class RealPermissionTests(unittest.TestCase):
         finally:
             os.chmod(self.conf, 0o755)
         self._assert_refused(out)
-        self.assertEqual(Path(self.path).read_text(), self.DISK_TEXT)
+        self._assert_disk_untouched()
 
 
 class SourceContractTests(unittest.TestCase):
