@@ -2088,6 +2088,12 @@
   这一行。`backend/tests/test_batch70.py` 里有一条真实权限实测（mode 0 的安装目录 + fork 降权
   子进程复现 CI 现场，root/无 nobody 时如实 skip）外加 mock 覆盖三条 stat 路，并钉住
   「unreadable 照常进漂移与判词」。
+- 批次71，批次70 同类缺陷在这个文件里的漏网之鱼：`suggest_unit` 的裸 `is_file()`。它和
+  `env_state` 挂在同两条读路径上（`GET /api/apps` 列表与 `GET /api/apps/{id}` 详情），
+  stat 抛 OSError 一样把 500 打出去——生产机上 root 读得到 `/etc/systemd/system` 踩不到，
+  CI 与降权跑的机器踩得到。修成读不动如实「不建议」（None），不猜也不崩；探针在生产机
+  实测过修复前 `RAISED=PermissionError`。A/B 反证：把 catch 拆回裸 stat，
+  `test_batch70` 的新用例与源码契约条当场两红，恢复即绿。
 - 批次70 补丁2，上一条真实权限用例的两代红法。第一版在 CI 用 `su -s /bin/sh nobody` 起子进程，
   GitHub runner 上被 PAM 挡成「Authentication failure」（nobody 没有口令），33ded7c 因此多挂一条；
   第二版改 fork + setgid/setuid 后 `execv` 重启解释器，在生产机（root）上又红：`.venv/bin/python`

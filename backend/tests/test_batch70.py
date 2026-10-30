@@ -12,6 +12,8 @@
   `exists()/is_symlink()` 兜底同样 catch；
 - `unit_reads_env_file`：drop-in 目录的 glob 迭代会抛，收进 try；
 - `env_drift`：unit 文件存在性闸门只是噪声过滤，stat 不动就跳过这一行，不炸整轮。
+- 批次71 补的第四条 `suggest_unit`：它挂在 GET /api/apps（列表）与详情页两条读路径上，
+  原来也是裸 `is_file()`——同一类缺陷在这个文件里的漏网之鱼，读不动如实「不建议」。
 
 真实权限用例 fork 出子进程 `setgid/setuid` 成 nobody、在子进程里就地调 `env_state`
 复现 CI 现场。不用 `su`：CI 里 root 起 su 会被 PAM 挡成 Authentication failure（nobody
@@ -117,7 +119,7 @@ class UnreadableUnderRealPermissionTests(unittest.TestCase):
 
 
 class StatErrorMappingTests(unittest.TestCase):
-    """stat 抛 OSError 的三条路：都落进诚实档，没有一个向上冒。"""
+    """stat 抛 OSError 的四条路：都落进诚实档，没有一个向上冒。"""
 
     def test_parent_stat_denied_is_unreadable_not_missing(self):
         # CI 原景：path=/root/www/demo，非 root 连 /root 都进不去
@@ -162,6 +164,22 @@ class StatErrorMappingTests(unittest.TestCase):
         self.assertEqual(got["drift"], [])
         self.assertEqual(got["total"], 1)
 
+    def test_suggest_unit_with_denied_stat_returns_none_instead_of_500(self):
+        # 批次71：同一个缺陷的漏网之鱼——suggest_unit 挂在 GET /api/apps（列表）和
+        # GET /api/apps/{id}（详情）两条读路径上，裸 is_file() 一抛就是整页 500。
+        # 生产机 root 下 /etc/systemd/system 读得到，踩不到；CI 之外还有跑在容器/降权
+        # 服务里的场景，读不动就如实「不建议」，不猜也不崩。
+        app = _app()
+        with mock.patch.object(apps_service.Path, "is_file",
+                               side_effect=PermissionError(13, "Permission denied")):
+            self.assertIsNone(apps_service.suggest_unit(app, True))
+        # 诚实档的另一头：读得动、文件真在，建议照旧给出来——catch 不许把功能吞了
+        units = tempfile.mkdtemp(prefix="cp_b70p_sug_")
+        self.addCleanup(shutil.rmtree, units, True)
+        Path(units, "demo.service").write_text("[Unit]\n", encoding="utf-8")
+        with mock.patch.object(apps_service, "UNIT_DIR", units):
+            self.assertEqual(apps_service.suggest_unit(app, True), "demo.service")
+
 
 class HonestRowsStillDriftTests(unittest.TestCase):
     """unreadable 照常进漂移与判词——读不到还装绿灯才是自检最坏的样子。"""
@@ -176,12 +194,14 @@ class HonestRowsStillDriftTests(unittest.TestCase):
         self.assertIn("读不了", out["detail"])
 
     def test_source_contract_guard_rows(self):
-        # 源码契约：裸 stat 的三条路都必须在 try 里（CI 的 PermissionError 全靠这三处兜住）
+        # 源码契约：裸 stat 的四条路都必须在 try 里（CI 的 PermissionError 全靠这几处兜住）
         self.assertIn("parent_ok = None", SERVICE_PY)
         self.assertRegex(SERVICE_PY, r"try:\s*\n\s*if target\.is_file\(\):")
         self.assertIn("unit_present = False", SERVICE_PY)
         fn = SERVICE_PY.split("def unit_reads_env_file")[1].split("def env_state")[0]
         self.assertIn("files.extend(_env_drop_in_dir(unit).glob", fn)
+        fn = SERVICE_PY.split("def suggest_unit")[1].split("def render_unit_from")[0]
+        self.assertRegex(fn, r"try:\s*\n\s*present = \(Path\(UNIT_DIR\) / cand\)\.is_file\(\)")
 
 
 if __name__ == "__main__":

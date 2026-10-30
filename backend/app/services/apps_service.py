@@ -87,7 +87,14 @@ def suggest_unit(app: dict, missing: bool) -> str | None:
     if not missing or app.get("unit_override"):
         return None
     cand = f"{app['name']}.service"
-    return cand if (Path(UNIT_DIR) / cand).is_file() else None
+    try:
+        present = (Path(UNIT_DIR) / cand).is_file()
+    except OSError:
+        # UNIT_DIR stat 不动（非 root 的 /etc/systemd/system 是读得到的，但调用这个读路径的
+        # 机器不保证）——读不动就不建议，不猜也不崩。这里原来是裸 stat，和批次70 的
+        # env_state 同一个缺陷：一个探测函数把 500 打进 GET /api/apps 与详情页。
+        return None
+    return cand if present else None
 
 
 def render_unit_from(tpl: str, app: dict) -> str:
