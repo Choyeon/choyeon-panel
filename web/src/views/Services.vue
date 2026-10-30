@@ -1857,8 +1857,21 @@ const patchColumns: any[] = [
 
 const patchPaging = { pageSize: 20, showSizePicker: false, showQuickJumper: false };
 // 通告号只在 dnf 那一支有：列出来能让管理员去查 CVE，但不为它单开一张表。
-// 截到第 8 条却不说话，看起来像一共就只有这些；真实条数必须跟着走。
-const advisoryLine = computed(() => cutCounted(patches.value?.advisories || [], 8, (a: any) => a.id));
+// 截到第 8 条却不说话，看起来像一共就只有这些；真实条数必须跟着走——而且要用接口报的
+// advisory_total，不是数组长度：那份数组在服务层就被切到了 list_limits.advisories。
+const advisoryLine = computed(() => cutCounted(patches.value?.advisories || [], 8,
+  (a: any) => a.id, patches.value?.advisory_total));
+
+// 清单太长时服务层只回前 list_limits.packages 个（上限由接口自己带，别在这里抄 300）。
+// 表格的分页器数的是切过的数组，而上方判词写的是真总数，两个数字同屏时必须说清哪个是真的、
+// 以及看不到的那部分去哪了——面板不代跑包管理器，全量只能自己执行。
+const patchListCut = computed(() => {
+  const p = patches.value;
+  const total = typeof p?.pending_total === 'number' ? p.pending_total : null;
+  const cap = Number(p?.list_limits?.packages) || 0;
+  if (total === null || !cap || total <= cap) return '';
+  return `待装 ${total} 个，这一轮只读出前 ${cap} 个，表格里看不到剩下的 ${total - cap} 个（面板不代跑包管理器，全量请用下方命令自己看）。`;
+});
 
 // 端口表：一个端口一行，判定和它的理由必须同屏——只给"对外可达"三个字，
 // 管理员下一步还是得回 SSH 里手敲 ss + ufw status 才知道该拿它怎么办。
@@ -2030,6 +2043,8 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         </div>
         <NText depth="3" class="pt-cmd-hint">面板只读出清单，不会替你装包：装包会顺带重启别的服务、可能换内核，失败要人盯着。</NText>
       </div>
+
+      <NText v-if="patchListCut" depth="3" class="pt-advisories cp-prose">{{ patchListCut }}</NText>
 
       <NDataTable
         :columns="patchColumns" :data="patches?.packages || []" size="small" :bordered="false"

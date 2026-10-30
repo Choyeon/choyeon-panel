@@ -1144,8 +1144,15 @@ def _updates_text(d: dict) -> str:
     for p in shown:
         mark = "  [security]" if p.get("security") else ""
         lines.append(f"  {p['name']:<38} {p.get('current') or '-':<26} -> {p.get('candidate') or '?'}{mark}")
-    if len(pkgs) > len(shown):
-        lines.append(f"  ...共 {len(pkgs)} 个，完整清单用 --json")
+    # 行尾那个数字只能来自 pending_total：以前写的是 len(pkgs)，而接口把 pkgs 切到了
+    # list_limits.packages，于是 412 个待装的机器在头行写「待装 412 个」、末行写「共 300 个」，
+    # 且「完整清单用 --json」一起成了假话——--json 里同样只有前 300 条。
+    cap = int((d.get("list_limits") or {}).get("packages") or 0)
+    if cap and total > cap:
+        lines.append(f"  ...待装 {total} 个，本轮只读出前 {cap} 个（--json 同样只有这 {cap} 个，"
+                     f"全量请自己跑包管理器的 list）")
+    elif len(pkgs) > len(shown):
+        lines.append(f"  ...共 {total} 个，完整清单用 --json")
     cmds = d.get("commands") or {}
     if cmds.get("refresh_index") and (err or (age is not None and age > updates_service.STALE_TRUST_HOURS)):
         lines.append(f"刷新索引：  {cmds['refresh_index']}")

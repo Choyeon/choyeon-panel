@@ -119,8 +119,14 @@ export function cutChars(text: string, max: number, where: string): string {
   return `${text.slice(0, max)}…（已截断，共 ${text.length} 字符，${where}）`;
 }
 
-/** 同上，但限的是条目数：只列前 max 条时，真实条数跟着一起走。 */
-export function cutCounted<T>(items: T[], max: number, show: (item: T) => string): string {
+/**
+ * 同上，但限的是条目数：只列前 max 条时，真实条数跟着一起走。
+ * `realTotal` 给的是接口那头没被切过的总数——数组本身可能已经被服务端切过（补丁清单就有
+ * 这一刀），这时 `items.length` 是传输上限而不是条数，拿它写「等 N 条」等于用面板自己的
+ * 限额冒充测量结果。
+ */
+export function cutCounted<T>(items: T[], max: number, show: (item: T) => string, realTotal?: number): string {
   const shown = items.slice(0, max).map(show).join('、');
-  return items.length > max ? `${shown} 等 ${items.length} 条` : shown;
+  const total = typeof realTotal === 'number' && realTotal > items.length ? realTotal : items.length;
+  return items.length > max || total > items.length ? `${shown} 等 ${total} 条` : shown;
 }

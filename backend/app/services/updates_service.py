@@ -406,6 +406,7 @@ async def _collect() -> dict:
     notes: list[str] = []
     pkgs: list[dict] = []
     advisories: list[dict] = []
+    advisory_total = 0
     security_known = False
     probe_error: str | None = None
     index_age: float | None = None
@@ -436,8 +437,12 @@ async def _collect() -> dict:
             notes.append(f"{cmd} check-update 失败（退出码 {r['code']}）：{(r['out'] or '').strip()[:160]}")
         probe_error = _probe_error(family, r["code"], pkgs)
         adv = await run(cmd, ["-q", "updateinfo", "list", "security"], timeout=DNF_TIMEOUT)
-        advisories = parse_dnf_updateinfo(adv["out"] or "")[:MAX_ADVISORIES]
-        security_known = probe_error is None and (bool(advisories) or any(p["security"] for p in pkgs))
+        # 先拿到完整的一份再切：切完才数长度，87 条通告就会被报成 60，
+        # 而 60 正是上面那个上限的字面值——限制本身成了一次测量结果。
+        advisories_all = parse_dnf_updateinfo(adv["out"] or "")
+        advisory_total = len(advisories_all)
+        advisories = advisories_all[:MAX_ADVISORIES]
+        security_known = probe_error is None and (bool(advisories_all) or any(p["security"] for p in pkgs))
         if probe_error is None and not security_known:
             notes.append(f"{cmd} 没给出安全更新子集，只报待装总数")
     elif family == ARCH:
@@ -462,8 +467,10 @@ async def _collect() -> dict:
     security_pkgs = [p for p in pkgs if p["security"]]
     if not security_known:
         security_count = None
-    elif family == RHEL and advisories:
-        security_count = len(advisories)
+    elif family == RHEL and advisory_total:
+        # 数的是真总数而不是切过的那份：拿 len(advisories) 时，一个安全更新很多
+        # （>60 条）的机器会永远显示「60 个」，而这个 60 是面板自己的传输上限。
+        security_count = advisory_total
     else:
         security_count = len(security_pkgs)
 
@@ -485,6 +492,11 @@ async def _collect() -> dict:
         "security_known": security_known,
         "packages": pkgs[:MAX_PKGS],
         "advisories": advisories,
+        # 这两个数组都被切过，切多少由下面的 list_limits 说。真实总数只有
+        # pending_total / advisory_total 这两个出处：不写出来，读接口的人只能数数组长度，
+        # 而 300 和 60 恰好也是代码里的常量——一个传输限制会伪装成一次测量结果。
+        "advisory_total": advisory_total,
+        "list_limits": {"packages": MAX_PKGS, "advisories": MAX_ADVISORIES},
         "reboot_required": reboot,
         "reboot_reason": reboot_reason,
         "auto_updates": await _auto_updates(family),
