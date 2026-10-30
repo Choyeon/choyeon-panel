@@ -388,6 +388,25 @@ def parse_limit(raw, default: int = LIST_DEFAULT, maximum: int = LIST_CAP) -> in
     return max(1, min(n or default, maximum))
 
 
+def parse_cursor(raw) -> tuple[int | None, str | None]:
+    """把 before 游标解析成正整数 id，返回 (游标, 错误文案)。
+
+    空串是「第一页」，不是错误。写成 0 / 负数 / 非数字则 400：SQLite 的
+    `id < -3` 不报错，只会安静地返回整表——把一个打错的游标当成「从头开始」，
+    翻页就会在页面里重复出现同一批记录。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None, None
+    try:
+        n = int(s)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return None, "before 必须是上一条最旧记录的 id（正整数）"
+    return n, None
+
+
 def list_ladder() -> list[int]:
     """条数下拉的档位，由上面那两个数派生：{默认的一半, 默认, 上限}。
 

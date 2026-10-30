@@ -31,7 +31,8 @@ test('告警页：缓存 key 带上级别、条数与关键字', () => {
 test('告警页：计数行用服务端 matched，并标出还有更早的没加载', () => {
   const s = read('views/Alerts.vue');
   assert.match(s, /const matched = computed\(\(\) => data\.value\?\.matched \?\? null\);/);
-  assert.match(s, /const hasOlder = computed\(\(\) => !!data\.value\?\.hasMore\);/);
+  // 批次82 起窗口边界由追加页之后的 hasMore 决定（加载更早之后要能收口）
+  assert.match(s, /const hasOlder = computed\(\(\) => moreAfter\.value\);/);
   assert.match(s, /const head = q\.value \? `匹配 \$\{n\} 条` : \(level\.value \? `该级别共 \$\{n\} 条` : `共 \$\{n\} 条`\);/);
   assert.match(s, /还有更早的记录未加载/);
 });

@@ -56,6 +56,18 @@ const { data: openData, error: openError, load: loadOpen } = useCachedFetch<Open
 watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 watch(openError, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
+// 更早的几页只追加在本页：缓存管的永远是「当前条件下的第一屏」，
+// 条件一变（换词/换级别/换条数/点刷新）第一屏重新取，追加的那几页必须一起清掉。
+const older = ref<AlertRow[]>([]);
+const olderBusy = ref(false);
+const olderError = ref('');
+const moreAfter = ref(false);
+watch(data, (d) => {
+  older.value = [];
+  olderError.value = '';
+  moreAfter.value = !!d?.hasMore;
+});
+
 const limitOpts = computed(() => (data.value?.ladder || []).map((n) => ({ label: `最近 ${n} 条`, value: n })));
 // 用户没碰过选择器时回显服务端实际用掉的那一档，而不是本页猜一个默认值
 const shownLimit = computed(() => limit.value ?? data.value?.limit ?? null);
@@ -63,13 +75,14 @@ const shownLimit = computed(() => limit.value ?? data.value?.limit ?? null);
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
 
 const rows = computed<AlertRow[]>(() => {
-  const list = data.value?.rows ?? [];
+  const list = [...(data.value?.rows ?? []), ...older.value];
   // 未确认的钉在最上面：这一页首要用途是「还有什么没处理」，不是完整时间线。
-  return [...list].sort((a, b) => (a.acked === b.acked ? b.id - a.id : a.acked - b.acked));
+  return list.sort((a, b) => (a.acked === b.acked ? b.id - a.id : a.acked - b.acked));
 });
 // 匹配数是服务端在这个过滤条件下数出来的整表条数；不能拿已加载的行数充数。
 const matched = computed(() => data.value?.matched ?? null);
-const hasOlder = computed(() => !!data.value?.hasMore);
+const hasOlder = computed(() => moreAfter.value);
+const canLoadOlder = computed(() => moreAfter.value && rows.value.length > 0 && !olderBusy.value);
 const countText = computed(() => {
   const n = matched.value === null ? '—' : String(matched.value);
   const head = q.value ? `匹配 ${n} 条` : (level.value ? `该级别共 ${n} 条` : `共 ${n} 条`);
@@ -106,6 +119,36 @@ function reload() {
   invalidateCache('audit:');
   void loadOpen().catch(() => undefined);
   return refresh().catch(() => undefined);
+}
+
+// 游标取「已加载里最小的 id」，不是表格最后一行：未确认的行被钉在最上面，
+// 最后一行的 id 往往不是最小，拿它当游标会在两页之间漏掉一段。
+async function loadOlder() {
+  if (!canLoadOlder.value) return;
+  const ids = rows.value.map((r) => r.id);
+  if (!ids.length) return;
+  const before = Math.min(...ids);
+  const mineQ = q.value;
+  const mineLevel = level.value;
+  const mineLimit = limit.value;
+  olderBusy.value = true;
+  olderError.value = '';
+  try {
+    const p = new URLSearchParams();
+    if (mineLimit) p.set('limit', String(mineLimit));
+    if (mineLevel) p.set('level', mineLevel);
+    if (mineQ) p.set('q', mineQ);
+    p.set('before', String(before));
+    const r: HistoryResp = await req(`/alerts/history?${p.toString()}`);
+    // 迟到响应：期间换了条件，这一页属于旧条件，扔掉而不是拼进来
+    if (q.value !== mineQ || level.value !== mineLevel || limit.value !== mineLimit) return;
+    older.value = [...older.value, ...(r.rows || [])];
+    moreAfter.value = !!r.hasMore;
+  } catch (e: any) {
+    olderError.value = e?.message || String(e);
+  } finally {
+    olderBusy.value = false;
+  }
 }
 
 const cols: any[] = [
@@ -307,6 +350,12 @@ async function runRound(kind: 'run' | 'probe') {
           <EmptyBox :text="histFailed ? '告警历史读取失败，点「刷新」重试' : (q ? `没有匹配「${q}」的告警记录` : (level ? '该级别没有告警记录' : '暂无告警历史，点「立即巡检」跑一轮'))" />
         </template>
       </NDataTable>
+      <div v-if="canLoadOlder || olderError" style="display: flex; align-items: center; justify-content: center; gap: var(--space-3); margin-top: var(--space-3)">
+        <NButton v-if="canLoadOlder" size="small" tertiary :loading="olderBusy" @click="loadOlder">
+          {{ olderError ? '重试加载更早的记录' : '加载更早的记录' }}
+        </NButton>
+        <NText v-if="olderError" type="error" style="font-size: var(--fs-xs)">{{ olderError }}</NText>
+      </div>
     </CpToolbarCard>
   </div>
 </template>

@@ -7,7 +7,7 @@ from .. import aio_db
 from ..deps import need_admin
 from ..log import warn
 from ..services import alerts_service
-from ..util import LIST_CAP, SEARCH_Q_MAX, like_contains, list_ladder, parse_limit
+from ..util import LIST_CAP, SEARCH_Q_MAX, like_contains, list_ladder, parse_cursor, parse_limit
 
 router = APIRouter()
 
@@ -29,6 +29,9 @@ async def alerts_history(req: Request):
     # 永远搜不到，还会被写成「没有符合筛选条件的告警记录」——把「这一屏没有」说成「没有」。
     q = (qp.get("q") or "").strip()[:SEARCH_Q_MAX]
     limit = parse_limit(qp.get("limit"))
+    before, cursor_err = parse_cursor(qp.get("before"))
+    if cursor_err:
+        return JSONResponse(status_code=400, content={"error": cursor_err, "code": "bad_cursor"})
     if level and not LEVEL_RE.match(level):
         return JSONResponse(status_code=400, content={"error": "level 只能是 ok / warn / crit"})
     where, params = [], []
@@ -42,15 +45,23 @@ async def alerts_history(req: Request):
         pat = like_contains(q)
         where.append("(code LIKE ? ESCAPE '\\' OR message LIKE ? ESCAPE '\\')")
         params += [pat, pat]
-    tail = " FROM alerts_log" + (" WHERE " + " AND ".join(where) if where else "")
+    filters = (" WHERE " + " AND ".join(where)) if where else ""
+    # 游标只收窄这一页，不进 COUNT：matched 是「这个过滤条件下历史上一共多少条」，
+    # 翻到第二页时数字不能跟着变小，否则「匹配 5 条」会变成「匹配 3 条」。
+    page = filters
+    page_params = list(params)
+    if before is not None:
+        page = filters + (" AND " if filters else " WHERE ") + "id < ?"
+        page_params.append(before)
     try:
         # 多取一行只为判断「还有更早的匹配没加载」，它不进响应
         rows = await aio_db.query(
-            "SELECT id,ts,level,code,message,meta,acked" + tail + " ORDER BY id DESC LIMIT ?",
-            (*params, limit + 1),
+            "SELECT id,ts,level,code,message,meta,acked FROM alerts_log" + page
+            + " ORDER BY id DESC LIMIT ?",
+            (*page_params, limit + 1),
         )
         # matched 是这个过滤条件下整张表的真实条数：页面上的「匹配 N 条」不能拿本页行数充数
-        total = await aio_db.query_one("SELECT COUNT(*) AS n" + tail, tuple(params))
+        total = await aio_db.query_one("SELECT COUNT(*) AS n FROM alerts_log" + filters, tuple(params))
     except Exception as e:  # noqa: BLE001
         return await _fail(f"alerts history 查询失败: {type(e).__name__}: {e}", "告警历史读取失败")
     has_more = len(rows) > limit

@@ -10,7 +10,7 @@ from .. import database as dbm
 from ..deps import need_admin as _need_admin
 from ..errors import err_json
 from ..services import alerts_service, nginx_ops, panel_entry_service
-from ..util import SEARCH_Q_MAX, is_http_url, like_contains, list_ladder, parse_limit, redact_creds
+from ..util import SEARCH_Q_MAX, is_http_url, like_contains, list_ladder, parse_cursor, parse_limit, redact_creds
 
 router = APIRouter()
 
@@ -308,17 +308,9 @@ async def audit_list(req: Request):
     # 过滤必须在服务端做：页面一屏只拿得到 limit 行，在客户端过滤的话「更早的 500 行之外」
     # 永远搜不到，还会如实显示成「没有匹配的记录」——把「没搜到这一屏」说成「没有」。
     q = (qp.get("q") or "").strip()[:SEARCH_Q_MAX]
-    before_raw = (qp.get("before") or "").strip()
-    before = None
-    if before_raw:
-        try:
-            before = int(before_raw)
-        except ValueError:
-            before = 0
-        if before <= 0:
-            return JSONResponse(status_code=400,
-                                content={"error": "before 必须是上一条最旧记录的 id（正整数）",
-                                         "code": "bad_cursor"})
+    before, cursor_err = parse_cursor(qp.get("before"))
+    if cursor_err:
+        return JSONResponse(status_code=400, content={"error": cursor_err, "code": "bad_cursor"})
     where: list[str] = []
     args: list = []
     if before is not None:
