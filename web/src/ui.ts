@@ -107,3 +107,20 @@ export function unitTag(r: { unitState?: string; unitMissing?: boolean; suggestU
       : { status: 'notfound', text: '单元不存在', tone: 'err' };
   return UNIT_TAG[r.unitState || ''] || { status: 'unknown', text: '状态未知', tone: 'idle' };
 }
+
+/**
+ * 截断要自己说出来。面板里有几处格子装不下原值（Redis 成员值、JSON 预览、安全通告号），
+ * 过去各写各的截断法，其中两处连"被切过"都不提——半截文本看起来就像数据本来到此为止，
+ * 只读账号又没有第二个入口，于是"值只有这么长"成了一个谎。
+ * 上限由调用方给（受格子大小约束），说法只有这一份。
+ */
+export function cutChars(text: string, max: number, where: string): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}…（已截断，共 ${text.length} 字符，${where}）`;
+}
+
+/** 同上，但限的是条目数：只列前 max 条时，真实条数跟着一起走。 */
+export function cutCounted<T>(items: T[], max: number, show: (item: T) => string): string {
+  const shown = items.slice(0, max).map(show).join('、');
+  return items.length > max ? `${shown} 等 ${items.length} 条` : shown;
+}
