@@ -11,6 +11,9 @@ import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
 import { useVisiblePoll } from '../composables/useVisiblePoll';
+// 应用清单还有别的消费者：备份页的「选应用」下拉缓存 key 'apps' 60 秒。本页增删改名后
+// 不失效它，那个下拉会在最长一分钟内选不到刚建的应用、或者把已删的应用列着让人去建备份任务。
+import { invalidateCache } from '../composables/useCachedFetch';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
@@ -386,6 +389,7 @@ function askDel(r: any) {
     msg: '此操作将仅删除面板配置，服务器文件保留；需要彻底清理请到应用详情页操作。是否继续？',
     api: async () => {
       await api.deleteApp(r.id, false);
+      invalidateCache('apps');
       load();
     },
     successMsg: '已删除配置',
@@ -413,6 +417,7 @@ async function create() {
       applyShared();
       const res: any = await api.createApp({ components: [buildApp(be.value, 'backend'), buildApp(fe.value, 'frontend')] });
       msg.success('前后端项目已创建');
+      invalidateCache('apps');
       showCreate.value = false;
       router.push(`/apps/${res.group}`);
       return;
@@ -432,6 +437,7 @@ async function create() {
       template: form.value.template || undefined,
     });
     msg.success('创建成功');
+    invalidateCache('apps');
     showCreate.value = false;
     router.push(`/apps/${a.id}`);
   } catch (e: any) {

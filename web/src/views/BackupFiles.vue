@@ -342,11 +342,26 @@ const columns: any[] = [
   },
 ];
 
-onMounted(() => {
+function applyJobQuery(): boolean {
   const q = route.query.job;
-  if (typeof q === 'string' && /^\d+$/.test(q)) jobFilter.value = q;
+  if (typeof q === 'string' && /^\d+$/.test(q) && q !== jobFilter.value) {
+    jobFilter.value = q;
+    return true;
+  }
+  return false;
+}
+
+onMounted(() => {
+  applyJobQuery();
   load();
   autoPoll.start();
+});
+
+// 同一个路由换 query 时 Vue 复用一个组件实例（router-view 没按 fullPath 加 key），
+// onMounted 不会再跑一次：从备份任务页连点两个「N 份」，筛子还停在第一次点进去的那个任务上，
+// 表里列的是上一个任务的产物而标题写着刚点的那个。
+watch(() => route.query.job, () => {
+  if (applyJobQuery()) void load();
 });
 </script>
 

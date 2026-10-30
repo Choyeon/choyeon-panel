@@ -73,6 +73,10 @@ const jRefreshing = ref(false);
 const nLoading = ref(false);
 const follow = ref(false);
 const FOLLOW_MS = 5000;
+// 跟随这一档的失败单独记：err 说的是「你刚点的那次检索怎么了」，
+// 后台补拉的错误顶到页面顶部横幅，会把正在看访问日志/访问统计的人
+// 吓成「那一页也坏了」，而真正的跟随坏掉就埋在另一个页签底下没人看见。
+const followErr = ref('');
 
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 260 });
 
@@ -155,16 +159,18 @@ async function searchJournal(opts: { silent?: boolean } = {}) {
     jLoading.value = true;
   }
   const seq = ++journalSeq;
-  err.value = '';
+  if (!opts.silent) err.value = '';
   const q = new URLSearchParams();
   Object.entries(jf.value).forEach(([k, v]) => { if (v !== '' && v !== null) q.set(k, String(v)); });
   try {
     const r = await req(`/system/logs?${q.toString()}`, { timeout: 60000 });
     if (seq !== journalSeq) return;
     jResult.value = r;
+    followErr.value = '';
   } catch (e: any) {
     if (seq !== journalSeq) return;
-    err.value = e.message || String(e);
+    if (opts.silent) followErr.value = e.message || String(e);
+    else { err.value = e.message || String(e); followErr.value = ''; }
     if (!opts.silent) jResult.value = null;
   } finally {
     if (seq === journalSeq) {
@@ -178,6 +184,12 @@ async function searchJournal(opts: { silent?: boolean } = {}) {
 // 挂着不动就占一个 journalctl 进程；轮询复用同一个检索接口，条件所见即所得。
 // 标签页隐藏时由 useVisiblePoll 挂起，回到前台立刻补一次，不会错过最新几行。
 const followPoll = useVisiblePoll(() => { void searchJournal({ silent: true }); }, FOLLOW_MS);
+// 跟随只在系统日志页签跑：NTabs 的 display-directive="show:lazy" 让切走的页签继续挂着，
+// 定时器照旧每 5 秒 fork 一个 journalctl——人在访问统计那一页，机器在为看不见的页签采样。
+watch(tab, (t) => {
+  if (t !== 'journal') followPoll.stop();
+  else if (follow.value) followPoll.start();
+});
 function toggleFollow(v: boolean) {
   follow.value = v;
   followPoll.stop();
@@ -544,6 +556,9 @@ const nEmptyText = computed(() => {
             <NSwitch size="small" :value="follow" aria-label="跟随最新日志" @update:value="toggleFollow" />
             <NText class="cell-sub" style="font-size: var(--fs-xs)">跟随（每 {{ FOLLOW_MS / 1000 }} 秒按同样条件重查）</NText>
           </span>
+          <NAlert v-if="followErr" type="warning" :bordered="false" size="small" style="width: 100%">
+            跟随的这一轮没取回日志（{{ followErr }}），画面停在上一次成功的那份；开关还开着，下一轮继续试。
+          </NAlert>
         </NSpace>
         <NSpace :size="8" wrap style="margin-bottom: var(--space-3)">
           <NText class="cell-sub" style="font-size: var(--fs-xs); align-self: center">快捷入口：</NText>

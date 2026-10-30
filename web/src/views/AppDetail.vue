@@ -10,6 +10,7 @@ import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
 import { fmtBytes } from '../composables/useFormat';
+import { invalidateCache } from '../composables/useCachedFetch';
 import LogStream from '../components/LogStream.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import PageTabBar from '../components/PageTabBar.vue';
@@ -344,6 +345,9 @@ async function save() {
       db_names: dbSel.value.join(',') || null,
       env: env.value.filter((x) => x && typeof x.k === 'string' && x.k),
     });
+    // 名称可能就在这一次改掉：备份页缓存的 'apps' 里存着名字派生态（下拉与任务归属），
+    // 不作废的话接下来一分钟它会拿着旧名字去匹配已经不存在的那个应用。
+    invalidateCache('apps');
     // 「已保存」和「已生效」是两件事：后端会把改动重新渲染进 unit / .panel.env / nginx，
     // 服务在跑就顺带重启。这一步失败或压根不该做（外部 unit）时只报"已保存"，
     // 用户会以为新配置已经在跑，于是把"改了没反应"当成玄学问题去排查。
@@ -475,6 +479,7 @@ function purge() {
       // 而标题里点名的还是 A 的名字与目录——那是照着 A 的名单删 B。跳页就作废这一次确认。
       if (target !== id) throw new Error('已经切换到别的应用，这次删除作废；要删请回到那个应用再点一次');
       await api.deleteApp(target, true);
+      invalidateCache('apps');
       router.push('/apps');
     },
     successMsg: '已删除并清理文件',

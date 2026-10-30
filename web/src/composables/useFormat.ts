@@ -6,8 +6,11 @@
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
 
-/** 十进制字节：0 → `0 B`，1536 → `1.5 KB`；非数字/负数（stat 失败时的常态）→ `—` */
+/** 十进制字节：0 → `0 B`，1536 → `1.5 KB`；非数字/负数/null（探测没读回来）→ `—` */
 export function fmtBytes(n: number | null | undefined): string {
+  // null 必须先挡住：Number(null) 是 0，会让「systemd 没报 MemoryCurrent」「异地大小读不到」
+  // 这些没值的地方画成「0 B」，看着像一个真的用量。
+  if (n === null || n === undefined) return '—';
   let v = Number(n);
   if (!Number.isFinite(v) || v < 0) return '—';
   let i = 0;
