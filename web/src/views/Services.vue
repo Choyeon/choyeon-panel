@@ -1857,7 +1857,12 @@ const patchColumns: any[] = [
 
 const patchPaging = { pageSize: 20, showSizePicker: false, showQuickJumper: false };
 // 通告号只在 dnf 那一支有：列出来能让管理员去查 CVE，但不为它单开一张表。
-const advisoryLine = computed(() => (patches.value?.advisories || []).slice(0, 8).map((a: any) => a.id).join('、'));
+const advisoryLine = computed(() => {
+  const all = patches.value?.advisories || [];
+  const ids = all.slice(0, 8).map((a: any) => a.id).join('、');
+  // 截到第 8 条却不说话，看起来像一共就只有这些；真实条数必须跟着走。
+  return all.length > 8 ? `${ids} 等 ${all.length} 条` : ids;
+});
 
 // 端口表：一个端口一行，判定和它的理由必须同屏——只给"对外可达"三个字，
 // 管理员下一步还是得回 SSH 里手敲 ss + ufw status 才知道该拿它怎么办。

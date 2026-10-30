@@ -125,10 +125,17 @@ const memberCols = computed<any[]>(() => {
   return cols;
 });
 
+const VALUE_CELL_MAX = 500;
+
 function hText(s: string) {
   // 单元格里是 nowrap + ellipsis（列宽所限），全文靠 tapEllipsis 的点按浮层看：
   // 只读账号在这张表里没有别的入口，而 hover 在手机上不存在。
-  return h('span', { class: 'mono-dim', title: s.slice(0, 500) }, s.slice(0, 500));
+  // 浮层拿到的是这里渲染的文本，所以截断必须写进文本本身——被切到 500 字符却不说，
+  // 看起来就像值本来就到此为止（本文件顶部的截断说明只讲整条 key，不讲单个成员）。
+  const cut = s.length <= VALUE_CELL_MAX
+    ? s
+    : `${s.slice(0, VALUE_CELL_MAX)}…（已截断，共 ${s.length} 字符，完整值请用 CLI 读取）`;
+  return h('span', { class: 'mono-dim', title: cut }, cut);
 }
 
 watch(() => props.detail?.key, () => {

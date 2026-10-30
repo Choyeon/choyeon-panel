@@ -278,7 +278,14 @@ function fmtCell(v: any, col = '', row?: any) {
             if (row) openRow(row, false, col);
           },
         }, jsonBrief(v)),
-      default: () => h('pre', { class: 'json-tip' }, JSON.stringify(v, null, 2).slice(0, 3000)),
+      default: () => {
+        // 切在半截的 JSON 看起来像数据坏了；预览截断要自己说出来，完整内容点开行详情就有。
+        const text = JSON.stringify(v, null, 2);
+        const preview = text.length > 3000
+          ? `${text.slice(0, 3000)}\n…（预览已截断，共 ${text.length} 字符；点开行详情查看完整内容）`
+          : text;
+        return h('pre', { class: 'json-tip' }, preview);
+      },
     });
   }
   return String(v);
