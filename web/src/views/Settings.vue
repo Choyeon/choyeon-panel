@@ -21,6 +21,30 @@ const isAdmin = computed(() => getRole() === 'admin');
 const renewing = ref(false);
 const renewLog = ref('');
 const renewSummary = ref('');
+// 面板自己的对外入口。读不到时后端给 unreadable 而不是空 entries：
+// 「nginx -T 读不动」和「面板只经 IP:端口 访问」在界面上必须长得不一样。
+const panelEntry = ref<any>(null);
+const panelEntryError = ref('');
+const peOpen = ref(false);
+const peDraft = ref('');
+const peSaving = ref(false);
+// 拒绝文案（证书没签 / 域名被别处占用 / 复核没过已回滚）要留在抽屉里让人整段复制，
+// 只弹 toast 飘过去就没了。
+const peMsg = ref('');
+const peDrawerW = useDrawerWidth(0.3);
+const canChangePe = computed(() => !!panelEntry.value && !panelEntry.value.unreadable
+  && panelEntry.value.changeable !== false && (panelEntry.value.entries || []).length > 0);
+const peTone = computed(() => {
+  if (panelEntryError.value || panelEntry.value?.unreadable) return 'err';
+  return panelEntry.value?.domain ? 'ok' : '';
+});
+const peStateText = computed(() => {
+  if (panelEntryError.value) return '入口没读到';
+  const p = panelEntry.value;
+  if (!p) return '检测中…';
+  if (p.unreadable) return '入口没读到';
+  return p.domain || '没有域名入口';
+});
 // 阈值类配置在库里可能根本没写过（值为空串），巡检侧用的是代码默认值。
 // 这里把空值显示成那个默认值，界面和真实生效的阈值才是一致的；保存后就是显式值。
 // 默认值和可填区间都不在这个文件里：它们跟着 /api/settings/alerts 的 `limits` 一起给出，
@@ -110,6 +134,37 @@ async function load() {
   // 防火墙规则表（开了哪些端口、来源地址）按 admin 收口，与后端 /api/firewall 同一口径；
   // 少了这个判断，只读账号一进设置页就吃到一条 403 报错。
   if (isAdmin.value) await grab(() => api.firewall(), (v) => (fw.value = v), fwError);
+  // 面板入口同样是 admin 口径：域名本身就是攻击面信息，后端 GET 也是这么收的。
+  if (isAdmin.value) await grab(() => api.panelEntry(), (v) => (panelEntry.value = v), panelEntryError);
+}
+function openPe() {
+  if (!canChangePe.value) return;
+  peDraft.value = panelEntry.value?.domain || '';
+  peMsg.value = '';
+  peOpen.value = true;
+}
+async function savePe() {
+  // 连点会并发两次「写配置 + reload」：第二次拿到的快照是第一次写完的那份，
+  // 回滚基准就不是改动前了。
+  if (peSaving.value) return;
+  const domain = peDraft.value.trim().toLowerCase();
+  if (!domain) return;
+  peSaving.value = true;
+  peMsg.value = '';
+  try {
+    const r = await api.setPanelDomain(domain);
+    await grab(() => api.panelEntry(), (v) => (panelEntry.value = v), panelEntryError);
+    peOpen.value = false;
+    if (!r.changed) msg.info('域名没变，盘上什么都没写');
+    // 回环复核绕过了 DNS：它证明的是本机 443 上的证书与新配置可用，
+    // 公网解析有没有指过来是另一件事，不能说成"已经能访问了"。
+    else msg.success(`已切到 ${r.domain}：本机回环复核通过；公网解析请自行确认`);
+  } catch (e: any) {
+    // 拒绝文案带 certbot 命令与被占用的文件名，整段留在抽屉里让人复制
+    peMsg.value = e.message;
+  } finally {
+    peSaving.value = false;
+  }
 }
 async function renew() {
   // 连点会并发拉起两个 certbot，第二个直接被它自己的锁挡下、报一条看不懂的错。
@@ -576,6 +631,32 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       <div v-if="isAdmin" class="cp-divider"></div>
       <section v-if="isAdmin">
         <div class="sec-head">
+          <h2 class="sec-title">面板入口</h2>
+          <span class="st" :class="peTone"><span class="dot" :class="peTone"></span>{{ peStateText }}</span>
+          <NButton round size="small" tertiary type="primary" :icon="ico('GlobeOutline')" :disabled="!canChangePe" @click="openPe">更换域名</NButton>
+        </div>
+        <span class="cp-help">这里只改面板入口那份配置里的 server_name、证书路径与 certbot 的 $host 判断，listen / proxy_pass / 手工 location 一个字都不动。写入前先 nginx -t，写入后 reload 并做一次回环 HTTPS 复核（连证书链一起校），任何一步不过就整份放回去再 reload。面板不替你签发证书：新域名要先签好；复核绕过 DNS，切换前请确认它的公网解析已经指向本机，否则你会从公网失去入口。</span>
+        <NSpace vertical :size="12" style="margin-top: var(--space-3)">
+          <EmptyBox v-if="panelEntryError" text="面板入口这一轮没读到" :hint="panelEntryError" />
+          <NAlert v-else-if="panelEntry?.unreadable" type="warning" :bordered="false" size="small">{{ panelEntry.reason }}</NAlert>
+          <EmptyBox v-else-if="panelEntry && !panelEntry.entries.length" text="没有哪份配置反代到面板端口" :hint="panelEntry.reason" />
+          <template v-else-if="panelEntry">
+            <div v-for="e in panelEntry.entries" :key="e.file" class="pe-row">
+              <div class="pe-line"><span class="pe-k">域名</span><span class="cp-break">{{ e.names.join(' ') || '（没有 server_name，只按默认站点服务）' }}</span></div>
+              <div class="pe-line"><span class="pe-k">配置</span><span class="cp-break">{{ e.file }}</span></div>
+              <div class="pe-line"><span class="pe-k">证书</span><span class="cp-break">{{ e.ssl ? (e.lineage ? `certbot · ${e.lineage}` : '不是 certbot 管的证书，改域名会被拒绝') : '没有 TLS' }}</span></div>
+              <div class="pe-line"><span class="pe-k">80 跳转</span><span>{{ e.httpsRedirect ? '有（明文跳 443）' : '没有（明文直通面板）' }}</span></div>
+              <div v-if="e.state !== 'ok'" class="pe-line"><span class="pe-k">状态</span><span>{{ e.state === 'missing' ? '文件已不在盘上（nginx 加载的是旧副本）' : `读不动：${e.reason || '未知原因'}` }}</span></div>
+            </div>
+            <NText v-for="(n, i) in panelEntry.notes || []" :key="i" depth="3" style="font-size: var(--fs-xs)">· {{ n }}</NText>
+          </template>
+          <EmptyBox v-else text="正在读取面板入口…" />
+        </NSpace>
+      </section>
+
+      <div v-if="isAdmin" class="cp-divider"></div>
+      <section v-if="isAdmin">
+        <div class="sec-head">
           <h2 class="sec-title">证书维护</h2>
           <NButton round size="small" tertiary type="primary" :loading="renewing" :disabled="renewing" :icon="ico('SyncOutline')" @click="renew">立即续期</NButton>
         </div>
@@ -588,6 +669,26 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       </section>
     </CpToolbarCard>
 
+    <NDrawer v-model:show="peOpen" :width="peDrawerW">
+      <NDrawerContent title="更换面板入口域名" closable>
+        <NForm label-placement="top" size="small">
+          <NFormItem label="新域名">
+            <NInput v-model:value="peDraft" placeholder="panel.example.com" :input-props="{ 'aria-label': '新的面板域名', autocomplete: 'off' }" @keyup.enter="savePe" />
+          </NFormItem>
+          <NAlert v-if="peMsg" type="error" :bordered="false" size="small" class="pe-alert">{{ peMsg }}</NAlert>
+          <NText depth="3" style="font-size: var(--fs-xs)">
+            切换后旧域名不再由面板这份配置服务（它自己的 vhost 不会被删）。新域名必须已经有证书，
+            并且公网解析已经指向本机——面板的回环复核绕过了 DNS，它证明不了域名在外面能不能解析到这台机器。
+          </NText>
+        </NForm>
+        <template #footer>
+          <NSpace justify="end" :size="8">
+            <NButton size="small" @click="peOpen = false">取消</NButton>
+            <NButton size="small" type="primary" :loading="peSaving" :disabled="peSaving || !peDraft.trim()" @click="savePe">切换</NButton>
+          </NSpace>
+        </template>
+      </NDrawerContent>
+    </NDrawer>
     <NDrawer v-model:show="chanOpen" :width="chanDrawerW">
       <NDrawerContent :title="chanMeta.label" closable>
         <NForm label-placement="top" size="small">
@@ -687,4 +788,10 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 /* user-select: all 点一下就整段选中：密钥和 otpauth 都是要一次抄走的串，逐字符选反而麻烦 */
 .tw-key code { flex: 1 1 auto; min-width: 0; font-size: var(--fs-xs); line-height: 1.6; color: var(--cp-text-strong); word-break: break-all; user-select: all; }
 .tw-note { display: block; margin-top: var(--space-2); font-size: var(--fs-xs); }
+/* 面板入口：一项一行，标签定宽、值可折断（配置路径与域名列表都长） */
+.pe-row { display: flex; flex-direction: column; gap: 2px; }
+.pe-line { display: flex; gap: var(--space-3); font-size: var(--fs-xs); line-height: 1.7; min-width: 0; }
+.pe-k { flex: 0 0 56px; color: var(--cp-text-dim); }
+/* 拒绝文案里有 certbot 命令，必须原样可读可复制 */
+.pe-alert { white-space: pre-wrap; word-break: break-word; }
 </style>

@@ -203,6 +203,12 @@ export const api = {
   // certbot 续期在服务器上最长可跑到几分钟，前端 15s 就 abort 会显示"请求超时"，
   // 而续期其实还在跑：用户重试 → 多个 certbot 并发抢同一张证书。给到 620s（略大于服务端上限）。
   certbotRenew: () => req('/system/certbot-renew', { body: {}, timeout: 620000 }),
+  // 面板自己的对外入口：GET 读现状（读不到由 unreadable 表达，不是空列表），
+  // POST 换域名。拒绝（没有证书/域名被别处占用/复核失败已回滚）一律 400，
+  // 文案里带可复制的处置命令，界面要原样展示而不是只弹一条 toast。
+  panelEntry: () => req('/system/panel-entry'),
+  setPanelDomain: (domain: string) =>
+    req('/system/panel-entry/domain', { body: { domain }, timeout: 120000 }),
   apps: () => req('/apps'),
   app: (id: number) => req(`/apps/${id}`),
   createApp: (a: any) => req('/apps', { body: a }),

@@ -9,7 +9,7 @@ from .. import aio_db, avatars, security, totp
 from .. import database as dbm
 from ..deps import need_admin as _need_admin
 from ..errors import err_json
-from ..services import alerts_service, nginx_ops
+from ..services import alerts_service, nginx_ops, panel_entry_service
 from ..util import is_http_url, list_ladder, parse_limit, redact_creds
 
 router = APIRouter()
@@ -330,3 +330,46 @@ async def certbot_renew(req: Request):
     # certbot 输出里可能带 --key-path 之类的参数值，出接口前统一脱敏；
     # renewed/unchanged/summary 是给界面直接用的，log 只在失败排查时看。
     return {"ok": True, **res, "log": redact_creds(res["log"])[:4000]}
+
+
+@router.get("/api/system/panel-entry")
+async def panel_entry(req: Request):
+    """面板自己的对外入口。只读，admin 才能看：域名本身就是攻击面信息。"""
+    if r := _need_admin(req):
+        return r
+    return await panel_entry_service.detail()
+
+
+@router.post("/api/system/panel-entry/domain")
+async def panel_entry_set_domain(req: Request):
+    if r := _need_admin(req):
+        return r
+    body = await _body(req)
+    domain = str(body.get("domain") or "").strip()
+    try:
+        res = await panel_entry_service.change_domain(domain)
+    except panel_entry_service.PanelEntryError as e:
+        return JSONResponse(status_code=400, content={"error": str(e), "code": "panel_entry_refused"})
+    if res.get("changed"):
+        # 纳管登记表里那条「面板入口」挂在旧域名上：不搬的话站点页会一直列一个
+        # 已经不由面板服务的域名，而新域名显示成未纳管。只搬 kind=panel 的行。
+        old = res.get("oldDomains") or []
+        if old:
+            marks = ",".join("?" * len(old))
+            row = await aio_db.query_one(
+                f"SELECT domain,file,source,note FROM site_claims WHERE kind='panel' AND domain IN ({marks})",
+                tuple(old))
+            if row:
+                await aio_db.execute(
+                    f"DELETE FROM site_claims WHERE kind='panel' AND domain IN ({marks})", tuple(old))
+                # 新域名在登记表里另有归属时不动它：那条可能是应用认领的，
+                # 用面板入口把它顶掉等于悄悄改掉别人的归属。
+                taken = await aio_db.query_one("SELECT kind FROM site_claims WHERE domain=?", (res["domain"],))
+                if not taken:
+                    await aio_db.execute(
+                        "INSERT OR REPLACE INTO site_claims(domain,app_id,file,kind,source,note)"
+                        " VALUES(?,NULL,?,'panel',?,?)",
+                        (res["domain"], row["file"], row["source"], row["note"]))
+        await aio_db.audit(req.state.cp_sub, "settings:panel-domain",
+                           f"{'/'.join(old) or '-'} -> {res['domain']}")
+    return res
