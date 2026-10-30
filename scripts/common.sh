@@ -10,10 +10,14 @@ set -euo pipefail
 # 硬编码的 /root/choyeon-panel 不存在，脚本在第一行校验就 [fail] 退出，
 # 于是"拉代码→备份→重建→重启→健康探测"整条流程从未执行，
 # 面板还在跑旧构建，而 choyeonctl upgrade 报的却是同一个错。
+# 判定用 `-e` 而不是 `-d`：linked worktree 与 submodule 里 `.git` 是一个**文件**
+# （`gitdir: ...`），目录判定会把结构完整的安装认成"不是仓库"，于是 PREFIX 悄悄回落到
+# /root/choyeon-panel，脚本在别处干活、报告却说装在默认目录。
+# CLI 侧的同一条判定（cli.py `_default_prefix`）一直用 `.exists()`，两处必须同一个口径。
 _default_prefix() {
   local src
   src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)" || src=""
-  if [ -n "$src" ] && [ -d "$src/.git" ] && [ -f "$src/backend/app/main.py" ]; then
+  if [ -n "$src" ] && [ -e "$src/.git" ] && [ -f "$src/backend/app/main.py" ]; then
     printf '%s' "$src"
   else
     printf '%s' "/root/choyeon-panel"
@@ -359,7 +363,7 @@ ensure_node() {
 # ---------- 代码 ----------
 clone_or_die() {
   need_cmd git
-  if [ -d "$PREFIX/.git" ]; then
+  if [ -e "$PREFIX/.git" ]; then
     # CP_BRANCH / `deploy --branch` 只在真正克隆时生效。这里静默返回的话，
     # `choyeonctl deploy --branch v2` 会报告部署成功，跑的却还是当前分支的代码。
     if [ -n "${CP_BRANCH:-}" ]; then

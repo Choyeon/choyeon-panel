@@ -32,7 +32,10 @@ for a in "$@"; do [ "$a" = "--no-pull" ] && DO_PULL=0; done
 
 require_root
 detect_os
-[ -d "$PREFIX/.git" ] || die "$PREFIX 不是 git 仓库，请先执行 scripts/install.sh"
+# `-e` 而不是 `-d`：linked worktree / submodule 的 `.git` 是文件，
+# 用目录判定会让 `choyeonctl upgrade` 在结构完整的安装上直接 die
+# （而 CLI 的 _default_prefix 认得它，两个读者对同一个事实给出相反答案）。
+[ -e "$PREFIX/.git" ] || die "$PREFIX 不是 git 仓库，请先执行 scripts/install.sh"
 
 OLD_SHA="$(current_sha)"
 log "升级开始：当前 commit ${OLD_SHA:0:8}"
