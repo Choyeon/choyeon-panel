@@ -32,8 +32,11 @@ const peSaving = ref(false);
 // 只弹 toast 飘过去就没了。
 const peMsg = ref('');
 const peDrawerW = useDrawerWidth(0.3);
-const canChangePe = computed(() => !!panelEntry.value && !panelEntry.value.unreadable
-  && panelEntry.value.changeable !== false && (panelEntry.value.entries || []).length > 0);
+// 这一轮没读到（panelEntryError）时也锁住：panelEntry 里还留着上一次成功读到的那份，
+// 只看它就等于拿旧读数给「能改」背书。
+const canChangePe = computed(() => !!panelEntry.value && !panelEntryError.value
+  && !panelEntry.value.unreadable && panelEntry.value.changeable !== false
+  && (panelEntry.value.entries || []).length > 0);
 const peTone = computed(() => {
   if (panelEntryError.value || panelEntry.value?.unreadable) return 'err';
   return panelEntry.value?.domain ? 'ok' : '';

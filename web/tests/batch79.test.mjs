@@ -37,8 +37,10 @@ test('设置页：面板入口按 admin 口径加载，读不到与「没有入�
 
 test('设置页：只有真能改时才亮切换按钮', () => {
   const s = read('views/Settings.vue');
-  assert.match(s, /const canChangePe = computed\(\(\) => !!panelEntry\.value && !panelEntry\.value\.unreadable/);
-  assert.match(s, /panelEntry\.value\.changeable !== false && \(panelEntry\.value\.entries \|\| \[\]\)\.length > 0/);
+  // 这一轮读失败时 panelEntry 里还留着旧读数：只看它就会拿旧数据给「能改」背书
+  assert.match(s, /const canChangePe = computed\(\(\) => !!panelEntry\.value && !panelEntryError\.value/);
+  assert.match(s, /!panelEntry\.value\.unreadable && panelEntry\.value\.changeable !== false/);
+  assert.match(s, /panelEntry\.value\.changeable !== false\s*\n\s*&& \(panelEntry\.value\.entries \|\| \[\]\)\.length > 0/);
   assert.match(s, /:disabled="!canChangePe"/);
 });
 
