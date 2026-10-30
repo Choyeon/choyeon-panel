@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .. import config
 from ..log import warn
-from ..util import PROBE_TIMEOUT, is_domain, is_email, run
+from ..util import PROBE_TIMEOUT, is_domain, is_email, path_state, run
 
 CONF_DIR = config.NGINX_CONF_DIRS[0]
 TLS_DIR = config.TLS_DIR
@@ -72,6 +72,39 @@ def _write_conf(path: str, content: str) -> None:
     finally:
         with suppress(OSError):
             os.unlink(tmp)
+
+
+def _conf_text(path: str) -> tuple[str, str | None, str]:
+    """配置文件的三态读法：("ok", 全文, "") / ("missing", None, "") / ("unreadable", None, 原因)。
+
+    被替换掉的旧写法是 `Path(p).read_text() if os.path.exists(p) else None`，而它下面紧跟着
+    `_write_conf`（os.replace 覆盖）与 `nginx -t` 失败时的 `os.unlink`：stat 被 PermissionError
+    折成 False 时，调用方手里只剩「盘上没有」这一种解释，于是那份读不动但确实存在的 vhost
+    被当成本次新建，覆盖后校验一不过就走删除分支——用户在这台机器上手写的站点配置没了，
+    而错误信息还写着「已回滚」。missing 与 unreadable 必须分开：前者可以按新建处理，
+    后者一律在动手前拒绝（见 _no_snapshot_error）。
+    原因只带异常类型：这些串会经接口回到前端，绝对路径不外泄（目录本身除外，它一直是明文的）。
+    """
+    ok, why = path_state(path)
+    if ok is None:
+        return "unreadable", None, why
+    if not ok:
+        return "missing", None, ""
+    try:
+        return "ok", Path(path).read_text(errors="replace"), ""
+    except OSError as e:
+        # stat 过得去而 open 失败是另一种读不到（O_NOFOLLOW、EACCES on 文件本身、EBADF 之外的
+        # 竞态窗口），同样不许回落到 None——那一档的含义是「确认盘上没有」。
+        return "unreadable", None, type(e).__name__
+
+
+def _no_snapshot_error(path: str, why: str, action: str) -> RuntimeError:
+    """拿不到回滚快照时的拒绝：不写、不删，并说清楚为什么这一次动不了。"""
+    return RuntimeError(
+        f"{path} 读不动（{why}），面板不{action}：这一刻既拿不到盘上正在生效的那一份，"
+        "也就没有可以在 nginx -t 失败后放回去的快照。请先按提示排掉权限问题，"
+        "或直接用编辑器手工改这份文件。"
+    )
 
 
 # `http2 on;` 是 1.25.1 才有的写法，而旧写法 `listen 443 ssl http2;` 在新版上只是
@@ -330,11 +363,15 @@ async def apply_vhost(spec: dict):
             )
         if await loaded_conf_paths() is None:
             warn(f"nginx -T 不可读，本次域名套用（{domain}）未能确认该域名是否已被别处定义")
-        old = Path(path).read_text(errors="replace") if os.path.exists(path) else None
+        old_state, old, old_why = _conf_text(path)
+        if old_state == "unreadable":
+            raise _no_snapshot_error(path, old_why, "覆盖")
         _write_conf(path, content)
         check = await run("nginx", ["-t"])
         if check["code"] != 0:
-            # 回滚到原文件（新建的则删除），并恢复 nginx 配置状态
+            # 回滚到原文件（新建的则删除），并恢复 nginx 配置状态。
+            # `old is None` 到这里只剩「动手前确认盘上没有」一种来源：读不动的那一档已经在
+            # 覆盖前拒绝了，所以这里 unlink 掉的一定是这一次自己写进去的那一份。
             if old is not None:
                 _write_conf(path, old)
             else:
@@ -357,14 +394,30 @@ async def apply_vhost(spec: dict):
     invalidate_domain_cache()
 
 
-async def remove_vhost(name: str):
+async def remove_vhost(name: str) -> str:
+    """拆掉该应用自己那份 panel-*.conf，返回 "removed" / "absent"。
+
+    这个返回值是「到底删没删」的唯一出处。以前路由自己再 stat 一次来决定 removed
+    （`Path(vhost_path(name)).exists()`），同一个事实两个读者，而第二个读者在权限拒绝时
+    只能说「没有」——明明读不到，界面上却是「该应用没有由面板生成的 vhost」。
+    """
     path = vhost_path(name)
-    if not os.path.exists(path):
+    state, _, why = _conf_text(path)
+    if state == "unreadable":
+        raise _no_snapshot_error(path, why, "删")
+    if state == "missing":
         # 没有这个应用的文件就别去 nginx -t + reload：拆除/清理流程对从未配过域名的
         # 应用也会调到这里，空跑一次 reload 是无谓的全站配置重载。
-        return
+        return "absent"
     async with _nginx_section():
-        old = Path(path).read_text(errors="replace")
+        # 锁内重读一次：从上面那读到进锁之间，并发的编辑或续期可能已经改过这份文件，
+        # 校验不过时要放回去的是最新的那一份，不是几秒前的旧印象。
+        state, old, why = _conf_text(path)
+        if state == "unreadable":
+            raise _no_snapshot_error(path, why, "删")
+        if state == "missing":
+            # 已经由别人删掉了，同样不该空跑一次全站重载
+            return "absent"
         os.unlink(path)
         check = await run("nginx", ["-t"])
         if check["code"] != 0:
@@ -386,6 +439,7 @@ async def remove_vhost(name: str):
                 f"{(reload['out'] or '').strip()[:200]}"
             )
     invalidate_domain_cache()
+    return "removed"
 
 
 async def issue_cert(domain: str, email: str | None = None) -> str:
@@ -914,7 +968,11 @@ def _safe_conf_path(p: str) -> str:
     if not p or not p.startswith("/"):
         raise RuntimeError("只能使用绝对路径")
     real = os.path.abspath(p)
-    if os.path.exists(real):
+    # lexists 而不是 exists：exists 会跟随符号链接，指向**不存在**目标的链接（悬空链接）在它眼里
+    # 等于"没有这个文件"，于是这里跳过 realpath。同一个链接、同一个守卫，会因为目标文件在不在
+    # 得到两种完全不同的判定——目标存在时按真实位置判（在 conf.d 外就拒），目标不存在时按链接
+    # 自己的路径判（在 conf.d 里就放行）。守卫的口径不能跟着第三个文件的状态漂。
+    if os.path.lexists(real):
         real = os.path.realpath(real)
     # 允许目录取自 CP_NGINX_CONF_DIRS，避免这里再硬编码一份与 config 不同步的路径
     if not any(real == d or real.startswith(d + "/") for d in config.NGINX_CONF_DIRS):
@@ -973,13 +1031,16 @@ async def save_app_config(path: str, content: str) -> dict:
     if len(content) > 200000:
         raise RuntimeError("文件过大")
     async with _nginx_section():
-        old = Path(real).read_text(errors="replace") if os.path.exists(real) else None
+        old_state, old, old_why = _conf_text(real)
+        if old_state == "unreadable":
+            raise _no_snapshot_error(real, old_why, "覆盖")
         _write_conf(real, content)
         check = await run("nginx", ["-t"])
         if check["code"] != 0:
             # 有原文件就恢复；没有原文件（本次是新建）必须删掉，
             # 否则坏配置会留在 conf.d/ 里，之后每次 nginx -t / reload 都连带失败，
             # 面板上其它应用的域名与 SSL 操作也会全部不可用。
+            # `old is None` 到这里只剩「动手前确认盘上没有」一种来源：读不动那一档已在写入前拒绝。
             if old is not None:
                 _write_conf(real, old)
             else:
@@ -1006,7 +1067,11 @@ async def quick_edit_config(path: str, kind: str, value: str | None = None) -> d
     if kind not in ("ws", "body", "redirect"):
         raise RuntimeError("未知的快捷操作类型")
     real = _safe_conf_path(path)
-    c = Path(real).read_text(errors="replace")
+    state, c, why = _conf_text(real)
+    if state == "unreadable":
+        raise _no_snapshot_error(real, why, "改")
+    if state == "missing":
+        raise RuntimeError(f"{real} 不在盘上，无法在它基础上改：请先套用该域名的配置。")
     if kind == "ws":
         if re.search(r"proxy_set_header\s+Upgrade", c):
             raise RuntimeError("该配置已包含 WebSocket 头")

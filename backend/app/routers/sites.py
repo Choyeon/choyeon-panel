@@ -206,10 +206,13 @@ async def site_remove(app_id: int, req: Request):
     app = await aio_db.query_one("SELECT id,name FROM apps WHERE id=?", (app_id,))
     if not app:
         return JSONResponse(status_code=404, content={"error": "应用不存在"})
-    existed = Path(nginx_ops.vhost_path(app["name"])).exists()
+    # removed 只能来自 remove_vhost 自己的返回值：这里以前额外 stat 一次
+    # （Path(vhost_path(name)).exists()），同一个事实两个读者，而第二个读者把 PermissionError
+    # 折成 False，读不到的那份配置会被说成「该应用没有由面板生成的 vhost」。
     err = None
+    removed = False
     try:
-        await nginx_ops.remove_vhost(app["name"])
+        removed = await nginx_ops.remove_vhost(app["name"]) == "removed"
     except Exception as e:  # noqa: BLE001
         err = _cmd_error(e)
     finally:
@@ -217,9 +220,7 @@ async def site_remove(app_id: int, req: Request):
     if err:
         return JSONResponse(status_code=400, content={"error": err})
     await aio_db.audit(req.state.cp_sub, "site:remove", app["name"])
-    if not existed:
-        return {"ok": True, "removed": False, "error": None}
-    return {"ok": True, "removed": True, "error": None}
+    return {"ok": True, "removed": removed, "error": None}
 
 
 @router.get("/api/ssl/certs")
