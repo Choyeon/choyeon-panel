@@ -2076,6 +2076,18 @@
   弹窗显示 B 却画 A 的 vhost；A 失败分支的 `showConfig=false` 关掉用户正开着的 B，A 的 `finally` 熄灭 B
   的加载态——补 `cfgSeq` 单调序号，成功/失败/finally 三处都判 `seq === cfgSeq`。`web/tests/batch70.test.mjs`
   （2 条源码契约）钉住两处形态；把 Sites 的 `finally` 去掉守卫复跑即红。
+- 批次70 补丁，批次69 的 `env_state` 在 stat 都不动的路径上把应用详情接口打成 500。批次70 push 后
+  CI 两个后端 job 全红（复盘发现批次69 自己的两个 commit 在 CI 上也是红的）：`test_batch65` 喂给
+  `app_get` 的应用行是 `/root/www/demo`，runner 不是 root，`target.parent.is_dir()` 第一下就
+  PermissionError——生产以 root 跑，本机全量 3366 绿也照不出这一条。面板自己平时踩不到，但同一个
+  读者还被 doctor 的 `_check_app_env` 用，读不动不该把整轮自检带崩。收口三处裸 stat：`env_state`
+  父目录 stat 抛 OSError 记 `unreadable`（不是 missing——那会引导人点「重新写入」去覆盖看不见的东西；
+  不是 no-dir——那是"没部署过"会被漂移闸门跳过），`is_file/exists/is_symlink` 整段同一个 catch
+  （目录 mode 000 时里面的文件照样 stat 不动，实测第一版只包父目录仍漏——真实权限 A/B 才照出来）；
+  `unit_reads_env_file` 的 drop-in glob 迭代收进 try；`env_drift` 的 unit 存在性闸门 stat 不动就跳过
+  这一行。`backend/tests/test_batch70.py` 里有一条真实权限实测（mode 0 的安装目录 + `su nobody`
+  子进程复现 CI 现场，root/无 nobody 时如实 skip）外加 mock 覆盖三条 stat 路，并钉住
+  「unreadable 照常进漂移与判词」。
 - 批次69，「面板显示的环境变量」与「进程实际读到的值」对账。应用键值对存在 SQLite 里，落盘只在
   「保存配置」和「部署」那两步；unit 写的是 `EnvironmentFile=-<目录>/.panel.env`，开头的 `-` 表示
   文件不存在也不报错。线上实测：`/root/www/choyeon-video` 在 2026-10-18 被换成新的 git clone，

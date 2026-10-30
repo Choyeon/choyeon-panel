@@ -220,7 +220,11 @@ def unit_reads_env_file(app: dict) -> bool:
     """
     unit = unit_name(app)
     want = str(env_file_path(app))
-    files = [Path(UNIT_DIR) / unit, *_env_drop_in_dir(unit).glob("*.conf")]
+    files = [Path(UNIT_DIR) / unit]
+    # drop-in 目录本身 stat 不动（非 root 探针）时跳过：unit 本体照样能读就照样判，
+    # 读不了下面的 read_text 本来就 catch OSError——但 glob 的迭代不在那里面。
+    with suppress(OSError):
+        files.extend(_env_drop_in_dir(unit).glob("*.conf"))
     for f in files:
         try:
             text = f.read_text(errors="replace")
@@ -252,7 +256,8 @@ def env_state(app: dict) -> dict:
       进程静默地一个变量都读不到。
     - differs：文件存在但内容与数据库不同（手工改过、或保存失败留下的半份）。
     - no-dir：安装目录还不存在（应用没部署过），谈不上漂移。
-    - unreadable：文件在但读不了（权限 / 是目录 / 软链坏了），如实单独一档，
+    - unreadable：文件在但读不了（权限 / 是目录 / 软链坏了），或安装目录压根 stat 不动
+      （非 root 的探针跑在 /root 下的应用上就是这种），如实单独一档，
       不能把它当成 missing 提示"重新写入"——那等于要覆盖一个看不见的东西。
     """
     body = env_body(app)
@@ -260,19 +265,33 @@ def env_state(app: dict) -> dict:
     if not app.get("path"):
         return {"disk": "no-dir", "vars": len(body.splitlines()), "unitReads": unit_reads}
     target = env_file_path(app)
-    if not target.parent.is_dir():
+    try:
+        parent_ok = target.parent.is_dir()
+    except OSError:
+        # CI 的非 root runner 踩到的正是这里：path 指向 /root/... 时连父目录都 stat 不了
+        # （PermissionError），原来直接把 GET /api/apps/{id} 打成 500。探针读不到就如实
+        # 一档 unreadable——"确认不了"既不是"没有"（missing 会引导人点重新写入），
+        # 也不是"目录还没落地"（no-dir 会被当成没部署过而跳过）。
+        parent_ok = None
+    if parent_ok is None:
+        disk = "unreadable"
+    elif not parent_ok:
         disk = "no-dir"
-    elif target.is_file():
+    else:
+        # is_file / exists / is_symlink 每一个都会 stat：目录不可进入（mode 000）时
+        # 连里面的文件都 stat 不动，同一个 PermissionError 不能从任何一条路漏出去——
+        # 漏出去就是详情页 500。整段兜住，漏出来的异常统一落 unreadable。
         try:
-            disk = "match" if target.read_text(encoding="utf-8", errors="replace") == body + "\n" else "differs"
+            if target.is_file():
+                disk = "match" if target.read_text(encoding="utf-8", errors="replace") == body + "\n" else "differs"
+            elif target.exists() or target.is_symlink():
+                # 那个位置上确有东西（目录、悬空软链、读不了的 inode）：说成 missing 会引导人点
+                # "重新写入"，而那一步会当场失败——先把"这里有个读不了的东西"如实分开。
+                disk = "unreadable"
+            else:
+                disk = "match" if not body else "missing"
         except OSError:
             disk = "unreadable"
-    elif target.exists() or target.is_symlink():
-        # 那个位置上确有东西（目录、悬空软链、读不了的 inode）：说成 missing 会引导人点
-        # "重新写入"，而那一步会当场失败——先把"这里有个读不了的东西"如实分开。
-        disk = "unreadable"
-    else:
-        disk = "match" if not body else "missing"
     return {"disk": disk, "vars": len(body.splitlines()), "unitReads": unit_reads}
 
 
@@ -296,7 +315,14 @@ def env_drift() -> dict:
     drift = []
     rows = dbm.query("SELECT id, name, path, env, unit_override FROM apps ORDER BY name")
     for a in rows:
-        if not (Path(UNIT_DIR) / unit_name(a)).is_file():
+        try:
+            unit_present = (Path(UNIT_DIR) / unit_name(a)).is_file()
+        except OSError:
+            # 这一层只是噪声闸门（"本机有没有这个 unit 文件"），不是结论本身：
+            # 连 UNIT_DIR 都 stat 不动时确认不了，就跳过——整轮自检不该为此炸掉，
+            # 而真有漂移时里面那层 env_state 会如实给 unreadable。
+            unit_present = False
+        if not unit_present:
             continue
         st = env_state(a)
         bad_disk = st["disk"] in ("missing", "differs", "unreadable")
