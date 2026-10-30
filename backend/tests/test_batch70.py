@@ -13,15 +13,18 @@
 - `unit_reads_env_file`：drop-in 目录的 glob 迭代会抛，收进 try；
 - `env_drift`：unit 文件存在性闸门只是噪声过滤，stat 不动就跳过这一行，不炸整轮。
 
-真实权限用例在无 root 的机器上拿 `su nobody` 起子进程复现 CI 现场；复现不了（没有 nobody
-用户、或以 root 跑）就如实 skip，不拿 mock 冒充实测。
+真实权限用例 fork 出子进程 `setgid/setuid` 成 nobody、在子进程里就地调 `env_state`
+复现 CI 现场。不用 `su`：CI 里 root 起 su 会被 PAM 挡成 Authentication failure（nobody
+没有口令），第一版就是这么红的；也不用 fork 后 execv 重启解释器：生产机上 `.venv` 在
+`/root` 下（0700），降权后的子进程连解释器都执行不了，第二版就是这么红的。模块在 fork 前
+已 import 完整，子进程只跑读路径。复现不了（无法降权、以非 root 跑）就如实 skip，
+不拿 mock 冒充实测。
 """
 
 import asyncio
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -30,6 +33,10 @@ from unittest import mock
 
 os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_b70p_"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# 第一版在这里无条件改写 os.environ["CP_DATA_DIR"]（为了让 su/execv 起的降权子进程进得来），
+# 副作用是把 discover 排序在自己之后的所有模块的会话数据目录一起带进自己 addCleanup 的
+# rmtree——run 全量时 batch33 的 flock 与 alerts 全被扫掉，单跑怎么试都绿。fork 版子进程
+# 在进程内调用，根本不需要环境对 nobody 友好，所以这条覆写整个删掉，只留模块自己的 setdefault。
 
 from app.routers import meta as meta_router  # noqa: E402
 from app.services import apps_service  # noqa: E402
@@ -49,55 +56,64 @@ def _env(kvs):
     return json.dumps([{"k": k, "v": v} for k, v in kvs])
 
 
-_SNIPPET = (
-    "import sys, json\n"
-    "sys.path.insert(0, {backend!r})\n"
-    "from app.services import apps_service\n"
-    "app = json.loads({app!r})\n"
-    "try:\n"
-    "    print('STATE=' + apps_service.env_state(app)['disk'])\n"
-    "except Exception as e:\n"
-    "    print('RAISED=' + type(e).__name__)\n"
-)
-
-
 class UnreadableUnderRealPermissionTests(unittest.TestCase):
-    """CI 反馈不回来：在真文件系统上造一个 stat 不动的安装目录，拿无权限用户实测。"""
+    """CI 反馈不回来：造一个 stat 不动的安装目录，fork 出降权到 nobody 的子进程实测。
 
-    def setUp(self):
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            self.skipTest("root 无视 mode 0，这里造不出 PermissionError")
-        outer = tempfile.mkdtemp(prefix="cp_b70p_open_")
-        self.addCleanup(shutil.rmtree, outer, True)
-        os.chmod(outer, 0o755)
-        self.demo = Path(outer, "demo")
-        self.demo.mkdir()
-        Path(self.demo, ".panel.env").write_text('A="1"\n', encoding="utf-8")
-        os.chmod(self.demo, 0o000)
-        self.addCleanup(os.chmod, str(self.demo), 0o755)
-        self.app = _app(path=str(self.demo), env=_env([("A", "1")]))
-
-    def _run_as_nobody(self):
-        for user in ("nobody", "65534"):
-            probe = subprocess.run(["id", user], capture_output=True, text=True)
-            if probe.returncode != 0:
-                continue
-            snippet = _SNIPPET.format(
-                backend=str(Path(__file__).resolve().parents[1]),
-                app=json.dumps(self.app),
-            )
-            return subprocess.run(
-                ["su", "-s", "/bin/sh", user, "-c", snippet],
-                capture_output=True, text=True, timeout=60,
-            )
-        self.skipTest("这台机器上没有 nobody/65534 用户，复现不了非 root 现场")
+    不用 `su nobody`：CI 里 root 起 su 会被 PAM 挡成 Authentication failure（nobody 没有
+    口令），第一版就是这么在 CI 上红的。第二版 fork 后 execv 重启解释器，在生产机上又红了：
+    `.venv/bin/python` 在 /root（0700）下面，降权后的进程连解释器路径都进不去。所以降权后
+    在子进程里就地调用——apps_service 在 fork 前已 import 完整，跑的还是那条真实读路径。
+    非 root 的机器上父目录压根造不出来，如实 skip 而不是拿 mock 冒充实测。
+    """
 
     def test_env_state_returns_unreadable_instead_of_raising(self):
-        r = self._run_as_nobody()
-        self.assertEqual(r.returncode, 0, f"子进程没跑起来：{r.stderr[:400]}")
-        self.assertIn("STATE=unreadable", r.stdout,
-                      f"不崩才是本补丁的要点，实际输出：{r.stdout[:200]}{r.stderr[:400]}")
-        self.assertNotIn("RAISED=PermissionError", r.stdout)
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            self.skipTest("需要 root 才能造『父目录 700、内层 000』再降权的现场")
+        try:
+            import pwd
+            pw = pwd.getpwnam("nobody")
+            uid, gid = pw.pw_uid, pw.pw_gid
+        except (ImportError, KeyError):
+            self.skipTest("查不到 nobody 用户，复现不了非 root 现场")
+        base = tempfile.mkdtemp(prefix="cp_b70p_open_")
+        self.addCleanup(shutil.rmtree, base, True)
+        outer = Path(base, "outer")
+        outer.mkdir()
+        os.chmod(base, 0o755)
+        demo = Path(outer, "demo")
+        demo.mkdir()
+        Path(demo, ".panel.env").write_text('A="1"\n', encoding="utf-8")
+        os.chmod(demo, 0o000)
+        os.chmod(outer, 0o700)
+        self.addCleanup(os.chmod, str(outer), 0o755)
+        app = _app(path=str(demo), env=_env([("A", "1")]))
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.dup2(w, 1)
+                os.dup2(w, 2)
+                os.close(r)
+                os.setgid(gid)
+                os.setuid(uid)
+                try:
+                    res = "STATE=" + apps_service.env_state(app)["disk"]
+                except Exception as e:  # noqa: BLE001 — 崩了也要把异常名送回父进程断言
+                    res = "RAISED=" + type(e).__name__
+                os.write(w, res.encode("utf-8") + b"\n")
+            except BaseException:  # noqa: BLE001 — fork 子进程的兜底：任何失败都要带着 traceback 进管道
+                import traceback
+                traceback.print_exc()
+            finally:
+                os._exit(9)
+        os.close(w)
+        with os.fdopen(r, "r", encoding="utf-8", errors="replace") as f:
+            out = f.read()
+        os.waitpid(pid, 0)
+        os.chmod(str(outer), 0o755)  # 先放开再 rmtree
+        self.assertIn("STATE=unreadable", out,
+                      f"不崩才是本补丁的要点，子进程输出：{out[:600]}")
+        self.assertNotIn("RAISED=PermissionError", out)
 
 
 class StatErrorMappingTests(unittest.TestCase):

@@ -75,15 +75,18 @@ _HOLD = textwrap.dedent(
 # 所以"抢不到"才是跨进程互斥的证据，而不是同一个 fd 重复加锁。
 _PROBE = textwrap.dedent(
     """
-    import json, sys
+    import json, os, sys
     from app import locks
     try:
         h = locks.acquire(sys.argv[1], "定时备份", "system")
     except RuntimeError as e:
-        print(json.dumps({"ok": False, "msg": str(e)}))
+        print(json.dumps({"ok": False, "msg": str(e),
+                          "path": str(locks.path_of(sys.argv[1])), "child_ino": None}))
     else:
+        ino = os.fstat(h.fd).st_ino
         h.release()
-        print(json.dumps({"ok": True}))
+        print(json.dumps({"ok": True,
+                          "path": str(locks.path_of(sys.argv[1])), "child_ino": ino}))
     """
 )
 
@@ -99,7 +102,13 @@ def _probe(key: str) -> dict:
         capture_output=True,
         text=True,
     )
-    return json.loads((r.stdout or "").strip() or "{}")
+    payload = json.loads((r.stdout or "").strip() or "{}")
+    # 全量跑（run_tests.py 的会话守护目录）里这条偶发出现过「子进程居然拿到了锁」，
+    # 单跑怎么试都绿。没有现场证据猜不出根因，所以把两边解析到的路径与 inode 一起带回：
+    # 下一红就能直接看出是不是「父与子根本没锁同一个 inode」（/tmp 被第三方清掉过
+    # 会话目录就是这么留下的假象），而不是继续猜 flock 语义。
+    payload["stderr"] = (r.stderr or "")[-500:]
+    return payload
 
 
 def _mkapp(**kw) -> int:
@@ -228,8 +237,11 @@ class TestLockPrimitive(unittest.TestCase):
         guard = locks.acquire(self.key, "部署", "web")
         self.addCleanup(guard.release)
         payload = _probe(self.key)
-        self.assertFalse(payload.get("ok"), "另一个进程已持有目标锁，本进程不该拿得到")
-        self.assertIn("部署", payload.get("msg", ""))
+        parent_path = str(locks.path_of(self.key))
+        parent_ino = os.stat(parent_path).st_ino
+        diag = (f"父进程锁 {parent_path} ino={parent_ino}，子进程回包：{json.dumps(payload, ensure_ascii=False)[:700]}")
+        self.assertFalse(payload.get("ok"), f"另一个进程已持有目标锁，本进程不该拿得到——{diag}")
+        self.assertIn("部署", payload.get("msg", ""), diag)
 
     def test_kernel_releases_when_the_holder_dies(self):
         """进程被 SIGKILL 之后锁必须自动没了——这是本批次选 flock 而不是数据库状态位的理由。"""

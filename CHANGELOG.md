@@ -2085,9 +2085,20 @@
   不是 no-dir——那是"没部署过"会被漂移闸门跳过），`is_file/exists/is_symlink` 整段同一个 catch
   （目录 mode 000 时里面的文件照样 stat 不动，实测第一版只包父目录仍漏——真实权限 A/B 才照出来）；
   `unit_reads_env_file` 的 drop-in glob 迭代收进 try；`env_drift` 的 unit 存在性闸门 stat 不动就跳过
-  这一行。`backend/tests/test_batch70.py` 里有一条真实权限实测（mode 0 的安装目录 + `su nobody`
+  这一行。`backend/tests/test_batch70.py` 里有一条真实权限实测（mode 0 的安装目录 + fork 降权
   子进程复现 CI 现场，root/无 nobody 时如实 skip）外加 mock 覆盖三条 stat 路，并钉住
   「unreadable 照常进漂移与判词」。
+- 批次70 补丁2，上一条真实权限用例的两代红法。第一版在 CI 用 `su -s /bin/sh nobody` 起子进程，
+  GitHub runner 上被 PAM 挡成「Authentication failure」（nobody 没有口令），33ded7c 因此多挂一条；
+  第二版改 fork + setgid/setuid 后 `execv` 重启解释器，在生产机（root）上又红：`.venv/bin/python`
+  在 `/root`（0700）下面，降权后的进程连解释器路径都 traversing 不了。最终版降权后在子进程里
+  就地调用 `env_state`——模块 fork 前已 import 完整，跑的还是那条真实读路径，结果经管道回传。
+  A/B 反证：把 `parent_ok` 的 catch 拆掉，该用例当场以 `RAISED=PermissionError` 变红，恢复即绿。
+  子进程版还埋着一个更脏的：模块级无条件改写 `os.environ["CP_DATA_DIR"]`（为让降权子进程进得来），
+  unittest discover 按字母序在它之后的所有模块由此全部改住进这个目录，而 run_tests 的会话守护按
+  环境变量名去回收——生产机上连跑两次全量，batch33 的跨进程 flock 与 alerts 的库都被扫了盘子
+  （`unable to open database file`），单跑怎么试都绿。fork 就地调用后这份覆写整个删掉；探针顺带
+  回传父子两边解析到的锁路径与 inode，这一类"锁没落在同一个文件上"的假象下次直接留证。
 - 批次69，「面板显示的环境变量」与「进程实际读到的值」对账。应用键值对存在 SQLite 里，落盘只在
   「保存配置」和「部署」那两步；unit 写的是 `EnvironmentFile=-<目录>/.panel.env`，开头的 `-` 表示
   文件不存在也不报错。线上实测：`/root/www/choyeon-video` 在 2026-10-18 被换成新的 git clone，
