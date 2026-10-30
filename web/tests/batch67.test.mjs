@@ -38,5 +38,7 @@ test('「保存后重启服务」按钮绑到 saveAndRestart，不再直接 act(
   assert.ok(!/act\('restart'\)/.test(btn[0]), '不许残留旧的 act(restart) 绑定');
   // 忙态同时跟着保存和重启两段走，保存那一程按钮也得锁住
   assert.match(btn[0], /:loading="unitSaving \|\| acting === 'restart'"/);
-  assert.match(btn[0], /:disabled="!!acting \|\| unitSaving"/);
+  // 批次76 在同一串条件后面追加了 unitUnreadable：unit 读不动时点保存，面板手里没有旧内容，
+  // 失败回滚会把「没读到」当成「盘上没有」而 unlink 正在生效的那份，所以那一档也得锁住。
+  assert.match(btn[0], /:disabled="!!acting \|\| unitSaving \|\| unitUnreadable"/);
 });
