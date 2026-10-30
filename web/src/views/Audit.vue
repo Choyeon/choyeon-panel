@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, h } from 'vue';
+import { computed, onScopeDispose, ref, watch, h } from 'vue';
 import { NCard, NDataTable, NInput, NSelect, NIcon, NTag, NText, useMessage } from 'naive-ui';
 import { NButton, tapEllipsis } from '../ui';
 import { api } from '../api';
@@ -12,30 +12,86 @@ import { fmtDateTime } from '../composables/useFormat';
 
 const msg = useMessage();
 const kw = ref('');
+// 过滤词防抖后才发给服务端：每敲一个字都打一次 LIKE 全表没有必要，
+// 但过滤本身必须在服务端——一屏只有 limit 行，在客户端过滤等于「只看得到最近这屏」，
+// 更早的记录会永远搜不到，还会被显示成「没有匹配的记录」。
+const q = ref('');
 // null = 不传 limit，用服务端自己的默认值。默认 200、档位 [100,200,500] 过去都是这一页
 // 抄的，接口那边按 100 截断（api.ts 里还有第三个 100）；现在由响应带回来。
 const limit = ref<number | null>(null);
 
 // 审计只由面板写操作追加，20s 内再次进这一页直接画上一次的结果，
 // 不再出现「整表空白 + 转圈」；点刷新才是强制回源。
-const { data, error, loading, busy, refresh } = useCachedFetch<{ rows: any[]; limit: number; ladder: number[] }>({
-  key: () => `audit:${limit.value ?? ''}`,
-  loader: () => api.audit(limit.value ?? undefined),
-  maxAge: 20000,
+const { data, error, loading, busy, refresh } = useCachedFetch<{
+  rows: any[]; limit: number; ladder: number[]; q: string; matched: number | null; hasMore: boolean;
+}>({
+  key: () => `audit:${limit.value ?? ''}:${q.value}`,
+  loader: () => api.audit({ limit: limit.value ?? undefined, q: q.value || undefined }),
+});
+
+let debounce = 0;
+onScopeDispose(() => clearTimeout(debounce));
+watch(kw, (v) => {
+  clearTimeout(debounce);
+  debounce = window.setTimeout(() => { q.value = v.trim(); }, 300);
 });
 
 // 原实现是 onMounted(load) 里 msg.error(e.message)；错误经 error ref 出来，提示口径不变
 watch(error, (e) => { if (e) msg.error((e as Error).message || String(e)); });
 
-// 接口只认 limit（没有 offset/page），服务端还把它夹在自己的上限，
-// 所以做不了真分页；上限那一档改用虚拟滚动，DOM 里只保留可见范围的行。
-const rows = computed<any[]>(() => data.value?.rows ?? []);
-const limitOpts = computed(() => (data.value?.ladder || []).map((n) => ({ label: `最近 ${n} 条`, value: n })));
+// 更早的几页只追加在本页：缓存管的永远是「当前条件下的第一屏」，
+// 条件一变（换搜索词/换每页条数/点刷新）第一屏重新取，追加的那几页必须一起清掉——
+// 旧条件的行拼在新结果后面，看起来像是「过滤没生效」。
+const older = ref<any[]>([]);
+const olderBusy = ref(false);
+const olderError = ref('');
+const moreAfter = ref(false);
+watch(data, (d) => {
+  older.value = [];
+  olderError.value = '';
+  moreAfter.value = !!d?.hasMore;
+});
+
+const rows = computed<any[]>(() => [...(data.value?.rows ?? []), ...older.value]);
+const matched = computed(() => data.value?.matched ?? null);
+const canLoadOlder = computed(() => moreAfter.value && rows.value.length > 0 && !olderBusy.value);
+const limitOpts = computed(() => (data.value?.ladder || []).map((n) => ({ label: `每页 ${n} 条`, value: n })));
 const shownLimit = computed(() => limit.value ?? data.value?.limit ?? null);
 const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, min: 240 });
 
+const countText = computed(() => {
+  const n = matched.value === null ? '—' : String(matched.value);
+  const head = q.value ? `匹配 ${n} 条` : `共 ${n} 条`;
+  return rows.value.length ? `${head}，已加载 ${rows.value.length} 条` : head;
+});
+
 function reload() {
   return refresh().catch(() => undefined);
+}
+
+async function loadOlder() {
+  // 连点会打出两页同游标：第二页会从第一页末尾之后再取，
+  // 两页之间没有重叠，但夹在中间的新记录会漏（id 游标是严格小于）。
+  if (!canLoadOlder.value) return;
+  const last = rows.value[rows.value.length - 1];
+  if (!last) return;
+  const mineQ = q.value;
+  const mineLimit = limit.value;
+  olderBusy.value = true;
+  olderError.value = '';
+  try {
+    const r: any = await api.audit({
+      limit: mineLimit ?? undefined, q: mineQ || undefined, before: last.id,
+    });
+    // 迟到响应：期间换了搜索词/每页条数，这一页属于旧条件，扔掉而不是拼进来
+    if (q.value !== mineQ || limit.value !== mineLimit) return;
+    older.value = [...older.value, ...(r.rows || [])];
+    moreAfter.value = !!r.hasMore;
+  } catch (e: any) {
+    olderError.value = e?.message || String(e);
+  } finally {
+    olderBusy.value = false;
+  }
 }
 
 const ACTION_TYPE: [RegExp, 'success' | 'error' | 'warning' | 'default'][] = [
@@ -46,13 +102,6 @@ const ACTION_TYPE: [RegExp, 'success' | 'error' | 'warning' | 'default'][] = [
 function actionType(a: string) {
   return ACTION_TYPE.find(([re]) => re.test(a))?.[1] || 'default';
 }
-
-const filtered = computed(() => {
-  if (!kw.value) return rows.value;
-  const k = kw.value.toLowerCase();
-  // 昵称是用户看得见的名字，过滤必须一起匹配，否则按昵称搜会"查无此人"
-  return rows.value.filter((r) => `${r.username || ''} ${r.nickname || ''} ${r.action} ${r.detail || ''}`.toLowerCase().includes(k));
-});
 
 const cols: any[] = [
   { title: '时间 (UTC)', key: 'created_at', width: 165, render: (r: any) => h('span', { class: 'mono-dim' }, fmtDateTime(r.created_at)) },
@@ -92,17 +141,23 @@ const cols: any[] = [
 
     <NCard size="small">
       <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">
-        共 {{ filtered.length }} 条{{ kw ? `（已过滤，加载 ${rows.length} 条）` : '' }}。审计按保留策略自动裁剪，仅管理员可见。
+        {{ countText }}{{ moreAfter ? '；还有更早的记录未加载' : '' }}。审计按保留策略自动裁剪，仅管理员可见。
       </NText>
       <NDataTable
         ref="tableAnchor"
         size="small" :bordered="false" :loading="loading" :scroll-x="'auto'"
         :max-height="tableH" :min-row-height="40" virtual-scroll :pagination="false"
-        :columns="cols" :data="filtered"
+        :columns="cols" :data="rows"
         :row-key="(r: any) => r.id"
       >
-        <template #empty><EmptyBox :text="error ? '审计记录获取失败，点上方「刷新」重试' : (kw ? '没有匹配的记录' : '暂无操作记录')" /></template>
+        <template #empty><EmptyBox :text="error ? '审计记录获取失败，点上方「刷新」重试' : (q ? `没有匹配「${q}」的记录` : '暂无操作记录')" /></template>
       </NDataTable>
+      <div v-if="canLoadOlder || olderError" style="display: flex; align-items: center; justify-content: center; gap: var(--space-3); margin-top: var(--space-3)">
+        <NButton v-if="canLoadOlder" size="small" tertiary :loading="olderBusy" @click="loadOlder">
+          {{ olderError ? '重试加载更早的记录' : '加载更早的记录' }}
+        </NButton>
+        <NText v-if="olderError" type="error" style="font-size: var(--fs-xs)">{{ olderError }}</NText>
+      </div>
     </NCard>
   </div>
 </template>

@@ -284,7 +284,8 @@ class TestWebHasNoCopies(unittest.TestCase):
     def test_api_helper_does_not_default_the_limit(self):
         src = code_of(API_SRC)
         self.assertNotIn("audit: (limit = 100)", src)
-        self.assertRegex(src, r"audit: \(limit\?: number\)")
+        # 批次80 把过滤与游标也收进选项对象；关键仍是 limit 只透传、不自带默认值
+        self.assertRegex(src, r"audit: \(opts: \{ limit\?: number")
 
     def test_redis_panel_sentences_itself_from_the_payload(self):
         src = code_of(PANEL_SRC)

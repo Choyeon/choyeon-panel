@@ -297,22 +297,69 @@ async def alerts_run_checks(req: Request):
     return {"ok": True, **({"skipped": ran["skipped"]} if ran.get("skipped") else {})}
 
 
+AUDIT_Q_MAX = 100
+
+
+def _like_contains(q: str) -> str:
+    """把用户输入包成 LIKE 模式，并把 % _ \\ 当成字面量。
+
+    不转义的话搜「100%」会变成「以 100 开头的任意内容」，搜「a_b」会把 a?b 也算命中——
+    页面给的答案是「匹配 N 条」，模式宽一格这个数就是错的。
+    """
+    for ch in ("\\", "%", "_"):
+        q = q.replace(ch, "\\" + ch)
+    return f"%{q}%"
+
+
 @router.get("/api/audit")
 async def audit_list(req: Request):
     if r := _need_admin(req):
         return r
+    qp = req.query_params
     # LEFT JOIN 取昵称：audit.username 存的是登录名，而用户改完昵称后希望审计里看到的是昵称；
     # 用户被删掉后审计仍需保留（登录名查不到人），LEFT JOIN 而不是 JOIN 就是为了这个。
-    limit = parse_limit(req.query_params.get("limit"))
-    rows = dbm.query(
-        "SELECT a.id,a.username,a.action,a.detail,a.created_at,u.nickname,u.avatar"
-        " FROM audit a LEFT JOIN users u ON u.username=a.username"
-        " ORDER BY a.id DESC LIMIT ?",
-        (limit,),
+    limit = parse_limit(qp.get("limit"))
+    # 过滤必须在服务端做：页面一屏只拿得到 limit 行，在客户端过滤的话「更早的 500 行之外」
+    # 永远搜不到，还会如实显示成「没有匹配的记录」——把「没搜到这一屏」说成「没有」。
+    q = (qp.get("q") or "").strip()[:AUDIT_Q_MAX]
+    before_raw = (qp.get("before") or "").strip()
+    before = None
+    if before_raw:
+        try:
+            before = int(before_raw)
+        except ValueError:
+            before = 0
+        if before <= 0:
+            return JSONResponse(status_code=400,
+                                content={"error": "before 必须是上一条最旧记录的 id（正整数）",
+                                         "code": "bad_cursor"})
+    where: list[str] = []
+    args: list = []
+    if before is not None:
+        where.append("a.id < ?")
+        args.append(before)
+    if q:
+        pat = _like_contains(q)
+        where.append("(a.username LIKE ? ESCAPE '\\' OR u.nickname LIKE ? ESCAPE '\\'"
+                     " OR a.action LIKE ? ESCAPE '\\' OR a.detail LIKE ? ESCAPE '\\')")
+        args += [pat] * 4
+    tail = (" FROM audit a LEFT JOIN users u ON u.username=a.username"
+            + (" WHERE " + " AND ".join(where) if where else ""))
+    # 多取一条判「还有没有更早的」：count 是给文案用的真实匹配数，
+    # 不能拿本页行数冒充。
+    rows = await run_in_threadpool(
+        dbm.query,
+        "SELECT a.id,a.username,a.action,a.detail,a.created_at,u.nickname,u.avatar" + tail
+        + " ORDER BY a.id DESC LIMIT ?",
+        (*args, limit + 1),
     )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    total = await run_in_threadpool(dbm.query_one, "SELECT COUNT(*) AS n" + tail, tuple(args))
     # 原来是裸数组：一个会截断你的接口连「截断到多少」都没地方说，
     # 页面只好自己抄一份 limit 与档位（[100,200,500]）。现在跟 /api/alerts/history 同一形状。
-    return {"rows": rows, "limit": limit, "ladder": list_ladder()}
+    return {"rows": rows, "limit": limit, "ladder": list_ladder(),
+            "q": q, "matched": total["n"] if total else None, "hasMore": has_more}
 
 
 @router.post("/api/system/certbot-renew")

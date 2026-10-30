@@ -229,7 +229,16 @@ export const api = {
   appProc: (id: number) => req(`/apps/${id}/proc`),
   // 不传 limit 就让服务端按它自己的默认取：默认值与上限只在 backend/app/util.py 写一次，
   // 这里过去另写过一个 100（第三份抄本），改一处另外两处不会跟着动。
-  audit: (limit?: number) => req(limit ? `/audit?limit=${limit}` : '/audit'),
+  // q（过滤）与 before（上一页最旧记录的 id）都交给服务端：只在已加载的这一屏里过滤，
+  // 更早的记录会永远搜不到，还会被显示成「没有匹配的记录」。
+  audit: (opts: { limit?: number; q?: string; before?: number } = {}) => {
+    const p = new URLSearchParams();
+    if (opts.limit) p.set('limit', String(opts.limit));
+    if (opts.q) p.set('q', opts.q);
+    if (opts.before) p.set('before', String(opts.before));
+    const s = p.toString();
+    return req(`/audit${s ? `?${s}` : ''}`);
+  },
   users: () => req('/users'),
   createUser: (username: string, password: string, role: string) => req('/users', { body: { username, password, role } }),
   updateUser: (id: number, body: any) => req(`/users/${id}`, { method: 'PATCH', body }),
