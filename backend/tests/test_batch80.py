@@ -8,7 +8,7 @@
 - LIKE 里的 % _ \\ 当字面量：搜「100%」不能变成「以 100 开头」；
 - matched 是整张表在**这个过滤条件**下的真实条数，不是本页行数；
 - before 是上一页最旧记录的 id（严格小于），往回翻不重不漏，bad cursor 明确 400；
-- 空/纯空白 q 等于不过滤；q 超长按 AUDIT_Q_MAX 截断（响应里带回实际用的词）。
+- 空/纯空白 q 等于不过滤；q 超长按 SEARCH_Q_MAX 截断（响应里带回实际用的词）。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from starlette.testclient import TestClient  # noqa: E402
 
 from app import database as dbm  # noqa: E402
 from app import main, security  # noqa: E402
-from app.routers.extras import AUDIT_Q_MAX  # noqa: E402
+from app.util import SEARCH_Q_MAX  # noqa: E402
 
 PREFIX = "b80:"
 USER = "b80-filter-user"
@@ -96,8 +96,8 @@ class TestServerSideFilter(_Base):
         self.assertGreaterEqual(body["matched"], 1)
 
     def test_long_query_is_capped_and_echoed(self):
-        body = self._get("/api/audit?q=" + "z" * (AUDIT_Q_MAX + 50))
-        self.assertEqual(len(body["q"]), AUDIT_Q_MAX)
+        body = self._get("/api/audit?q=" + "z" * (SEARCH_Q_MAX + 50))
+        self.assertEqual(len(body["q"]), SEARCH_Q_MAX)
 
 
 class TestMatchedAndCursor(_Base):

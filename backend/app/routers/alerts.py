@@ -7,7 +7,7 @@ from .. import aio_db
 from ..deps import need_admin
 from ..log import warn
 from ..services import alerts_service
-from ..util import LIST_CAP, list_ladder, parse_limit
+from ..util import LIST_CAP, SEARCH_Q_MAX, like_contains, list_ladder, parse_limit
 
 router = APIRouter()
 
@@ -22,9 +22,13 @@ async def _fail(detail: str, msg: str = "操作失败，详见面板日志", sta
 
 @router.get("/api/alerts/history")
 async def alerts_history(req: Request):
-    level = (req.query_params.get("level") or "").strip()
-    code = (req.query_params.get("code") or "").strip()[:64]
-    limit = parse_limit(req.query_params.get("limit"))
+    qp = req.query_params
+    level = (qp.get("level") or "").strip()
+    code = (qp.get("code") or "").strip()[:64]
+    # 关键字也在服务端过滤：页面一屏只有 limit 行，在浏览器里 filter 的话更早的命中
+    # 永远搜不到，还会被写成「没有符合筛选条件的告警记录」——把「这一屏没有」说成「没有」。
+    q = (qp.get("q") or "").strip()[:SEARCH_Q_MAX]
+    limit = parse_limit(qp.get("limit"))
     if level and not LEVEL_RE.match(level):
         return JSONResponse(status_code=400, content={"error": "level 只能是 ok / warn / crit"})
     where, params = [], []
@@ -34,18 +38,26 @@ async def alerts_history(req: Request):
     if code:
         where.append("code=?")
         params.append(code)
-    sql = "SELECT id,ts,level,code,message,meta,acked FROM alerts_log"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY id DESC LIMIT ?"
-    params.append(limit)
+    if q:
+        pat = like_contains(q)
+        where.append("(code LIKE ? ESCAPE '\\' OR message LIKE ? ESCAPE '\\')")
+        params += [pat, pat]
+    tail = " FROM alerts_log" + (" WHERE " + " AND ".join(where) if where else "")
     try:
-        rows = await aio_db.query(sql, tuple(params))
+        # 多取一行只为判断「还有更早的匹配没加载」，它不进响应
+        rows = await aio_db.query(
+            "SELECT id,ts,level,code,message,meta,acked" + tail + " ORDER BY id DESC LIMIT ?",
+            (*params, limit + 1),
+        )
+        # matched 是这个过滤条件下整张表的真实条数：页面上的「匹配 N 条」不能拿本页行数充数
+        total = await aio_db.query_one("SELECT COUNT(*) AS n" + tail, tuple(params))
     except Exception as e:  # noqa: BLE001
         return await _fail(f"alerts history 查询失败: {type(e).__name__}: {e}", "告警历史读取失败")
+    has_more = len(rows) > limit
     # limit / ladder 随结果一起下发：下拉档位过去由页面自己抄（[100,200,500]），
     # 上限一改，页面还能选到服务端已经给不出的那一档。
-    return {"rows": rows, "limit": limit, "ladder": list_ladder()}
+    return {"rows": rows[:limit], "limit": limit, "ladder": list_ladder(),
+            "q": q, "matched": total["n"] if total else None, "hasMore": has_more}
 
 
 @router.get("/api/alerts/open")

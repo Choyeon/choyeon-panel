@@ -398,6 +398,22 @@ def list_ladder() -> list[int]:
     return sorted(v for v in steps if 1 <= v <= LIST_CAP)
 
 
+# 列表搜索词的上限：LIKE 模式越长扫描越慢，而人不会敲 100 个字符去搜一行记录。
+# 与 LIST_* 一样只写一次——审计与告警历史的 q 都从这里取，免得一处改了另一处还按旧长度截。
+SEARCH_Q_MAX = 100
+
+
+def like_contains(q: str) -> str:
+    """把用户输入包成 LIKE 模式，并把 % _ \\ 当成字面量。
+
+    不转义的话搜「100%」会变成「以 100 开头的任意内容」，搜「a_b」会把 a?b 也算命中——
+    页面给的答案是「匹配 N 条」，模式宽一格这个数就是错的。
+    """
+    for ch in ("\\", "%", "_"):
+        q = q.replace(ch, "\\" + ch)
+    return f"%{q}%"
+
+
 def disk_usage_pct(path: str) -> int | None:
     """返回 path 所在分区的已用百分比（按非 root 可用空间算），取不到返回 None。
 

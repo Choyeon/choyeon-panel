@@ -10,7 +10,7 @@ from .. import database as dbm
 from ..deps import need_admin as _need_admin
 from ..errors import err_json
 from ..services import alerts_service, nginx_ops, panel_entry_service
-from ..util import is_http_url, list_ladder, parse_limit, redact_creds
+from ..util import SEARCH_Q_MAX, is_http_url, like_contains, list_ladder, parse_limit, redact_creds
 
 router = APIRouter()
 
@@ -297,20 +297,6 @@ async def alerts_run_checks(req: Request):
     return {"ok": True, **({"skipped": ran["skipped"]} if ran.get("skipped") else {})}
 
 
-AUDIT_Q_MAX = 100
-
-
-def _like_contains(q: str) -> str:
-    """把用户输入包成 LIKE 模式，并把 % _ \\ 当成字面量。
-
-    不转义的话搜「100%」会变成「以 100 开头的任意内容」，搜「a_b」会把 a?b 也算命中——
-    页面给的答案是「匹配 N 条」，模式宽一格这个数就是错的。
-    """
-    for ch in ("\\", "%", "_"):
-        q = q.replace(ch, "\\" + ch)
-    return f"%{q}%"
-
-
 @router.get("/api/audit")
 async def audit_list(req: Request):
     if r := _need_admin(req):
@@ -321,7 +307,7 @@ async def audit_list(req: Request):
     limit = parse_limit(qp.get("limit"))
     # 过滤必须在服务端做：页面一屏只拿得到 limit 行，在客户端过滤的话「更早的 500 行之外」
     # 永远搜不到，还会如实显示成「没有匹配的记录」——把「没搜到这一屏」说成「没有」。
-    q = (qp.get("q") or "").strip()[:AUDIT_Q_MAX]
+    q = (qp.get("q") or "").strip()[:SEARCH_Q_MAX]
     before_raw = (qp.get("before") or "").strip()
     before = None
     if before_raw:
@@ -339,7 +325,7 @@ async def audit_list(req: Request):
         where.append("a.id < ?")
         args.append(before)
     if q:
-        pat = _like_contains(q)
+        pat = like_contains(q)
         where.append("(a.username LIKE ? ESCAPE '\\' OR u.nickname LIKE ? ESCAPE '\\'"
                      " OR a.action LIKE ? ESCAPE '\\' OR a.detail LIKE ? ESCAPE '\\')")
         args += [pat] * 4

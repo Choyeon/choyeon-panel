@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from 'vue';
+import { computed, h, onScopeDispose, ref, watch } from 'vue';
 import {
   NAlert, NCard, NDataTable, NIcon, NInput, NSelect, NSpace, NTag, NText, useMessage,
 } from 'naive-ui';
@@ -13,7 +13,7 @@ import { useTableHeight } from '../composables/useTableHeight';
 import { fmtDateTime } from '../composables/useFormat';
 
 type AlertRow = { id: number; ts: string; level: string; code: string; message: string; meta: string; acked: number };
-type HistoryResp = { rows: AlertRow[]; limit: number; ladder: number[] };
+type HistoryResp = { rows: AlertRow[]; limit: number; ladder: number[]; q: string; matched: number | null; hasMore: boolean };
 type OpenReport = { rows: AlertRow[]; counts: Record<string, number>; total: number };
 
 const msg = useMessage();
@@ -24,12 +24,28 @@ const level = ref('');
 // 从页面进看到 200 条、从 curl 进只有 100 条。现在由响应把生效值与档位带回来。
 const limit = ref<number | null>(null);
 const kw = ref('');
+// 关键字必须由服务端过滤：页面一屏只有 limit 行，在浏览器里 filter 的话更早的命中
+// 永远搜不到，空态还会把窗口边界说成历史边界。
+const q = ref('');
+let debounce = 0;
+onScopeDispose(() => clearTimeout(debounce));
+watch(kw, (v) => {
+  clearTimeout(debounce);
+  debounce = window.setTimeout(() => { q.value = v.trim(); }, 300);
+});
 const acking = ref<number | null>(null);
 const running = ref('');
 
 const { data, loading, error, refresh } = useCachedFetch<HistoryResp>({
-  key: () => `alerts:history:${level.value}:${limit.value ?? ''}`,
-  loader: () => req(`/alerts/history?${limit.value ? `limit=${limit.value}&` : ''}${level.value ? `level=${level.value}` : ''}`),
+  key: () => `alerts:history:${level.value}:${limit.value ?? ''}:${q.value}`,
+  loader: () => {
+    const p = new URLSearchParams();
+    if (limit.value) p.set('limit', String(limit.value));
+    if (level.value) p.set('level', level.value);
+    if (q.value) p.set('q', q.value);
+    const s = p.toString();
+    return req(`/alerts/history${s ? `?${s}` : ''}`);
+  },
   maxAge: 15000,
 });
 const { data: openData, error: openError, load: loadOpen } = useCachedFetch<OpenReport>({
@@ -48,10 +64,17 @@ const { anchor: tableAnchor, heightPx: tableH } = useTableHeight({ reserve: 16, 
 
 const rows = computed<AlertRow[]>(() => {
   const list = data.value?.rows ?? [];
-  const k = kw.value.trim().toLowerCase();
-  const hit = k ? list.filter((r) => `${r.code} ${r.message}`.toLowerCase().includes(k)) : list;
   // 未确认的钉在最上面：这一页首要用途是「还有什么没处理」，不是完整时间线。
-  return [...hit].sort((a, b) => (a.acked === b.acked ? b.id - a.id : a.acked - b.acked));
+  return [...list].sort((a, b) => (a.acked === b.acked ? b.id - a.id : a.acked - b.acked));
+});
+// 匹配数是服务端在这个过滤条件下数出来的整表条数；不能拿已加载的行数充数。
+const matched = computed(() => data.value?.matched ?? null);
+const hasOlder = computed(() => !!data.value?.hasMore);
+const countText = computed(() => {
+  const n = matched.value === null ? '—' : String(matched.value);
+  const head = q.value ? `匹配 ${n} 条` : (level.value ? `该级别共 ${n} 条` : `共 ${n} 条`);
+  const shown = rows.value.length;
+  return shown && shown < (matched.value ?? shown) ? `${head}，已加载 ${shown} 条` : head;
 });
 const counts = computed<Record<string, number>>(() => openData.value?.counts || { ok: 0, warn: 0, crit: 0 });
 const openTotal = computed(() => openData.value?.total ?? 0);
@@ -267,6 +290,12 @@ async function runRound(kind: 'run' | 'probe') {
         存活探测只对本机 127.0.0.1 的应用端口发一次 GET：连不上或超时算严重，只要有 HTTP 应答（含 4xx/5xx）就算活着，不会因此推送通知。阈值与通知通道在「设置 · 告警」里配置。
       </NAlert>
 
+      <!-- 这一屏只装了 limit 行：把「匹配置信数」和「还有更早的没加载」写在同一句里，
+           用户才不会把窗口边界当成历史的边界。 -->
+      <NText depth="3" style="font-size: var(--fs-xs); display: block; margin-bottom: var(--space-3)">
+        {{ countText }}{{ hasOlder ? '；还有更早的记录未加载' : '' }}。
+      </NText>
+
       <NDataTable
         ref="tableAnchor"
         size="small" :bordered="false" :loading="loading" :scroll-x="'auto'"
@@ -275,7 +304,7 @@ async function runRound(kind: 'run' | 'probe') {
         :row-key="(r: AlertRow) => r.id"
       >
         <template #empty>
-          <EmptyBox :text="histFailed ? '告警历史读取失败，点「刷新」重试' : (kw || level ? '没有符合筛选条件的告警记录' : '暂无告警历史，点「立即巡检」跑一轮')" />
+          <EmptyBox :text="histFailed ? '告警历史读取失败，点「刷新」重试' : (q ? `没有匹配「${q}」的告警记录` : (level ? '该级别没有告警记录' : '暂无告警历史，点「立即巡检」跑一轮'))" />
         </template>
       </NDataTable>
     </CpToolbarCard>
