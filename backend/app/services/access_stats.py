@@ -23,6 +23,8 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from . import web_logs
+
 # 一次扫描最多往回读这么多字节；再大的文件只看尾部（truncatedRead 会如实说明）。
 MAX_BYTES = 8 * 1024 * 1024
 # 解析行数硬上限：8MB 全是最短行时也有几十万行，超过这个数就停，别让一次刷新攥住线程池。
@@ -171,6 +173,26 @@ def read_tail(path: str) -> tuple[list[str], int, bool]:
     return lines, len(raw), start > 0
 
 
+def _unreadable(minutes: int) -> dict:
+    """读不动那一份统计结果：键与正常返回完全一致、数值全为 0，另带一句 `readError`。
+
+    为什么不直接抛：这条路挂在 `GET /api/system/nginx-stats` 上，裸 PermissionError 出去就是
+    500，而 500 里一个字都没说。为什么不只给 `readError` 不给零值表：这张表的键在界面上
+    各有各的位置，缺键的前端就是 undefined 渲染。零值本身绝不能被读成"这个窗口没流量"，
+    所以 `readError` 必须一起给，前端与 CLI 见到它就只说"读不到"。
+    """
+    window = max(1, min(int(minutes) if minutes else 1, SERIES_MAX))
+    return {
+        "parsed": 0, "outsideWindow": 0, "malformed": 0, "scannedLines": 0,
+        "bytesRead": 0, "truncatedRead": False, "windowMinutes": window,
+        "from": "", "to": "", "newest": "", "oldest": "", "bytesOut": 0,
+        "clients": 0, "clientsOverflow": 0, "pathsOverflow": 0,
+        "status": {"0xx": 0, "1xx": 0, "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0},
+        "topCodes": [], "topPaths": [], "topClients": [], "methods": [], "series": [],
+        "readError": web_logs.readable_hint(),
+    }
+
+
 def collect(path: str, minutes: int = 60) -> dict:
     """扫一次访问日志：状态码分布、TOP 路径/客户端、方法分布与每分钟请求曲线。
 
@@ -183,8 +205,15 @@ def collect(path: str, minutes: int = 60) -> dict:
     不能拿"最后一行"当最新），第二趟才聚合。合成一趟要把每条记录留在内存里
     （上限 `MAX_LINES` 行 × 每行几个字符串 ≈ 几十 MB），多解析一遍只多花 CPU，
     不改内存上界。
+
+    来源清单里的文件读不动（0640 root:adm 撞上非 root 进程）时给 `_unreadable()`：
+    按天那条路早就把"读不到的世代"单独数进 `unreadableFiles`，分钟窗口原来是裸读，
+    一次刷新直接变 500。
     """
-    lines, read_bytes, truncated = read_tail(path)
+    try:
+        lines, read_bytes, truncated = read_tail(path)
+    except OSError:
+        return _unreadable(minutes)
     window = max(1, min(int(minutes) if minutes else 1, SERIES_MAX))
     limit = min(len(lines), MAX_LINES)
     if len(lines) > MAX_LINES:

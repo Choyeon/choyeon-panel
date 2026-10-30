@@ -19,13 +19,13 @@ import { useVisiblePoll } from '../composables/useVisiblePoll';
 type JItem = { ts: string; unit: string; prio: number; text: string };
 type JResp = { items: JItem[]; count: number; truncated: boolean };
 type SFile = { i: number; label: string; kind: string; site: string };
-type NResp = { items: string[]; count: number; source: string; files: SFile[]; truncated: boolean; hint?: string };
+type NResp = { items: string[]; count: number; source: string; files: SFile[]; truncated: boolean; hint?: string; readError?: string };
 type LogOpts = {
   lines_default: number; lines_max: number; ladder: number[];
   nginx_tail_bytes: number; stats_minutes: number[]; stats_days: number[];
 };
 type SResp = {
-  hint?: string; files?: SFile[]; source?: string; site?: string; file?: number;
+  hint?: string; readError?: string; files?: SFile[]; source?: string; site?: string; file?: number;
   parsed?: number; outsideWindow?: number; malformed?: number; scannedLines?: number;
   bytesRead?: number; truncatedRead?: boolean; windowMinutes?: number;
   from?: string; to?: string; bytesOut?: number; clients?: number;
@@ -497,6 +497,14 @@ const nCols: any[] = [
 // 用数组下标当 key 会让滚动时行内容错位复用。
 const jRows = computed(() => (jResult.value?.items || []).map((it, i) => ({ ...it, i })));
 const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i, line })));
+
+// 空表格里那一格写什么：读不到、没命中、还没读，是三件事，写成一句就有一句是谎话。
+// "这段日志里没有命中行"尤其不能顶替"读不到"——它会把权限问题说成日志内容问题。
+const nEmptyText = computed(() => {
+  if (nResult.value?.readError) return '这个来源读不到，表格里没有行不是因为没有请求，是因为没读进来。';
+  if (nResult.value) return '这段日志里没有命中行（换个过滤词，或加大尾读行数）';
+  return '点「读取末尾」取一份日志';
+});
 </script>
 
 <template>
@@ -573,7 +581,8 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
           />
           <NButton size="small" type="primary" :loading="nLoading" :disabled="nLoading" :icon="icon('SearchOutline', 14)" @click="tailNginx">读取末尾</NButton>
         </NSpace>
-        <NAlert v-if="nResult?.hint" type="info" :bordered="false" size="small">{{ nResult.hint }}</NAlert>
+        <NAlert v-if="nResult?.readError" type="warning" :bordered="false" size="small">{{ nResult.source }}：{{ nResult.readError }}</NAlert>
+        <NAlert v-else-if="nResult?.hint" type="info" :bordered="false" size="small">{{ nResult.hint }}</NAlert>
         <div v-else-if="nResult" class="cp-help" style="margin-bottom: var(--space-2)">
           {{ nResult.source }} · 返回 {{ nResult.count }} 行{{ nResult.truncated ? '（已到上限）' : '' }}；
           {{ tailNote }}
@@ -583,7 +592,7 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
           :scroll-x="'auto'" :max-height="tableH" :virtual-scroll="true" class="cp-tbl tbl-log"
           :row-key="(r: { i: number }) => r.i"
         >
-          <template #empty><EmptyBox :text="nResult ? '这段日志里没有命中行（换个过滤词，或加大尾读行数）' : '点「读取末尾」取一份日志'" /></template>
+          <template #empty><EmptyBox :text="nEmptyText" /></template>
         </NDataTable>
       </NTabPane>
 
@@ -606,7 +615,8 @@ const nRows = computed(() => (nResult.value?.items || []).map((line, i) => ({ i,
           </NText>
         </NSpace>
 
-        <NAlert v-if="sResult?.hint" type="info" :bordered="false" size="small">{{ sResult.hint }}</NAlert>
+        <NAlert v-if="sResult?.readError" type="warning" :bordered="false" size="small">{{ sResult.source }}：{{ sResult.readError }}</NAlert>
+        <NAlert v-else-if="sResult?.hint" type="info" :bordered="false" size="small">{{ sResult.hint }}</NAlert>
         <EmptyBox v-else-if="!sResult && !sLoading" text="这一页会自己跑一次；也可以换来源或窗口后点「统计」" />
 
         <template v-else-if="sResult">

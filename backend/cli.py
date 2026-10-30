@@ -1957,6 +1957,10 @@ async def cmd_webstats(a: argparse.Namespace) -> dict:
         Out.result(data, _webdaily_text(data))
         return data
     data = access_stats.collect(picked["path"], minutes)
+    if data.get("readError"):
+        # 文件在来源清单里但读不动（非 root 读 0640 root:adm 的 nginx 日志）。
+        # 打一张全零的表出去，念起来和"这个窗口没人访问"一模一样，所以按前置条件失败处理。
+        Out.error(f"{picked['label']}：{data['readError']}", EXIT_PRECONDITION)
     data["source"] = picked["label"]
     data["site"] = picked["site"]
     Out.result(data, _webstats_text(data))

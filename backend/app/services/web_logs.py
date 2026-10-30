@@ -170,6 +170,19 @@ def discovery_hint() -> str:
             "choyeonctl upgrade --no-pull 重新渲染并重启才生效。")
 
 
+def readable_hint() -> str:
+    """来源在盘上找得到、但这一次读不动时的说明（tail 与统计共用这一份判词）。
+
+    和 `discovery_hint()` 分开：那一句说的是"白名单里压根没有文件"，这一句说的是
+    "文件在，是你没权限读"。两者的处置完全不同，合成一句就有一句会说谎。
+    不拼绝对路径——这个字符串会进浏览器。
+    """
+    return ("这个来源在磁盘上存在，但面板进程读不动它。nginx 写的 access.log / error.log "
+            "通常是 0640 root:adm，只有 traversal 权限的目录能让它出现在来源清单里，读内容要"
+            "真正的读权限；让面板服务保持 root（deploy/choyeon-panel.service 默认就是），"
+            "或把该文件的读权限放开给面板进程。终端排障可以用 root 跑 choyeonctl webstats。")
+
+
 def tail_file(path: str, lines: int, filt: str, max_chars: int) -> dict:
     """从文件末尾最多读 TAIL_BYTES，再取后 lines 行（大日志不会把内存打满）。
 
@@ -181,12 +194,20 @@ def tail_file(path: str, lines: int, filt: str, max_chars: int) -> dict:
     排障时最想知道的那一条。返回的四个数分开说清三件事：给了几行（items）、窗口里命中几行
     （matched）、其中被行数上限裁掉几行（dropped）、字节窗口有没有到底
     （window_truncated）。只有 dropped 与 window_truncated 都是 0/false 时才是完整答案。
+
+    "发现得了"与"读得动"是两件事：来源清单只要求目录可 traversal + 是普通文件，读内容才碰
+    文件本身的权限。读不动时如实给 `readable: False` 而不是抛 OSError——这条路挂在
+    `GET /api/system/nginx-log` 上，一个裸 PermissionError 就是 500，而 500 什么都没说。
     """
-    size = os.path.getsize(path)
-    start = max(0, size - TAIL_BYTES)
-    with open(path, "rb") as f:
-        f.seek(start)
-        raw = f.read()
+    try:
+        size = os.path.getsize(path)
+        start = max(0, size - TAIL_BYTES)
+        with open(path, "rb") as f:
+            f.seek(start)
+            raw = f.read()
+    except OSError:
+        return {"items": [], "matched": 0, "dropped": 0, "window_truncated": False,
+                "readable": False}
     rows = raw.decode(errors="replace").splitlines()
     if filt:
         kf = filt.lower()
@@ -198,4 +219,5 @@ def tail_file(path: str, lines: int, filt: str, max_chars: int) -> dict:
         "matched": matched,
         "dropped": matched - len(keep),
         "window_truncated": start > 0,
+        "readable": True,
     }

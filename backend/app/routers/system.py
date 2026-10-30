@@ -516,17 +516,22 @@ async def nginx_log(request: Request):
         return _bad(f"file 序号超出范围（可用 0-{len(files) - 1}）")
     picked = files[idx]
     tail = await run_in_threadpool(web_logs.tail_file, picked["path"], lines, filt, MAX_ITEM_CHARS)
+    # 来源在清单里 ≠ 读得动（0640 root:adm 的日志只要目录可 traversal 就会被列出来）。
+    # 读不动时如实带 readError 并把四个数说成"没读到"，不许画一张空表让人以为日志是空的。
+    read_error = "" if tail.get("readable", True) else web_logs.readable_hint()
     return {
         "items": tail["items"],
         "count": len(tail["items"]),
         "matched": tail["matched"],
         "dropped": tail["dropped"],
         "window_truncated": tail["window_truncated"],
+        "readError": read_error,
         "source": picked["label"],
         "files": [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]} for i, f in enumerate(files)],
         # 「这一页是不是全部」要同时看两把刀：行数上限裁掉的命中（dropped），和整个文件比
         # 单次读量大、连窗口都没读到底（window_truncated）。按返回条数判会把两者都说成完整答案。
-        "truncated": tail["dropped"] > 0 or tail["window_truncated"],
+        # 读不动是第三种事实，不是"没裁掉所以完整"。
+        "truncated": bool(read_error) or tail["dropped"] > 0 or tail["window_truncated"],
     }
 
 
