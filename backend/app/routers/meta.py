@@ -579,7 +579,17 @@ async def _check_app_env() -> dict:
     从不告诉调用方"原来不一致"），所以漂移只能靠人肉发现。
     """
     d = apps_service.env_drift()
+    # 「没查出漂移」和「一个都没查成」不是一个事实：unit 目录 stat 不动时闸门给不出结论
+    # （非 root 跑 CLI、或 UNIT_DIR 权限被改过），这些行既不在 drift 里也不该算绿灯。
+    unknown = d.get("unknown", 0)
     if not d["drift"]:
+        if unknown:
+            return {
+                "status": "warn",
+                "detail": f"{d['total']} 个纳管应用里有 {unknown} 个连 unit 文件都确认不了"
+                          f"（{apps_service.UNIT_DIR} 读不动），这一项对它们没查成",
+                "fix": "用 root 执行 choyeonctl doctor；确认该目录存在且可读之后再看这一项",
+            }
         return {
             "status": "pass",
             "detail": f"{d['total']} 个纳管应用的环境变量落盘一致，且 unit 都引用了 .panel.env",
@@ -599,9 +609,13 @@ async def _check_app_env() -> dict:
         else:  # 磁盘那份是对的，没人读它
             why = f"{n} 个变量写得对，但它的 unit 没有引用 .panel.env，进程一个都读不到"
         parts.append(f"{x['name']}：{why}")
+    tail = "——面板显示的环境变量和进程实际读到的不是同一份"
+    if unknown:
+        tail += (f"；另有 {unknown} 个连 unit 文件都确认不了"
+                 f"（{apps_service.UNIT_DIR} 读不动），这一项对它们也没查成")
     return {
         "status": "fail",
-        "detail": "；".join(parts) + "——面板显示的环境变量和进程实际读到的不是同一份",
+        "detail": "；".join(parts) + tail,
         "fix": "进这些应用的「详情 → 环境变量」页点「重新写入并重启」（只重存现有配置，不改值）；"
                "急着重录全量配置也可以在「应用」页重新部署一次",
     }

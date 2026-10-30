@@ -314,21 +314,27 @@ def env_drift() -> dict:
     只看本机已经有 unit 文件的应用（与 `ensure_env_link` 判 no-unit 用同一个读者）：
     建了记录还没部署过的应用既没进程也没 unit，.panel.env 不在磁盘上不是漂移而是
     "还没落地"，把它列进失败项只会让人开始忽略这一项。
+    但"确认没有"与"确认不了"是两件事：UNIT_DIR 本身 stat 不动时闸门给不出结论，
+    把它一并当成"没有 unit"会让整项自检在什么都没读的情况下报 pass——
+    读不动的那些行数进 `unknown`，由调用方如实降为未确认，而不是绿灯。
 
     投影里必须带 `unit_override`：纳管外部 unit 的应用如果按 `panel-<name>.service` 去问，
     那个名字压根没有文件，它就会被上面那条噪声闸门当成"还没部署过"直接跳过——上线第一天
     video 的详情接口报 `missing`、自检却一声不响，差的就是这一列。
     """
     drift = []
+    unknown = 0
     rows = dbm.query("SELECT id, name, path, env, unit_override FROM apps ORDER BY name")
     for a in rows:
         try:
             unit_present = (Path(UNIT_DIR) / unit_name(a)).is_file()
         except OSError:
             # 这一层只是噪声闸门（"本机有没有这个 unit 文件"），不是结论本身：
-            # 连 UNIT_DIR 都 stat 不动时确认不了，就跳过——整轮自检不该为此炸掉，
-            # 而真有漂移时里面那层 env_state 会如实给 unreadable。
-            unit_present = False
+            # 确认不了不等于确认没有，None 让下面单独数进 unknown，整轮自检也不为此炸掉。
+            unit_present = None
+        if unit_present is None:
+            unknown += 1
+            continue
         if not unit_present:
             continue
         st = env_state(a)
@@ -336,7 +342,7 @@ def env_drift() -> dict:
         not_read = st["vars"] > 0 and not st["unitReads"]
         if bad_disk or not_read:
             drift.append({"id": a["id"], "name": a["name"], **st})
-    return {"total": len(rows), "drift": drift}
+    return {"total": len(rows), "drift": drift, "unknown": unknown}
 
 
 async def ensure_env_link(app: dict) -> str:

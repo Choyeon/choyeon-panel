@@ -11,7 +11,8 @@
   「重新写入」去覆盖一个看不见的东西；也不是 no-dir——那是"没部署过"，会被漂移闸门跳过）；
   `exists()/is_symlink()` 兜底同样 catch；
 - `unit_reads_env_file`：drop-in 目录的 glob 迭代会抛，收进 try；
-- `env_drift`：unit 文件存在性闸门只是噪声过滤，stat 不动就跳过这一行，不炸整轮。
+- `env_drift`：unit 文件存在性闸门只是噪声过滤，stat 不动就跳过这一行，不炸整轮
+  （批次72 又把「跳过」细化成三态：读不动要单独数进 unknown，不许算成查过且干净）。
 - 批次71 补的第四条 `suggest_unit`：它挂在 GET /api/apps（列表）与详情页两条读路径上，
   原来也是裸 `is_file()`——同一类缺陷在这个文件里的漏网之鱼，读不动如实「不建议」。
 
@@ -163,6 +164,8 @@ class StatErrorMappingTests(unittest.TestCase):
             got = apps_service.env_drift()
         self.assertEqual(got["drift"], [])
         self.assertEqual(got["total"], 1)
+        # 批次72：不炸整轮之外还得说实话——这一行是「没查成」，不是「查过且干净」
+        self.assertEqual(got["unknown"], 1)
 
     def test_suggest_unit_with_denied_stat_returns_none_instead_of_500(self):
         # 批次71：同一个缺陷的漏网之鱼——suggest_unit 挂在 GET /api/apps（列表）和
@@ -197,7 +200,8 @@ class HonestRowsStillDriftTests(unittest.TestCase):
         # 源码契约：裸 stat 的四条路都必须在 try 里（CI 的 PermissionError 全靠这几处兜住）
         self.assertIn("parent_ok = None", SERVICE_PY)
         self.assertRegex(SERVICE_PY, r"try:\s*\n\s*if target\.is_file\(\):")
-        self.assertIn("unit_present = False", SERVICE_PY)
+        # 批次72 把这道闸门改成三态（None = 确认不了），契约跟着改：仍必须在 try 里
+        self.assertIn("unit_present = None", SERVICE_PY)
         fn = SERVICE_PY.split("def unit_reads_env_file")[1].split("def env_state")[0]
         self.assertIn("files.extend(_env_drop_in_dir(unit).glob", fn)
         fn = SERVICE_PY.split("def suggest_unit")[1].split("def render_unit_from")[0]

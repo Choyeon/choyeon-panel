@@ -2094,6 +2094,25 @@
   CI 与降权跑的机器踩得到。修成读不动如实「不建议」（None），不猜也不崩；探针在生产机
   实测过修复前 `RAISED=PermissionError`。A/B 反证：把 catch 拆回裸 stat，
   `test_batch70` 的新用例与源码契约条当场两红，恢复即绿。
+- 批次72，批次70 补丁那道「stat 不动就跳过这一行」的闸门自己造成了一个假绿灯。生产机上用
+  total-denial 探针（`UNIT_DIR` 与所有 stat 方法全部抛 PermissionError）实测：`env_drift` 每行都
+  在闸门处 `continue`，`drift` 为空，`_check_app_env` 于是给出 `pass` 与
+  「5 个纳管应用的环境变量落盘一致，且 unit 都引用了 .panel.env」——一个字节都没读，却替五个应用
+  担保了落盘一致。批次69 上线后 video 那次「详情接口报 missing、自检一声不响」是投影漏列，
+  这一条更糟：闸门把"确认不了"翻译成"确认没有"，而"确认没有"正是该项的通过条件。
+  修法是把闸门做成三态（本机确有 unit / 确认没有 / 确认不了），确认不了的行单独数进
+  `env_drift()` 返回值的 `unknown`，判词据此降级：无漂移但有 unknown → `warn`，点名个数与读不动的
+  目录，并如实写「这一项对它们没查成」；有漂移 → 仍是 `fail`，尾部补一句「另有 N 个连 unit 文件都
+  确认不了」。不给一键修复（重启别人的服务这条约束不变），也不给 pass：读不动永远不许被写成"一致"。
+  `backend/tests/test_batch72.py` 钉住四组事实：mode 000 的 unit 目录下的真实权限实测（生产机 root
+  用 fork + setgid/setuid 就地调用，降权进程连 `/root` 都进不来这条已在批次70 补丁2 踩过；非 root
+  主机就地调用，两者都不成立才如实 skip）、total-denial 端到端判词里不得出现「落盘一致」、三态闸门
+  的另外两侧（确认没有照旧跳过且 `unknown=0`，干净行与读不动行混列只数读不动，真漂移与 unknown
+  同时存在时 `fail` 且两个都点名）、以及旧调用方传不含 `unknown` 键的字典不得 KeyError。
+  A/B 反证：把闸门那行的 `None` 折回 `False`，该文件 11 条里当场红 6 条（含真实权限、端到端、
+  两条三态与源码契约），恢复即绿。`test_batch70` 的漂移闸门用例同步改断 `unknown == 1`，
+  源码契约钉 `unit_present = None`。生产机以 root 跑，`/etc/systemd/system` 读得到，这一批
+  不改线上判词——它改的是"读不动时骗人"这件事本身。
 - 批次70 补丁2，上一条真实权限用例的两代红法。第一版在 CI 用 `su -s /bin/sh nobody` 起子进程，
   GitHub runner 上被 PAM 挡成「Authentication failure」（nobody 没有口令），33ded7c 因此多挂一条；
   第二版改 fork + setgid/setuid 后 `execv` 重启解释器，在生产机（root）上又红：`.venv/bin/python`
