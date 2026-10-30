@@ -56,6 +56,11 @@ const dbSel = ref<string[]>([]);
 const unitInfo = ref<any>(null);
 const unitContent = ref('');
 const unitSaving = ref(false);
+// unit 文件的三态来自后端 _unit_text：ok 拿到全文 / missing 盘上确实没有 / unreadable 在但读不动。
+// 旧的那句 `r.content || r.defaultTemplate` 把 missing 与 unreadable 读成同一句话，
+// 于是"这一次没读到"在编辑框里冒充成"现网配置就是这份模板"。
+const unitUnreadable = computed(() => unitInfo.value?.file_state === 'unreadable');
+const unitMissing = computed(() => unitInfo.value?.file_state === 'missing');
 const proc = ref<any>(null);
 // 同上：读不到进程读数时，卡片要说的是"这一次没取到"，不是"systemd 没给读数"
 const procErr = ref('');
@@ -170,7 +175,8 @@ async function loadUnit() {
     // Environment= 凭据与路径，而且「保存」会把这份内容写回现在这个应用。
     if (requested !== id) return;
     unitInfo.value = r;
-    unitContent.value = r.content || r.defaultTemplate;
+    if (unitUnreadable.value) unitContent.value = '';
+    else unitContent.value = r.file_state === 'ok' ? r.content : r.defaultTemplate;
   } catch (e: any) {
     if (requested !== id) return;
     msg.error(e.message);
@@ -747,6 +753,14 @@ watch(
             <NAlert v-if="unitInfo && !unitInfo.managed" type="warning" :bordered="false" size="small">
               该应用为纳管模式（unit {{ app.unit }} 由外部管理），面板只读展示，不会写入该文件。
             </NAlert>
+            <NAlert v-if="unitUnreadable" type="error" :bordered="false" size="small">
+              读不到 {{ unitInfo?.path }}（{{ unitInfo?.file_reason || '未知原因' }}）：面板这一刻拿不到盘上正在生效的这份 unit 全文，
+              所以框里是空的，也不会用面板默认模板顶上去——那会让一份你没见过的配置看起来像现网配置。
+              排除权限问题后点「重新读取」。
+            </NAlert>
+            <NAlert v-else-if="unitMissing" type="info" :bordered="false" size="small">
+              盘上还没有 {{ unitInfo?.unit }}（首次部署前是正常的）。下面是面板将要生成的默认模板，保存即写入并 daemon-reload。
+            </NAlert>
             <div class="cp-help">
               文件：<span class="mono-dim cp-break">{{ unitInfo?.path }}</span>。保存流程：写入 → systemd-analyze verify 校验 → daemon-reload，任一步失败自动回滚。修改后需重启服务才生效；面板生成模式下保存会同步更新部署模板，后续部署按此模板渲染。占位符 <code v-pre>{{name}} {{path}} {{start_cmd}} {{port}}</code> 可在模板中使用。
             </div>
@@ -754,16 +768,16 @@ watch(
               v-model:value="unitContent"
               type="textarea"
               :autosize="{ minRows: 14, maxRows: 26 }"
-              :readonly="!!unitInfo && !unitInfo.managed"
+              :readonly="unitUnreadable || (!!unitInfo && !unitInfo.managed)"
               :input-props="{ class: 'mono', 'aria-label': 'systemd unit 内容', style: 'font-size: var(--fs-xs)' }"
             />
             <NSpace justify="space-between" align="center">
               <NSpace size="small">
                 <NButton size="small" tertiary round :icon="ico('RefreshOutline')" @click="loadUnit">重新读取</NButton>
-                <NButton v-if="unitInfo?.managed" size="small" tertiary round @click="restoreDefaultTpl">恢复面板默认模板</NButton>
-                <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :loading="unitSaving || acting === 'restart'" :disabled="!!acting || unitSaving" :icon="ico('SyncOutline')" @click="saveAndRestart">保存后重启服务</NButton>
+                <NButton v-if="unitInfo?.managed" size="small" tertiary round :disabled="unitUnreadable" @click="restoreDefaultTpl">恢复面板默认模板</NButton>
+                <NButton v-if="unitInfo?.managed" size="small" tertiary round type="warning" :loading="unitSaving || acting === 'restart'" :disabled="!!acting || unitSaving || unitUnreadable" :icon="ico('SyncOutline')" @click="saveAndRestart">保存后重启服务</NButton>
               </NSpace>
-              <NButton type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed || unitSaving" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
+              <NButton type="primary" size="small" round :loading="unitSaving" :disabled="!unitInfo?.managed || unitSaving || unitUnreadable" :icon="ico('SaveOutline')" @click="saveUnitFile">保存 Unit</NButton>
             </NSpace>
           </template>
         </NSpace>

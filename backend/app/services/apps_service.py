@@ -19,6 +19,7 @@ from ..util import (
     is_name,
     is_port,
     is_unit,
+    path_state,
     redact_creds,
     run,
     run_shell_async,
@@ -1696,18 +1697,50 @@ async def attach_ssl(app_id: int, email: str | None = None) -> str:
     return out
 
 
+def _unit_text(path: str) -> tuple[str, str | None, str]:
+    """读一个 unit 文件，回 (状态, 全文, 原因)。状态只有三档，且"读不动"绝不并入"没有"。
+
+    - ok：拿到了全文。
+    - missing：stat 明确说没有这个文件（ENOENT / ENOTDIR）——首次部署前本来就该是空的。
+    - unreadable：文件在，但这一次读不动（权限 / ACL / 挂载选项 / 读到一半被换掉），
+      `text` 是 None。调用方必须把它和 missing 分开处理：把"读不到"当成"盘上没有"，
+      读的一侧会把面板默认模板当成现网配置显示出来，写的一侧更狠——`save_unit` 的回滚
+      快照按"原来没有"记着，verify 一失败就走 unlink 分支，把正在生效的那份 unit 删了。
+
+    `os.path.exists()` 与 `Path.exists()` 一样只回两个值，而且把 PermissionError 折成
+    False（批次75 已把这条写进 util.path_state）；裸 read_text 则把同一个异常原样抛出去，
+    在这里就是 GET /api/apps/{id}/unit 直接 500。
+    """
+    state, why = path_state(path)
+    if state is None:
+        return "unreadable", None, why
+    if not state:
+        return "missing", None, ""
+    try:
+        return "ok", Path(path).read_text(errors="replace"), ""
+    except OSError as e:
+        # stat 过了不等于读得动：这一档仍然算 unreadable，不抛给路由层
+        return "unreadable", None, type(e).__name__
+
+
 def read_unit(app_id: int) -> dict:
     app = get_app(app_id)
     if not app:
         raise RuntimeError("应用不存在")
     unit = unit_name(app)
     path = f"{UNIT_DIR}/{unit}"
-    content = Path(path).read_text(errors="replace") if os.path.exists(path) else ""
+    file_state, text, why = _unit_text(path)
     return {
         "unit": unit,
         "path": path,
         "managed": not app["unit_override"],
-        "content": content,
+        # 全文只反映"真的读到了"的那一份。missing 与 unreadable 都回空串，两者的区别写在
+        # file_state 里，前端必须先分支再决定要不要回退到面板默认模板——
+        # `r.content || r.defaultTemplate` 这一句把两种情况读成同一句话，
+        # 于是"读不动"在编辑框里冒充成"现网配置就是这份模板"。
+        "content": text if file_state == "ok" else "",
+        "file_state": file_state,
+        "file_reason": why,
         "template": app["unit_template"],
         "defaultTemplate": render_unit({**app, "unit_template": None}),
     }
@@ -1737,10 +1770,22 @@ async def save_unit(app_id: int, content: str) -> dict:
     normalized = content if content.endswith("\n") else content + "\n"
     unit = unit_name(app)
     path = f"{UNIT_DIR}/{unit}"
-    old = Path(path).read_text(errors="replace") if os.path.exists(path) else None
+    # 回滚快照必须是三态读出来的那一份。旧写法 `if os.path.exists(path) else None`
+    # 在文件读不动时留下两种坏结果：either 崩在裸 read_text 上，或者（exists 被
+    # PermissionError 折成 False 时）把"读不到"记成"原来没有"——于是 verify 一失败，
+    # _restore 走 unlink 分支，把正在跑着这个应用的 unit 删掉了。
+    old_state, old, old_why = _unit_text(path)
+    if old_state == "unreadable":
+        raise RuntimeError(
+            f"现有的 unit 文件读不动（{old_why}），面板不写：这一刻既拿不到回滚快照，"
+            "也没法确认覆盖的是哪一份。请先按提示排掉权限问题，或用 CLI 直接编辑。"
+        )
 
     def _restore():
         """失败回滚：原来没有这个文件就把刚写进去的删掉。
+
+        `old is None` 到这里只剩"盘上确实没有"一种来源——读不动的那一档已经在上面拦住了，
+        所以 unlink 删的一定是这一次自己写进去的。
 
         旧实现只在 old is not None 时恢复，首次保存（或 unit 文件已被删）失败后，
         这份没通过 verify 的 unit 会留在 UNIT_DIR 里——当下没 daemon-reload 所以还没加载，
