@@ -105,8 +105,8 @@ const infoItems = computed(() => {
 });
 
 // PID 一格的三种账：读到 pid 报号；systemctl 连判词都没给（超时、非 root、本机没有 systemd）
-// 写「未读到」——「未运行」是「这个服务已停止」的断言，正是批次㉜从存活口径里清掉的那句，
-// 而照着它点「启动」的人，是在对一个可能正活着的服务下判断。
+// 走 UNKNOWN_LABEL 那一档——「未运行」是「这个服务已停止」的断言，正是批次㉜从存活口径里
+// 清掉的那句，而照着它点「启动」的人，是在对一个可能正活着的服务下判断。
 function pidText(p: any): string {
   if (p.pid) return String(p.pid);
   return p.state === 'unknown' ? UNKNOWN_LABEL : '未运行';
