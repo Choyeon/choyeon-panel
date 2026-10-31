@@ -36,7 +36,7 @@ from ..services import (
     updates_service,
 )
 from ..templates import list_templates
-from ..util import CTRL_TIMEOUT, dir_state, disk_usage_pct, run
+from ..util import CTRL_TIMEOUT, dir_state, disk_usage_pct, name_list, run
 
 router = APIRouter()
 
@@ -350,7 +350,7 @@ async def _check_cert_renewal() -> dict:
                 "fix": "手工核对：certbot certificates",
             }
         return {"status": "pass", "detail": "certbot 已装但暂无证书", "fix": ""}
-    names = ", ".join(certs[:5])
+    names = name_list(certs, 5, sep=", ", unit="张")
     t = await cert_ops.timer_status()
     if t["status"] == "installed":
         if t.get("checked") == "systemd-unit":
@@ -362,7 +362,7 @@ async def _check_cert_renewal() -> dict:
                 "detail": f"{len(certs)} 张证书的 {unit} 只有单元文件、未被 systemd 装载，不会自动续期",
                 "fix": f"systemctl enable --now {unit}",
             }
-        return {"status": "pass", "detail": f"{len(certs)} 张证书有自动续期（{names}）：{t['detail']}", "fix": ""}
+        return {"status": "pass", "detail": f"{len(certs)} 张证书有自动续期：{names}；{t['detail']}", "fix": ""}
     if t["status"] == "unknown":
         # 查不了 ≠ 没有。说成"没有"会让人去装一个其实已经在跑的定时器
         return {
@@ -428,14 +428,16 @@ async def _check_timer_units() -> dict:
     if orphans or missing:
         parts = []
         if orphans:
-            parts.append("没有对应任务的残留单元：" + "、".join(sorted(orphans)[:6]))
+            parts.append("没有对应任务的残留单元：" + name_list(sorted(orphans), 6))
         if missing:
-            parts.append("已启用但单元文件不存在：" + "、".join(sorted(missing)[:6]))
+            parts.append("已启用但单元文件不存在：" + name_list(sorted(missing), 6))
         fix = "；".join(
             f"systemctl disable --now {o.split('（')[0]} && rm -f {unit_dir}/{o.split('（')[0]} "
             f"{unit_dir}/{o.split('（')[0].replace('.timer', '.service')}"
             for o in sorted(orphans)[:6]
         ) or "在对应页面重新保存一次任务（面板会重新渲染 unit）"
+        if len(orphans) > 6:
+            fix += f"；另有 {len(orphans) - 6} 个残留单元未列出，先 systemctl list-timers --all 看全"
         return {"status": "warn", "detail": "；".join(parts), "fix": fix}
     return {"status": "pass", "detail": "定时器单元与任务记录一一对应", "fix": ""}
 

@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 
 from .. import probe
 from ..severity import SEV_INFO, SEV_RISK, SEV_WARN
-from ..util import tallied
+from ..util import name_list, tallied
 from . import systemd_ops
 
 CACHE_TTL = 120.0
@@ -650,7 +650,7 @@ def _findings(kernel: dict, stale: dict, reloads: dict) -> list[dict]:
     out = []
     if kernel.get("needs_reboot"):
         newer = kernel.get("newer") or []
-        names = ", ".join(k["pkg"] for k in newer[:3])
+        names = name_list([k["pkg"] for k in newer], 3, sep=", ")
         det = (f"运行中的内核是 {kernel.get('running')}"
                + (f"，已装上但没进用的：{names}" if names else "，发行版挂了重启标记"))
         out.append({
@@ -692,7 +692,8 @@ def _findings(kernel: dict, stale: dict, reloads: dict) -> list[dict]:
         out.append({
             "id": f"stale-lib:{unit or '(none)'}", "severity": sev,
             "title": f"{shown}：{head}",
-            "detail": f"{rec['procs']} 个进程仍映射着 {len(rec['files'])} 个已被替换的文件（{', '.join(labels[:4])}）"
+            "detail": f"{rec['procs']} 个进程仍映射着 {len(rec['files'])} 个已被替换的文件："
+                      f"{name_list(labels, 4, sep=', ')}"
                       f"{at}{when}。新版本装在磁盘上，但不在这个进程的地址空间里。",
             "fix": fix,
             "files": [{"path": f["path"], "pkg": f.get("pkg") or "", "version": f.get("pkg_version") or "",
@@ -722,7 +723,7 @@ def _findings(kernel: dict, stale: dict, reloads: dict) -> list[dict]:
         out.append({
             "id": "daemon-reload", "severity": SEV_WARN,
             "title": f"{len(sysd['need_reload'])} 个 unit 文件改过但没 daemon-reload",
-            "detail": f"systemd 自己报 NeedDaemonReload=yes：{', '.join(sysd['need_reload'][:5])}。"
+            "detail": f"systemd 自己报 NeedDaemonReload=yes：{name_list(sysd['need_reload'], 5, sep=', ')}。"
                       "在这之前 systemctl restart 用的还是旧版的 unit 定义。",
             "fix": "systemctl daemon-reload",
         })

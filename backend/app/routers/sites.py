@@ -17,7 +17,7 @@ from ..deps import need_admin as _need_admin
 from ..errors import err_json
 from ..services import cert_ops, nginx_ops, site_audit_service, site_claim_service
 from ..services.site_claim_service import PANEL_LABEL
-from ..util import redact_creds
+from ..util import clip_text, redact_creds
 
 router = APIRouter()
 
@@ -45,7 +45,7 @@ def _mask(text: str) -> str:
 def _cmd_error(exc: Exception) -> str:
     """把子进程/校验异常翻译成中文短消息，且不泄露本机路径。"""
     raw = str(exc).strip() or exc.__class__.__name__
-    detail = _mask(redact_creds(raw))[:400]
+    detail = clip_text(_mask(redact_creds(raw)), 400, what="错误信息")
     low = raw.lower()
     if "配置已删除" in raw:
         # remove_vhost 已经把状态讲清楚了（文件删了、面板没重载）。这里不能再套
@@ -259,7 +259,7 @@ async def ssl_renew(name: str, req: Request):
     # 只回一句"续期已执行"用户会以为证书换新了，实际上什么都没发生。
     return {
         "ok": True,
-        "log": _mask(redact_creds(res["log"]))[:4000],
+        "log": clip_text(_mask(redact_creds(res["log"])), 4000, what="certbot 输出"),
         "summary": res["summary"],
         "renewed": res["renewed"],
         "reloaded": res["reloaded"],

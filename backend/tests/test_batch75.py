@@ -442,7 +442,9 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("def path_state(", UTIL_PY)
         self.assertIn("def dir_state(", UTIL_PY)
         self.assertIn("from ..util import PROBE_TIMEOUT, path_state, run", UPDATES_PY)
-        self.assertIn("from ..util import CTRL_TIMEOUT, dir_state, disk_usage_pct, run", META_PY)
+        meta_import = next(ln for ln in META_PY.splitlines() if ln.startswith("from ..util import"))
+        for name in ("CTRL_TIMEOUT", "dir_state", "disk_usage_pct", "run"):
+            self.assertIn(name, meta_import)
 
     def test_boolean_gates_are_gone(self):
         # 只查可执行行：这一批把旧写法留在注释与 docstring 里当证据（和批次50A 同一口径），

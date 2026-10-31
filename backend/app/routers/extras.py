@@ -10,7 +10,16 @@ from .. import database as dbm
 from ..deps import need_admin as _need_admin
 from ..errors import err_json
 from ..services import alerts_service, nginx_ops, panel_entry_service
-from ..util import SEARCH_Q_MAX, is_http_url, like_contains, list_ladder, parse_cursor, parse_limit, redact_creds
+from ..util import (
+    SEARCH_Q_MAX,
+    clip_text,
+    is_http_url,
+    like_contains,
+    list_ladder,
+    parse_cursor,
+    parse_limit,
+    redact_creds,
+)
 
 router = APIRouter()
 
@@ -354,7 +363,7 @@ async def certbot_renew(req: Request):
     await aio_db.audit(req.state.cp_sub, "certbot:renew", res["summary"])
     # certbot 输出里可能带 --key-path 之类的参数值，出接口前统一脱敏；
     # renewed/unchanged/summary 是给界面直接用的，log 只在失败排查时看。
-    return {"ok": True, **res, "log": redact_creds(res["log"])[:4000]}
+    return {"ok": True, **res, "log": clip_text(redact_creds(res["log"]), 4000, what="certbot 输出")}
 
 
 @router.get("/api/system/panel-entry")

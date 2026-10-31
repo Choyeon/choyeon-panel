@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from .. import config, probe, security
 from .. import database as dbm
 from ..severity import SEV_ORDER
-from ..util import run, tallied
+from ..util import name_list, run, tallied
 from . import exposure_service, systemd_ops
 
 CACHE_TTL = 300.0
@@ -627,7 +627,7 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
         out.append({
             "id": "empty-password", "severity": "risk",
             "title": f"{len(accounts['empty_password'])} 个账号是空口令",
-            "detail": "、".join(accounts["empty_password"][:10]) + "。这些账号只要能连上服务就能直接登进去。",
+            "detail": name_list(accounts["empty_password"], 10) + "。这些账号只要能连上服务就能直接登进去。",
             "fix": "passwd <账号> 立刻设口令，不该存在的就锁掉：usermod -L <账号>",
         })
     if accounts["uid0_extra"]:
@@ -690,7 +690,7 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
         out.append({
             "id": "weak-key", "severity": "warn",
             "title": f"{len(weak)} 把已授权钥匙强度过低",
-            "detail": "、".join(weak[:6]) + "（DSA，或 RSA 小于 2048 位）。",
+            "detail": name_list(weak, 6, unit="把") + "。弱钥匙指 DSA，或 RSA 小于 2048 位。",
             "fix": "换 ed25519 钥匙，再从对应 authorized_keys 里删掉旧行",
         })
     bad_files = [f for f in keys["files"] if f["flags"]]
@@ -699,7 +699,7 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
         out.append({
             "id": "ak-file", "severity": "risk" if hard else "warn",
             "title": f"{len(bad_files)} 个 authorized_keys 的权限或形态有问题",
-            "detail": "；".join(f"{f['user']}：{'，'.join(f['flags'])}" for f in bad_files[:4]),
+            "detail": name_list([f"{f['user']}：{'，'.join(f['flags'])}" for f in bad_files], 4, sep="；"),
             "fix": "owner-only：chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys",
         })
     silent = [
@@ -711,7 +711,8 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
         out.append({
             "id": "no-comment", "severity": "warn",
             "title": f"{len(silent)} 把已授权钥匙没有备注",
-            "detail": "备注是唯一记录「这把钥匙是谁的」的地方；没有它只能逐把去问。指纹：" + "、".join(silent[:5]),
+            "detail": "备注是唯一记录「这把钥匙是谁的」的地方；没有它只能逐把去问。指纹："
+                      + name_list(silent, 5, unit="把"),
             "fix": "逐把核对指纹，认不出来源的就删；自己的钥匙重新加上注释",
         })
     unparsed = sum(1 for f in keys["files"] for k in f["keys"] if k["unparsed"])

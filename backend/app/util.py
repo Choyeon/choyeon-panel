@@ -433,6 +433,32 @@ def like_contains(q: str) -> str:
     return f"%{q}%"
 
 
+def name_list(items, limit: int, *, sep: str = "、", unit: str = "个") -> str:
+    """把名字清单截到 limit 个；真的截了就把总数和未列出数一起交出来。
+
+    这些清单出现在自检详情里，位置有限，截断本身不可避免。但「只列了 6 个」和
+    「一共只有 6 个」在界面上是同一句话——前者会让人以为已经处理完，于是漏掉后面
+    那段没修的东西。截断时把真实总数说出来，是这一条能如实汇报的最低要求。
+    """
+    items = [str(x) for x in items]
+    shown = sep.join(items[:limit])
+    if len(items) <= limit:
+        return shown
+    return f"{shown}…（共 {len(items)} {unit}，另 {len(items) - limit} {unit}未列出）"
+
+
+def clip_text(text, limit: int, *, what: str = "输出") -> str:
+    """把一段文本截到 limit 字符，截断时附上真实长度。
+
+    `log[:4000]` 会在第 4000 字符一刀切，页面显示得像完整日志；真正报错的那一段
+    若在后面，就永远看不到，也没有任何提示说「这里不是全部」。
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…（{what}共 {len(text)} 字符，只显示了前 {limit} 字符）"
+
+
 def disk_usage_pct(path: str) -> int | None:
     """返回 path 所在分区的已用百分比（按非 root 可用空间算），取不到返回 None。
 
