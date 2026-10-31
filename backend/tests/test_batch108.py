@@ -102,9 +102,11 @@ class TestSnapshotFirstFrame(unittest.TestCase):
 
     def test_second_frame_reports_the_real_zero(self):
         self._snap(_raw(5_000_000, 9_000_000), 0.0)
-        d = self._snap(_raw(5_000_000, 9_000_000, idle=1500, total=2000), 2.0)
+        # idle 与 total 同量增长 = 这一窗确实一点没忙：0% 是真读数
+        d = self._snap(_raw(5_000_000, 9_000_000, idle=3000, total=4000), 2.0)
         self.assertTrue(d["measured"])
         self.assertEqual(d["cpu"], 0.0)
+        self.assertEqual(d["cpuPerCore"], [0.0])
         self.assertEqual((d["netRx"], d["netTx"]), (0, 0), "确实没流量就是 0，不是未读到")
         self.assertEqual(len(system_metrics._history), 1)
 

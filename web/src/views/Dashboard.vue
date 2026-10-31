@@ -231,7 +231,7 @@ const monSeries = computed(() => {
 });
 const monChips = computed(() => {
   const s = stat.value;
-  // 速率格一律走 rateText：分母不成立时后端给的是 null，这里就写「未读到」，
+  // 速率格一律走 rateText：分母不成立时后端给的是 null，短名由 ui.ts 的 UNKNOWN_LABEL 给，
   // 不许 `${fmtBytes(null || 0)}/s` 把没测到印成 0 B/s。
   if (monMode.value === 'io') {
     return [
