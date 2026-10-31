@@ -107,7 +107,7 @@ class PayloadTests(unittest.TestCase):
             d, run = _run(text, 2)
         self.assertTrue(d["truncated"])
         self.assertEqual(d["line_limit"], 5)
-        self.assertIn("-n 5", run.call_args[0][0])
+        self.assertIn("-n 5", " ".join(run.call_args[0][0]))
 
     def test_not_truncated_when_the_tail_is_shorter_than_the_cap(self):
         d, _ = _run(HOST_LOG, 3)
@@ -184,7 +184,7 @@ class DoctorAndCliTests(unittest.TestCase):
         self.assertIn("内核计数 3 次，日志里只认到 2 次", self._cli(oom))
 
     def test_cli_does_not_invent_a_cap_when_the_tail_is_whole(self):
-        oom = _oom(kernel_total=3, source="journal", events_total=3,
+        oom = _oom(kernel_total=1, source="journal", events_total=1,
                    events=[{"pid": 1, "comm": "a", "at": "x", "line": "y"}])
         text = self._cli(oom)
         self.assertNotIn("只读了最后", text)

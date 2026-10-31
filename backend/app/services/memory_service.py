@@ -80,7 +80,8 @@ NOTES = (
 )
 
 _OOM_KILL_RE = re.compile(r"Killed process (\d+) \(([^)]*)\)")
-_OOM_TASK_RE = re.compile(r"task:([^,]+),pid=(\d+)")
+# 两种写法都见过：`task:python,pid=123` 与 `task=python,pid=123`（本机内核用后者）。
+_OOM_TASK_RE = re.compile(r"task[:=]([^,]+),pid=(\d+)")
 _OOM_REAPER_RE = re.compile(r"reaped process (\d+) \(([^)]*)\)")
 _UNIT_SUFFIXES = systemd_ops.UNIT_SUFFIXES
 
@@ -489,8 +490,10 @@ def _oom_events(text: str) -> list[dict]:
                 out.append(ev)
             continue
         if task or reap:
-            m = task or reap
-            pid, comm = int(m.group(2)), m.group(1)[:64]
+            if task:
+                comm, pid = task.group(1)[:64], int(task.group(2))
+            else:
+                pid, comm = int(reap.group(1)), reap.group(2)[:64]
             if pid in seen:
                 continue  # 已有更完整的那一行
             seen[pid] = len(out)
