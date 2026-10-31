@@ -102,9 +102,11 @@ def list_backups() -> list:
         tid = b.get("cloud_target_id")
         b["cloud_target_name"] = cloud.get(tid) if tid else None
         prefix = f"bk{b['id']}-"
-        files = list(reversed([f for f in listing if f.startswith(prefix)]))[:30]
+        # 列表只端最近 30 个，免得任务一多整页都是文件清单；但份数与合计回答的是
+        # 「这条任务现在攒了多少」，必须按全部产物算——keep 设到 100 的任务被显示成
+        # 30 份、合计也少一大截，正是批次87 要修的那种把截断当总量。
         entries = []
-        for f in files:
+        for f in reversed([f for f in listing if f.startswith(prefix)]):
             try:
                 st = os.stat(f"{BACKUP_DIR}/{f}")
                 entries.append({
@@ -117,7 +119,10 @@ def list_backups() -> list:
                 })
             except OSError:
                 continue
-        b["files"] = entries
+        b["files_total"] = len(entries)
+        b["files_bytes"] = sum(e["size"] for e in entries)
+        b["files"] = entries[:30]
+        b["files_omitted"] = len(entries) - len(b["files"])
         out.append(b)
     return out
 

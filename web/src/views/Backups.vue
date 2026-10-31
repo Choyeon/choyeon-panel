@@ -254,9 +254,11 @@ const columns: any[] = [
       // 这一行是一句带空格的话，不是一个词：375px 实测内容 249px、格子只有 226px，
       // 而 .cell-sub 自带 nowrap+ellipsis，于是最近一次备份的时间被切成「合计 188.6 K… UTC」
       // 这种谁都读不出来的形状。列上没有第二个入口（原来连 title 都没写），所以直接折行。
-      const sub = `合计 ${fmtBytes(r.files.reduce((n: number, f: any) => n + (f.size || 0), 0))} · 最近 ${fmtDateTime(r.files[0].mtime)} UTC`;
+      // 份数与合计读后端按全部产物算出的值；列表本身只端最近 30 个，多出来的必须说出来。
+      const more = r.files_omitted ? ` · 只列最近 ${r.files.length} 份，另有 ${r.files_omitted} 份未列出` : '';
+      const sub = `合计 ${fmtBytes(r.files_bytes)} · 最近 ${fmtDateTime(r.files[0].mtime)} UTC${more}`;
       return h('div', { class: 'cell-txt' }, [
-        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files.length} 份`),
+        h(NButton, { text: true, size: 'small', type: 'primary', class: 'cp-op', onClick: () => router.push({ path: '/backups/files', query: { job: String(r.id) } }) }, () => `${r.files_total} 份`),
         h('div', { class: 'cell-sub cp-prose', title: sub }, sub),
       ]);
     },

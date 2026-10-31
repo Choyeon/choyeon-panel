@@ -683,7 +683,9 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
                 "last_status": status,
                 "last_note": r.get("last_note") or "",
                 "cloud_target_name": r.get("cloud_target_name"),
-                "artifacts": len(r.get("files") or []),
+                # 份数按整条任务算；列表只端最近 30 个，别让截断值冒充总量（批次87）。
+                "artifacts": r.get("files_total", 0),
+                "artifacts_omitted": r.get("files_omitted", 0),
             })
         failed = [j for j in jobs if j["last_status"] not in ("ok", "未执行")]
         lines = [
