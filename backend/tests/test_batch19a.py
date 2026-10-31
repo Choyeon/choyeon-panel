@@ -24,7 +24,7 @@ import os
 import re
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -56,8 +56,18 @@ def _cert(name, expiry_line):
     return f"Certificate Name: {name}\n  Domains: {name}\n  Expiry Date: {expiry_line}\n"
 
 
+def _expires_in(days: int) -> str:
+    """相对今天算出来的到期日。
+
+    原来这里钉死过 "2026-10-31 (VALID: 21 days)"：写它的那天确实是 21 天，过了那天
+    证书就是过期的，整套用例随日历翻红——夹具该钉的是「还剩几天」这个前提，不是某个日期。
+    多给 6 小时，让 `(expiry - now) // 86400` 正好落在 days。
+    """
+    return (datetime.now(UTC) + timedelta(days=days, hours=6)).strftime("%Y-%m-%d %H:%M:%S+00:00")
+
+
 # 21 天：配置 25 → 该报；配置 14 → 不该报。这一张是"两个出处会给出不同答案"的样本。
-CERT_21 = _cert("n19a21.example.com", "2026-10-31 00:00:00+00:00 (VALID: 21 days)")
+CERT_21 = _cert("n19a21.example.com", f"{_expires_in(21)} (VALID: 21 days)")
 # 天数读不到但也没标 INVALID：这一张是粉饰路径的样本。
 CERT_NODAYS = _cert("n19aNd.example.com", "(VALID)")
 # 过期无效：与天数无关，必须 crit。
@@ -220,7 +230,7 @@ class InspectionSkipTests(unittest.TestCase):
         dbm.set_setting("notified:ssl:n19aNd.example.com", "2026-10-13")
         self._round(CERT_NODAYS)
         self.assertEqual(self._certs_sent(), [])
-        self._round(_cert("n19aNd.example.com", "2027-06-01 00:00:00+00:00 (VALID: 230 days)"))
+        self._round(_cert("n19aNd.example.com", f"{_expires_in(230)} (VALID: 230 days)"))
         self.assertEqual(_rows("ssl:n19aNd.example.com")[-1]["level"], "ok")
         recovered = [t for t in self._certs_sent() if t.startswith("已恢复")]
         self.assertEqual(len(recovered), 1, self._certs_sent())
