@@ -654,15 +654,30 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         # 后缀的唯一出处在 backup_service：自检项与这里必须数同一批文件，
         # 否则 `backup list` 只列 tar 包，定时跑出来的 PG 备份在 CLI 里像不存在一样。
         suffixes = backup_service.ARTIFACT_SUFFIXES
-        files = [
-            f
-            for f in Path(config.BACKUP_DIR).glob("**/*")
-            if f.is_file() and f.name.endswith(suffixes)
-        ]
-        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-        rows = [{"file": str(f), "size": f.stat().st_size, "mtime": int(f.stat().st_mtime)} for f in files[:50]]
-        Out.result(rows, "\n".join(f"{r['size']:>10}  {r['file']}" for r in rows) or "(无备份)")
-        return {"backups": rows}
+        # 展示上限只有一个出处：切片与下面那句"未列出"都读它，别把同一个数抄两遍。
+        max_shown = 50
+        # 每个文件只 stat 一次，并跳过 glob 之后被备份轮替/清理删掉的那些：旧写法对同一个
+        # 文件 stat 了三遍（排序键、size、mtime 各一次），消失的文件会抛未处理的
+        # FileNotFoundError，让整条 `backup list` 崩掉。
+        stamped = []
+        for f in (f for f in Path(config.BACKUP_DIR).glob("**/*")
+                  if f.is_file() and f.name.endswith(suffixes)):
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            stamped.append((int(st.st_mtime), st.st_size, str(f)))
+        # 真实份数在截断前算：切片之后 len(rows) 只是下限，拿它冒充"本机一共这些备份"
+        # 就是把截断当总量。批次87 修的是网页按任务算的份数，这条平铺跨任务的 glob 是另一个读者。
+        total = len(stamped)
+        stamped.sort(key=lambda t: t[0], reverse=True)
+        rows = [{"file": p, "size": sz, "mtime": mt} for mt, sz, p in stamped[:max_shown]]
+        omitted = total - len(rows)
+        note = f"\n（共 {total} 份，另 {omitted} 份未列出，只列最近 {max_shown} 份）" if omitted else ""
+        payload = {"backups": rows, "total": total, "omitted": omitted}
+        Out.result(payload,
+                   ("\n".join(f"{r['size']:>10}  {r['file']}" for r in rows) or "(无备份)") + note)
+        return payload
 
     if a.backup_cmd == "jobs":
         # 任务列表与网页备份页共用同一个读者（list_backups）：终端上判"哪条任务昨晚没成"
