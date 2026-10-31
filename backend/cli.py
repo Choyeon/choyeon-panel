@@ -1232,6 +1232,12 @@ def _ssh_audit_text(d: dict) -> str:
         f"授权密钥：{kk.get('total_keys', 0)} 把，覆盖 {kk.get('scanned', 0)} 个账号"
         "（只列指纹与元信息，不读私钥，也不回显公钥正文）"
     )
+    if not kk.get("complete", True):
+        # 这两个数在这一轮只是下限：某个文件被字符上限切了、或用户目录数触到 MAX_FILES 就没往下读。
+        # 念成"N 把钥匙、覆盖 N 个账号，扫全了"是这台机器最不该有的一句假话。
+        cap = login_audit_service.MAX_FILES
+        lines.append(f"  ↑ 这是下限：本轮没扫到底（超过单文件读取上限或核对满 {cap} 个用户就停手），"
+                     "没读到的那一段里的钥匙没有核对")
     for p in kk.get("files") or []:
         lines.append(f"  {p['user']}  {p['path']}（{p['mode']} · 属主 {p['owner']}）")
         for k in p.get("keys") or []:
@@ -2114,6 +2120,10 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        " 行（LDAP 镜像的 passwd/shadow 能到几万行），没扫完的在 accounts.scan_partial "
                        "里点名哪份表更长，「没有空口令 / 没有多余 uid=0」降级为已扫段落的结论",
                        "公钥只列算法/位数/备注/指纹，不回显公钥正文",
+                       "授权密钥本轮读到第 " + str(login_audit_service.MAX_FILES) +
+                       " 个用户、单文件 " + str(login_audit_service.AK_MAX_CHARS) +
+                       " 字符就停手，没读到底的在 keys.partial_files / keys.files_capped 里点名，"
+                       "「已授权钥匙就这些」降级为下限——没扫到的那一段里的钥匙没核对",
                        "读不到 sshd 配置时退出码 3；报告能产出就回 0，风险与否看 JSON 的 counts"]},
             {"name": "doctor", "args": [], "desc": "安全与健康自检，含每项修复建议"},
             {"name": "user list|create|reset|revoke|2fa-disable|delete",

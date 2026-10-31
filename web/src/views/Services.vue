@@ -152,6 +152,17 @@ const flaggedSettings = computed(() => loginSettings.value.filter((r: any) => r.
 const onlyFlagged = ref(true);
 const shownSettings = computed(() => (onlyFlagged.value ? flaggedSettings.value : loginSettings.value));
 const keyFiles = computed<any[]>(() => loginData.value?.keys?.files ?? []);
+// 已授权钥匙本轮有没有扫到底：判据用服务端给的 keys.complete，和 CLI、自检同一个读者——
+// 触到单文件字符上限（partial_files）或读满 MAX_FILES 个用户（files_capped）都是「没看全」。
+const keysIncomplete = computed(() => loginData.value?.keys?.complete === false);
+const keysScanWhy = computed(() => {
+  const k = loginData.value?.keys ?? {};
+  const parts: string[] = [];
+  const pf = k.partial_files ?? [];
+  if (pf.length) parts.push(`${pf.slice(0, 3).join('、')}${pf.length > 3 ? ' 等' : ''} 的文件超过单文件读取上限，没读到底`);
+  if (k.files_capped) parts.push(`只读了前 ${k.scanned ?? 0} 个用户的 authorized_keys，其余没读`);
+  return parts.join('；');
+});
 const loginAttempts = computed<any>(() => loginData.value?.attempts ?? {});
 // 「爆破防护」这一格的说法整句来自服务端：它才知道 systemctl 到底有没有回话。
 // 前端原来自己按 active/installed 拼句子，于是探测失败与"这台机器没装"都写成"都没在跑"——
@@ -2158,7 +2169,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         <span class="ls-chip" :class="{ warn: !loginAttempts.ok }"><i>来源地址</i>{{ sourcesLine }}</span>
         <span class="ls-chip" :class="{ warn: !loginAttempts.ok }"><i>成功登录</i>{{ acceptedLine }}</span>
         <span class="ls-chip" :class="{ warn: !guardRunning }"><i>爆破防护</i>{{ guardLine }}</span>
-        <span class="ls-chip"><i>公钥</i>{{ loginData.keys.total_keys }} 把 / {{ loginData.keys.scanned }} 个文件</span>
+        <span class="ls-chip" :class="{ warn: keysIncomplete }"><i>公钥</i>{{ loginData.keys.total_keys }} 把 / {{ loginData.keys.scanned }} 个文件<template v-if="keysIncomplete">（本轮没扫到底，这是下限）</template></span>
         <span class="ls-chip" :class="{ err: loginData.sshd.reachable === true }">
           <i>sshd 端口</i>{{ loginData.sshd.port }} {{ reachLine }}
         </span>
@@ -2258,6 +2269,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
           <NIcon :component="icons.KeyOutline" :size="15" color="var(--cp-brand-soft)" /> authorized_keys
         </span>
         <NText v-if="loginData?.keys?.truncated" depth="3" class="ls-src">文件太多，只列了前若干把钥匙</NText>
+        <NText v-if="keysIncomplete" depth="3" class="ls-src">{{ keysScanWhy }}：下面这些钥匙只是本轮读到的下限，没读到的部分有没有别的钥匙、权限如何，都没核对</NText>
       </div>
       <NDataTable
         :columns="keyColumns" :data="keyFiles" size="small" :bordered="false"

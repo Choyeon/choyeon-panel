@@ -38,6 +38,13 @@ SSHD_TIMEOUT = 10.0
 JOURNAL_TIMEOUT = 25.0
 MAX_KEYS = 60  # 单个 authorized_keys 最多逐条列这么多行，再多只报总数
 MAX_FILES = 64
+# 单个 authorized_keys 一轮最多读这么多字符（也是 `_read_text` 这把尺本身）。共享堡垒机/自动化
+# 机器账号能把这文件撑到几百 KB，逐把钥匙约 600 字符——正文一旦触到这把尺就没量到底：后面的
+# 钥匙既没数进总数，切点还可能正好劈开一把钥匙。和账号表那两处 `_read_lines` 同一条纪律：读满
+# 就如实说"没读到底"，别让一个下限冒充成"这台机器的已授权钥匙就这些"（批次93）。
+# 这个值与 `_read_text` 默认上限一致：低于它读到的文件过去本就整份量到底，不该因新加的标志位
+# 被判成"没扫完"——只有真被这把尺切到的那份才降级为下限。
+AK_MAX_CHARS = 200_000
 JOURNAL_LINES = 50000
 # 认证日志这一段覆盖多长，说法只有一份：`_attempts` 给出 window_label / window_note，
 # doctor 判词、CLI 与登录安全页签都从这里读。`-n` 限的是行数不是时间——窗口里日志超过
@@ -305,6 +312,10 @@ def _authorized_keys(users: list[dict], as_root: bool) -> dict:
     name_by_uid = {u["uid"]: u["name"] for u in users}
     files: list[dict] = []
     scanned = 0
+    # 两处"没扫到底"分开记：某个文件正文被字符上限切掉（钥匙数是下限），以及收满 MAX_FILES 份
+    # 之后剩余用户目录压根没读。两者都让「已授权钥匙就这些」这句否定失去资格。
+    partial_files: list[str] = []
+    files_capped = False
     me = os.getuid()
     for u in users:
         home = u["home"]
@@ -313,6 +324,10 @@ def _authorized_keys(users: list[dict], as_root: bool) -> dict:
         # 非 root 只可能读到自己（和 root 跑面板时的全部）
         if not as_root and u["uid"] != me:
             continue
+        # 这是一个该读的用户目录，但已经收满 MAX_FILES 份——后面这些一律没核对，如实记下再停手。
+        if len(files) >= MAX_FILES:
+            files_capped = True
+            break
         path = os.path.join(home, ".ssh", "authorized_keys")
         try:
             st = os.lstat(path)
@@ -325,7 +340,7 @@ def _authorized_keys(users: list[dict], as_root: bool) -> dict:
             "owner": name_by_uid.get(st.st_uid, str(st.st_uid)),
             "modified_at": datetime.fromtimestamp(st.st_mtime, UTC).isoformat(timespec="seconds"),
             "symlink": stat.S_ISLNK(st.st_mode),
-            "count": 0, "keys": [], "flags": [],
+            "count": 0, "keys": [], "flags": [], "partial": False,
         }
         if entry["symlink"]:
             entry["flags"].append("是指向别处的符号链接，面板没有读它指向的内容")
@@ -335,7 +350,16 @@ def _authorized_keys(users: list[dict], as_root: bool) -> dict:
             entry["flags"].append("同组或其他人可写：任何本地用户都能往里加钥匙")
         if st.st_uid not in (0, u["uid"]):
             entry["flags"].append(f"属主是 {name_by_uid.get(st.st_uid, st.st_uid)}，不是这个用户")
-        text = _read_text(path, 80000) or ""
+        text = _read_text(path, AK_MAX_CHARS) or ""
+        if len(text) >= AK_MAX_CHARS:
+            # 正文触到这把尺 = 没量到底。切点可能正好落在一把钥匙中间，那半截不是完整的行：
+            # 把它从"这一把钥匙"里摘掉，既不虚报一把，也不会拿残缺的 blob 给出错的强度判定。
+            if text and not text.endswith("\n"):
+                cut = text.rfind("\n")
+                text = text[:cut + 1] if cut != -1 else ""
+            entry["partial"] = True
+            entry["flags"].append(f"文件超过单文件读取上限 {AK_MAX_CHARS} 字符，本轮没读到底")
+            partial_files.append(u["name"])
         for line in text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -360,13 +384,14 @@ def _authorized_keys(users: list[dict], as_root: bool) -> dict:
                 entry["keys"].append({"algo": algo, "bits": bits, "comment": comment, "fp": fp,
                                       "weak": weak, "options": opts, "unparsed": not bool(fp)})
         files.append(entry)
-        if len(files) >= MAX_FILES:
-            break
     return {
         "files": files,
         "scanned": scanned,
         "total_keys": sum(f["count"] for f in files),
         "truncated": any(f["count"] > len(f["keys"]) for f in files),
+        "partial_files": partial_files,
+        "files_capped": files_capped,
+        "complete": not partial_files and not files_capped,
     }
 
 
@@ -847,6 +872,15 @@ async def _collect() -> dict:
         notes.append("本次不是 root 运行：/etc/shadow 和其它用户的 authorized_keys 读不到，这两项没有核对。")
     if keys["truncated"]:
         notes.append(f"单个 authorized_keys 最多逐条列 {MAX_KEYS} 行，超出的只计数没列出。")
+    pf = keys.get("partial_files") or []
+    if pf or keys.get("files_capped"):
+        why = []
+        if pf:
+            why.append(f"{name_list(pf, 3)} 的 authorized_keys 超过单文件 {AK_MAX_CHARS} 字符，本轮没读到底")
+        if keys.get("files_capped"):
+            why.append(f"只核对了前 {MAX_FILES} 个用户的 authorized_keys，其余用户的目录本轮没读")
+        notes.append("已授权钥匙这一轮没扫到底（" + "；".join(why) + "）："
+                     "钥匙总数只是下限，没读到的那部分里有没有别的钥匙、权限如何，都无从核对")
     notes.append(
         "这一层严格只读：不写 sshd_config、不 reload sshd、不改 authorized_keys——"
         "SSH 是这台机器的主入口，猜错就是把人锁在门外。"
@@ -923,6 +957,19 @@ def doctor_item(data: dict) -> dict:
         return {"status": "warn",
                 "detail": f"登录方式没有要紧项，但账号表这一轮没读到底（上限 {ACCOUNTS_MAX_LINES} 行，"
                           f"{files} 更长），空口令与多余 uid=0 没有核对完整",
+                "fix": "choyeonctl ssh-audit", "fixable": False}
+    kk = data.get("keys") or {}
+    if not kk.get("complete", True):
+        # 已授权钥匙和账号表同一条纪律：没读到的那一段不能算核对过。绿灯说的恰恰是
+        # "这台机器没有被漏掉的钥匙"，而单文件字符触顶或用户份数触顶时，排在没读到的那一段里的
+        # 一把钥匙（可能正是别人的、或强度过低的）在这一轮根本看不见。
+        why = "、".join(
+            [f"{n} 的 authorized_keys 超过 {AK_MAX_CHARS} 字符没读到底"
+             for n in (kk.get("partial_files") or [])[:3]]
+            + ([f"只有前 {MAX_FILES} 个用户的 authorized_keys 被读到"] if kk.get("files_capped") else []))
+        return {"status": "warn",
+                "detail": f"登录方式没有要紧项，但已授权钥匙这一轮没扫到底（{why}），"
+                          "排在没读到的那一段里的钥匙没有核对",
                 "fix": "choyeonctl ssh-audit", "fixable": False}
     att = data["attempts"]
     # 绿灯这一行也要把窗口说对：日志读满上限时"24h 失败认证 N 次"里的 N 只是最后
