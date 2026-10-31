@@ -25,7 +25,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-os.environ.setdefault("CP_DATA_DIR", tempfile.mkdtemp(prefix="cp_b105_data_"))
+# 只有本轮真是这个模块自己开的目录才归它删：见 tearDownModule。
+_OWN_DATA_DIR = "CP_DATA_DIR" not in os.environ
+if _OWN_DATA_DIR:
+    os.environ["CP_DATA_DIR"] = tempfile.mkdtemp(prefix="cp_b105_data_")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.routers import alerts as alerts_router  # noqa: E402
@@ -321,9 +324,11 @@ class TestFrontendContract(unittest.TestCase):
 
 
 def tearDownModule():
-    data = os.environ.get("CP_DATA_DIR")
-    if data and data.startswith(tempfile.gettempdir()):
-        shutil.rmtree(data, ignore_errors=True)
+    # 只删自己建的那一份。`run_tests.py` 会把 CP_DATA_DIR 设成整轮共用的守护目录，
+    # 按「在临时目录下」判断就会把别轮的 panel.db 连目录一起端掉：排在后面的
+    # batch6a 权限用例于是把「目录被删后重建的 0755」读成面板没锁权限。
+    if _OWN_DATA_DIR:
+        shutil.rmtree(os.environ["CP_DATA_DIR"], ignore_errors=True)
 
 
 if __name__ == "__main__":
