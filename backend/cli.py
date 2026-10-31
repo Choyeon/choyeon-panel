@@ -1026,6 +1026,14 @@ def _firewall_table(data: dict) -> str:
                 "IPv6" if r.get("family") == "ipv6" else "IPv4",
                 "受保护" if r.get("protected") else ""]
         lines.append("  ".join(cols).rstrip() + f"  sig={r.get('sig', '')}")
+    skipped = data.get("service_ports_skipped") or 0
+    if skipped:
+        # 这个数字读载荷、不重抄常量：载荷是 read() 那一次核对真正用的上限，
+        # 前端也是从同一份载荷取值，两边不会各说各话。载荷缺失才退回服务层的常量。
+        cap = data.get("service_ports_enrich_max") or firewall_service.ENRICH_MAX_RULES
+        lines.append(f"另有 {skipped} 条 service 规则的端口定义本轮没查"
+                     f"（只核对前 {cap} 条）——按读不到处理：删它会拒绝，"
+                     "也不会据此断定它的端口通不通")
     bad_rules = firewall_service.rules_unread(data)
     if bad_rules:
         lines.append(f"规则表没读到，这一条不等于「没有放行规则」（{bad_rules}）")
@@ -2151,6 +2159,10 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                                     "面板自身在非 loopback 上的监听端口，以及当前请求连进来的端口；没有绕过参数",
 
                        "remove 必须带 list 里读回的 sig（--expect）：编号会随任何一次删除前移",
+                       "firewalld 的 service 规则逐条查端口定义，只核对前 "
+                       + str(firewall_service.ENRICH_MAX_RULES) + " 条；触顶后没查的条数在 "
+                       "service_ports_skipped 里如实报出，它们按「读不到」处理（删除会拒绝、"
+                       "可达性不下结论），不会被当成「已核对过」",
                        "off 需要 --yes；on 会先确认 SSH 与面板入口端口已经在放行列表里",
                        "参数写歪退出码 2（用法错误），被自锁守卫拦下与防火墙自身报错为 1"]},
             {"name": "ban list|add|rm",

@@ -80,6 +80,11 @@ const blindNote = computed(() => {
   }
   return '';
 });
+// firewalld 的 service 规则只逐条核对前若干条端口定义（上限只在服务层定义一次），
+// 触顶后没查的那些按「读不到」处理：面板不据此说「端口都核对过了」，如实报出没查的条数。
+const enrichSkipped = computed(() => Number(st.value?.service_ports_skipped ?? 0));
+// 核对上限由服务层给（前端不抄写那个数字）：只在真要显示"核对到第几条"时读一次。
+const enrichMax = computed(() => Number(st.value?.service_ports_enrich_max ?? 0));
 // 启用 ufw 前，后端要拿这份表确认 22 与面板入口仍在放行；表没读到时它一定拒绝，
 // 按钮就跟着一起置灰，别让人点一次才知道。firewalld 的启用看的是 permanent 那份表，
 // 与运行期表无关，所以只有 ufw 需要在这里跟着 rulesBad 走。
@@ -398,6 +403,10 @@ const rangeHint = computed(() => {
         </div>
         <EmptyBox v-if="!rules.length && !loading && rulesBad" text="规则表没读到，这里列不出来" :hint="rulesBad" />
         <EmptyBox v-else-if="!rules.length && !loading" text="当前没有入站规则" />
+        <NText v-if="enrichSkipped" depth="3" class="cp-break" style="font-size: var(--fs-2xs); display: block">
+          其中 {{ enrichSkipped }} 条 service 规则的端口定义本轮没查（只核对前 {{ enrichMax }} 条）：
+          按读不到处理，删它会拒绝，也不会据此断定它的端口通不通。
+        </NText>
       </NSpace>
     </NCard>
 

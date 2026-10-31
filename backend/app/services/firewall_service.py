@@ -30,6 +30,9 @@ SSHD_CONFIG = "/etc/ssh/sshd_config"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 NGINX_CONF_GLOBS = ("/etc/nginx/conf.d/*.conf", "/etc/nginx/sites-enabled/*")
 MAX_NGINX_FILES = 40
+# service 规则的端口定义逐条 spawn `--info-service`，规则上百条的机器不能全查——只核对前这么多条。
+# 这个数只在 `_enrich_service_ports` 用一次，CLI 判词与测试都读它，不许在别处再抄一个 12。
+ENRICH_MAX_RULES = 12
 _SERVER_HEAD_RE = re.compile(r"\bserver\s*\{", re.I)
 _PROXY_PASS_RE = re.compile(r"proxy_pass\s+[^;\s]*?://([^;/\s]+)", re.I)
 _LISTEN_RE = re.compile(r"^[ \t]*listen[ \t]+([^;\n]+);", re.I | re.M)
@@ -427,8 +430,8 @@ def parse_firewalld(list_all: str, scope: str = "runtime") -> list[dict]:
     return rules
 
 
-async def _enrich_service_ports(rules: list[dict], permanent: bool = False) -> str:
-    """把 firewalld 的 service 规则翻译成它实际开放的端口；返回没读到的原因（空串＝全读到了）。
+async def _enrich_service_ports(rules: list[dict], permanent: bool = False) -> tuple[str, int]:
+    """把 firewalld 的 service 规则翻译成它实际开放的端口；返回 `(没读到的原因, 本轮没核对的 service 条数)`。
 
     `services: ssh` 才是这类机器上 22 端口的主要放行方式，自锁判定若不认识它，"删除 ssh
     service"看上去就毫无风险。所以这里分三种结果，绝不合成两种：
@@ -440,9 +443,15 @@ async def _enrich_service_ports(rules: list[dict], permanent: bool = False) -> s
     `permanent=True` 是给 daemon 没在跑的那条路用的（启用防火墙前只能查离线配置）：
     不带 `--permanent` 时 `--info-service` 会连着 daemon 一起失败，那样一道明明写好了
     ssh 放行的机器会被"读不到"挡在启用外面。
+
+    只核对前 `ENRICH_MAX_RULES` 条：规则上百条的机器不该被这一层逐条 spawn 拖垮。但触顶之后
+    剩下那些 service 规则是「压根没查」，与「查了没查到」不一样，必须如实数出来交给上层报数——
+    否则一张 13 条的放行表会被读成"端口定义全部核对过"。这里把它们的 `ports_known` 显式标成
+    `None`（而不是留着键缺失、靠 `.get()` 兜底默认），让删除侧 `might_protect` 与可达性侧
+    `blind_allow_rules` 的"按最坏情况拒绝"落在一个写下来的状态上，不押在"少一个键"的巧合上。
     """
     fails: list[str] = []
-    for r in rules[:12]:
+    for r in rules[:ENRICH_MAX_RULES]:
         if r.get("kind") != "service":
             continue
         args = (["--permanent"] if permanent else []) + [f"--info-service={r['token']}"]
@@ -466,7 +475,13 @@ async def _enrich_service_ports(rules: list[dict], permanent: bool = False) -> s
         r["port_specs"] = specs
         r["port"], r["port_to"], r["proto"] = specs[0]
         r["ports_known"] = True
-    return "；".join(fails[:2])
+    # 触顶之后没轮到的 service 规则：显式记成"没读到"，并数出真实条数（第二个返回值）交给上层如实报数。
+    skipped = 0
+    for r in rules[ENRICH_MAX_RULES:]:
+        if r.get("kind") == "service" and "ports_known" not in r:
+            r["ports_known"] = None
+            skipped += 1
+    return "；".join(fails[:2]), skipped
 
 
 def _service_ports_unread(rule: dict) -> bool:
@@ -707,7 +722,12 @@ async def _permanent_rules() -> tuple[list[dict], str]:
     if r["code"] != 0:
         return [], _not_read("firewall-cmd --permanent --list-all", r["code"], r["out"])
     rules = parse_firewalld(r["out"], "permanent")
-    return rules, await _enrich_service_ports(rules, permanent=True)
+    reason, _skipped = await _enrich_service_ports(rules, permanent=True)
+    # permanent 那份表的第二个数（没核对的 service 条数）不进 `perm_bad`：那份字符串的语义是
+    # "这份表读没读到"，喂给 `persisted` 的判定。表读到了、只是有几条 service 的端口定义没查，
+    # 不该把已经写进配置的规则全标成"重载后会丢"；那些规则已在 `_enrich_service_ports` 里显式
+    # 标成 ports_known=None，删除侧按最坏情况拒绝，无需靠 perm_bad 兜。
+    return rules, reason
 
 
 async def read(tool: str | None = None, request=None) -> dict:
@@ -726,6 +746,8 @@ async def read(tool: str | None = None, request=None) -> dict:
         "rules_ok": False,
         "reason": "",
         "rules": [],
+        "service_ports_skipped": 0,
+        "service_ports_enrich_max": ENRICH_MAX_RULES,
         "protected": [],
         "protected_reasons": {},
         "output": "",
@@ -783,7 +805,8 @@ async def read(tool: str | None = None, request=None) -> dict:
             perm_sigs = {r["sig"] for r in perm}
             for r in base["rules"]:
                 r["persisted"] = None if perm_bad else (r["sig"] in perm_sigs)
-            fails.append(await _enrich_service_ports(base["rules"]))
+            enrich_reason, base["service_ports_skipped"] = await _enrich_service_ports(base["rules"])
+            fails.append(enrich_reason)
     else:
         # 没装防火墙是一台机器**确定**的状态（没有过滤、端口全都进得来），不是"没读到"。
         base["active"] = False
