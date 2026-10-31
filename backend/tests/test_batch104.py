@@ -285,6 +285,18 @@ class DoctorTests(Case):
         self.assertNotIn("重新写入并重启", r["fix"])
         self.assertIn("详情 → 环境变量", r["fix"])
 
+    def test_drift_elsewhere_does_not_silence_the_extras(self):
+        # 线上现在正是这种状态：video 缺文件、rosetta 内容不一致，music 与 rosetta-backend
+        # 带着手写的 ADMIN_PASSWORD / QQ_COOKIE。只在"没漂移"时点名，这些键就永远不会出现在判词里。
+        r = self._run(
+            drift=[{"name": "choyeon-video", "disk": "missing", "vars": 1,
+                    "unitReads": True, "extra": {"names": [], "total": 0, "readable": True}}],
+            extra=[{"name": "choyeon-music", "names": ["ADMIN_PASSWORD"], "total": 3, "readable": True}])
+        self.assertEqual(r["status"], "fail")
+        self.assertIn("ADMIN_PASSWORD", r["detail"])
+        self.assertIn("原样保留", r["detail"])
+        self.assertIn("等 3 个", r["detail"], "点名截断了就要把真实总数带上")
+
     def test_fail_fix_says_the_repair_preserves_extras(self):
         r = self._run(drift=[{"name": "choyeon-video", "disk": "missing", "vars": 1,
                               "unitReads": True, "extra": {"names": [], "total": 0, "readable": True}}])

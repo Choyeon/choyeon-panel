@@ -600,6 +600,22 @@ async def _check_env_file() -> dict:
     }
 
 
+def _env_extras_sentence(extras: list) -> str:
+    """「哪几个应用带着记录外的手写键」这句话只有一个写法。
+
+    它在任何分支都得说：只在"没有漂移"时点名，等于只要别处出过一次真漂移，这些键就再也不出现在
+    判词里——线上现在正是这种状态（video 缺文件、rosetta 内容不一致，music 与 rosetta-backend
+    却带着手写的 ADMIN_PASSWORD / QQ_COOKIE）。而"面板不会删它们"这个承诺只有在运维知道它们存在时
+    才有意义。只点名，不给值。
+    """
+    if not extras:
+        return ""
+    who = "；".join(f"{x['name']}：{apps_service.extra_who(x)}" for x in extras[:5])
+    more = "" if len(extras) <= 5 else f"；另有 {len(extras) - 5} 个应用没在这里列出"
+    return (f"另外 {len(extras)} 个应用的 .panel.env 里有面板记录之外的变量——{who}{more}。"
+            "它们由运维手写，进程照样读得到；面板保存时原样保留、不会删除它们")
+
+
 async def _check_app_env() -> dict:
     """每个纳管应用的 .panel.env 是不是真的还是面板显示的那份。
 
@@ -628,16 +644,13 @@ async def _check_app_env() -> dict:
                 "status": "warn",
                 "detail": f"{d['total']} 个纳管应用里有 {unknown} 个连 unit 文件都确认不了"
                           f"（{apps_service.UNIT_DIR} 读不动），这一项对它们没查成"
-                          + (f"；另有 {len(extras)} 个应用带着记录外的变量" if extras else ""),
+                          + (f"；{_env_extras_sentence(extras)}" if extras else ""),
                 "fix": "用 root 执行 choyeonctl doctor；确认该目录存在且可读之后再看这一项",
             }
         if extras:
-            who = "；".join(f"{x['name']}：{apps_service.extra_who(x)}" for x in extras[:5])
-            more = "" if len(extras) <= 5 else f"；另有 {len(extras) - 5} 个应用没在这里列出"
             return {
                 "status": "warn",
-                "detail": f"{len(extras)} 个应用的 .panel.env 里有面板记录之外的变量——{who}{more}。"
-                          "它们由运维手写，进程照样读得到；面板保存时原样保留、不会删除它们",
+                "detail": _env_extras_sentence(extras),
                 "fix": "要让面板接管就在该应用「详情 → 环境变量」里按同样的键名补一项（值保持一致），"
                        "之后这份文件就完全由面板管；不想保留就在同一页用「删除这些变量并写入」明确删，"
                        "面板不会自己决定",
@@ -673,6 +686,8 @@ async def _check_app_env() -> dict:
     if unknown:
         tail += (f"；另有 {unknown} 个连 unit 文件都确认不了"
                  f"（{apps_service.UNIT_DIR} 读不动），这一项对它们也没查成")
+    if extras:
+        tail += f"；{_env_extras_sentence(extras)}"
     return {
         "status": "fail",
         "detail": "；".join(parts) + tail,
