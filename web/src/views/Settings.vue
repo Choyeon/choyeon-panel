@@ -179,7 +179,11 @@ async function renew() {
     // 「执行完成」不等于「续到了」：certbot 对没到期的证书同样成功退出，
     // 结论由后端按到期日实际变化算出来，界面照它说，不要自己下判断。
     renewSummary.value = r.summary || '';
-    if (r.reloaded === false && r.renewed?.length) msg.warning(`${r.summary}（nginx 重载失败，请手动 reload）`);
+    // confirmed=false 是后端没能读到期日清单（certbot 不可用 / 证书目录读不动），
+    // 这次既没证明续到、也没证明「没到期」，绝不能按成功绿字弹出（批次98）。
+    // 站点页那个续期按钮走的是同一个 renew_certs，两个入口对同一事实必须同一颜色。
+    if (r.confirmed === false) msg.warning(`${r.summary}（别当作续期成功，请先到网站页核对证书清单）`, { duration: 8000 });
+    else if (r.reloaded === false && r.renewed?.length) msg.warning(`${r.summary}（nginx 重载失败，请手动 reload）`);
     else msg.success(r.summary || 'certbot 已执行');
   } catch (e: any) {
     msg.error(e.message);

@@ -174,15 +174,24 @@ class RenewEndpointContractTests(unittest.TestCase):
 
 
 class RenewToastTriStateSourceTests(unittest.TestCase):
-    """前端把「读不到」弹成黄色告警而不是绿色成功——这条判据只有一个出处在 Sites.vue 的 renew()。"""
+    """前端把「读不到」弹成黄色告警而不是绿色成功——这条判据在两个续期按钮上都要有。
 
-    SRC = (BACKEND.parent / "web" / "src" / "views" / "Sites.vue").read_text(encoding="utf-8")
+    站点页与设置页各有一个续期入口，但走的是同一个 `renew_certs()`：只补一处，
+    另一处仍会把同一份「没读到」弹成绿色成功，批次98 修的判词就只修了一半。
+    """
+
+    VIEWS = ("Sites.vue", "Settings.vue")
+
+    def _src(self, name: str) -> str:
+        return (BACKEND.parent / "web" / "src" / "views" / name).read_text(encoding="utf-8")
 
     def test_未确认时走_warning_而非_success(self):
-        self.assertIn("r.confirmed === false", self.SRC)
-        self.assertIsNotNone(
-            re.search(r"if \(r\.confirmed === false\)\s*msg\.warning", self.SRC),
-            "confirmed=false 没有走 msg.warning（黄色告警），会被当成成功")
+        for name in self.VIEWS:
+            src = self._src(name)
+            self.assertIn("r.confirmed === false", src, f"{name} 没读 confirmed")
+            self.assertIsNotNone(
+                re.search(r"if \(r\.confirmed === false\)\s*msg\.warning", src),
+                f"{name} 的 confirmed=false 没有走 msg.warning（黄色告警），会被当成成功")
 
     def test_证书清单区块也读_confirmable_不再自推_source(self):
         """同一个 `list_certs` 三态判据（confirmable）要贯穿到区块，别在模板里重推。
@@ -191,9 +200,10 @@ class RenewToastTriStateSourceTests(unittest.TestCase):
         都没有。模板按 source 判的话，后者会显示「读不到任何证书」，紧挨着的提示语却写着
         「本机没有证书（certbot 与证书目录都为空）」——两行自相矛盾。
         """
-        self.assertNotIn("certsInfo.source === 'none'", self.SRC)
-        self.assertIn("certsInfo.confirmable !== true", self.SRC, "「清单不可用」提示的判据")
-        self.assertIn("certsInfo.confirmable === true", self.SRC, "空表文案的判据")
+        src = self._src("Sites.vue")
+        self.assertNotIn("certsInfo.source === 'none'", src)
+        self.assertIn("certsInfo.confirmable !== true", src, "「清单不可用」提示的判据")
+        self.assertIn("certsInfo.confirmable === true", src, "空表文案的判据")
 
 
 class SiteAuditUsesSameJudgeTests(unittest.TestCase):
