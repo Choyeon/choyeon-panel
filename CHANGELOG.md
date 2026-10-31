@@ -2181,6 +2181,22 @@
   线上复验（本机真 unit 走真 systemctl）：`choyeon-panel.service` 仍是 `state=active`、`subState=running`、
   `pid` 有值、`restarts=0`（真实读数照旧），而 systemctl 查不成那一轮给 `state=unknown`、`subState=None`、
   `restarts=None`——界面据此只能写「未读到」，写不出「重启 0 次」或「未运行」。
+- OOM 计数读不到的那一轮不再宣布「没有杀过进程」（批次110）。`memory_service._oom` 写
+  `kernel_total = int(vm_now.get("oom_kill") or 0)`，于是 `/proc/vmstat` 读空（采样窗口里那次读返回空串、
+  权限、proc 读失败）与「这台机器从开机到现在一次都没杀过」得到同一个 0，而两个读它的人都没办法分辨：
+  内存页 OOM 那一格写「没有杀过进程」，而**同一排**旁边两格正写着「速率没采到」——同一个读空的 vmstat，
+  速率那侧早就如实了；`choyeonctl doctor` 的内存项写「内存没有压力：…，没有停顿、换页与 OOM 记录」，
+  而这恰恰是本机唯一会因 OOM 报红的一项，把没有依据的那半句写成绿灯比少一项检查更糟。
+  现在 `_oom` 附 `counter_ok`（这一轮到底读没读到 `oom_kill`），读空时 `source` 不再冒充 `counter` 并给出
+  原因；自检与界面按旗标分支（与批次108 的 `measured`、批次106 的 `_unchecked` 同一条线），前端取
+  `counter_ok === true` 而不是「非 false」——没有旗标就当没读到。真读到 `oom_kill 0` 照旧写
+  「没有杀过进程」「无 OOM 记录」，0 仍然是读数。
+  `backend/tests/test_batch110.py` 钉住读空／真 0／「单元 memory.events 的计数不能替整机计数背书」三种
+  原文下的旗标、自检两句判词的分叉、杀过人仍然报 fail，以及界面「没读到」分支必须排在
+  「没有杀过进程」之前（顺序反了就等于读空时仍宣布没杀过）。
+  线上复验：本机真读 `/proc/vmstat` 给 `counter_ok=true`、`kernel_total=3`、`source=journal`，判词照旧报红；
+  把同一份真内存数据里的 `oom` 换成读空那一轮，`counter_ok=false`、`source=unknown`，判词里
+  「与 OOM 记录」不再出现，只说「这一轮没读到，不代表没杀过进程」。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
