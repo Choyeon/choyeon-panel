@@ -1,6 +1,8 @@
 import { computed, defineComponent, h, onBeforeUnmount, ref, type ComputedRef, type PropType } from 'vue';
 import { NButton as NaiveButton } from 'naive-ui';
-import { fmtBytes } from './composables/useFormat';
+// 带 .ts 后缀是测试跑法的要求：`node --experimental-strip-types` 走原生 ESM 解析，
+// 不给扩展名的 './composables/useFormat' 它会当成目录去找 index；Vite 两种都认。
+import { fmtBytes } from './composables/useFormat.ts';
 
 /**
  * NButton 的图标只认 `#icon` 插槽（naive-ui 没有 icon prop），而全站按钮写的是
