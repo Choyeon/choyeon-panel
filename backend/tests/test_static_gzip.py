@@ -29,7 +29,7 @@ class StaticEncodingCase(unittest.TestCase):
         root = Path(self.tmp.name)
         (root / "assets").mkdir()
         (root / "assets" / "a.js").write_bytes(RAW)
-        (root / "assets" / "a.js.gz").write_bytes(gzip.compress(PACKED))
+        (root / "assets" / "a.js.gz").write_bytes(gzip.compress(PACKED, mtime=0))
         (root / "index.html").write_text("<html>ok</html>", encoding="utf-8")
         app = FastAPI()
         app.mount("/", DistFiles(directory=str(root), html=True), name="static")
@@ -100,7 +100,9 @@ class StaticEncodingCase(unittest.TestCase):
     def test_requesting_the_gz_path_directly_does_not_double_wrap(self):
         r = self._get("/assets/a.js.gz", "gzip")
         self.assertNotIn("content-encoding", r.headers)
-        self.assertEqual(r.content, gzip.compress(PACKED))
+        # gzip 头里带 mtime：不锁 mtime 时，setUp 写入的那份与本行重新压缩的那份会因跨秒而字节不同
+        # （CI 比本机慢，几乎每次都在断言里重压一次），把它做成"命中就逐字节等于盘上那份"的可重复断言。
+        self.assertEqual(r.content, gzip.compress(PACKED, mtime=0))
 
 
 if __name__ == "__main__":
