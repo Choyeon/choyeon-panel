@@ -3,7 +3,7 @@ import { computed, h, onMounted, ref } from 'vue';
 import {
   NAlert, NCard, NDataTable, NIcon, NModal, NPopconfirm, NSelect, NSpace, NTag, NText, useMessage,
 } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, unknownNote } from '../ui';
 import { getRole, req, siteHref } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
@@ -217,11 +217,30 @@ const undecidedCount = computed(() =>
   sites.value.filter((r: any) => !r.claimed && !r.suggest_kind).length);
 
 const claimTone = computed(() => {
+  if (sitesReason.value) return { type: 'warning' as const, text: unknownNote('归属清单', sitesReason.value) };
+  if (loadingSites.value) return { type: 'default' as const, text: unknownNote('归属清单') };
   if (!sites.value.length) return { type: 'default' as const, text: '没有站点' };
   if (!unclaimedCount.value) return { type: 'success' as const, text: `${claimedCount.value} 个域名全部已纳管` };
   const tail = undecidedCount.value ? `、${undecidedCount.value} 个判不出归属` : '';
   return { type: 'warning' as const, text: `${claimedCount.value}/${sites.value.length} 已纳管${tail}` };
 });
+
+/**
+ * 「这一轮没读到」与「确认这台机器没有」是两件事，而读不到时数组就是空的——空数组两边同形。
+ * 判据沿用批次98 给 `list_certs` 定的 `confirmable`（不在页面里按 `source` 重推一遍），
+ * 域名侧用接口带回来的 reason/加载中；两条都不成立才敢报数。
+ */
+const siteCountText = computed(() => {
+  if (loadingSites.value || sitesReason.value) return unknownNote('域名清单', sitesReason.value ?? undefined);
+  return `共 ${sites.value.length} 个域名 · ${claimedCount.value} 个已纳管`;
+});
+const certCountText = computed(() => {
+  if (certsInfo.value.confirmable !== true) return unknownNote('证书数量', certsInfo.value.reason ?? undefined);
+  return `${certs.value.length} 张证书`;
+});
+const headerSub = computed(() =>
+  `${siteCountText.value} · ${certCountText.value}。归属以面板的纳管登记表为准，`
+  + '登记表没有的按 nginx 现读给出建议并写明依据；纳管不改动 nginx');
 
 /** 一行归属的来路要能逐条质疑：登记表写的、判定给的、判不出的原因，是三种不同的话。 */
 function evidence(r: any) {
@@ -729,7 +748,7 @@ onMounted(refresh);
 
 <template>
   <div>
-    <PageHeader title="网站与证书" :sub="`共 ${sites.length} 个域名 · ${claimedCount} 个已纳管 · ${certs.length} 张证书。归属以面板的纳管登记表为准，登记表没有的按 nginx 现读给出建议并写明依据；纳管不改动 nginx`">
+    <PageHeader title="网站与证书" :sub="headerSub">
       <template #actions>
         <NTag v-if="earliest" size="small" :bordered="false" :type="earliestType">
           最早到期 {{ earliest.name }} · {{ earliest.days_left == null ? '未知' : `${earliest.days_left} 天` }}
