@@ -44,6 +44,9 @@ RATE_WINDOW_SEC = 0.8
 TOP_PROCS = 12
 TOP_UNITS = 12
 MAX_OOM_EVENTS = 8
+# kernel 尾读行数。`oom_kill` 数的是整个 boot，日志却只读得到最后这些行——两者对不上时
+# 必须说出来（判词、CLI、页面都从这里取，不各写一个 3000）。
+OOM_LOG_LINES = 3000
 JOURNAL_TIMEOUT = 8
 PROC_BUDGET_SEC = 2.0
 
@@ -78,6 +81,7 @@ NOTES = (
 
 _OOM_KILL_RE = re.compile(r"Killed process (\d+) \(([^)]*)\)")
 _OOM_TASK_RE = re.compile(r"task:([^,]+),pid=(\d+)")
+_OOM_REAPER_RE = re.compile(r"reaped process (\d+) \(([^)]*)\)")
 _UNIT_SUFFIXES = systemd_ops.UNIT_SUFFIXES
 
 try:
@@ -423,10 +427,12 @@ def _oom(vm_now: dict, units: list[dict]) -> dict:
     unit_kills = {u["unit"]: int(u["events"].get("oom_kill") or 0) for u in units
                   if u.get("events") and int(u["events"].get("oom_kill") or 0)}
     out = {"kernel_total": kernel_total, "unit_kills": unit_kills,
-           "events": [], "source": "counter", "reason": ""}
+           "events": [], "events_total": 0, "events_omitted": 0,
+           "truncated": False, "line_limit": OOM_LOG_LINES,
+           "source": "counter", "reason": ""}
     if not kernel_total and not unit_kills:
         return out
-    cmd = "journalctl -k -b -n 3000 --no-pager -o short-iso"
+    cmd = f"journalctl -k -b -n {OOM_LOG_LINES} --no-pager -o short-iso"
     try:
         proc = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True,
                               timeout=JOURNAL_TIMEOUT)
@@ -439,33 +445,59 @@ def _oom(vm_now: dict, units: list[dict]) -> dict:
         out["source"] = "counter-only"
         out["reason"] = "计数说杀过进程，但当前 boot 的 kernel 日志里没有 OOM 行（日志可能已轮转）"
         return out
+    # 读满上限就说明更早的行没进来：日志很可能没有轮转，只是被尾读挡在外面。
+    out["truncated"] = len(text.splitlines()) >= OOM_LOG_LINES
     out["source"] = "journal"
-    out["events"] = _oom_events(text)
+    events = _oom_events(text)
+    out["events_total"] = len(events)
+    out["events"] = events[-MAX_OOM_EVENTS:]
+    out["events_omitted"] = len(events) - len(out["events"])
     return out
 
 
 def _oom_events(text: str) -> list[dict]:
-    """从 kernel 日志里挑 OOM 那几行，尽量还原「杀了谁、在第几秒」。
+    """从 kernel 日志里挑出被杀进程，一行一个进程。
 
-    两种写法都见过：`Out of memory: Killed process 1234 (node) total-vm:...` 与
-    `oom-kill:constraint=...,task:python,pid=1234`。认不出这两种的行只留原文不填名字——
+    同一场 OOM 内核会写两三行：`X invoked oom-killer` 是触发者，`oom-kill:...task=Y,pid=N`
+    与 `Out of memory: Killed process N (Y)` 才是受害者。按 pid 合并这三行——原样摆出来
+    会把一个受害者数成两三次，页面上的「3 次」与名单行数也对不上。展示优先取
+    `Killed process` 那行（带进程名与 pid 的完整写法）；认不出 pid 的行只留原文，
     猜错的受害者比没有受害者更容易把人引到错的方向。
     """
-    out = []
+    out: list[dict] = []
+    seen: dict[int, int] = {}
+
+    def _at(line: str) -> str:
+        return (line.split(" ") or [""])[0][:24]
+
     for line in (text or "").splitlines():
         low = line.lower()
+        if "invoked oom-killer" in low:
+            continue  # 触发分配失败的进程不是受害者，别让它混进名单
         if "out of memory" not in low and "oom-kill" not in low and "oom_reaper" not in low:
             continue
-        ev = {"pid": None, "comm": None, "at": (line.split(" ") or [""])[0][:24],
-              "line": line[:240]}
         kill = _OOM_KILL_RE.search(line)
         task = _OOM_TASK_RE.search(line)
+        reap = _OOM_REAPER_RE.search(line)
         if kill:
-            ev["pid"], ev["comm"] = int(kill.group(1)), kill.group(2)[:64]
-        elif task:
-            ev["comm"], ev["pid"] = task.group(1)[:64], int(task.group(2))
-        out.append(ev)
-    return out[-MAX_OOM_EVENTS:]
+            pid, comm = int(kill.group(1)), kill.group(2)[:64]
+            ev = {"pid": pid, "comm": comm, "at": _at(line), "line": line[:240]}
+            if pid in seen:
+                out[seen[pid]].update(ev)
+            else:
+                seen[pid] = len(out)
+                out.append(ev)
+            continue
+        if task or reap:
+            m = task or reap
+            pid, comm = int(m.group(2)), m.group(1)[:64]
+            if pid in seen:
+                continue  # 已有更完整的那一行
+            seen[pid] = len(out)
+            out.append({"pid": pid, "comm": comm, "at": _at(line), "line": line[:240]})
+            continue
+        out.append({"pid": None, "comm": None, "at": _at(line), "line": line[:240]})
+    return out
 
 
 def _findings(mem: dict, press: dict, rates: dict, units: dict, oom: dict, tun: dict) -> list[dict]:
@@ -489,6 +521,14 @@ def _findings(mem: dict, press: dict, rates: dict, units: dict, oom: dict, tun: 
             detail += f"受害者：{victims}。"
         if where:
             detail += f"单元上限：{where}。"
+        total = int(oom.get("events_total") or 0)
+        # 计数是整 boot 的，日志只读到末尾一段：对不上时说出来，别让名单看起来像全量。
+        if kills and total < kills:
+            detail += (f"内核计数 {kills} 次，日志里只认到 {total} 次"
+                       + ("（只读了末尾一段 kernel 日志）。" if oom.get("truncated") else "。"))
+        if oom.get("events_omitted"):
+            detail += (f"名单只列最近 {len(oom.get('events') or [])} 个，"
+                       f"另有 {oom['events_omitted']} 个没列出。")
         if oom.get("reason"):
             detail += f"（{oom['reason']}）"
         detail += "先看是谁在长大，再决定是加内存、给那个服务设上限，还是让它自己少占点。"
@@ -708,7 +748,12 @@ def doctor_item(data: dict) -> dict:
     if kills or unit_kills:
         total = kills + sum(int(v) for v in unit_kills.values())
         risky = [f["title"] for f in data.get("findings") or [] if f["severity"] == SEV_RISK]
-        detail = f"OOM 杀掉过 {total} 个进程；{head}"
+        seen = int(oom.get("events_total") or 0)
+        detail = f"OOM 杀掉过 {total} 个进程"
+        # 计数是整 boot、日志只读到尾部：认到的次数更少时别让这几个字看起来像全量名单。
+        if oom.get("source") == "journal" and seen < kills:
+            detail += f"（kernel 日志里只认到 {seen} 次）"
+        detail += f"；{head}"
         if risky:
             detail += "。" + tallied(risky, " 项判词")
         return {"status": "fail", "detail": detail, "fix": "choyeonctl memory"}

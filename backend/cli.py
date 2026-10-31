@@ -1490,10 +1490,19 @@ def _memory_text(d: dict) -> str:
         if uk:
             head += f"，单元自己的上限另杀 {sum(int(v) for v in uk.values())} 次"
         lines.append(head)
-        for e in oom.get("events") or []:
+        rows = oom.get("events") or []
+        for e in rows:
             who = (f"{e.get('comm')}({e.get('pid')})" if e.get("comm")
                    else (e.get("line") or "")[:70])
             lines.append(f"  {e.get('at')}  {who}")
+        total = int(oom.get("events_total") or 0)
+        if total > len(rows):
+            lines.append(f"  （名单只列最近 {len(rows)} 个，另有 {total - len(rows)} 个没列出）")
+        if oom.get("truncated"):
+            lines.append(f"  （kernel 日志只读了最后 {oom.get('line_limit')} 行，"
+                         "更早的 OOM 可能不在名单里）")
+        if kills and total < kills:
+            lines.append(f"  （内核计数 {kills} 次，日志里只认到 {total} 次）")
         if oom.get("reason"):
             lines.append(f"  {oom['reason']}")
     else:

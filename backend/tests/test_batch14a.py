@@ -676,11 +676,16 @@ class OomEventsTests(unittest.TestCase):
     def test_unrelated_lines_ignored(self):
         self.assertEqual(ms._oom_events("kernel: normal boot message\n"), [])
 
-    def test_capped_at_max_events(self):
+    def test_cap_moved_to_the_payload_and_declares_the_total(self):
+        """解析不再自己砍：砍在载荷那一层，并同时报出总数与没列出的个数（批次86）。"""
         text = "\n".join(f"at{i} kernel: Out of memory: Killed process {i} (p{i})" for i in range(20))
-        evs = ms._oom_events(text)
-        self.assertEqual(len(evs), ms.MAX_OOM_EVENTS)
-        self.assertEqual(evs[-1]["pid"], 19)
+        self.assertEqual(len(ms._oom_events(text)), 20)
+        with mock.patch.object(ms.subprocess, "run", return_value=mock.Mock(stdout=text)):
+            d = ms._oom({"oom_kill": 20}, [])
+        self.assertEqual(len(d["events"]), ms.MAX_OOM_EVENTS)
+        self.assertEqual(d["events"][-1]["pid"], 19)
+        self.assertEqual(d["events_total"], 20)
+        self.assertEqual(d["events_omitted"], 20 - ms.MAX_OOM_EVENTS)
 
 
 class OomTests(unittest.TestCase):

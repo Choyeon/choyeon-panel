@@ -2518,12 +2518,23 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         </span>
         <NText depth="3" class="mm-src">
           <template v-if="oomBlock.source === 'counter-only'">{{ oomBlock.reason || '只有次数，没有受害者' }}</template>
-          <template v-else>当前 boot 的 kernel 日志里挑出来的这几行；认不出进程名的只留原文</template>
+          <template v-else>
+            当前 boot 的 kernel 日志里按 PID 合并后的被杀进程；认不出进程名的只留原文。
+            <template v-if="oomBlock.truncated">
+              只读了最后 {{ oomBlock.line_limit }} 行，更早的 OOM 可能不在这里。
+            </template>
+            <template v-if="oomBlock.events_omitted">
+              另有 {{ oomBlock.events_omitted }} 个没列出。
+            </template>
+            <template v-if="killTotal > (oomBlock.events_total || 0)">
+              内核计数 {{ killTotal }} 次，日志里只认到 {{ oomBlock.events_total || 0 }} 次。
+            </template>
+          </template>
         </NText>
       </div>
       <NDataTable
         v-if="memKilled && oomRows.length" :columns="oomColumns" :data="oomRows" size="small" :bordered="false"
-        :scroll-x="'auto'" :pagination="false" :row-key="(r: any) => r.line" class="cp-tbl tbl-mem-oom"
+        :scroll-x="'auto'" :pagination="false" :row-key="(r: any) => r.pid ?? r.line" class="cp-tbl tbl-mem-oom"
       />
 
       <div v-if="swapDevs.length" class="mm-block">
