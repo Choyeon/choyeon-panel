@@ -2221,6 +2221,28 @@
   `.panel.env`、`rosetta-frontend` 磁盘那份与面板会写的那份不一致），三项 warn 是过去 24 小时
   16677 次失败认证来自 357 个地址、每核排队 1.78（这一轮跑全量测试所致）、站点链路两处默认档与配置
   归属值得处理——都与这次改动无关。
+- 网站页页头那三个数不再冒充「本机一个站点一张证书也没有」（批次112）。页头原来是裸模板串
+  `共 ${sites.length} 个域名 · ${claimedCount} 个已纳管 · ${certs.length} 张证书`：`loadSites`/`loadCerts`
+  在接口失败那两轮都把数组清成空、把原因只写进 `sitesReason` 与 `certsInfo.reason`，于是页头画
+  「共 0 个域名 · 0 个已纳管 · 0 张证书」——读不出「没读到」与「确实没有」的差别，首屏（还没取到数）
+  也是同一句 0。旁边那张归属标签更严重：空数组落到 `!sites.value.length` 那一档，写成「没有站点」，
+  把一个「这一轮没读到」念成了确认结论——正是批次98 给 `renew_certs` 判掉的那类塌陷（接口两路读者
+  都跑不通 vs 跑通而本机确实没有，`source === 'none'` 混了这两件事，所以批次98 定了 `confirmable`）。
+  域名侧与证书侧现在用同一把判据：`loadingSites || sitesReason` 与 `confirmable !== true` 一律走
+  `ui.ts` 的 `unknownNote`（带接口给的原因），只有判据成立才报真实计数；页面不再按 `source` 重推。
+  `claimTone` 前置两条分支（读不到给 warning 并带原因、加载中如实说本轮没读到），都不再落到「没有站点」。
+  `web/tests/batch112.test.mjs` 钉住模板里不再有裸计数、两条判据形态（含 `certsInfo.source === 'none'`
+  必须缺席，与批次98 那条 `assertNotIn` 同源）、以及归属标签的失败分支必须排在「没有站点」之前。
+  线上复验到代码与产物这一层：部署后的 `Sites-Dfl78qVt.js` 里三条 `unknownNote` 标签（域名清单 1、
+  证书数量 1、归属清单 2）与受保护的计数分支（`个已纳管` 1）并存，`个域名 · ` 那份只剩 computed 里
+  那一处、模板里已经没有；`GET /assets/Sites-Dfl78qVt.js` 取回 200 且同样含这两条标签，证明服务的
+  是新产物而不是旧 chunk；同轮 `choyeonctl site list --json` 真读到 7 个域名，走的是报数那一档。
+  **没有做的复验**：没有在生产上真的制造一次清单读不到去截渲染后的字符串（要在生产改 nginx/证书目录
+  才能触发，属于越界动作）——失败分支的正确性由用例与代码形态保证，浏览器内的渲染证据缺一档。
+  `choyeonctl upgrade --no-pull` 给 `ok/healthy=true`；`doctor` 为 17 pass / 2 warn / 3 fail：两项 fail
+  是本批之前就存在的账（内核 OOM 历史杀过 3 次；`choyeon-video` 记录有变量而目录无 `.panel.env`、
+  `rosetta-frontend` 磁盘那份非面板会写的那份），第三项 fail「每核排队 2.08」是我这一轮跑全量测试
+  造成的，两项 warn 是过去 24 小时 16609 次失败认证来自 356 个地址、站点链路两处默认档与配置归属。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
