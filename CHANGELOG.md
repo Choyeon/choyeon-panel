@@ -2197,6 +2197,30 @@
   线上复验：本机真读 `/proc/vmstat` 给 `counter_ok=true`、`kernel_total=3`、`source=journal`，判词照旧报红；
   把同一份真内存数据里的 `oom` 换成读空那一轮，`counter_ok=false`、`source=unknown`，判词里
   「与 OOM 记录」不再出现，只说「这一轮没读到，不代表没杀过进程」。
+- 概览的容量与累计字节不再把「没读到」画成 `0 B`（批次111）。`Dashboard.vue` 的 `stat` 初值是
+  **空对象**，首屏每一轮都从它开始画；而仪表下面那行 detail 与网速卡的「总发送 / 总接收」写的是
+  `fmtBytes(x || 0)`，于是同一个内存仪表圆心写着「未读到」（批次106/108 的短名）、底下那行写
+  「0 B / 0 B」——一格两句话，且那句 0 B 是一次从没发生过的测量：读起来像这台机器没有内存、这块网卡
+  一个字节也没发过；`/api/system/stats` 探测失败那一轮同样是 0 B。`useFormat.ts` 自己的口径就是
+  null → `—`（`Number(null)` 是 0 那句注释说得明白），`|| 0` 恰好绕过它——所以这次不是改格式函数，
+  是给绝对量补一个唯一的读者。
+  `ui.ts` 新增 `bytesText`：真读到 0 仍印 `0 B`（0 是读数），缺数、负值、非数字一律走 `UNKNOWN_LABEL`；
+  `Dashboard.vue` 四个调用点改传后端原值——`memUsed / memTotal`、`diskUsed / diskTotal`、单网卡
+  `one.totalTx/totalRx`、全部网卡 `s.netTotalTx/netTotalRx`。速率两格继续走批次108 的 `rateText`：
+  「没有分母」与「没有值」是两种账，不合并。同类写法在 `LogCenter.vue`（`bytesOut`/`diskBytes` 由
+  服务端每次现算，恒为数）与 `BackupFiles.vue` 的合计（求和里的 `|| 0` 是算术）核查后判定不是缺陷，
+  没有一起改。
+  `web/tests/batch111.test.mjs` 用真输入跑 `bytesText`（`0 → 0 B`、`1.0 GB`、`32.0 KB`、负值与
+  `NaN` 走短名），钉住四处调用点形态、把八条 `fmtBytes(x || 0)` 写法钉死，并要求短名与容量读法
+  各只有一份出处。
+  线上复验：部署后的 `Dashboard-pi8o5Jxq.js` 里那行是 `` `${R(c.value.memUsed)} / ${R(c.value.memTotal)}` ``
+  ——原值进共享读者，八个站点 `memUsed||0 / netTotalTx||0` 之类在产物中计数为 0；`R` 来自只含一处
+  「未读到」的 `index-BrSM_iu-.js`，经 `GET /assets/...` 取回仍是 200 且那份短名只出现一次（不是本地
+  旧 chunk）。`choyeonctl upgrade --no-pull` 给 `ok/healthy=true`；`doctor` 为 17 pass / 3 warn / 2 fail，
+  两项 fail 都是本批之前就存在的账（内核 OOM 历史杀过 3 次；`choyeon-video` 记录有变量但安装目录没有
+  `.panel.env`、`rosetta-frontend` 磁盘那份与面板会写的那份不一致），三项 warn 是过去 24 小时
+  16677 次失败认证来自 357 个地址、每核排队 1.78（这一轮跑全量测试所致）、站点链路两处默认档与配置
+  归属值得处理——都与这次改动无关。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
