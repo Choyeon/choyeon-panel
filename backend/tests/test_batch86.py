@@ -59,6 +59,8 @@ class DedupeTests(unittest.TestCase):
         self.assertEqual([e["comm"] for e in evs], ["python", "python", "python"])
         # 展示取信息最全的那行，而不是先到的 oom-kill 行。
         self.assertIn("Out of memory: Killed process 250726", evs[0]["line"])
+        # 时间戳的时区不能被切掉最后一位（short-iso 是 25 个字符）。
+        self.assertEqual(evs[0]["at"], "2026-10-23T21:02:30+08:00")
 
     def test_trigger_process_never_enters_the_list(self):
         evs = ms._oom_events(HOST_LOG)

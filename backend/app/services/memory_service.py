@@ -469,7 +469,8 @@ def _oom_events(text: str) -> list[dict]:
     seen: dict[int, int] = {}
 
     def _at(line: str) -> str:
-        return (line.split(" ") or [""])[0][:24]
+        # short-iso 的时间戳带 +08:00，切到 24 位会把最后一位时区数字吃掉。
+        return (line.split(" ") or [""])[0][:32]
 
     for line in (text or "").splitlines():
         low = line.lower()
