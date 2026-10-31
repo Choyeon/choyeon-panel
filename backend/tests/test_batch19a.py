@@ -309,7 +309,9 @@ class ZeroLineInspectionTests(unittest.TestCase):
 class PageAndSettingAgreeTests(unittest.TestCase):
     """同一个配置值必须同时决定页面档位与巡检通知——这条才是"两个出处"的真正解药。"""
 
-    NOW = datetime(2026, 10, 10, tzinfo=UTC)   # 2026-10-31 距此 21 天
+    # 页面这条路径要显式给"现在"，巡检那条走真实时钟：两边都以真实今天为准，
+    # 证书夹具也是相对今天算的；任何一边钉死日期，跨过那天两张表就会对不上。
+    NOW = datetime.now(UTC)
 
     def setUp(self):
         _clear_ssl(self)
