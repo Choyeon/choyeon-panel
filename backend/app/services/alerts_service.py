@@ -31,7 +31,7 @@ import os
 import re
 import smtplib
 import urllib.request
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from email.message import EmailMessage
 
 from .. import aio_db, config
@@ -588,6 +588,45 @@ def parse_certbot(output: str) -> list[dict]:
 _checks_running = False
 
 
+_unchecked_sinks: list[list[str]] = []
+
+
+def _unchecked(what: str, why: str) -> None:
+    """这一节本轮压根没查成：既写面板日志，也记进当轮正在收集的那份清单。
+
+    `warn()` 只落到 journal，告警页与设置页都看不见它；而那两个入口的回应只说「巡检完成，
+    新增 N 条历史」——于是"磁盘、证书、探活全没读成"和"全读完了都没问题"在界面上是同一句话。
+    批次101 立的规矩在这儿补齐：后端说这轮没做，界面不许替它说做完了。
+
+    清单挂在模块级的栈上而不是逐层传参：`run_probes` / `run_backup_checks` 同时被巡检和
+    各自的独立入口调用，测试里还大量用零参数替身 patch 它们——加一个必填形参会把那些替身
+    全部打成 TypeError，而漏传的地方正好是静默跳过的那一节。
+    """
+    msg = f"{what}本轮没查成（{why}）"
+    warn(msg)
+    for sink in _unchecked_sinks:
+        sink.append(msg)
+
+
+@contextmanager
+def collect_unchecked():
+    """开一份"本轮没查成"的清单，退出时交出去。可以嵌套，每一层都收到自己那份。
+
+    退出时按**身份**摘掉自己那一份：`list.remove` 比的是值，两份空清单 `[] == []` 相等，
+    照 remove 写就会摘掉别层（或上一轮）那份——本层的清单泄漏在栈上，下一轮把这一轮的
+    旧账一起端给界面，说成"这一轮没查成"。
+    """
+    sink: list[str] = []
+    _unchecked_sinks.append(sink)
+    try:
+        yield sink
+    finally:
+        for i in range(len(_unchecked_sinks) - 1, -1, -1):
+            if _unchecked_sinks[i] is sink:
+                del _unchecked_sinks[i]
+                break
+
+
 async def run_checks() -> dict:
     """一轮巡检的重入闸：同一个进程里只允许一轮在跑。
 
@@ -605,10 +644,14 @@ async def run_checks() -> dict:
         return {"ok": True, "skipped": "上一轮巡检还在执行，本轮跳过"}
     _checks_running = True
     try:
-        await _run_checks()
+        with collect_unchecked() as unchecked:
+            await _run_checks()
     finally:
         _checks_running = False
-    return {"ok": True}
+    out: dict = {"ok": True}
+    if unchecked:
+        out["unchecked"] = unchecked
+    return out
 
 
 async def _run_checks():
@@ -616,7 +659,7 @@ async def _run_checks():
     dth = disk_thresholds()
     disk_pct = dth["warn"]
     if pct is None:
-        warn("无法读取磁盘使用率，跳过磁盘告警")
+        _unchecked("磁盘使用率阈值", f"{config.DATA_DIR} 所在分区读不到占用")
     else:
         # 越过要紧线就升成 crit：通知渠道（Telegram / webhook）按 level 区分对待，
         # 而"还能写"和"快写不下了"是两件事，都发 warn 就只能靠人读数字。
@@ -640,13 +683,13 @@ async def _run_checks():
                      code="failed-units", level="crit", ok_message="无 failed 状态服务",
                      meta=_meta(units=units))
     else:
-        warn("systemctl 不可用，跳过 failed 单元巡检:", failed["out"][:120])
+        _unchecked("failed 状态服务清单", f"systemctl 退出码 {failed['code']}：{failed['out'][:80]}")
 
     ssl_days = setting_int("alert_ssl_days")  # 0 = 关闭证书巡检
     if ssl_days > 0:
         certs = await run("certbot", ["certificates"], timeout=CERTBOT_TIMEOUT)
         if certs["code"] != 0:
-            warn("certbot 不可用，跳过证书巡检:", certs["out"][:120])
+            _unchecked("证书到期天数", f"certbot 退出码 {certs['code']}：{certs['out'][:80]}")
         else:
             for c in parse_certbot(certs["out"]):
                 if c["invalid"]:
@@ -657,7 +700,8 @@ async def _run_checks():
                     # 天数读不出来不等于"有效期正常"。落到 else 分支就是往历史里写一行
                     # 「证书 X 有效期正常」，上一轮真报过警的话还会推一条「已恢复」——
                     # 而站点页同一张证书显示的是"未知"。读不到就只记日志，档位不动。
-                    warn(f"证书 {c['name']} 的剩余天数读不到，本轮跳过（不记正常，也不发恢复通知）")
+                    _unchecked(f"证书 {c['name']} 的有效期",
+                               "certbot 输出里读不到到期日（不记正常，也不发恢复通知）")
                 elif c["days"] <= ssl_days:
                     await _check(f"ssl-{c['name']}", True,
                                  f"证书 {c['name']} 将在 {c['days']} 天后到期（阈值 {ssl_days} 天）",
@@ -696,13 +740,14 @@ async def _check_resources() -> None:
     try:
         snap = await system_metrics.snapshot()
     except Exception as e:  # noqa: BLE001
-        warn("读取系统指标失败，跳过资源阈值巡检:", type(e).__name__, e)
+        _unchecked("CPU／内存／负载阈值", f"读取系统指标失败：{type(e).__name__}")
         return
 
     hist = snap.get("history")
     if isinstance(hist, list) and len(hist) < 2:
         # 进程第一次采样没有差值基线，cpu 恒为 0.0：那是"没测到"不是"很空闲"，
         # 据此记一行"CPU 正常"等于谎报平安，等下一轮有基线了再说。
+        _unchecked("CPU／内存／负载阈值", "面板刚启动，还没有采样差值")
         return
 
     cpu = float(snap.get("cpu") or 0.0)
@@ -885,7 +930,7 @@ async def run_backup_checks() -> list[dict]:
     try:
         rows = await asyncio.to_thread(scheduled_runs)
     except Exception as e:  # noqa: BLE001
-        warn("读取备份任务留痕失败，跳过备份巡检:", type(e).__name__, e)
+        _unchecked("备份任务执行留痕", f"读取失败：{type(e).__name__}")
         return []
     results: list[dict] = []
     for b in rows:
@@ -930,7 +975,7 @@ async def run_probes() -> list[dict]:
             "SELECT id, name, port FROM apps WHERE port IS NOT NULL AND port > 0 ORDER BY id"
         )
     except Exception as e:  # noqa: BLE001
-        warn("读取应用列表失败，跳过存活探测:", type(e).__name__, e)
+        _unchecked("应用存活探测", f"读取应用列表失败：{type(e).__name__}")
         return []
     results: list[dict] = []
     for a in apps:

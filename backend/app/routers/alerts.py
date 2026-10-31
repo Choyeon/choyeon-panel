@@ -149,10 +149,15 @@ async def alerts_run(req: Request):
             "SELECT id,ts,level,code,message,meta FROM alerts_log WHERE id>? ORDER BY id", (watermark,)
         )
         await aio_db.audit(req.state.cp_sub, "alert:run",
-                           f"{len(inserted)} 条" + (f"({ran['skipped']})" if ran.get("skipped") else ""))
+                           f"{len(inserted)} 条" + (f"({ran['skipped']})" if ran.get("skipped") else "")
+                           + (f"(未查成 {len(ran['unchecked'])} 节)" if ran.get("unchecked") else ""))
         out = {"ok": True, "inserted": inserted, "count": len(inserted)}
         if ran.get("skipped"):
             out["skipped"] = ran["skipped"]
+        # 巡检里某一节压根没读成（systemctl 不可用 / 指标读取失败 / 应用列表查询失败…）时，
+        # 历史可以一行都不新增——那不等于「全都查过了没问题」。界面要说的是「这轮没查完」。
+        if ran.get("unchecked"):
+            out["unchecked"] = ran["unchecked"]
         return out
     except Exception as e:  # noqa: BLE001
         return await _fail(f"alerts run 失败: {type(e).__name__}: {e}", "巡检执行失败，详见面板日志")
@@ -165,11 +170,18 @@ async def alerts_probe(req: Request):
     try:
         before = await aio_db.query_one("SELECT COALESCE(MAX(id), 0) m FROM alerts_log")
         watermark = int(before["m"]) if before else 0
-        results = await alerts_service.run_probes()
+        # 探测这一节自己也要留账：应用列表查不到时 run_probes 返回空清单，
+        # 直接照实回「探测完成，0 个应用」就成了「一个应用都没探、却说探完都没事」。
+        with alerts_service.collect_unchecked() as unchecked:
+            results = await alerts_service.run_probes()
         inserted = await aio_db.query(
             "SELECT id,ts,level,code,message,meta FROM alerts_log WHERE id>? ORDER BY id", (watermark,)
         )
-        await aio_db.audit(req.state.cp_sub, "alert:probe", str(len(results)))
-        return {"ok": True, "results": results, "inserted": inserted, "count": len(inserted)}
+        await aio_db.audit(req.state.cp_sub, "alert:probe",
+                           str(len(results)) + (f"(未查成 {len(unchecked)} 节)" if unchecked else ""))
+        out: dict = {"ok": True, "results": results, "inserted": inserted, "count": len(inserted)}
+        if unchecked:
+            out["unchecked"] = unchecked
+        return out
     except Exception as e:  # noqa: BLE001
         return await _fail(f"alerts probe 失败: {type(e).__name__}: {e}", "存活探测执行失败，详见面板日志")

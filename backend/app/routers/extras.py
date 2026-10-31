@@ -323,8 +323,14 @@ async def alerts_run_checks(req: Request):
     ran = await alerts_service.run_checks()
     # 手动跑一轮巡检会真的发通知，事后必须查得到是谁在什么时候点过
     await aio_db.audit(req.state.cp_sub, "settings:alert-checks",
-                       "manual" + (f"({ran['skipped']})" if ran.get("skipped") else ""))
-    return {"ok": True, **({"skipped": ran["skipped"]} if ran.get("skipped") else {})}
+                       "manual" + (f"({ran['skipped']})" if ran.get("skipped") else "")
+                       + (f"(未查成 {len(ran['unchecked'])} 节)" if ran.get("unchecked") else ""))
+    out: dict = {"ok": True}
+    if ran.get("skipped"):
+        out["skipped"] = ran["skipped"]
+    if ran.get("unchecked"):
+        out["unchecked"] = ran["unchecked"]
+    return out
 
 
 @router.get("/api/audit")

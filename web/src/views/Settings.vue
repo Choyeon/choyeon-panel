@@ -5,7 +5,7 @@ import {
   NInputNumber, NSwitch, NDrawer, NDrawerContent, NText, NAlert,
 } from 'naive-ui';
 import { useRoute, useRouter } from 'vue-router';
-import { NButton, useDrawerWidth } from '../ui';
+import { NButton, uncheckedNote, useDrawerWidth } from '../ui';
 import { api, getRole, getUsername, saveLoginData } from '../api';
 import { icon } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
@@ -356,7 +356,12 @@ async function runChecks() {
     // 上一轮还在跑时后端直接跳过本轮、一份历史都不写，只回一句 skipped。这里不转述，
     // 按钮就会报「巡检已执行」：管理员以为阈值刚核对过，实际这一轮什么都没读。
     if (r?.skipped) msg.warning(`这次没有执行巡检：${r.skipped}`, { duration: 8000 });
-    else msg.success('巡检已执行，若触发阈值会立即推送');
+    // 没查成的节照样要说：告警页点的是同一轮巡检，两处共用同一句说法（ui.ts）。
+    else {
+      const note = uncheckedNote(r?.unchecked);
+      if (note) msg.warning(`巡检已执行，但${note}`, { duration: 9000 });
+      else msg.success('巡检已执行，若触发阈值会立即推送');
+    }
   } catch (e: any) {
     msg.error(e.message);
   } finally {

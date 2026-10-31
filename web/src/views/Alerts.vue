@@ -3,7 +3,7 @@ import { computed, h, onScopeDispose, ref, watch } from 'vue';
 import {
   NAlert, NCard, NDataTable, NIcon, NInput, NSelect, NSpace, NTag, NText, useMessage,
 } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, uncheckedNote } from '../ui';
 import { api, getRole, req } from '../api';
 import { icon, icons } from '../icons';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
@@ -263,8 +263,16 @@ async function runRound(kind: 'run' | 'probe') {
     // 上一轮还在跑时后端一份历史都不新增，只回一句 skipped。不转述就成了「巡检完成」：
     // 管理员以为阈值刚核对过一遍，实际这一轮什么都没读。
     if (r?.skipped) msg.warning(`这次没有执行巡检：${r.skipped}`, { duration: 8000 });
-    else if (kind === 'run') msg.success(`巡检完成，新增 ${r?.count ?? 0} 条历史`);
-    else msg.success(`探测完成，${r?.results?.length ?? 0} 个应用，新增 ${r?.count ?? 0} 条历史`);
+    else {
+      const base = kind === 'run'
+        ? `巡检完成，新增 ${r?.count ?? 0} 条历史`
+        : `探测完成，${r?.results?.length ?? 0} 个应用，新增 ${r?.count ?? 0} 条历史`;
+      // 某几节压根没读成（systemctl 不可用 / 指标读失败 / 应用列表查不到）时历史可以一行不增，
+      // 这时只报「完成」等于替后端说「全都查过了没问题」——清单本身才是要转述的那句话。
+      const note = uncheckedNote(r?.unchecked);
+      if (note) msg.warning(`${base}，但${note}`, { duration: 9000 });
+      else msg.success(base);
+    }
     reload();
   } catch (e: any) {
     msg.error(e.message);

@@ -130,3 +130,18 @@ export function cutCounted<T>(items: T[], max: number, show: (item: T) => string
   const total = typeof realTotal === 'number' && realTotal > items.length ? realTotal : items.length;
   return items.length > max || total > items.length ? `${shown} 等 ${total} 条` : shown;
 }
+
+/**
+ * 巡检/探测回一句「本轮有 N 节压根没查成」时该怎么说；没查成的节为 0 就回空串。
+ *
+ * 后端每个入口的成功回应原本只说「巡检完成，新增 N 条历史」。systemctl 不可用、系统指标
+ * 读失败、应用列表查询失败这些情况一份历史都不新增，于是"全查完了都没事"和"什么都没读成"
+ * 在界面上长得一模一样（批次101 定的规矩：后端说这轮没做，界面不许替它说做完了）。
+ * 说法只有这一份——告警页和设置页点的是同一轮巡检，各写各的迟早只剩一处转述。
+ */
+export function uncheckedNote(list?: string[]): string {
+  if (!Array.isArray(list) || list.length === 0) return '';
+  const head = list.slice(0, 3).join('；');
+  const more = list.length > 3 ? `；另有 ${list.length - 3} 节详见面板日志` : '';
+  return `本轮有 ${list.length} 节没查成：${head}${more}`;
+}
