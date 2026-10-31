@@ -60,7 +60,8 @@ test('AppDetail 部署记录读取失败与主数据隔离，副数据失败不�
   const s = read('views/AppDetail.vue');
   assert.match(s, /const depsErr = ref\(''\);/);
   // /deployments 单独成功清空、单独 catch 记 depsErr，而不是走 loadErr 整页失败
-  assert.match(s, /deps\.value = list;\s*depsErr\.value = '';/);
+  // （批次88 起响应是 {rows,total,has_more} 分页数组，成功路径写 page.rows）
+  assert.match(s, /deps\.value = page\.rows;[\s\S]*?depsErr\.value = '';/);
   assert.match(s, /depsErr\.value = e\?\.message \|\| '部署记录读取失败';/);
   assert.ok(s.includes(`:text="depsErr || '暂无部署记录'"`),
     '部署记录空态没接上 depsErr 第三态');

@@ -26,6 +26,10 @@ const app = ref<any>(null);
 const env = ref<{ k: string; v: string }[]>([]);
 const edit = ref<any>({});
 const deps = ref<any[]>([]);
+// 后端一页 20 条并给出总数：列表长度不是「一共部署过几次」，更早的记录要能顺着游标翻回去。
+const depsTotal = ref(0);
+const depsHasMore = ref(false);
+const depsLoadingMore = ref(false);
 // 部署记录读取失败的第三态：空列表和"读不到"不是一回事，画成"暂无部署记录"会让人以为应用从没部署过。
 const depsErr = ref('');
 const depLog = ref<any>(null);
@@ -307,9 +311,11 @@ async function load() {
   // 部署记录单独 try/catch：应用主体已经取到手了，/deployments 抖动不该把整页
   // 从可读可操作换成「加载应用详情失败」——那是把一次副数据读取失败说成主数据没了。
   try {
-    const list = await api.deployments(requested);
+    const page = await api.deployments(requested);
     if (requested !== id) return;
-    deps.value = list;
+    deps.value = page.rows;
+    depsTotal.value = page.total;
+    depsHasMore.value = page.has_more;
     depsErr.value = '';
   } catch (e: any) {
     if (requested !== id) return;
@@ -398,9 +404,9 @@ async function pollDeps() {
   const requested = id;
   // 轮询是 setTimeout 里跑的，失败若不在这里吞掉就变成未处理的 promise rejection：
   // 界面上部署记录停在旧数据、也没有任何提示。
-  let list: any;
+  let page: any;
   try {
-    list = await api.deployments(requested);
+    page = await api.deployments(requested);
   } catch (e: any) {
     if (requested !== id) return;
     depsErr.value = `部署记录读取失败：${e.message}`;
@@ -408,7 +414,9 @@ async function pollDeps() {
     return;
   }
   if (requested !== id) return;
-  deps.value = list;
+  deps.value = page.rows;
+  depsTotal.value = page.total;
+  depsHasMore.value = page.has_more;
   depsErr.value = '';
   // 头部徽标看的是 app.deploying：只换记录列表的话「部署中」要等手动刷新才出现
   let fresh: any;
@@ -421,6 +429,28 @@ async function pollDeps() {
   if (fresh) app.value = fresh;
   // 还有 running 记录就继续轮：部署是后台任务，不轮询用户只能反复点「刷新」才知道跑完了
   if (deps.value.some((d: any) => d.status === 'running')) later(pollDeps, 5000);
+}
+async function loadMoreDeps() {
+  // 第一页之后的历史顺着 id 游标往回翻；列表长度只是「已经列出几条」，不是总数。
+  const requested = id;
+  const last = deps.value[deps.value.length - 1];
+  if (!last || depsLoadingMore.value) return;
+  depsLoadingMore.value = true;
+  try {
+    const page = await api.deployments(requested, last.id);
+    if (requested !== id) return;
+    // 翻页期间轮询可能刚换过第一页：按 id 去重，同一条记录不会出现两次
+    const seen = new Set(deps.value.map((d: any) => d.id));
+    deps.value = deps.value.concat(page.rows.filter((d: any) => !seen.has(d.id)));
+    depsTotal.value = page.total;
+    depsHasMore.value = page.has_more;
+    depsErr.value = '';
+  } catch (e: any) {
+    if (requested !== id) return;
+    msg.error(`更早的部署记录读取失败：${e.message}`);
+  } finally {
+    depsLoadingMore.value = false;
+  }
 }
 async function viewDep(depId: number) {
   const requested = id;
@@ -502,6 +532,10 @@ watch(
     proc.value = null;
     depLog.value = null;
     deps.value = [];
+    depsTotal.value = 0;
+    depsHasMore.value = false;
+    depsLoadingMore.value = false;
+    depsErr.value = '';
     cancel();   // 切应用时掐掉上一个应用挂着的部署轮询
     load();
   },
@@ -686,6 +720,11 @@ watch(
       <div v-else-if="tab === 'deploy'">
         <div class="split-view">
           <div class="dep-list">
+            <!-- 列表只端一页，说清楚「已列几条 / 一共几次」，别让一页当成全部历史 -->
+            <div v-if="deps.length" class="cell-sub cp-prose" style="margin-bottom: var(--space-2)">
+              已列 {{ deps.length }} / 共 {{ depsTotal }} 次
+              <span v-if="depsErr"> · {{ depsErr }}</span>
+            </div>
             <div v-for="d in deps" :key="d.id" class="dep-item" :class="{ active: depLog?.id === d.id }"
                  role="button" tabindex="0" :aria-label="`查看部署记录 #${d.id}`"
                  @click="viewDep(d.id)" @keyup.enter="viewDep(d.id)" @keyup.space.prevent="viewDep(d.id)">
@@ -695,6 +734,7 @@ watch(
               </NSpace>
             </div>
             <EmptyBox v-if="!deps.length" :text="depsErr || '暂无部署记录'" />
+            <NButton v-if="depsHasMore" size="small" tertiary round :loading="depsLoadingMore" :disabled="depsLoadingMore" style="margin-top: var(--space-2)" @click="loadMoreDeps">加载更早</NButton>
             <NButton size="small" tertiary round :icon="ico('RefreshOutline')" style="margin-top: var(--space-2)" @click="pollDeps">刷新</NButton>
           </div>
           <div class="log-view dep-log" :class="{ 'dep-log-empty': !depLog }">{{ depLog?.log || '点击左侧记录查看部署日志' }}</div>

@@ -218,7 +218,7 @@ export const api = {
   deploy: (id: number) => req(`/apps/${id}/deploy`, { body: {} }),
   // 一键同步 = fetch + reset + 重启，不跑 install；git fetch 服务端上限 300s，给到 320s
   appSync: (id: number) => req(`/apps/${id}/sync`, { body: {}, timeout: 320000 }),
-  deployments: (id: number) => req(`/apps/${id}/deployments`),
+  deployments: (id: number, before?: number) => req(`/apps/${id}/deployments${before ? `?before=${before}` : ''}`),
   deployment: (id: number, depId: number) => req(`/apps/${id}/deployments/${depId}`),
   appSsl: (id: number, email?: string) => req(`/apps/${id}/ssl`, { body: { email }, timeout: 320000 }),
   appNginx: (id: number) => req(`/apps/${id}/nginx`),

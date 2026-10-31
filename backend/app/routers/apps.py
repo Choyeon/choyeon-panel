@@ -10,7 +10,7 @@ from ..deps import need_admin
 from ..errors import err_json
 from ..services import apps_service, nginx_ops, systemd_ops
 from ..templates import apply_template
-from ..util import parse_lines, redact_creds
+from ..util import parse_limit, parse_lines, redact_creds
 from .system import log_stream_response
 
 router = APIRouter()
@@ -198,13 +198,28 @@ async def app_sync(app_id: int, req: Request):
         return err_json(e)
 
 
+DEPLOY_PAGE = 20
+
+
 @router.get("/api/apps/{app_id}/deployments")
-async def app_deployments(app_id: int):
-    return dbm.query(
-        "SELECT id,app_id,status,commit_sha,started_at,finished_at,length(log) log_len FROM deployments WHERE app_id=?"
-        " ORDER BY id DESC LIMIT 20",
-        (app_id,),
+async def app_deployments(app_id: int, before: int | None = None, limit: int = DEPLOY_PAGE):
+    # 每次部署 / 同步 / 回滚都会写一行，长期一定超过一页。原来裸数组 + 写死 LIMIT 20，
+    # 第 21 条之前的历史既看不到、也没有一个字说它存在。现在给出总数与游标，
+    # 页面可以顺着 before 往回翻（批次88）。
+    size = parse_limit(limit, default=DEPLOY_PAGE, maximum=200)
+    where, args = "app_id=?", [app_id]
+    if before is not None:
+        where += " AND id<?"
+        args.append(int(before))
+    rows = dbm.query(
+        "SELECT id,app_id,status,commit_sha,started_at,finished_at,length(log) log_len "
+        f"FROM deployments WHERE {where} ORDER BY id DESC LIMIT ?",
+        (*args, size + 1),
     )
+    has_more = len(rows) > size
+    rows = rows[:size]
+    total = dbm.query_one("SELECT COUNT(*) AS n FROM deployments WHERE app_id=?", (app_id,))
+    return {"rows": rows, "total": total["n"] if total else 0, "has_more": has_more, "limit": size}
 
 
 @router.get("/api/apps/{app_id}/deployments/{dep_id}")
