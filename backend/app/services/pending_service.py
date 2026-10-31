@@ -44,6 +44,8 @@ SUBPROCESS_TIMEOUT = 6
 
 REBOOT_MARKER = "/run/reboot-required"
 REBOOT_MARKER_PKGS = "/run/reboot-required.pkgs"
+# 载荷与终端里最多点名这么多个包，真实条数另走 marker.files_total。
+MARKER_PKGS_SHOWN = 20
 SSHD_CONFIG = "/etc/ssh/sshd_config"
 SSHD_DIR = "/etc/ssh"
 APT_HISTORY = "/var/log/apt/history.log"
@@ -311,7 +313,7 @@ def _kernel_state(btime: int) -> dict:
     running = os.uname().release
     out = {"ok": False, "reason": None, "running": running, "installed": [], "newer": [],
            "partial": [],
-           "marker": {"present": False, "path": REBOOT_MARKER, "files": []},
+           "marker": {"present": False, "path": REBOOT_MARKER, "files": [], "files_total": 0},
            "needs_reboot": None, "boot_epoch": btime or None, "boot_iso": _epoch_iso(btime)}
     try:
         r = subprocess.run(
@@ -348,8 +350,10 @@ def _kernel_state(btime: int) -> dict:
     # 版本号，拿它当「新内核」会把每台正常机器都判成待重启。用「linux-image- 后面接数字」区分。
     kernels = [x for x in rows if re.match(r"^linux-image-\d", x["pkg"]) and x["pkg"] != f"linux-image-{running}"]
     if os.path.exists(REBOOT_MARKER):
+        pkgs = _read_marker_pkgs()
         out["marker"]["present"] = True
-        out["marker"]["files"] = _read_marker_pkgs()
+        out["marker"]["files"] = pkgs[:MARKER_PKGS_SHOWN]
+        out["marker"]["files_total"] = len(pkgs)
         out["needs_reboot"] = True
         out["reason"] = None
         return out
@@ -405,7 +409,13 @@ def _dpkg_gt(a: str, b: str) -> bool:
 
 
 def _read_marker_pkgs() -> list[str]:
-    return [ln.strip() for ln in _read(REBOOT_MARKER_PKGS).splitlines() if ln.strip()][:20]
+    """发行版挂在重启标记旁边的包名清单（全量，展示预算由调用方收窄）。
+
+    这里不裁：`/run/reboot-required.pkgs` 在装了 nvidia/docker/内核元包的机器上能写到
+    上百行，而"哪些包要我重启"正是管理员决定什么时候重启的依据。裁剪与总数说明放在
+    进载荷的那一处（`MARKER_PKGS_SHOWN`），这样 JSON 里永远带着真实条数。
+    """
+    return [ln.strip() for ln in _read(REBOOT_MARKER_PKGS).splitlines() if ln.strip()]
 
 
 def _nginx_state(btime: int, hz: int) -> dict:

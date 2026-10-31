@@ -842,8 +842,9 @@ def doctor_item(data: dict) -> dict:
                 "fix": "choyeonctl ssh-audit", "fixable": False}
     counts = data["counts"]
     if data["accounts"]["empty_password"] or data["accounts"]["uid0_extra"]:
-        names = "、".join((data["accounts"]["empty_password"] + data["accounts"]["uid0_extra"])[:5])
-        return {"status": "fail", "detail": f"存在不该有的账号：{names}（空口令或额外 uid=0）",
+        listed = data["accounts"]["empty_password"] + data["accounts"]["uid0_extra"]
+        return {"status": "fail",
+                "detail": f"存在不该有的账号（空口令或额外 uid=0）：{name_list(listed, 5)}",
                 "fix": "choyeonctl ssh-audit 里看完整判词，先按入侵痕迹处理", "fixable": False}
     if counts["risk"]:
         risk_titles = [f["title"] for f in data["findings"] if f["severity"] == "risk"]

@@ -1597,7 +1597,14 @@ def _pending_text(d: dict) -> str:
     if k.get("ok"):
         verdict = {True: "需要重启", False: "不需要重启"}.get(k.get("needs_reboot"), "判定不了")
         newer = ", ".join(x.get("pkg", "") for x in (k.get("newer") or [])[:3])
-        mark = "挂着" if (k.get("marker") or {}).get("present") else "没有"
+        mk = k.get("marker") or {}
+        mark = "挂着" if mk.get("present") else "没有"
+        if mk.get("present"):
+            total = int(mk.get("files_total") or 0)
+            if total:
+                shown = len(mk.get("files") or [])
+                more = f"，载荷里只列前 {shown} 个" if shown < total else ""
+                mark += f"（{total} 个包在等重启{more}）"
         lines.append(f"内核：running {k.get('running')}，已装 {len(k.get('installed') or [])} 个镜像包"
                      + (f"，比它新的：{newer}" if newer else "") + f"；重启标记{mark} → {verdict}")
         if k.get("reason"):

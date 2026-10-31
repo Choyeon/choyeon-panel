@@ -27,7 +27,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from .. import config
 from .. import database as dbm
-from ..util import human_bytes, is_http_url, is_name, redact_creds
+from ..util import human_bytes, is_http_url, is_name, name_list, redact_creds
 
 # 单文件 PutObject 的上限是 5GiB（S3 与 MinIO 同规则）。分块上传是另一件事，
 # 面板的产物是 gz 归档，真到 5GiB 该改的是备份任务的口径而不是在这里塞一套 multipart。
@@ -288,7 +288,7 @@ def delete_target(tid: int) -> dict:
     """
     linked = dbm.query("SELECT id, kind, target FROM backups WHERE cloud_target_id=?", (int(tid),))
     if linked:
-        names = "、".join(f"#{x['id']}（{x['kind']}:{x['target']}）" for x in linked[:5])
+        names = name_list([f"#{x['id']}（{x['kind']}:{x['target']}）" for x in linked], 5, unit="条")
         raise RuntimeError(f"还有备份任务挂在这个目标上：{names}。先取消关联，再删目标")
     if not dbm.query_one("SELECT id FROM cloud_targets WHERE id=?", (int(tid),)):
         raise RuntimeError(f"异地目标 {tid} 不存在")

@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import config
-from ..util import run
+from ..util import name_list, run
 from .alerts_service import CERTBOT_TIMEOUT, parse_certbot, setting_int
 
 # 「还剩几天算快到期」这条线不在这里定义，见 status_of()：它读的是告警配置 alert_ssl_days。
@@ -318,8 +318,11 @@ def renewal_hint(timer: dict | None, certs: list[dict]) -> str:
     if st == "installed":
         return "系统已安装续期定时器，certbot 会自动尝试续期；面板的续期按钮用于立即验证一次。"
     if expiring:
-        names = ", ".join(c["name"] for c in expiring[:3])
-        return f"未检测到续期定时器，且 {names} 即将或已经到期：请尽快手动配置 systemd timer 或 cron。"
+        # 总数写在前面：这句是页面顶栏唯一会说"有几张要到期"的地方，
+        # 只点三个名字而不说一共几张，第四张到期的人看到的就是"三张"。
+        names = name_list([c["name"] for c in expiring], 3, sep=", ", unit="张")
+        return (f"未检测到续期定时器，且 {len(expiring)} 张证书即将或已经到期：{names}。"
+                "请尽快手动配置 systemd timer 或 cron。")
     if st == "missing":
         return "未检测到续期定时器：证书到期不会自动续，需要自己配置 systemd timer / cron，或到期前手动续期。"
     return "无法确认本机是否安装了续期定时器（systemd 与 cron 都查不到），请自行核实后再依赖自动续期。"

@@ -37,7 +37,16 @@ from email.message import EmailMessage
 from .. import aio_db, config
 from .. import database as dbm
 from ..log import warn
-from ..util import PROBE_TIMEOUT, disk_usage_pct, is_http_url, is_unit, redact_creds, run
+from ..util import (
+    PROBE_TIMEOUT,
+    clip_text,
+    disk_usage_pct,
+    is_http_url,
+    is_unit,
+    name_list,
+    redact_creds,
+    run,
+)
 from . import system_metrics
 from .backup_service import is_failed_run, scheduled_runs
 from .load_service import LOAD_RISK_PER_CORE
@@ -143,17 +152,53 @@ def _today() -> str:
     return datetime.date.today().isoformat()
 
 
+# meta 那一列的预算。SQLite 的 TEXT 没有上限，这个数是这一列自己定的（一条告警展开后
+# 给人看的取值不该是一整屏 JSON）；收窄规则集中在 `_meta` 里，别在调用点各抄一份 [:20]。
+META_LIMIT = 400
+META_LIST_KEEP = 3
+META_STR_CHARS = 120
+META_KEYS_CHARS = 240
+# 历史里那一行文字的预算，`record` 裁剪与去重比对用的是同一个数（见其文档）。
+MESSAGE_LIMIT = 500
+
+
 def _meta(**kv) -> str:
     """把取值压成一行 JSON 存进 meta。
 
     巡检每 30 分钟一轮，实时数值（CPU%、状态码）几乎每轮都在变；
     把它们写进 message 会让"同 code+level 且 message 未变则跳过"的去重失效，
     历史表于是每轮都长一行。数值放 meta，message 只写结论 + 阈值。
+
+    压不进 META_LIMIT 时按字段收窄，不从中间剪断：半截 JSON 到了历史页 parse 失败，
+    那一格退化成原样糊出来的一串引号，这条告警的取值等于全丢，而且没人看得出它丢了。
+    收窄会把清单长度与原始字节数留在里面，"这里不是全部"始终看得见。
     """
     try:
-        return json.dumps(kv, ensure_ascii=False)[:400]
+        full = json.dumps(kv, ensure_ascii=False)
     except (TypeError, ValueError):
         return ""
+    if len(full) <= META_LIMIT:
+        return full
+    narrowed: dict = {}
+    for key, val in kv.items():
+        if isinstance(val, (list, tuple)):
+            if len(val) > META_LIST_KEEP:
+                narrowed[f"{key}_total"] = len(val)
+            narrowed[key] = [str(x) for x in val[:META_LIST_KEEP]]
+        elif isinstance(val, str) and len(val) > META_STR_CHARS:
+            narrowed[key] = val[:META_STR_CHARS]
+        else:
+            narrowed[key] = val
+    narrowed["meta_full_chars"] = len(full)
+    try:
+        raw = json.dumps(narrowed, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return ""
+    if len(raw) <= META_LIMIT:
+        return raw
+    # 字段本身多到收窄一轮还不够（例如一次几十个键）：只留"有哪些键、原样多大"。
+    return json.dumps({"meta_full_chars": len(full), "meta_keys": ",".join(kv)[:META_KEYS_CHARS],
+                       "meta_narrowed": "键太多，取值已省略"}, ensure_ascii=False)
 
 
 def _int_setting(key: str, default: int, lo: int, hi: int) -> int:
@@ -388,16 +433,20 @@ async def record(level: str, code: str, message: str, meta: str = "") -> int | N
     code = str(code or "")[:64]
     if level not in LEVELS or not code:
         return None
+    # 去重比的是**真正落库那一份**文字。用未裁剪的 message 去比裁剪后的 last["message"]，
+    # 超过 MESSAGE_LIMIT 的告警每轮都"看起来变了"：历史表 30 分钟长一行，
+    # 列表被同一条故障刷满，而真正的新一行再也挤不进去。
+    stored = clip_text(str(message or ""), MESSAGE_LIMIT, what="告警文字")
     try:
         last = await aio_db.query_one(
             "SELECT level, message FROM alerts_log WHERE code=? ORDER BY id DESC LIMIT 1",
             (code,),
         )
-        if last is not None and last["level"] == level and last["message"] == message:
+        if last is not None and last["level"] == level and last["message"] == stored:
             return None
         return await aio_db.execute(
             "INSERT INTO alerts_log(ts,level,code,message,meta) VALUES(datetime('now'),?,?,?,?)",
-            (level, code, str(message)[:500], str(meta)[:500]),
+            (level, code, stored, str(meta)[:META_LIMIT]),
         )
     except Exception as e:  # noqa: BLE001
         # 历史写不进去不能连通知一起吞掉；报错只进面板日志，不外抛给巡检循环
@@ -583,9 +632,13 @@ async def _run_checks():
                        timeout=PROBE_TIMEOUT)
     if failed["code"] == 0:
         units = _failed_units(failed["out"])
-        await _check("failed-units", bool(units), f"存在 failed 状态服务: {', '.join(units)}",
+        # 名字进 message 是逐条点名（去重键跟着集合走），清单预算由 name_list 说出来；
+        # 取值进 meta，由 _meta 收窄。调用点不再各抄一份 [:20]——那 20 之外的单元
+        # 既看不到也没人说过"还有几个"。
+        await _check("failed-units", bool(units),
+                     f"存在 failed 状态服务: {name_list(units, 10, sep=', ')}",
                      code="failed-units", level="crit", ok_message="无 failed 状态服务",
-                     meta=_meta(units=units[:20]))
+                     meta=_meta(units=units))
     else:
         warn("systemctl 不可用，跳过 failed 单元巡检:", failed["out"][:120])
 
@@ -853,12 +906,12 @@ async def run_backup_checks() -> list[dict]:
         await _check(
             key, True,
             f"备份任务 {label} 最近一次执行失败（{b['last_run'] or '时间未知'}，状态 {status}）："
-            f"{(b['last_note'] or '原因见 journalctl -u choyeon-panel')[:120]}",
+            f"{clip_text(b['last_note'] or '原因见 journalctl -u choyeon-panel', 120, what='原因')}",
             code=code, level="crit",
             log_message=f"备份任务 {label} 执行失败（状态 {status}）",
             ok_message=ok_message,
             meta=_meta(backup=bid, kind=b["kind"], at=b["last_run"] or "", status=status,
-                       note=str(b["last_note"] or "")[:200]),
+                       note=str(b["last_note"] or "")),
         )
         results.append({"id": bid, "label": label, "status": status})
     return results
@@ -893,7 +946,7 @@ async def run_probes() -> list[dict]:
         expect, expect_text = _app_expectation(name)
         if status is None:
             await record("warn", code, f"应用 {name} 端口 {port} 有响应，但不是 HTTP",
-                         meta=_meta(app=a["id"], port=port, detail=detail[:120]))
+                         meta=_meta(app=a["id"], port=port, detail=detail))
             results.append({"name": name, "port": port, "alive": True, "status": None, "level": "warn"})
         elif status in expect:
             # 恢复走 _recover 而不是裸 record：上一轮"无响应"发过通知就得补一条「已恢复」，
