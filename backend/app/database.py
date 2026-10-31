@@ -270,7 +270,7 @@ def execute(sql: str, params=()):
         return cur.lastrowid
 
 
-def execute_many(stmts: list[tuple[str, tuple]], invalidate: tuple[str, ...] = ()) -> None:
+def execute_many(stmts: list[tuple[str, tuple]], invalidate: tuple[str, ...] = ()) -> list[int]:
     """多条写语句走同一事务：要么全部生效，要么一条都没写进去。
 
     `execute()` 每条都自己 commit，端点里连写两三列就会在中间失败（口令哈希那条撞了
@@ -281,19 +281,24 @@ def execute_many(stmts: list[tuple[str, tuple]], invalidate: tuple[str, ...] = (
     留给调用方自己去 pop 就会有两种坏结果——忘了 pop（刚吊销的 token 版本号还要在缓存里
     活满 TTL，那几秒旧票照过验签），或者 pop 在失败回滚之后（库里没变、缓存却空了，
     下一次读又回填旧值，等于什么都没发生）。
+
+    返回值是每条语句真正改动的行数（与 `stmts` 同序）：批里带 UPDATE 的调用方要拿它判
+    「那一行还在不在」——`execute_many` 把 commit 收到一次，rowcount 也就只能由它一起交出来。
     """
     if not stmts:
-        return
+        return []
+    counts: list[int] = []
     with _lock:
         try:
             for sql, params in stmts:
-                conn.execute(sql, params)
+                counts.append(int(conn.execute(sql, params).rowcount or 0))
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         for key in invalidate:
             _auth_cache.pop(key, None)
+    return counts
 
 
 # settings 的 upsert 只写这一处：单条、批量、以及并进别的事务的那条共用同一份冲突语义。
@@ -362,25 +367,17 @@ def totp_state(username: str) -> str:
 
 
 def set_totp_stmt(username: str, secret: str) -> tuple[str, tuple]:
-    """给「关掉第二因子要和吊销会话挤进同一个事务」的调用方（CLI 逃生口），返回 (SQL, 参数)。
+    """写（或清空）第二因子的唯一一条 SQL，交给调用方并进那个事务。
 
-    列名仍然只出现在这一处：`set_totp` 用的就是它，不是在别处又抄了一遍 SQL。
+    这里不给「直接写一列」的独立入口：第二因子一换就必须同时吊销该账号已签发的会话
+    （网页开/关与 CLI 逃生口都这么办），留一个 `set_totp()` 在旁边，就会有第四处调用
+    只写密钥、忘了吊销，等于把加固做成半套。传空串表示关闭——`totp_secret=''` 就是
+    "没开"的唯一判据，没有第二个 enabled 位可写。
+
+    单独写它请用 `execute_many([set_totp_stmt(...)])`：返回值就是这条 UPDATE 真正改动的
+    行数（`execute()` 返回的是 `lastrowid`，UPDATE 之后那个数与"改了几行"无关）。
     """
     return ("UPDATE users SET totp_secret=? WHERE username=?", (str(secret or ""), str(username or "")))
-
-
-def set_totp(username: str, secret: str) -> int:
-    """写入（或清空）两步验证密钥的单条入口，返回真正被改动的行数。
-
-    传空串表示关闭——`totp_secret=''` 就是"没开"的唯一判据，没有第二个 enabled 位可写。
-
-    不走 `execute()`：它返回的是 `lastrowid`，UPDATE 之后那个数与"改了几行"无关，
-    而这里要拿 rowcount 判"账号还在不在"。
-    """
-    with _lock:
-        cur = conn.execute(*set_totp_stmt(username, secret))
-        conn.commit()
-        return int(cur.rowcount or 0)
 
 
 def _read_setting(key: str) -> str | None:

@@ -235,7 +235,7 @@ class TestLoginGateway(unittest.TestCase):
     def _two_factor_user(self) -> tuple[str, str]:
         u = _mkuser("admin")
         s = totp.new_secret()
-        dbm.set_totp(u, s)
+        dbm.execute_many([dbm.set_totp_stmt(u, s)])
         self.addCleanup(_deluser, u)
         return u, s
 
@@ -312,12 +312,17 @@ class TestSelfServiceEndpoints(unittest.TestCase):
         self.h = _auth(self.user, "viewer")
         self.admin = _mkuser("admin")
         self.addCleanup(_deluser, self.user, self.admin)
-        dbm.set_totp(self.user, "")
+        dbm.execute_many([dbm.set_totp_stmt(self.user, "")])
         totp.reset_used()
         self.addCleanup(totp.reset_used)
 
     def _post(self, path, **body):
-        return self.client.post(path, headers=self.h, json=body)
+        r = self.client.post(path, headers=self.h, json=body)
+        # 开与关第二因子都会吊销本账号已签发的会话并给这一路换发新 token。测试就是那台浏览器：
+        # 不接住新票，之后每一句都打在已经作废的旧票上（401），断言看到的就不是被测分支了。
+        if r.status_code == 200 and (tok := (r.json() or {}).get("token")):
+            self.h = {"Authorization": f"Bearer {tok}"}
+        return r
 
     def _enable(self) -> str:
         secret = self._post("/api/auth/2fa/setup", password=PW).json()["secret"]
@@ -476,7 +481,8 @@ class TestMigration(unittest.TestCase):
 
     def test_totp_helpers_tolerate_a_missing_account(self):
         self.assertEqual(dbm.totp_state(_uid("ghost")), "")
-        self.assertEqual(dbm.set_totp(_uid("ghost"), "ABCDEFGHJKLM"), 0, "rowcount 不是 lastrowid")
+        self.assertEqual(dbm.execute_many([dbm.set_totp_stmt(_uid("ghost"), "ABCDEFGHJKLM")]), [0],
+                         "execute_many 交出的是 rowcount，不是 lastrowid")
 
 
 class TestDeleteResidue(unittest.TestCase):
@@ -548,7 +554,7 @@ class TestLoginAuditFinding(unittest.TestCase):
         u = _mkuser("admin")
         self.addCleanup(_deluser, u)
         secret = totp.new_secret()
-        dbm.set_totp(u, secret)
+        dbm.execute_many([dbm.set_totp_stmt(u, secret)])
         d = la._panel_2fa()
         self.assertTrue(d["ok"], d)
         self.assertGreaterEqual(d["accounts"], 1)
@@ -621,7 +627,7 @@ class TestCliEscapeHatch(unittest.TestCase):
     def test_yes_is_required(self):
         u = _mkuser("admin")
         self.addCleanup(_deluser, u)
-        dbm.set_totp(u, totp.new_secret())
+        dbm.execute_many([dbm.set_totp_stmt(u, totp.new_secret())])
         res, _, _ = self._run(["user", "2fa-disable", u])
         self.assertEqual(res.get("exit"), self.cli.EXIT_USAGE, res)
         self.assertNotEqual(dbm.totp_state(u), "", "没确认就不许动")
@@ -633,7 +639,7 @@ class TestCliEscapeHatch(unittest.TestCase):
         """跑这条命令的原因是"手机不在手边"，而这种时候并不确定手里有票的是不是本人。"""
         u = _mkuser("admin")
         self.addCleanup(_deluser, u)
-        dbm.set_totp(u, totp.new_secret())
+        dbm.execute_many([dbm.set_totp_stmt(u, totp.new_secret())])
         token = security.sign_token(u, "admin")
         res, _, _ = self._run(["user", "2fa-disable", u, "--yes"])
         self.assertTrue(res["data"]["revokedSessions"], res)
@@ -659,7 +665,7 @@ class TestCliEscapeHatch(unittest.TestCase):
     def test_it_leaves_an_audit_trail(self):
         u = _mkuser("admin")
         self.addCleanup(_deluser, u)
-        dbm.set_totp(u, totp.new_secret())
+        dbm.execute_many([dbm.set_totp_stmt(u, totp.new_secret())])
         self._run(["user", "2fa-disable", u, "--yes"])
         rows = dbm.query("SELECT action FROM audit WHERE username=? AND action LIKE 'cli:%'", (u,))
         self.assertIn("cli:user:2fa-disable", [r["action"] for r in rows])
@@ -668,7 +674,7 @@ class TestCliEscapeHatch(unittest.TestCase):
         u = _mkuser("admin")
         self.addCleanup(_deluser, u)
         secret = totp.new_secret()
-        dbm.set_totp(u, secret)
+        dbm.execute_many([dbm.set_totp_stmt(u, secret)])
         res, _, _ = self._run(["user", "list"])
         # text 取捕获的第二个参数：Out.result 被替换掉了，stdout 是空的，而这段文本正是
         # "贴进工单、被拍照"的那一份——密钥泄露就发生在这里，不是发生在 JSON 结构里。

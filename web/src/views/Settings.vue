@@ -6,7 +6,7 @@ import {
 } from 'naive-ui';
 import { useRoute, useRouter } from 'vue-router';
 import { NButton, useDrawerWidth } from '../ui';
-import { api, getRole, getUsername } from '../api';
+import { api, getRole, getUsername, saveLoginData } from '../api';
 import { icon } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import PageTabBar from '../components/PageTabBar.vue';
@@ -450,13 +450,18 @@ async function commitTwofa() {
   if (!twDraft.value.code) return msg.warning('先填验证器里的动态口令');
   twBusy.value = true;
   try {
+    // 开与关都会吊销这个账号其它已签发的会话，并给本浏览器换发一枚新 token（服务端与写库
+    // 同一次事务）。新 token 必须落地——旧票已经随那次事务失效，不存就是下一个请求 401、
+    // 网页终端被 4401 关掉，而这句话刚说过「已开启」。
+    let r: any = null;
     if (twMode.value === 'enable') {
-      await api.twofaEnable(twDraft.value.password, twSecret.value.secret, twDraft.value.code);
-      msg.success('两步验证已开启，下次登录起需要动态口令');
+      r = await api.twofaEnable(twDraft.value.password, twSecret.value.secret, twDraft.value.code);
+      msg.success('两步验证已开启，下次登录起需要动态口令；这个账号其它地方的登录态已作废');
     } else {
-      await api.twofaDisable(twDraft.value.password, twDraft.value.code);
-      msg.success('两步验证已关闭');
+      r = await api.twofaDisable(twDraft.value.password, twDraft.value.code);
+      msg.success('两步验证已关闭；这个账号其它地方的登录态已作废，请用口令重新登录');
     }
+    if (r?.token) saveLoginData(r);
     twOpen.value = false;
     twofa.value = await api.twofa();
   } catch (e: any) {
@@ -513,9 +518,11 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         <span class="cp-help">
           给这个账号加一枚登录动态口令：口令正确之后，还要验证器 App（Google Authenticator、Microsoft Authenticator、FreeOTP 都能扫）里当时那一串。
           开启与关闭都要再输一次本账号口令，关闭还要一枚当前有效的动态口令——只攥着一枚偷来的令牌的人不该能顺手把主人的第二因子关掉。
+          第二因子一换（不论方向），这个账号已经签发的会话全部作废：本浏览器由服务端换发新令牌继续用，其它设备要重新登录一次——
+          在别的机器上偷到的那一张旧票不能因为「登录规则变了」还照着旧规则用。
           密钥在服务端只有 totp_secret 这一列，任何页面与审计都不会再回显它；生成一次就要当场扫完，关掉这个抽屉密钥即失效。
           管理员在「用户管理」页只看得到有没有开、不能替别人关：验证器丢了，请由 root 在服务器上执行
-          <span class="mono-dim cp-break">choyeonctl user 2fa-disable &lt;用户名&gt; --yes</span>，它会同时吊销该账号的全部会话。
+          <span class="mono-dim cp-break">choyeonctl user 2fa-disable &lt;用户名&gt; --yes</span>，它同样会吊销该账号的全部会话。
         </span>
         <NSpace vertical :size="8" style="margin-top: var(--space-3)">
           <NText v-if="twofa?.enabled" depth="3" style="font-size: var(--fs-xs)">
@@ -718,8 +725,8 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       <NDrawerContent :title="twMode === 'enable' ? '开启两步验证' : '关闭两步验证'" closable>
         <NForm label-placement="top" size="small">
           <NAlert v-if="twMode === 'disable'" type="warning" :bordered="false" size="small" class="tw-alert">
-            关闭之后这个账号只用口令就能登录。验证器不在手边就别在这里绕：让 root 在服务器上执行
-            choyeonctl user 2fa-disable {{ getUsername() }} --yes，它会同时吊销该账号的全部会话。
+            关闭之后这个账号只用口令就能登录，其它设备上的登录态会一起作废（本浏览器不用重登）。验证器不在手边就别在这里绕：
+            让 root 在服务器上执行 choyeonctl user 2fa-disable {{ getUsername() }} --yes，它同样会吊销该账号的全部会话。
           </NAlert>
           <NFormItem label="本账号口令">
             <NInput

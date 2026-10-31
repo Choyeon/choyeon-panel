@@ -280,6 +280,9 @@ async def logout(req: Request):
 # 第二因子关掉（那会让他下次只需口令就能进）；同理开启也要口令，避免"会话被劫持后
 # 攻击者绑上自己的验证器，反过来把真主人锁在门外"。
 # 关闭还要一枚当前有效的动态口令：手机丢了走 `choyeonctl user 2fa-disable`（root 才能跑）。
+# 开与关都会吊销该账号已签发的全部 token，并与写 totp_secret 同一事务（批次103）——这条规则
+# 只有一个判据「第二因子换了」，网页自助、CLI 逃生口、未来任何新入口都得走同一把尺子；
+# 当前浏览器由响应里换发的新 token 继续，其它设备重新登录。
 
 @app.get("/api/auth/2fa")
 async def twofa_status(req: Request):
@@ -334,10 +337,23 @@ async def twofa_enable(req: Request):
         # 没验中就不记步数（verify 只在成功时记），也不写库：一枚猜中的口令才能绑定。
         await aio_db.audit(me["username"], "twofa_enable_failed", ip)
         return JSONResponse(status_code=400, content={"error": "动态口令不正确或已过期，请重试"})
-    if not dbm.set_totp(me["username"], secret):
+    # 写密钥与吊销旧 token 同一事务，且吊销是这条规则的一半，不是附加动作：第二因子变了，
+    # 之前在**另一种**登录强度下签发的会话就该重签。漏掉它，「因为怀疑口令泄露才来开 2FA」
+    # 的人会得到最没用的加固——库里从此要动态口令，而偷到手那张票还剩满 TTL 只用口令就能进。
+    # （CLI 的 user 2fa-disable 早就连会话一起吊销；同一件事两条路两个判据也是这次一起收的。）
+    epoch_key = security.user_epoch_key(me["username"])
+    rows = await aio_db.execute_many([
+        dbm.set_totp_stmt(me["username"], secret),
+        security.user_epoch_stmt(me["username"]),
+    ], (epoch_key,))
+    if not rows[0]:
         return JSONResponse(status_code=404, content={"error": "用户不存在"})
-    await aio_db.audit(me["username"], "twofa_enable", "两步验证已开启")
-    return {"ok": True, "enabled": True, **totp.totp_params()}
+    await aio_db.audit(me["username"], "twofa_enable", "两步验证已开启，会话全部吊销")
+    # 本人这一路刚验过口令＋动态口令，换发一枚新 token 让他继续用；其余设备全部作废。
+    return {"ok": True, "enabled": True,
+            **_user_token(me["username"], me["role"] or "admin",
+                          me.get("nickname", ""), me.get("avatar", "")),
+            **totp.totp_params()}
 
 
 @app.post("/api/auth/2fa/disable")
@@ -361,10 +377,22 @@ async def twofa_disable(req: Request):
             content={"error": "动态口令不正确或已过期。手机不在手边请由 root 在服务器上执行 "
                               "choyeonctl user 2fa-disable 关闭"},
         )
-    dbm.set_totp(me["username"], "")
+    # 关闭同样吊销：这条规则不看方向，只看"第二因子换了"。摘掉验证器往往正因为手机丢了，
+    # 而丢的那台手机上可能正好存着一枚还能用的 token；吊销之后库里只用口令，但每个会话都得
+    # 重新登录一次才能继续。
+    epoch_key = security.user_epoch_key(me["username"])
+    rows = await aio_db.execute_many([
+        dbm.set_totp_stmt(me["username"], ""),
+        security.user_epoch_stmt(me["username"]),
+    ], (epoch_key,))
+    if not rows[0]:
+        return JSONResponse(status_code=404, content={"error": "用户不存在"})
     totp.forget_used(me["username"])
-    await aio_db.audit(me["username"], "twofa_disable", "两步验证已关闭")
-    return {"ok": True, "enabled": False, **totp.totp_params()}
+    await aio_db.audit(me["username"], "twofa_disable", "两步验证已关闭，会话全部吊销")
+    return {"ok": True, "enabled": False,
+            **_user_token(me["username"], me["role"] or "admin",
+                          me.get("nickname", ""), me.get("avatar", "")),
+            **totp.totp_params()}
 
 
 async def _password_ok(me: dict, raw: object) -> bool:

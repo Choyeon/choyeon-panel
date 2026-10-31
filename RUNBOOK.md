@@ -70,6 +70,12 @@ choyeonctl start|stop|restart|logs|upgrade
 - 破坏性操作需显式 `--yes`（如 `user delete`）；
 - 改密、降权、删号都会吊销该用户旧 token（`security.user_epoch_stmt` / `bump_user_epoch`），
   且吊销与那次改动写在同一个事务里——失败就一起回滚，不会留下"权限改了而旧票照用"，这是预期行为。
+- **第二因子状态一变（不论方向）同样吊销该账号全部会话**：网页开启/关闭两步验证、
+  `choyeonctl user 2fa-disable` 走的是同一条规则。写 `totp_secret` 与轮换 `token_epoch`
+  在同一次 `dbm.execute_many(...)` 里提交（认证缓存在同一次持锁内失效），所以不会出现
+  "库里要动态口令了、偷来的旧票还能只用口令进"这种半套加固；操作者本人这一路由响应里
+  换发的新 token 继续用，其它设备重新登录一次。数据库层刻意不提供单条写密钥的入口
+  （只有 `set_totp_stmt` + `execute_many`），就是为了挡住"只写密钥、忘了吊销"的第四处调用。
 
 **就绪探针**（反代/容器用）：`/api/health` 是存活探针，`/api/ready` 是就绪探针（会查库，库不可用时返回 503）。两者都在认证白名单里，不要给它们加鉴权。
 
@@ -152,6 +158,7 @@ CP_LOG=1 journalctl -u choyeon-panel -n 200 --no-pager | grep -iE 'unhandled|err
 | 部署日志刷不出 | nginx 反代缓冲未关 | 确认 `proxy_buffering off;`（见 `deploy/nginx-panel.conf.example`） |
 | 上传大文件 413 | nginx `client_max_body_size` 小于后端 `CP_MAX_UPLOAD_MB` | 两边对齐（默认后端 8MB，示例 nginx 20MB） |
 | 改密后被踢下线 | 正常行为：改密会吊销旧 token | 重新登录；前端已对接新 token 自动续签 |
+| 开了/关了两步验证，别的设备全掉线 | 正常行为：第二因子换了状态，该账号已签发的会话一起作废（本浏览器由响应换发新 token，不用重登） | 其它设备重新登录一次；要吊销而不改第二因子用 `choyeonctl user revoke <name>` |
 | 部署卡在 running | 上次进程被杀遗留的状态 | 重启服务即会自动标记为 failed（lifespan 里已处理） |
 
 ### 3.4 nginx 配置错误

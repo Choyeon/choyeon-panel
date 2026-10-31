@@ -272,7 +272,7 @@ class CliAtomicTests(unittest.TestCase):
         name = "cp102_cli_2fa"
         _mk_user(name, role="admin")
         secret = totp.new_secret()
-        dbm.set_totp(name, secret)
+        dbm.execute_many([dbm.set_totp_stmt(name, secret)])
         with _flaky("token_epoch"):
             res, _, _ = self._run(["user", "2fa-disable", name, "--yes"])
         self.assertIn("raise", res)
@@ -284,7 +284,7 @@ class CliAtomicTests(unittest.TestCase):
 
         name = "cp102_cli_2fa_ok"
         _mk_user(name, role="admin")
-        dbm.set_totp(name, totp.new_secret())
+        dbm.execute_many([dbm.set_totp_stmt(name, totp.new_secret())])
         token = security.sign_token(name, "admin")
         res, _, _ = self._run(["user", "2fa-disable", name, "--yes"])
         self.assertTrue(res["data"]["revokedSessions"], res)
