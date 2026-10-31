@@ -547,6 +547,10 @@ async function pushNow(r: any) {
   try {
     const res = await api.pushBackup(r.id);
     if (res.skipped) msg.info(`这次没有要推的产物：${res.skipped}`);
+    // prune_skipped 是"副本一份都没少删、远端还在长"，runner、审计和 CLI 都读了它，
+    // 界面不能只说「已推送 N 份」——同一事实四处有话说、唯独当面的这句没有。
+    else if (res.prune_skipped)
+      msg.warning(`已推送 ${res.pushed.length} 份，但远端没有按保留份数剪枝：${res.prune_skipped}`, { duration: 8000 });
     else msg.success(`已推送 ${res.pushed.length} 份${res.pruned && res.pruned.length ? `，并按保留份数删掉远端最旧的 ${res.pruned.length} 份` : ''}`);
     await reload();
   } catch (e: any) {

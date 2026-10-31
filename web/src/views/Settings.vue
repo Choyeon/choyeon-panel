@@ -352,8 +352,11 @@ async function runChecks() {
   if (checking.value) return;
   checking.value = true;
   try {
-    await api.alertRunChecks();
-    msg.success('巡检已执行，若触发阈值会立即推送');
+    const r = await api.alertRunChecks();
+    // 上一轮还在跑时后端直接跳过本轮、一份历史都不写，只回一句 skipped。这里不转述，
+    // 按钮就会报「巡检已执行」：管理员以为阈值刚核对过，实际这一轮什么都没读。
+    if (r?.skipped) msg.warning(`这次没有执行巡检：${r.skipped}`, { duration: 8000 });
+    else msg.success('巡检已执行，若触发阈值会立即推送');
   } catch (e: any) {
     msg.error(e.message);
   } finally {

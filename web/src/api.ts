@@ -246,7 +246,10 @@ export const api = {
   alertSettings: () => req('/settings/alerts'),
   saveAlerts: (body: any) => req('/settings/alerts', { body }),
   alertTest: () => req('/settings/alerts/test', { body: {}, timeout: 25000 }),
-  alertRunChecks: () => req('/settings/alerts/run-checks', { body: {}, timeout: 60000 }),
+  // 巡检一轮要跑 systemctl / certbot 子进程和逐应用探活，服务端没有硬上限：最坏约等于
+  // 「应用数 × 探测超时」。这个等待数只在这一处写：告警页与设置页点的是同一个接口，
+  // 两处各写各的数，等得短的那一处会在这一轮真的跑完之前先报「请求超时」。
+  alertRunChecks: () => req('/settings/alerts/run-checks', { body: {}, timeout: 330000 }),
   firewall: () => req('/firewall'),
   // 封禁 sshd 爆破来源。后端写的是防火墙那一张表：ufw 要 insert 再把规则表整份列回来才算数
   // （服务端子进程超时 60 秒）。前端必须比它慢一点，否则真实结果已经落地，画面只剩"请求超时"。

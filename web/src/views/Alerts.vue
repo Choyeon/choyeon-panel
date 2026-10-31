@@ -4,7 +4,7 @@ import {
   NAlert, NCard, NDataTable, NIcon, NInput, NSelect, NSpace, NTag, NText, useMessage,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { getRole, req } from '../api';
+import { api, getRole, req } from '../api';
 import { icon, icons } from '../icons';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
 import EmptyBox from '../components/EmptyBox.vue';
@@ -251,15 +251,19 @@ async function ackAll() {
 // 巡检内含 systemctl / certbot 子进程与逐应用探测，服务端没有硬上限：
 // 最坏情况约等于「应用数 × 探测超时」。前端超时必须明显大于它，
 // 否则本地先 abort 而远端还在跑，用户再点一次就会并发两轮巡检。
+// run 那一档的等待数只在 api.ts 记一份——设置页点的是同一个接口，各写各的数时
+// 等得短的那一处必然先报一个假的「超时」。
 async function runRound(kind: 'run' | 'probe') {
   if (running.value) return;
   running.value = kind;
   try {
-    const r = await req(kind === 'run' ? '/alerts/run' : '/alerts/probe', {
-      body: {},
-      timeout: kind === 'run' ? 330000 : 300000,
-    });
-    if (kind === 'run') msg.success(`巡检完成，新增 ${r?.count ?? 0} 条历史`);
+    const r = kind === 'run'
+      ? await api.alertRunChecks()
+      : await req('/alerts/probe', { body: {}, timeout: 300000 });
+    // 上一轮还在跑时后端一份历史都不新增，只回一句 skipped。不转述就成了「巡检完成」：
+    // 管理员以为阈值刚核对过一遍，实际这一轮什么都没读。
+    if (r?.skipped) msg.warning(`这次没有执行巡检：${r.skipped}`, { duration: 8000 });
+    else if (kind === 'run') msg.success(`巡检完成，新增 ${r?.count ?? 0} 条历史`);
     else msg.success(`探测完成，${r?.results?.length ?? 0} 个应用，新增 ${r?.count ?? 0} 条历史`);
     reload();
   } catch (e: any) {
