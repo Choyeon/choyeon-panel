@@ -117,6 +117,17 @@ class WindowPhraseTests(unittest.TestCase):
         self.assertIn("下限", note)
         self.assertIn("journalctl --since", note, "截断必须给出读到全量的办法")
 
+    def test_label_and_note_follow_the_payload_cap(self):
+        """说法跟着那次读取走：载荷自己的 line_limit 才是真读了多少行。
+
+        doctor / CLI / 封禁提醒都在读取结束之后才拼这句话，那时模块常量可能已经变了
+        （测试会调、以后调参也会调）——拿常量会有一次说 50000、一次说 10 的情形。
+        """
+        att = _att(truncated=True, covered_from="2026-10-30 07:57", line_limit=10)
+        self.assertIn("最后 10 行", att["window_label"])
+        self.assertIn("（10 行）", att["window_note"])
+        self.assertNotIn("50000", att["window_label"] + att["window_note"])
+
     def test_unread_never_claims_a_window(self):
         """读不到时连「过去 24 小时」都不是一次测量：说法保持原样，由调用方说读不到。"""
         att = LA._no_attempts("journalctl 退出码 1，这段窗口没读到")

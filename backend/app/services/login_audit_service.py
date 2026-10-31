@@ -491,22 +491,35 @@ def _first_seen(lines: list[str]) -> str:
     return ""
 
 
+def _cap(attempts: dict) -> int:
+    """这一轮实际读到的行数上限，出自它自己的载荷。
+
+    `window_label` 会在别的时刻被调用（doctor、CLI、封禁提醒），那时模块常量可能
+    已经不是当初读日志用的那个数（测试、以后调参都算）——说法必须跟着那次读取走。
+    """
+    try:
+        return int(attempts.get("line_limit") or JOURNAL_LINES)
+    except (TypeError, ValueError):
+        return JOURNAL_LINES
+
+
 def window_label(attempts: dict) -> str:
     """「这些次数覆盖多久」的唯一说法。未截断时就是过去 24 小时。"""
     if not attempts.get("ok") or not attempts.get("truncated"):
         return WINDOW_FULL
     since = attempts.get("covered_from") or ""
-    return f"这一轮读到的最后 {JOURNAL_LINES} 行日志里" + (f"（自 {since} 起）" if since else "")
+    return f"这一轮读到的最后 {_cap(attempts)} 行日志里" + (f"（自 {since} 起）" if since else "")
 
 
 def window_note(attempts: dict) -> str:
     """截断时的一句完整说明；未截断时为空，读的人不必自己拼。"""
     if not attempts.get("ok") or not attempts.get("truncated"):
         return ""
+    cap = _cap(attempts)
     since = attempts.get("covered_from") or ""
     span = f"（从 {since} 起，覆盖不足 24 小时）" if since else ""
-    return (f"24 小时窗口的 sshd 日志超过这一轮读取上限（{JOURNAL_LINES} 行），"
-            f"只数到最后 {JOURNAL_LINES} 行{span}：失败次数、来源数与此处排行都是这一段的下限，"
+    return (f"24 小时窗口的 sshd 日志超过这一轮读取上限（{cap} 行），"
+            f"只数到最后 {cap} 行{span}：失败次数、来源数与此处排行都是这一段的下限，"
             "不是整窗口的数。全量请自己跑 journalctl --since '24 hours ago' 数一遍。")
 
 
