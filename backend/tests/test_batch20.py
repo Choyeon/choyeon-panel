@@ -319,7 +319,9 @@ class TestSourceContract(Case):
 
         src = Path(A.__file__).read_text(encoding="utf-8")
         body = src[src.index("async def _apply_external_unit"):src.index("async def apply_edited")]
-        for call in ("write_env_file(new_app)", "ensure_env_link(new_app)", "restart_and_verify("):
+        # 断言到左括号为止：批次104 之后写入器多了一个「记录外的手写键保不保留」的参数，
+        # 这一项要守的是"纳管分支真的调了写入器、写的就是这个应用"，不是它带几个参数。
+        for call in ("write_env_file(new_app", "ensure_env_link(new_app)", "restart_and_verify("):
             self.assertIn(call, body, f"纳管分支少了 {call}，环境变量就又只进记录了")
 
     def test_env_file_path_is_always_built_from_the_constant(self):

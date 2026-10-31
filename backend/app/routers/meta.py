@@ -610,18 +610,37 @@ async def _check_app_env() -> dict:
     界面上的口令去登后台，只会得到「密码错误」，而这台机器上没有任何地方说过这两份不是同一份。
     之前也没有任何代码比较过这两份（`write_env_file` 只在自己要写时顺手比一下内容，
     从不告诉调用方"原来不一致"），所以漂移只能靠人肉发现。
+
+    另一件事单独判 warn：盘上有记录外的手写键而面板那几行全对。它不是"两份不一致"——进程两个
+    都读得到——但运维必须知道有几个键是面板管不到的：写入器默认原样保留它们，而"保留"这个决定
+    一旦没人说过，下一次从别处恢复目录就会真的丢掉它们。
     """
     d = apps_service.env_drift()
     # 「没查出漂移」和「一个都没查成」不是一个事实：unit 目录 stat 不动时闸门给不出结论
     # （非 root 跑 CLI、或 UNIT_DIR 权限被改过），这些行既不在 drift 里也不该算绿灯。
     unknown = d.get("unknown", 0)
+    # 盘上有记录外的手写键、而面板那几行全对：进程两个都读得到，这不是漂移，判 fail
+    # 会把真漂移淹掉；但必须点名——写入器现在默认原样保留它们，不说明就等于埋着。
+    extras = d.get("extra") or []
     if not d["drift"]:
         if unknown:
             return {
                 "status": "warn",
                 "detail": f"{d['total']} 个纳管应用里有 {unknown} 个连 unit 文件都确认不了"
-                          f"（{apps_service.UNIT_DIR} 读不动），这一项对它们没查成",
+                          f"（{apps_service.UNIT_DIR} 读不动），这一项对它们没查成"
+                          + (f"；另有 {len(extras)} 个应用带着记录外的变量" if extras else ""),
                 "fix": "用 root 执行 choyeonctl doctor；确认该目录存在且可读之后再看这一项",
+            }
+        if extras:
+            who = "；".join(f"{x['name']}：{apps_service.extra_who(x)}" for x in extras[:5])
+            more = "" if len(extras) <= 5 else f"；另有 {len(extras) - 5} 个应用没在这里列出"
+            return {
+                "status": "warn",
+                "detail": f"{len(extras)} 个应用的 .panel.env 里有面板记录之外的变量——{who}{more}。"
+                          "它们由运维手写，进程照样读得到；面板保存时原样保留、不会删除它们",
+                "fix": "要让面板接管就在该应用「详情 → 环境变量」里按同样的键名补一项（值保持一致），"
+                       "之后这份文件就完全由面板管；不想保留就在同一页用「删除这些变量并写入」明确删，"
+                       "面板不会自己决定",
             }
         return {
             "status": "pass",
@@ -634,11 +653,19 @@ async def _check_app_env() -> dict:
         if x["disk"] == "missing":
             why = f"记录里有 {n} 个变量，安装目录下却没有 .panel.env，systemd 静默跳过这一行"
         elif x["disk"] == "differs":
-            why = f"磁盘上的 .panel.env 与记录里那 {n} 个变量不一致"
+            # 不说"这 N 个变量不一致"：差异也可能只是注释、空行或行尾换行——那样变量本身
+            # 是对的，硬说成不一致就是把假话写进判词。说的是"文件不是面板会写出的那份"。
+            why = f"磁盘上的 .panel.env 不是面板按这 {n} 个变量会写出的那份，进程读的是磁盘这一份"
         elif x["disk"] == "unreadable":
             why = "读不了安装目录下的 .panel.env，没法确认进程拿到的是哪份"
         elif x["disk"] == "no-dir":
             why = f"安装目录已经不存在，{n} 个变量无处落地"
+        elif x["disk"] == "foreign":
+            # 面板行全对、只有外来键，却被 unitReads 那条线判进漂移：说清是两件事，
+            # 而且外来键照样点名（批次24：数与点名同源，只报个数等于没点名）
+            why = (f"{n} 个变量写得对，另外还有 {x['extra']['total']} 个记录外的变量"
+                   f"（{apps_service.extra_who(x['extra'])}），"
+                   "但它的 unit 没有引用 .panel.env，进程一个都读不到")
         else:  # 磁盘那份是对的，没人读它
             why = f"{n} 个变量写得对，但它的 unit 没有引用 .panel.env，进程一个都读不到"
         parts.append(f"{x['name']}：{why}")
@@ -649,7 +676,8 @@ async def _check_app_env() -> dict:
     return {
         "status": "fail",
         "detail": "；".join(parts) + tail,
-        "fix": "进这些应用的「详情 → 环境变量」页点「重新写入并重启」（只重存现有配置，不改值）；"
+        "fix": "进这些应用的「详情 → 环境变量」页点「重新写入并重启」（只重存现有配置，不改值；"
+               "盘上记录外的手写变量会原样保留，要删它们要用同一页那颗「删除这些变量并写入」）；"
                "急着重录全量配置也可以在「应用」页重新部署一次",
     }
 

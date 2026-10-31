@@ -53,7 +53,9 @@ test('修复按钮复用 save()，只在管理员下出现，并按在跑改标�
   const tag = block[0];
   assert.match(tag, /role="alert"/, '读屏要立刻读到这条漂移');
   assert.match(tag, /v-if="isAdmin"/, 'viewer 写不动配置，不该看到修复按钮');
-  assert.match(tag, /@click="save"/, '修复必须复用 PATCH /api/apps/{id}：它才真的写 .panel.env 并重启');
+  // \b 而不是收尾的引号：批次104 起这颗按钮写成 save()（它多了一个「删不删记录外的键」的
+  // 参数，调用点要显式空参）。要守的是"复用的是那个 PATCH 流程"，不是它带不带括号。
+  assert.match(tag, /@click="save\b/, '修复必须复用 PATCH /api/apps/{id}：它才真的写 .panel.env 并重启');
   assert.match(tag, /:loading="saving"[^>]*:disabled="saving"/, '保存中要锁住，连点会并发写 unit');
   assert.match(tag, /app\.running \? '重新写入并重启' : '重新写入'/,
     '服务没在跑时不能说"并重启"，那等于承诺了一件不会做的事');

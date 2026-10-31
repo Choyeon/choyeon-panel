@@ -40,6 +40,10 @@ UNIT_DIR = config.UNIT_DIR
 # drop-in 名不能改：systemd 的 <unit>.d/ 里可能有别人的文件，面板只认自己这个名字。
 ENV_FILE_NAME = ".panel.env"
 ENV_DROP_IN_NAME = "panel-env.conf"
+# 点名「记录外的手工变量」时的上限。列不完也要说清还剩多少个——批次83 以来立的规矩：
+# 任何截断都必须自报真实总数，否则榜单本身就成了新的假话。
+ENV_EXTRA_PREVIEW = 8
+_NO_EXTRA = {"names": [], "total": 0, "readable": True}
 
 _DEPLOY_TASKS: set = set()
 # 后台任务对应的部署 id：只有进程内还在跑的部署才在这个集合里。
@@ -165,27 +169,121 @@ def env_file_path(app: dict) -> Path:
     return Path(app["path"]) / ENV_FILE_NAME
 
 
-def env_body(app: dict) -> str:
+def env_lines(app: dict) -> list[str]:
+    """面板记录渲染成 .panel.env 的那几行（唯一的渲染出口，写入器与对账读者共用它）。
+
+    fullmatch：$ 在 re.match 下允许末尾一个换行过关，键名 "A\\n" 会被写成
+    跨行的 `A\\n="v"`，systemd 读到的是两个畸形行。
+    """
     try:
         vars_ = json.loads(app.get("env") or "[]")
     except (ValueError, TypeError):
         vars_ = []
-    return "\n".join(
+    return [
         f'{x["k"]}="{_env_escape(x.get("v", ""))}"'
         for x in vars_
-        # fullmatch：$ 在 re.match 下允许末尾一个换行过关，键名 "A\n" 会被写成
-        # 跨行的 `A\n="v"`，systemd 读到的是两个畸形行。
         if isinstance(x, dict) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", x.get("k") or "")
-    )
+    ]
 
 
-def write_env_file(app: dict) -> str:
+def env_body(app: dict) -> str:
+    return "\n".join(env_lines(app))
+
+
+def _env_key_of(line: str) -> str | None:
+    """这一行声明的键名；注释、空行与畸形行返回 None（它们不是变量，只原样保留）。"""
+    if "=" not in line:
+        return None
+    k = line.split("=", 1)[0].strip()
+    return k if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) else None
+
+
+def _disk_env_text(app: dict) -> str:
+    """盘上 .panel.env 的原文；那个位置上真的什么都没有时返回空串。
+
+    读不动时**抛** OSError 而不是返回空串——空串的含义是"盘上没东西，可以随便写"，
+    把它当成权限异常的回退值，等于让写入器放心覆盖一个自己看不见的文件
+    （批次70/75 立的三态规矩：「确认不了」不等于「确认没有」）。
+    """
+    target = env_file_path(app)
+    if not target.is_file():
+        if target.exists() or target.is_symlink():
+            # 目录、悬空软链这类占位的东西：env_state 有 unreadable 一档，这里也必须拒绝写
+            raise OSError(f"{target} 存在但不是一份可读的普通文件")
+        return ""
+    return target.read_text(encoding="utf-8", errors="replace")
+
+
+def _env_diff(lines: list[str], disk_text: str) -> dict:
+    """逐行比对记录与盘上那份，只回键名，绝不回值（值是凭据）。
+
+    比的是整行原文，不解析值：面板写的是 `K="v"`，值里可以带引号、空格、反斜杠，
+    再写一个值解析器就等于给同一件事添第二个出处。
+    - missing：记录里的变量在盘上对不上——要么整行没了，要么同名行被手工改成别的值。
+    - foreign：盘上某行声明的键名压根不在记录里。那是运维绕过面板手写的
+      （生产机实测到 ADMIN_PASSWORD / ADMIN_SESSION_SECRET / QQ_COOKIE 这一类），
+      而过去的写入器按记录整份覆盖，下一次保存就把它们静默删了——
+      进程当天读不到这些值，界面上一个字的痕迹都没有。
+    注释与畸形行不进任何一档：它们不是变量，谈不上漂移，但会原样保留。
+    """
+    want = lines
+    keys = {(_env_key_of(x) or "") for x in lines}
+    disk = [x for x in disk_text.splitlines() if x.strip()]
+    have = set(disk)
+    return {
+        "missing": [x.split("=", 1)[0] for x in want if x not in have],
+        "foreign": list(dict.fromkeys(k for k in map(_env_key_of, disk) if k and k not in keys)),
+    }
+
+
+def env_extra(app: dict) -> dict:
+    """只读：盘上那份里有哪些「记录外的键」，返回 {"names": [...], "total": n, "readable": bool}。
+
+    names 是点名上限（ENV_EXTRA_PREVIEW 个），total 是真实个数——列到上限也要说清还有多少个没列出来。
+    值一概不回。读不动时 readable=False，由调用方按「确认不了」处理，不许当成"盘上没有"。
+    """
+    try:
+        disk = _disk_env_text(app)
+    except OSError:
+        return {**_NO_EXTRA, "readable": False}
+    return _extra_brief(_env_diff(env_lines(app), disk)["foreign"])
+
+
+def _extra_brief(foreign: list[str]) -> dict:
+    return {"names": list(foreign[:ENV_EXTRA_PREVIEW]), "total": len(foreign), "readable": True}
+
+
+def extra_who(extra: dict) -> str:
+    """「ADMIN_PASSWORD、QQ_COOKIE 等 12 个」——数字与点名的出处只有这一处。
+
+    截断到点名上限时照样要把真实总数带上（批次24/83 立的规矩：列到一半却说不出还剩多少，
+    榜单自己就成了新的假话）。只给键名，值一概不回：这些键往往是口令。
+    """
+    names = extra["names"]
+    return "、".join(names) + ("" if extra["total"] <= len(names) else f" 等 {extra['total']} 个")
+
+
+def _kept_env_lines(app: dict, disk_text: str) -> list[str]:
+    """覆盖写入时要原样保留的盘上行：记录里没有的键、注释与畸形行，按原顺序、原文。
+
+    同名行不保留——那一份由记录重新渲染，保留它等于写两遍同一个键。
+    """
+    keys = {(_env_key_of(x) or "") for x in env_lines(app)}
+    return [x for x in disk_text.splitlines() if x.strip() and (_env_key_of(x) or "") not in keys]
+
+
+def write_env_file(app: dict, keep_extra: bool = True) -> str:
     """写安装目录下的 .panel.env，返回 written / unchanged / no-dir 三态之一。
 
     三态是给调用方判断"这次保存到底要不要重启"用的：内容没变还重启一次服务，等于每次
     点保存都把线上进程抖一下；目录不存在则是"还没落地"，不能说成已生效。
+
+    keep_extra=True（默认）：盘上那些记录里没有的键**原样保留**。面板只管自己记录的那几行，
+    手写变量归运维——覆盖它们是一次无人知晓的删除（线上后果：某个应用的口令是手工加进
+    .panel.env 的，用户在面板上改另一个变量，口令跟着没了，进程启动读不到 ADMIN_PASSWORD）。
+    keep_extra=False 只由界面上明确写着「删除这些变量并写入」的那颗按钮触发。
     """
-    body = env_body(app)
+    body = env_lines(app)
     target = env_file_path(app)
     if not target.parent.is_dir():
         # 应用还没部署过（目录都不存在）时不要顺手把目录建出来：git clone 拒绝往
@@ -193,12 +291,19 @@ def write_env_file(app: dict) -> str:
         # 完全不知道和刚才保存配置有关。目录会由部署自己创建，届时再写这个文件。
         return "no-dir"
     try:
-        if target.is_file() and target.read_text(encoding="utf-8", errors="replace") == body + "\n":
+        disk = _disk_env_text(app)
+    except OSError as e:
+        raise RuntimeError(
+            f"读不到现存的 .panel.env，面板没有覆盖它（免得把手工加的变量静默删掉）：{e}"
+        ) from e
+    text = "\n".join(body + (_kept_env_lines(app, disk) if keep_extra else [])) + "\n"
+    try:
+        if disk == text:
             # 内容一致也要把权限补回 0600：手工 chmod 过、或者从备份恢复回来的文件
             # 权限未必对，而这里正是唯一一次机会。
             os.chmod(target, 0o600)
             return "unchanged"
-        write_secret_atomic(target, body + "\n")
+        write_secret_atomic(target, text)
     except OSError as e:
         raise RuntimeError(f"写入 .panel.env 失败：{e}") from e
     return "written"
@@ -262,17 +367,26 @@ def env_state(app: dict) -> dict:
     - match：磁盘上就是数据库里那份（含"两边都空"这种——没有需要同步的东西）。
     - missing：数据库里有变量，文件却不存在。unit 带 `-` 前缀时这条最危险：
       进程静默地一个变量都读不到。
-    - differs：文件存在但内容与数据库不同（手工改过、或保存失败留下的半份）。
+    - differs：文件存在但内容与面板会写出的那份不同（手工改过、保存失败留下的半份，
+      或只是多了注释与空行）。后一种情况记录里的变量其实都对，所以判词说的是"这份文件
+      不是面板写出的那一版"，不是"这些变量不一致"；同名行以磁盘为准这一点由 systemd 保证。
+    - foreign：面板那几行一个字都没错，但盘上还有记录里没有的键（运维手写的）。
+      它不是漂移——进程两个都读得到——所以不能和 differs 混成一档：混在一起，判词
+      就只能说"不一致"，而正确的处置是"要么把它纳进变量列表，要么明确删掉它"。
     - no-dir：安装目录还不存在（应用没部署过），谈不上漂移。
     - unreadable：文件在但读不了（权限 / 是目录 / 软链坏了），或安装目录压根 stat 不动
       （非 root 的探针跑在 /root 下的应用上就是这种），如实单独一档，
       不能把它当成 missing 提示"重新写入"——那等于要覆盖一个看不见的东西。
+
+    额外带一个 `extra`：{"names": 记录外键名（点名上限 ENV_EXTRA_PREVIEW 个）, "total": 真实个数}。
+    只给名字，不给值——这些键往往是口令。
     """
     body = env_body(app)
     unit_reads = unit_reads_env_file(app)
     if not app.get("path"):
-        return {"disk": "no-dir", "vars": len(body.splitlines()), "unitReads": unit_reads}
+        return {"disk": "no-dir", "vars": len(body.splitlines()), "unitReads": unit_reads, "extra": _NO_EXTRA}
     target = env_file_path(app)
+    extra = _NO_EXTRA
     try:
         parent_ok = target.parent.is_dir()
     except OSError:
@@ -291,7 +405,16 @@ def env_state(app: dict) -> dict:
         # 漏出去就是详情页 500。整段兜住，漏出来的异常统一落 unreadable。
         try:
             if target.is_file():
-                disk = "match" if target.read_text(encoding="utf-8", errors="replace") == body + "\n" else "differs"
+                text = target.read_text(encoding="utf-8", errors="replace")
+                if text == body + "\n":
+                    disk = "match"
+                else:
+                    diff = _env_diff(env_lines(app), text)
+                    # 面板那几行对不上就是 differs（哪怕同时有外来键）；只有外来键、
+                    # 面板行全对，才是 foreign。两者都不剩"逐字节相等"这一条捷径之外的
+                    # 余地：文件末尾少一个换行之类仍然如实算 differs。
+                    disk = "foreign" if not diff["missing"] and diff["foreign"] else "differs"
+                    extra = _extra_brief(diff["foreign"])
             elif target.exists() or target.is_symlink():
                 # 那个位置上确有东西（目录、悬空软链、读不了的 inode）：说成 missing 会引导人点
                 # "重新写入"，而那一步会当场失败——先把"这里有个读不了的东西"如实分开。
@@ -300,11 +423,11 @@ def env_state(app: dict) -> dict:
                 disk = "match" if not body else "missing"
         except OSError:
             disk = "unreadable"
-    return {"disk": disk, "vars": len(body.splitlines()), "unitReads": unit_reads}
+    return {"disk": disk, "vars": len(body.splitlines()), "unitReads": unit_reads, "extra": extra}
 
 
 def env_drift() -> dict:
-    """自检用的汇总：{"total": 纳管应用数, "drift": [漂移的那几个]}。
+    """自检用的汇总：{"total": 纳管应用数, "drift": [漂移的那几个], "extra": [有记录外键的那几个]}。
 
     算漂移的两条线，缺一条就漏一半：
     - 磁盘那份不对（missing / differs / unreadable）：界面显示的键值对压根没进进程。
@@ -319,11 +442,17 @@ def env_drift() -> dict:
     把它一并当成"没有 unit"会让整项自检在什么都没读的情况下报 pass——
     读不动的那些行数进 `unknown`，由调用方如实降为未确认，而不是绿灯。
 
+    `extra` 单独一份，不并进 drift：盘上有记录外的手写键而面板那几行全对，进程两个都读得到，
+    这不是"面板显示的与进程读到的不是同一份"，判 fail 会把真漂移淹在噪声里。
+    但它必须被点名——写入器现在默认原样保留这些键，界面与自检都要说清保留了谁；
+    不告诉运维"这里有面板管不到的东西"，下一次换目录恢复就会真的丢掉它们。
+
     投影里必须带 `unit_override`：纳管外部 unit 的应用如果按 `panel-<name>.service` 去问，
     那个名字压根没有文件，它就会被上面那条噪声闸门当成"还没部署过"直接跳过——上线第一天
     video 的详情接口报 `missing`、自检却一声不响，差的就是这一列。
     """
     drift = []
+    extra = []
     unknown = 0
     rows = dbm.query("SELECT id, name, path, env, unit_override FROM apps ORDER BY name")
     for a in rows:
@@ -343,7 +472,9 @@ def env_drift() -> dict:
         not_read = st["vars"] > 0 and not st["unitReads"]
         if bad_disk or not_read:
             drift.append({"id": a["id"], "name": a["name"], **st})
-    return {"total": len(rows), "drift": drift, "unknown": unknown}
+        elif st["extra"]["total"]:
+            extra.append({"id": a["id"], "name": a["name"], **st["extra"]})
+    return {"total": len(rows), "drift": drift, "extra": extra, "unknown": unknown}
 
 
 async def ensure_env_link(app: dict) -> str:
@@ -851,7 +982,25 @@ def _append_note(out: dict, msg: str) -> None:
     out["note"] = f'{out["note"]}；{msg}' if out.get("note") else msg
 
 
-async def _apply_external_unit(old: dict, new_app: dict, renamed: bool) -> dict:
+def _extra_note(extra: dict, dropped: bool) -> str:
+    """把这一次对「记录外的手写键」做了什么如实写进 note。
+
+    必须在写入**之前**取 extra（写入之后再读，删掉的那几个就永远点名不出来了）。
+    只说名字不说值；保留与删除两种处置都要说——过去这里一个字都不说，用户在面板上改
+    一个变量，盘上另外三个手工加的键跟着没了，而界面只报"已保存"。
+    """
+    if not extra["readable"] or not extra["total"]:
+        return ""
+    who = extra_who(extra)
+    if dropped:
+        return f"已按你的选择删除记录里没有的 {extra['total']} 个变量（{who}），服务重启后就读不到它们了"
+    return (
+        f"盘上有 {extra['total']} 个记录里没有的变量（{who}），面板原样保留、没有删除；"
+        "要让面板接管它们就在「环境变量」列表里补上"
+    )
+
+
+async def _apply_external_unit(old: dict, new_app: dict, renamed: bool, drop_extra: bool = False) -> dict:
     """纳管模式（外部 unit）下的同步：unit 本体一个字都不改，但环境变量必须真的落地。
 
     以前的写法是一句"unit 与环境变量文件不由面板写入"直接返回，等于把面板自己管辖的
@@ -862,6 +1011,10 @@ async def _apply_external_unit(old: dict, new_app: dict, renamed: bool) -> dict:
     所以这里做三件事：写 .panel.env、补 systemd drop-in（<unit>.d/panel-env.conf，
     不改别人的 unit 文件）、在服务本来就在跑时重启一次。仍然不做的：渲染 unit、
     写 nginx 站点——那是外部 unit 的边界，改动的确只进了记录，就照实说。
+
+    drop_extra=True 只来自界面上那颗「删除这些变量并写入」：默认保留盘上记录外的手写键。
+    纳管的外部 unit 恰恰是手写变量最常见的那一类（unit 不是面板写的，.panel.env 常常也是
+    运维先手工建起来的），一次保存删掉 ADMIN_PASSWORD 这种键，服务重启就直接起不来。
     """
     out = {"applied": False, "restarted": False, "note": ""}
     unit = unit_name(new_app)
@@ -875,8 +1028,10 @@ async def _apply_external_unit(old: dict, new_app: dict, renamed: bool) -> dict:
         notes.append(
             f"{who or '名字'}属于 unit 本体，面板不写外部 unit：这部分改动要在 {unit} 里同步后重启才生效"
         )
+    # 写入之前先看清盘上有几个面板管不到的键（写入之后就读不到"被删掉的那些"了）
+    extra_before = env_extra(new_app)
     try:
-        env_state = write_env_file(new_app)
+        env_state = write_env_file(new_app, keep_extra=not drop_extra)
         link_state = await ensure_env_link(new_app)
     except Exception as e:  # noqa: BLE001
         notes.append(f"环境变量没能落地：{str(e)[:160]}")
@@ -903,11 +1058,17 @@ async def _apply_external_unit(old: dict, new_app: dict, renamed: bool) -> dict:
             out["restarted"] = True
         except Exception as e:  # noqa: BLE001
             notes.append(f"环境变量已写入，但 {unit} 没能重启成功：{str(e)[:160]}（值已落盘，下次启动生效）")
+    if env_state != "no-dir":
+        # 保留还是删除都要点名：用户只点了「保存」，盘上那几个面板管不到的键的去向
+        # 必须写在同一句话里，否则下一次起不来时没人知道面板动过它们。
+        note = _extra_note(extra_before, drop_extra)
+        if note:
+            notes.append(note)
     out["note"] = "；".join(notes)
     return out
 
 
-async def apply_edited(old: dict, new_app: dict) -> dict:
+async def apply_edited(old: dict, new_app: dict, drop_extra: bool = False) -> dict:
     """PATCH 之后把改动真正落到 systemd / .panel.env / nginx，服务在跑就顺手重启。
 
     旧写法只有"改名"才会重建 unit 与站点（原来的 cleanup_renamed），其余字段只进
@@ -918,6 +1079,9 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
     返回 {"applied","restarted","note"}，让路由如实说这次到底生效了没有：外部
     unit（unit_override）的 unit 本体与 nginx 不归面板写，那部分照实说"只改了记录"，
     但环境变量属于应用目录，照样写、照样挂、照样重启（见 _apply_external_unit）。
+
+    drop_extra 是给 .panel.env 里那些「记录外的手写键」的处置开关：默认 False=原样保留，
+    只有界面上明确确认过的那颗按钮才传 True（那时 note 会点名被删掉了哪几个）。
     """
     out = {"applied": True, "restarted": False, "note": ""}
     if not old:
@@ -941,7 +1105,7 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
         if not will_apply_vhost:
             await nginx_ops.remove_vhost(old["name"])
     if new_app.get("unit_override"):
-        r = await _apply_external_unit(old, new_app, renamed)
+        r = await _apply_external_unit(old, new_app, renamed, drop_extra)
         if not old.get("unit_override") and not renamed:
             # 名字没变就从"面板托管"切到"外部纳管"。此前这里无条件写下「panel-<name>.service
             # 还在 systemd 里运行」，但那个文件未必存在（应用可能从没成功部署过，或早已被手工
@@ -961,12 +1125,18 @@ async def apply_edited(old: dict, new_app: dict) -> dict:
         # drop-in 不会有人再读，留着就是指向同一份 .panel.env 的孤儿配置。
         await remove_env_link(old)
     try:
-        write_env_file(new_app)
+        # 写入之前先看清盘上有几个面板管不到的键（写完再读，被删掉的那几个就永远点不出名了）
+        extra_before = env_extra(new_app)
+        env_written = write_env_file(new_app, keep_extra=not drop_extra)
         await ensure_unit(new_app, warn=lambda t: _append_note(out, t.removeprefix("!!> ")))
         # 自定义 unit_template 里漏写 EnvironmentFile 时，面板写的 .panel.env 永远读不到，
         # 而界面照样报"已生效"。补 drop-in 是这一步的兜底，默认模板自带那行时它是空操作。
         if await ensure_env_link(new_app) == "written":
             _append_note(out, "该 unit 的配置里没有引用 .panel.env，面板已用 drop-in 补上（不改 unit 本体）")
+        if env_written != "no-dir":
+            note = _extra_note(extra_before, drop_extra)
+            if note:
+                _append_note(out, note)
         if new_app.get("domain") and new_app.get("port"):
             await nginx_ops.apply_vhost(
                 {"name": new_app["name"], "domain": new_app["domain"], "port": new_app["port"]}
@@ -1632,6 +1802,13 @@ async def _deployment_body(app: dict, dep_id: int):
         # 这里不补 drop-in，写好的 .panel.env 一样没人读，而部署日志显示"完成"。
         if await ensure_env_link(app) == "written":
             _append_log(dep_id, "!!> 该 unit 的配置里没有引用 .panel.env，面板已用 drop-in 补上（不改 unit 本体）")
+        # 盘上面板管不到的那些键（写完再读，留下的就是原样保住的）
+        kept = env_extra(app)
+        if kept["total"]:
+            # 部署同样不能静默删掉运维手写的键；这里也要点名，
+            # 否则"部署完成"之后服务起不来，没人知道是这一步少写了三行。
+            _append_log(dep_id, f"==> .panel.env 里保留了 {kept['total']} 个面板记录之外的变量"
+                                 f"（{extra_who(kept)}），面板没有删除它们，进程照样读得到")
 
         if app["domain"]:
             if app["port"]:

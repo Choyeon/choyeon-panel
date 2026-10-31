@@ -302,7 +302,9 @@ class FrontendContractTests(unittest.TestCase):
                          "横幅必须读后端那份对账结果，而不是在界面里再猜一次")
 
     def test_banner_offers_the_reuse_of_the_existing_save(self):
-        self.assertRegex(DETAIL_VUE, r'<NAlert v-if="envDrift"[\s\S]*?@click="save"')
+        # \b 而不是收尾的引号：批次104 起这颗按钮写成 save()（多了"删不删记录外的键"的参数，
+        # 调用点要显式空参）。要守的是"复用的是那个 PATCH 流程"，不是它带不带括号。
+        self.assertRegex(DETAIL_VUE, r'<NAlert v-if="envDrift"[\s\S]*?@click="save\b')
         self.assertIn("重新写入并重启", DETAIL_VUE)
         self.assertIn("重新写入", DETAIL_VUE)
 

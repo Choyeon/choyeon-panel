@@ -134,28 +134,47 @@ const envItems = computed(() =>
  * 别处来的值，界面却照常显示数据库这一份——照着界面上的口令去登录只会「密码错误」，
  * 而此前这台机器上没有任何地方说过这件事。后端 envState 只给状态和键数、不给值。
  *
+ * 另一档反过来：磁盘上的 .panel.env 里还有面板记录里没有的键（运维手写的，例如
+ * ADMIN_PASSWORD）。面板写入时默认原样保留它们，所以这不是"两份不一致"，进程两个都读得到；
+ * 但必须点名，并把处置交给运维——要么按同样的键名补进列表让面板接管，要么显式删。
+ * 过去这里没有第三条路：一次保存直接按记录整份覆盖，手写的键静默消失，界面上一个字的痕迹都没有。
+ *
  * 修复按钮复用 save()：PATCH 会把现有配置重新写进 .panel.env、补上 drop-in，
- * 服务在跑就顺带重启一次，不改任何一个值。
+ * 服务在跑就顺带重启一次，不改任何一个值，也不删记录外的键。
+ * `save({ dropExtra: true })` 是唯一会删那些键的入口，只有下面那颗二次确认的按钮会带这个参数。
  */
-const envDrift = computed<{ type: 'warning' | 'error'; text: string } | null>(() => {
+const envDrift = computed<{ type: 'warning' | 'error'; text: string; extra: { names: string[]; total: number } } | null>(() => {
   const s: any = app.value?.envState;
   if (!s) return null;
   const n = s.vars || 0;
+  const extra = s.extra || { names: [], total: 0 };
+  const who = extra.names.join('、') + (extra.total > extra.names.length ? ' 等' : '');
+  const held = extra.total
+    ? `另外，盘上还有 ${extra.total} 个面板记录里没有的变量（${who}），保存时原样保留、不会被删除。`
+    : '';
   if (s.disk === 'match' && (!n || s.unitReads)) return null;
   if (s.disk === 'no-dir') {
     if (!n) return null; // 没有变量、目录也还没建出来：没东西可漂，别报横幅
-    return { type: 'warning', text: `安装目录还不存在，这 ${n} 个变量没落地，要等部署时才写进 .panel.env。服务此刻${app.value?.running ? '在运行，那它读到的是别处的值' : '没在运行'}。` };
+    return { type: 'warning', extra, text: `安装目录还不存在，这 ${n} 个变量没落地，要等部署时才写进 .panel.env。服务此刻${app.value?.running ? '在运行，那它读到的是别处的值' : '没在运行'}。` };
   }
   if (s.disk === 'unreadable') {
-    return { type: 'error', text: `读不了安装目录下的 .panel.env（权限或它已不是普通文件），无法确认进程拿到的是哪一份。` };
+    return { type: 'error', extra, text: `读不了安装目录下的 .panel.env（权限或它已不是普通文件），无法确认进程拿到的是哪一份。${held}` };
+  }
+  if (s.disk === 'foreign') {
+    return {
+      type: 'warning',
+      extra,
+      text: `${n ? `面板这 ${n} 个变量与磁盘一致，但` : ''}安装目录下的 .panel.env 里有 ${extra.total} 个记录里没有的变量（${who}）——那是运维手写的，进程照样读得到。`
+        + '要让面板接管它们，就在下面的列表里按同样的键名补一项（值保持一致）；确认不再需要，就用「删除这些变量并写入」删掉。面板不会替你做这个决定。',
+    };
   }
   const why =
     s.disk === 'missing'
       ? `这 ${n} 个变量只在面板里：安装目录下没有 .panel.env，而 unit 的 EnvironmentFile 带着 - 前缀，systemd 会静默跳过这一行`
       : s.disk === 'differs'
-        ? `安装目录下的 .panel.env 与面板里这份不一样：进程读到的是磁盘那份，不是下面列的这些值`
+        ? `安装目录下的 .panel.env 不是面板按这 ${n} 个变量会写出的那份：进程读的是磁盘这一份，同名变量的值以它为准`
         : `这些变量写进了 .panel.env，但应用的 unit 没有引用这个文件，进程一个都读不到`;
-  return { type: 'error', text: `${why}——面板显示的值和进程实际读到的不是同一份。` };
+  return { type: 'error', extra, text: `${why}——面板显示的值和进程实际读到的不是同一份。${held}` };
 });
 
 function onDescSlot(name: string) {
@@ -331,7 +350,7 @@ async function load() {
   if (deps.value.some((d: any) => d.status === 'running')) later(pollDeps, 3000);
 }
 
-async function save() {
+async function save(opts: { dropExtra?: boolean } = {}) {
   // 后端会把这份配置渲染进 unit / .panel.env / nginx 并顺带重启：第二次 PUT 带的是第一次
   // 还没应用完的旧字段，等于把刚保存的改动盖回去。
   if (saving.value) return;
@@ -350,6 +369,9 @@ async function save() {
       path: edit.value.path || null,
       db_names: dbSel.value.join(',') || null,
       env: env.value.filter((x) => x && typeof x.k === 'string' && x.k),
+      // 只有「删除这些变量并写入」那颗按钮会带这个参数（点按钮传进来的事件对象不带它）：
+      // 后端默认保留 .panel.env 里面板记录之外的手写键，删它们必须是显式选择。
+      ...(opts && opts.dropExtra === true ? { envExtra: 'drop' } : {}),
     });
     // 名称可能就在这一次改掉：备份页缓存的 'apps' 里存着名字派生态（下拉与任务归属），
     // 不作废的话接下来一分钟它会拿着旧名字去匹配已经不存在的那个应用。
@@ -663,7 +685,7 @@ watch(
                 <span v-if="pgErr">数据库清单没取到（{{ pgErr }}）——下拉可能是空的，仍可直接输入库名后回车</span>
               </template>
             </NFormItem>
-            <NButton v-if="isAdmin" type="primary" size="small" round :loading="saving" :disabled="saving" :icon="ico('SaveOutline')" @click="save">保存配置</NButton>
+            <NButton v-if="isAdmin" type="primary" size="small" round :loading="saving" :disabled="saving" :icon="ico('SaveOutline')" @click="save()">保存配置</NButton>
           </NSpace>
         </NForm>
       </div>
@@ -679,15 +701,31 @@ watch(
             <template v-else>
               写入应用目录的 .panel.env 并由 systemd EnvironmentFile 加载。服务正在运行时，保存会自动同步 unit 并重启生效；停止状态则下次启动时生效。
             </template>
+            保存只重写下面这份列表里的键；.panel.env 里由运维手写的其它键会原样保留，要删它们只用上面那条提示里的「删除这些变量并写入」。
           </div>
           <!-- 面板里这份和进程真正读到的那份不是同一件事：只在保存/部署时落盘，
-               目录被换过之后文件没了，unit 那行带 - 前缀，systemd 静默跳过。 -->
+               目录被换过之后文件没了，unit 那行带 - 前缀，systemd 静默跳过。
+               反方向也要说：盘上记录外的手写键面板不删，但要让运维知道它们存在。 -->
           <NAlert v-if="envDrift" :type="envDrift.type" :bordered="false" size="small" role="alert">
             <div class="cp-break">{{ envDrift.text }}</div>
-            <NButton
-              v-if="isAdmin" size="tiny" tertiary round :icon="ico('SyncOutline')"
-              style="margin-top: var(--space-2)" :loading="saving" :disabled="saving" @click="save"
-            >{{ app.running ? '重新写入并重启' : '重新写入' }}</NButton>
+            <NSpace v-if="isAdmin" size="small" style="margin-top: var(--space-2)">
+              <NButton
+                size="tiny" tertiary round :icon="ico('SyncOutline')"
+                :loading="saving" :disabled="saving" @click="save()"
+              >{{ app.running ? '重新写入并重启' : '重新写入' }}</NButton>
+              <NPopconfirm
+                v-if="envDrift.extra.total"
+                @positive-click="save({ dropExtra: true })"
+              >
+                <template #trigger>
+                  <NButton size="tiny" tertiary round type="error" :disabled="saving" :icon="ico('TrashOutline')">
+                    删除这些变量并写入
+                  </NButton>
+                </template>
+                要删的是 .panel.env 里面板记录之外的 {{ envDrift.extra.total }} 个变量（{{ envDrift.extra.names.join('、') }}）。
+                它们一旦删掉，服务重启后进程就读不到这些值了，而且面板不会替你把它们找回来。
+              </NPopconfirm>
+            </NSpace>
           </NAlert>
           <!-- 1Panel 的参数抽屉是「只读详情 / 编辑」互斥切换：默认只读，敏感值先遮罩 -->
           <NButton v-if="isAdmin" size="small" tertiary round :icon="ico(envView === 'edit' ? 'EyeOutline' : 'PencilOutline')" style="align-self: flex-start" @click="envView = envView === 'edit' ? 'detail' : 'edit'">
@@ -712,7 +750,7 @@ watch(
                 <NButton size="tiny" circle :icon="ico('AddOutline', 12)" aria-label="新增一项环境变量" style="margin-left: var(--space-1)" @click="create()" />
               </template>
             </NDynamicInput>
-            <NButton size="small" type="primary" round :loading="saving" :disabled="saving" :icon="ico('SaveOutline')" style="align-self: flex-start" @click="save">保存环境变量</NButton>
+            <NButton size="small" type="primary" round :loading="saving" :disabled="saving" :icon="ico('SaveOutline')" style="align-self: flex-start" @click="save()">保存环境变量</NButton>
           </template>
         </NSpace>
       </div>
