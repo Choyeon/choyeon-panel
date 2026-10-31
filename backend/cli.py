@@ -1241,6 +1241,11 @@ def _ssh_audit_text(d: dict) -> str:
         f"账号面：可登录 {acc.get('login_count', 0)} 个 · 空口令 {len(acc.get('empty_password') or [])} 个 · "
         f"额外 uid=0 {len(acc.get('uid0_extra') or [])} 个"
     )
+    # 这三个数字里有 0 是"核对过没有"，还是"那一段根本没看到"，得在这行说清楚：
+    # 行末的 0 最容易被读成"确认干净"，而下面那些 说明： 没有人保证会被看到。
+    # 具体看了多少行由服务端的那条说明给（上限只在 service 里定义一次）。
+    if acc.get("scan_partial"):
+        acc_line += " · 账号表没扫完，这两个 0 只是已扫过那一段的结论"
     lines.append(acc_line + (" · /etc/shadow 读不到，空口令这项没核对" if acc.get("shadow_unreadable") else ""))
     for g, members in (acc.get("sudo_groups") or {}).items():
         lines.append(f"  {g} 组：{'、'.join(members) or '（无成员）'}")
@@ -2049,8 +2054,9 @@ def _webstats_text(d: dict) -> str:
                      f"坏行 {d.get('malformed')} 条。日志格式可能是自定义 log_format"
                      "（既不是 combined 也不是 common），或者这个站点此刻确实没人访问。")
         return "\n".join(lines)
-    lines.append(f"请求 {d['parsed']} 次 · 独立客户端 {d['clients']} 个 · "
-                 f"下行 {human_bytes(int(d.get('bytesOut') or 0))} · 坏行 {d.get('malformed')}")
+    lines.append(f"请求 {d['parsed']} 次 · 独立客户端 {d['clients']} 个"
+                 + ("（已达统计键数上限，实际更多）" if d.get("clientsFloored") else "")
+                 + f" · 下行 {human_bytes(int(d.get('bytesOut') or 0))} · 坏行 {d.get('malformed')}")
     if d.get("outsideWindow"):
         lines.append(f"  窗口外（更早）另有 {d['outsideWindow']} 行未计入")
     if d.get("truncatedRead"):
@@ -2059,10 +2065,13 @@ def _webstats_text(d: dict) -> str:
                                         ("2xx", "3xx", "4xx", "5xx", "1xx", "0xx") if st.get(k)))
     if d.get("topPaths"):
         lines.append("TOP 路径：")
-        lines += [f"  {p['count']:>7}  {p['path']}" for p in d["topPaths"][:10]]
+        # 不再在终端里二次截断：接口给 15 名 + 「…其他」，这里只切 10 名的话，
+        # 第 11-15 名与「…其他」一起消失，而屏幕上看不出少了一件事。
+        lines += [f"  {p['count']:>7}  {p['path']}" + (f"  {human_bytes(int(p['bytes']))}"
+                  if p.get("bytes") else "") for p in d["topPaths"]]
     if d.get("topClients"):
         lines.append("TOP 客户端：")
-        lines += [f"  {c['count']:>7}  {c['key']}" for c in d["topClients"][:10]]
+        lines += [f"  {c['count']:>7}  {c['key']}" for c in d["topClients"]]
     return "\n".join(lines)
 
 
@@ -2093,6 +2102,9 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "SSH 是这台机器的主入口，改错就是把人锁在门外",
                        "配置来源会如实标注：sshd -T 是有效值，回落 sshd_config 时含注释掉的行",
                        "非 root 时 /etc/shadow 与他人 authorized_keys 读不到，在 notes 里说明而不是跳过",
+                       "账号表只逐行读到第 " + str(login_audit_service.ACCOUNTS_MAX_LINES) +
+                       " 行（LDAP 镜像的 passwd/shadow 能到几万行），没扫完的在 accounts.scan_partial "
+                       "里点名哪份表更长，「没有空口令 / 没有多余 uid=0」降级为已扫段落的结论",
                        "公钥只列算法/位数/备注/指纹，不回显公钥正文",
                        "读不到 sshd 配置时退出码 3；报告能产出就回 0，风险与否看 JSON 的 counts"]},
             {"name": "doctor", "args": [], "desc": "安全与健康自检，含每项修复建议"},
@@ -2260,6 +2272,9 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        + str(access_stats.MAX_LINES) + " 行，再大的日志只看尾部，truncatedRead 会如实标出来",
                        "路径与客户端各自最多 " + str(access_stats.MAX_KEYS) + " 个键，超出并进「…其他」并计数，"
                        "不会因为爬虫刷唯一 URL 就把内存吃光",
+                       "榜单只留前 " + str(access_stats.TOP_N) + " 名（状态码前 "
+                       + str(access_stats.TOP_CODES) + " 名），落榜的请求数并进「…其他」那一行；"
+                       "独立客户端达到键上限时标 clientsFloored，读成「至少这么多人」",
                        "统计口径不含查询串：访问日志的 ?token= 常带凭据，而榜单要回答的是哪个地址被访问得多",
                        "扫描器会把 TLS 记录打到 80 端口，nginx 用 `\\xHH` 文本记下不可打印字节；"
                        "这类行还原后认不出方法名，方法位统一记 \"-\"，不会挤掉真实流量的榜位",

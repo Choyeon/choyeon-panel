@@ -86,6 +86,31 @@ def _read_text(path: str, limit: int = 200000) -> str | None:
         return None
 
 
+# 账号表按行数封顶读。LDAP/FreeIPA 镜像出来的 /etc/passwd 与 /etc/shadow 能到几万行，
+# 一次全读进内存不现实；但"读满就停"必须说出来——空口令账号或多余 uid=0 若排在
+# 上限之后，原来这一轮会报成「确认没有」，而那正是最不该冒充核对过的一句话。
+ACCOUNTS_MAX_LINES = 4000
+# 行数上限的字符兜底：正常 shadow 一行约 60 字符，先触到的会是行数。但账号表里也可以有
+# 一条很长的组（成员几百个），所以字符这道线真的可能先到——`_read_lines` 把两种触顶都算
+# "没读到底"，不假设行数一定赢。
+ACCOUNTS_MAX_CHARS = 2_000_000
+
+
+def _read_lines(path: str, limit: int = ACCOUNTS_MAX_LINES) -> tuple[list[str] | None, bool]:
+    """(行, 这一轮有没有读到文件底)。读不动是 `(None, False)`——那是"没读到"，不是"没有"。
+
+    盘只开一次：字符上限仍走 `_read_text` 那一个读者（权限判定与测试替身都只认它），
+    这里只补上"没读到底"这一层它没说的账。两道线都算：`read(limit)` 停在字符上时
+    行数还没触顶，只看 `len(lines) > limit` 会把这一种截断漏成"扫全了"，
+    而截断正好落在某一条账号的中间。
+    """
+    text = _read_text(path, ACCOUNTS_MAX_CHARS)
+    if text is None:
+        return None, False
+    lines = text.splitlines()
+    return lines[:limit], len(lines) > limit or len(text) >= ACCOUNTS_MAX_CHARS
+
+
 def _parse_effective(text: str) -> dict[str, list[str]]:
     """`sshd -T` 每行 `key value`；listenaddress 会重复出现，值本身可能带空格。"""
     out: dict[str, list[str]] = {}
@@ -251,12 +276,16 @@ def _blob_meta(algo: str, b64: str) -> tuple[str | None, int | None, bool]:
     return fp, bits, weak
 
 
-def _passwd_users() -> list[dict]:
-    text = _read_text("/etc/passwd")
-    if text is None:
-        return []
+def _passwd_users() -> tuple[list[dict], bool]:
+    """(解析出来的账号行, 这份表有没有读到底)。
+
+    那个标志不是装饰：调用方要用它决定"这台机器没有多余 uid=0"这类否定句能不能说出口。
+    """
+    lines, truncated = _read_lines("/etc/passwd")
+    if lines is None:
+        return [], False
     out = []
-    for line in text.splitlines()[:4000]:
+    for line in lines:
         f = line.split(":")
         if len(f) < 7:
             continue
@@ -268,7 +297,7 @@ def _passwd_users() -> list[dict]:
             "shell": shell,
             "login": bool(shell) and shell not in NON_LOGIN_SHELLS,
         })
-    return out
+    return out, truncated
 
 
 def _authorized_keys(users: list[dict], as_root: bool) -> dict:
@@ -341,32 +370,45 @@ def _authorized_keys(users: list[dict], as_root: bool) -> dict:
     }
 
 
-def _accounts(users: list[dict]) -> dict:
-    """空口令、多余 uid=0、有登录 shell 的账号、sudo/wheel 成员。"""
+def _accounts(users: list[dict], passwd_partial: bool = False) -> dict:
+    """空口令、多余 uid=0、有登录 shell 的账号、sudo/wheel 成员。
+
+    `complete` 说的是"这三份表都从头看到尾了"：任何一份读满上限或被截，
+    下面的否定结论（没有空口令、没有多余 uid=0）就只能对已扫过的那一段负责。
+    """
     login_users = [u["name"] for u in users if u["login"]]
     uid0_extra = [u["name"] for u in users if u["uid"] == 0 and u["name"] != "root"]
     empty: list[str] = []
     notes: list[str] = []
-    text = _read_text("/etc/shadow", 200000)
-    if text is None:
+    shadow_lines, shadow_partial = _read_lines("/etc/shadow")
+    if shadow_lines is None:
         notes.append("读不到 /etc/shadow（需要 root），空口令账号这一项没核对成")
     else:
-        for line in text.splitlines():
+        for line in shadow_lines:
             f = line.split(":")
             if len(f) >= 2 and f[1] == "":
                 empty.append(f[0])
+    group_lines, group_partial = _read_lines("/etc/group")
     groups: dict[str, list[str]] = {}
-    for line in (_read_text("/etc/group") or "").splitlines():
+    for line in group_lines or []:
         f = line.split(":")
         if len(f) >= 4 and f[0] in SUDO_GROUPS:
             groups[f[0]] = [x for x in f[3].split(",") if x]
+    partial = [n for n, hit in (("/etc/passwd", passwd_partial), ("/etc/shadow", shadow_partial),
+                                ("/etc/group", group_partial)) if hit]
+    if partial:
+        notes.append(f"账号表这一轮只读到前 {ACCOUNTS_MAX_LINES} 行（或 {ACCOUNTS_MAX_CHARS} 字符），"
+                     f"{'、'.join(partial)} 比这更长：后面的账号本轮没有核对，"
+                     "「没有空口令账号 / 没有多余 uid=0」只对已扫过的这一段成立")
     return {
         "login_shells": login_users,
         "login_count": len(login_users),
         "uid0_extra": uid0_extra,
         "empty_password": empty,
-        "shadow_unreadable": text is None,
+        "shadow_unreadable": shadow_lines is None,
         "sudo_groups": groups,
+        "scan_partial": partial,
+        "complete": not partial,
         "notes": notes,
     }
 
@@ -783,16 +825,17 @@ async def audit(refresh: bool = False) -> dict:
 
 async def _collect() -> dict:
     as_root = os.geteuid() == 0
-    ssh, users, guard, attempts, panel = await asyncio.gather(
+    ssh, passwd_scan, guard, attempts, panel = await asyncio.gather(
         _sshd_settings(), asyncio.to_thread(_passwd_users), _guard_status(), _attempts(),
         asyncio.to_thread(_panel_2fa),
     )
+    users, passwd_partial = passwd_scan
     try:
         ports_data = await exposure_service.audit()
     except Exception:  # noqa: BLE001 - 端口那一层失败不该把这一页一起拖没
         ports_data = None
     keys = await asyncio.to_thread(_authorized_keys, users, as_root)
-    accounts = _accounts(users)
+    accounts = _accounts(users, passwd_partial)
     exposure = _ssh_exposure(ssh["values"], ports_data)
     findings = _findings(ssh, keys, accounts, attempts, guard, exposure, panel)
 
@@ -871,6 +914,15 @@ def doctor_item(data: dict) -> dict:
                 "detail": "登录方式没有要紧项，但这 24 小时的登录尝试读不到"
                           f"（{data['attempts'].get('note') or '没有可读的 sshd 日志'}），"
                           "有没有人在撞库无从核对",
+                "fix": "choyeonctl ssh-audit", "fixable": False}
+    scanned = data["accounts"]
+    if not scanned.get("complete", True):
+        # 和上面两条例外同一条纪律：没扫完的那一段不能算核对过。排在 4000 行之后
+        # 的空口令账号是看不见的，而绿灯说的恰恰是"这台机器没有那种账号"。
+        files = "、".join(scanned.get("scan_partial") or [])
+        return {"status": "warn",
+                "detail": f"登录方式没有要紧项，但账号表这一轮没读到底（上限 {ACCOUNTS_MAX_LINES} 行，"
+                          f"{files} 更长），空口令与多余 uid=0 没有核对完整",
                 "fix": "choyeonctl ssh-audit", "fixable": False}
     att = data["attempts"]
     # 绿灯这一行也要把窗口说对：日志读满上限时"24h 失败认证 N 次"里的 N 只是最后

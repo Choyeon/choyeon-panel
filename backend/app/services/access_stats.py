@@ -33,6 +33,9 @@ MAX_LINES = 200_000
 MAX_KEYS = 4000
 # 返回给前端的榜单长度与曲线桶数上限。
 TOP_N = 15
+# 状态码榜单比路径/客户端短一截（一行一个码，界面只放得下这么多），
+# 但"短的"不等于"没的"：第 11 个码之后的请求照样要并进「…其他」。
+TOP_CODES = 10
 SERIES_MAX = 1440
 # 统计窗口档位：给网页下拉用，不是校验区间（校验用 SERIES_MAX，任何 1-1440 都接受）。
 # 放这里而不是前端抄一份：档位一改，接口、CLI、下拉必须一起改。
@@ -186,7 +189,8 @@ def _unreadable(minutes: int) -> dict:
         "parsed": 0, "outsideWindow": 0, "malformed": 0, "scannedLines": 0,
         "bytesRead": 0, "truncatedRead": False, "windowMinutes": window,
         "from": "", "to": "", "newest": "", "oldest": "", "bytesOut": 0,
-        "clients": 0, "clientsOverflow": 0, "pathsOverflow": 0,
+        "clients": 0, "paths": 0, "clientsOverflow": 0, "clientsFloored": False,
+        "pathsFloored": False, "pathsOverflow": 0,
         "status": {"0xx": 0, "1xx": 0, "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0},
         "topCodes": [], "topPaths": [], "topClients": [], "methods": [], "series": [],
         "readError": web_logs.readable_hint(),
@@ -239,6 +243,7 @@ def collect(path: str, minutes: int = 60) -> dict:
     methods: dict[str, int] = {}
     minute_buckets: dict[int, int] = {}
     paths_extra = clients_extra = 0
+    paths_extra_bytes = 0
     parsed = outside = 0
     total_bytes = 0
 
@@ -272,6 +277,7 @@ def collect(path: str, minutes: int = 60) -> dict:
             paths[p] = [1, sent]
         else:
             paths_extra += 1
+            paths_extra_bytes += sent
 
         ip = m.group("client")
         if ip in clients:
@@ -300,31 +306,51 @@ def collect(path: str, minutes: int = 60) -> dict:
         "oldest": _iso(oldest),
         "bytesOut": total_bytes,
         "clients": len(clients),
+        "paths": len(paths),
         "clientsOverflow": clients_extra,
+        # 唯一键封顶时 len(clients) 就是 MAX_KEYS 本身：真实人数只会更多，不会更少。
+        # 不把这一层说出来，界面上的"独立客户端 4000 个"读起来像一个精确数。
+        "clientsFloored": len(clients) >= MAX_KEYS,
+        "pathsFloored": len(paths) >= MAX_KEYS,
         "pathsOverflow": paths_extra,
         "status": classes,
-        "topCodes": [{"code": k, "count": v}
-                     for k, v in sorted(codes.items(), key=lambda kv: (-kv[1], kv[0]))[:10]],
-        "topPaths": _top_paths(paths, paths_extra),
+        "topCodes": _top_counts(codes, key="code", limit=TOP_CODES),
+        "topPaths": _top_paths(paths, paths_extra, paths_extra_bytes),
         "topClients": _top_counts(clients, clients_extra),
-        "methods": _top_counts(methods, 0),
+        "methods": _top_counts(methods),
         "series": series,
     }
 
 
-def _top_counts(counter: dict, extra: int) -> list:
-    items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_N]
-    out = [{"key": k, "count": v} for k, v in items]
-    if extra:
-        out.append({"key": "…其他", "count": extra})
+def _top_counts(counter: dict, extra: int = 0, *, key: str = "key", limit: int = TOP_N) -> list:
+    """榜单留前 `limit` 名，剩下的请求数并进「…其他」而不是悄悄消失。
+
+    原来这里有两处不说：`methods` 恒传 `extra=0`，而第 16 名之后的键根本不在榜上——
+    扫描器在 80 端口上刷出来的方法名（PROPFIND、CONNECT、随机串）轻松超过 15 个，
+    于是这些请求既不上榜也不出现「…其他」，而 CLI 的 schema 还写着"超出并进…其他并计数"；
+    `topCodes` 更直接，`[:10]` 一刀切，第 11 个状态码的请求数从表里凭空蒸发。
+    """
+    items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    out = [{key: k, "count": v} for k, v in items[:limit]]
+    rest = extra + sum(v for _, v in items[limit:])
+    if rest:
+        out.append({key: "…其他", "count": rest})
     return out
 
 
-def _top_paths(counter: dict, extra: int) -> list:
-    rows = sorted(counter.items(), key=lambda kv: (-kv[1][0], kv[0]))[:TOP_N]
-    out = [{"path": p, "count": c, "bytes": b} for p, (c, b) in rows]
-    if extra:
-        out.append({"path": "…其他", "count": extra, "bytes": 0})
+def _top_paths(counter: dict, extra: int = 0, extra_bytes: int = 0) -> list:
+    """路径榜同一条纪律：落榜的请求数与字节数都并进「…其他」这一行。
+
+    字节数原来固定写 0，等于在流量列上说"这些路径没发过东西"；键表封顶时那份
+    字节由调用方在循环里单独攒（`extra_bytes`），所以这一行两个数都是全量。
+    """
+    rows = sorted(counter.items(), key=lambda kv: (-kv[1][0], kv[0]))
+    out = [{"path": p, "count": c, "bytes": b} for p, (c, b) in rows[:TOP_N]]
+    rest = [(c, b) for _, (c, b) in rows[TOP_N:]]
+    count = extra + sum(c for c, _ in rest)
+    if count:
+        out.append({"path": "…其他", "count": count,
+                    "bytes": extra_bytes + sum(b for _, b in rest)})
     return out
 
 

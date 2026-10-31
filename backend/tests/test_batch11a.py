@@ -580,7 +580,7 @@ class TestAccountsAndPasswd(unittest.TestCase):
     def test_passwd_tolerates_short_lines_and_exotic_shells(self):
         text = "broken:line\ndata:x:6:12:data:/var/lib/data:/usr/sbin/nologin\nme:x:1000:1000:me:/home/me:/bin/bash\n"
         with self.reads(passwd=text):
-            users = svc._passwd_users()
+            users, _partial = svc._passwd_users()
         self.assertEqual([u["name"] for u in users], ["data", "me"])
         self.assertFalse(users[0]["login"])
         self.assertTrue(users[1]["login"])
@@ -588,11 +588,20 @@ class TestAccountsAndPasswd(unittest.TestCase):
 
     def test_passwd_uid_that_is_not_a_number_becomes_minus_one(self):
         with self.reads(passwd="weird:x:notanumber:1::/home/weird:/bin/bash\n"):
-            self.assertEqual(svc._passwd_users()[0]["uid"], -1)
+            self.assertEqual(svc._passwd_users()[0][0]["uid"], -1)
 
     def test_missing_passwd_yields_no_users_instead_of_raising(self):
         with self.reads(passwd=None):
-            self.assertEqual(svc._passwd_users(), [])
+            self.assertEqual(svc._passwd_users(), ([], False))
+
+    def test_passwd_at_the_line_cap_says_the_scan_is_not_complete(self):
+        # 读满上限就停本身不是缺陷（几万行的目录表谁也不想一次吞掉），缺陷是把
+        # 「这一段没有」说成「这台机器没有」。
+        text = "".join(f"u{i}:x:{i}:1::/home/u{i}:/usr/sbin/nologin\n" for i in range(svc.ACCOUNTS_MAX_LINES + 5))
+        with self.reads(passwd=text):
+            users, partial = svc._passwd_users()
+        self.assertEqual(len(users), svc.ACCOUNTS_MAX_LINES)
+        self.assertTrue(partial)
 
 
 class TestSshdSettings(unittest.TestCase):
@@ -987,7 +996,7 @@ class TestCollectShape(unittest.TestCase):
         return mock.patch.multiple(
             svc,
             _sshd_settings=_async(_ssh(kw.get("values", HARDENED), kw.get("source", "sshd -T"))),
-            _passwd_users=lambda: kw.get("users", []),
+            _passwd_users=lambda: (kw.get("users", []), kw.get("passwd_partial", False)),
             _guard_status=_async(_guard(kw.get("guarded", True))),
             _attempts=_async(kw.get("att", _att())),
             _authorized_keys=lambda users, as_root: kw.get("keys", _keys([])),

@@ -172,10 +172,16 @@ const acceptedLine = computed(() => {
   const list = loginAttempts.value.accepted ?? [];
   return list.length ? list.map((a: any) => `${a.method} ${a.count}`).join('、') : '无成功记录';
 });
+// 账号表按行数封顶读（上限只在服务层定义一次），没扫完的那一段是「没看」，不是「没有」：
+// 三个否定句各自看自己那份表的标志，扫全了才说「没有」。
+const accPartialFiles = computed<string[]>(() => loginData.value?.accounts?.scan_partial ?? []);
+const accPartial = (file: string) => accPartialFiles.value.includes(file);
+const accNeg = (file: string) => (accPartial(file) ? '已扫部分没有' : '没有');
 const sudoLine = computed(() => {
   const g = loginData.value?.accounts?.sudo_groups ?? {};
   const pairs = Object.entries(g).filter(([, m]) => (m as any[]).length);
-  return pairs.length ? pairs.map(([n, m]) => `${n}: ${(m as any[]).join('、')}`).join(' · ') : '空（没人能 sudo）';
+  if (pairs.length) return pairs.map(([n, m]) => `${n}: ${(m as any[]).join('、')}`).join(' · ');
+  return accPartial('/etc/group') ? '空（/etc/group 没扫完，后面的组没核对）' : '空（没人能 sudo）';
 });
 const reachLine = computed(() => {
   const r = loginData.value?.sshd?.reachable;
@@ -2270,14 +2276,14 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <div v-if="loginData" class="ls-acc">
         <div class="ls-acc-line">
-          <i>可交互登录的账号</i>{{ loginData.accounts.login_count }} 个：<span class="mono">{{ loginData.accounts.login_shells.join('、') || '无' }}</span>
+          <i>可交互登录的账号</i>{{ loginData.accounts.login_count }} 个<template v-if="accPartial('/etc/passwd')">（账号表没扫完，后面的没算进来）</template>：<span class="mono">{{ loginData.accounts.login_shells.join('、') || '无' }}</span>
         </div>
         <div class="ls-acc-line">
           <i>空口令</i>
           <template v-if="loginData.accounts.shadow_unreadable">/etc/shadow 读不到，这一项没核对</template>
-          <template v-else>{{ loginData.accounts.empty_password.length ? loginData.accounts.empty_password.join('、') : '没有' }}</template>
+          <template v-else>{{ loginData.accounts.empty_password.length ? loginData.accounts.empty_password.join('、') : accNeg('/etc/shadow') }}</template>
         </div>
-        <div class="ls-acc-line"><i>多余的 uid=0</i>{{ loginData.accounts.uid0_extra.length ? loginData.accounts.uid0_extra.join('、') : '没有' }}</div>
+        <div class="ls-acc-line"><i>多余的 uid=0</i>{{ loginData.accounts.uid0_extra.length ? loginData.accounts.uid0_extra.join('、') : accNeg('/etc/passwd') }}</div>
         <div class="ls-acc-line"><i>sudo / wheel 成员</i>{{ sudoLine }}</div>
         <div v-for="(n, i) in loginData.accounts.notes || []" :key="i" class="ls-note">{{ n }}</div>
       </div>

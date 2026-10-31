@@ -28,8 +28,9 @@ type SResp = {
   hint?: string; readError?: string; files?: SFile[]; source?: string; site?: string; file?: number;
   parsed?: number; outsideWindow?: number; malformed?: number; scannedLines?: number;
   bytesRead?: number; truncatedRead?: boolean; windowMinutes?: number;
-  from?: string; to?: string; bytesOut?: number; clients?: number;
+  from?: string; to?: string; bytesOut?: number; clients?: number; paths?: number;
   clientsOverflow?: number; pathsOverflow?: number;
+  clientsFloored?: boolean; pathsFloored?: boolean;
   status?: Record<string, number>;
   topCodes?: { code: string; count: number }[];
   topPaths?: { path: string; count: number; bytes: number }[];
@@ -308,7 +309,14 @@ const statsInfo = computed<InfoItem[]>(() => {
     { k: '站点', v: d.site || '-' },
     { k: '窗口', v: `${d.windowMinutes} 分钟 · ${d.from || '?'} → ${d.to || '?'}（UTC）` },
     { k: '请求数', v: `${d.parsed} 次` },
-    { k: '独立客户端', v: `${d.clients} 个${d.clientsOverflow ? `（另有 ${d.clientsOverflow} 个未上榜）` : ''}` },
+    {
+      k: '独立客户端',
+      // clientsOverflow 数的是"请求次数"，不是"客户端个数"：键表满了以后每一条来自新 IP
+      // 的请求各加一，同一个 IP 刷一百次就是一百。原来这里写"N 个未上榜"，把一个请求数
+      // 念成了人数。达到键上限时那个 4000 也只是下限。
+      v: `${d.clients} 个${d.clientsFloored ? '（键数已达上限，实际更多）' : ''}`
+        + `${d.clientsOverflow ? `，另有 ${d.clientsOverflow} 次请求的客户端没单独计数` : ''}`,
+    },
     { k: '出站流量', v: fmtBytes(d.bytesOut || 0) },
     {
       k: '扫描范围',
@@ -318,7 +326,8 @@ const statsInfo = computed<InfoItem[]>(() => {
   ];
   if (d.outsideWindow) rows.push({ k: '窗口外', v: `${d.outsideWindow} 行更早，未计入本次窗口` });
   if (d.malformed) rows.push({ k: '解析不了', v: `${d.malformed} 行（不是 common/combined 格式，或时间戳读不出）` });
-  if (d.pathsOverflow) rows.push({ k: '路径溢出', v: `${d.pathsOverflow} 个唯一路径并进「…其他」` });
+  if (d.pathsOverflow) rows.push({ k: '路径溢出', v: `${d.pathsOverflow} 次请求的路径没进键表（已并入榜单的「…其他」）` });
+  if (d.pathsFloored) rows.push({ k: '唯一路径', v: `记满 ${d.paths} 个就停止计数，实际更多` });
   return rows;
 });
 
