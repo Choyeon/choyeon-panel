@@ -477,10 +477,14 @@ async def renew_certs() -> dict:
     """
     from . import cert_ops  # 延迟导入：cert_ops 侧不需要知道 nginx_ops
 
-    async def _expiries() -> dict:
-        return {c["name"]: c.get("expiry") for c in (await cert_ops.list_certs())["certs"]}
+    async def _cert_state() -> tuple[dict, bool, str | None]:
+        d = await cert_ops.list_certs()
+        # 「读到了清单」= 有行，或 list_certs 明确确认过本机为空（confirmable）；
+        # 二者都不是时（certbot 不可用又退化失败）这次读不能支撑任何否定结论。
+        return ({c["name"]: c.get("expiry") for c in d["certs"]},
+                bool(d["certs"]) or bool(d.get("confirmable")), d.get("reason"))
 
-    before = await _expiries()
+    before, before_ok, before_why = await _cert_state()
     # 同 issue_cert：certbot renew 会改写 nginx 配置并（若配了 deploy-hook）重载服务，
     # 必须占住 ⑤H 那把「nginx 写入临界区」的锁，否则面板这边正写一半的 vhost
     # 会被它当成待校验配置一起读进去。续期本身要几分钟，同期排队的是低频接口，代价可接受。
@@ -492,22 +496,34 @@ async def renew_certs() -> dict:
         # 就等于"报错正好发生在 out 为空的时候"必然 KeyError，把一条本该是 400 的
         # 失败变成 500（out 为空恰恰是 certbot 被 kill、磁盘写满这类情况）。
         raise RuntimeError(f"证书续期失败 (exit {r['code']}): {r['out'] or '(无输出)'}")
-    after = await _expiries()
+    after, after_ok, after_why = await _cert_state()
     renewed = sorted(n for n, e in after.items() if e and before.get(n) and e != before.get(n))
     reloaded = False
     if renewed:
         async with _nginx_section():
             reloaded = (await run("systemctl", ["reload", "nginx"]))["code"] == 0
         invalidate_domain_cache()
+    # 续期"没续到东西"有两种真相：确实没到期（正常），或面板压根没读到期日清单
+    # （certbot 不可用 / 证书目录读不动）。certbot 退出码 0 只证明它自己跑完了，
+    # 不证明这边观察得到结果；观察不到时把空 diff 说成"这是正常结果，不是失败"，
+    # 等于用一次读失败支撑机器级否定，而同一页的证书清单面板会如实标"数据不可用"。
+    confirmed = before_ok and after_ok
+    if renewed:
+        summary = (f"已续期 {len(renewed)} 张：" + "、".join(renewed)
+                   + ("，nginx 已重载" if reloaded else "，nginx 重载失败"))
+    elif confirmed:
+        summary = "没有证书到期，certbot 未做任何变更（这是正常结果，不是失败）"
+    else:
+        why = after_why or before_why or "证书到期日清单读不到"
+        summary = (f"certbot 退出码 0，但面板没能确认到期清单（{why}），"
+                   "无法断定这次到底续到了没有——请看站点页证书清单，或手动跑 `certbot certificates` 核对")
     return {
         "log": r["out"],
         "renewed": renewed,
         "unchanged": sorted(set(after) - set(renewed)),
         "reloaded": reloaded,
-        "summary": (
-            f"已续期 {len(renewed)} 张：" + "、".join(renewed) + ("，nginx 已重载" if reloaded else "，nginx 重载失败")
-            if renewed else "没有证书到期，certbot 未做任何变更（这是正常结果，不是失败）"
-        ),
+        "confirmed": confirmed,
+        "summary": summary,
     }
 
 

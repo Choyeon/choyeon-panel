@@ -411,11 +411,11 @@ class TestRenewEndpoint(unittest.TestCase):
         self.assertIn("panel-demo.conf", body)
         self.assertIn("校验", body)
 
-    def test_success_masks_paths_and_audits_only_the_name(self):
+    def test_success_masks_paths_and_audits_the_conclusion(self):
         async def _ok():
             return {
                 "log": "Certificate not yet due for renewal; log at /var/log/letsencrypt/letsencrypt.log",
-                "renewed": [], "unchanged": ["a.example.com"], "reloaded": False,
+                "renewed": [], "unchanged": ["a.example.com"], "reloaded": False, "confirmed": True,
                 "summary": "没有证书到期，certbot 未做任何变更（这是正常结果，不是失败）",
             }
 
@@ -427,7 +427,12 @@ class TestRenewEndpoint(unittest.TestCase):
         # 接口必须把"到底续到了没有"一起带回去，只回 ok 会让界面把空操作说成已续期
         self.assertIn("没有证书到期", r["summary"])
         self.assertEqual(r["renewed"], [])
-        audit_stub.assert_called_once_with("renew_tester", "site:renew", "a.example.com")
+        self.assertIs(r["confirmed"], True)
+        # 审计带结论：另一个续期入口记的就是 summary，这里只记名字的话
+        # 事后翻审计分不出"续到了 / 没到期 / 清单没读到"
+        called = audit_stub.call_args.args[2]
+        self.assertIn("a.example.com", called)
+        self.assertIn("没有证书到期", called)
 
 
 class TestVhostDelegation(unittest.TestCase):

@@ -206,29 +206,36 @@ async def _from_openssl(now: datetime, threshold: int) -> tuple[list | None, str
 
 async def list_certs(now: datetime | None = None, threshold: int | None = None) -> dict:
     """返回 {"certs": [...], "source": "certbot|openssl|none", "reason": str|None,
-    "expiring_days": int}。
+    "expiring_days": int, "confirmable": bool}。
 
     `expiring_days` 就是这批证书被判"即将到期"用的那条线（来自 `alert_ssl_days`），
     随载荷一起给出去，页面才不用再自己抄一个数字、也不用猜后端按什么判的。
+
+    `confirmable` 把"certs 为空"这件事分成两档，供调用方区分「确认本机没有证书」与
+    「根本读不出来」：只要拿到清单、或两个读者都跑通而确实为空，就是 True；只有 certbot
+    不可用、退化路径也给不出清单时才是 False。空清单本身不再冒充一条机器级否定结论——
+    续期一类的调用要读它，才不至于把"读不到"说成"没有证书到期，这是正常结果"。
     """
     ref = now or datetime.now(UTC)
     line = setting_int("alert_ssl_days") if threshold is None else threshold
     certbot_certs, certbot_reason = await _from_certbot(ref, line)
     if certbot_certs:
-        return {"certs": certbot_certs, "source": "certbot", "reason": None, "expiring_days": line}
+        return {"certs": certbot_certs, "source": "certbot", "reason": None,
+                "expiring_days": line, "confirmable": True}
 
     live_certs, live_reason = await _from_openssl(ref, line)
     if live_certs:
         # certbot 不在也能给出准确清单，但口径变了（没有 lineage 之外的元数据），reason 要带回去
-        return {"certs": live_certs, "source": "openssl", "reason": certbot_reason, "expiring_days": line}
+        return {"certs": live_certs, "source": "openssl", "reason": certbot_reason,
+                "expiring_days": line, "confirmable": True}
 
     if certbot_reason is None and live_reason is None:
-        return {"certs": [], "source": "none", "expiring_days": line,
+        return {"certs": [], "source": "none", "expiring_days": line, "confirmable": True,
                 "reason": "本机没有证书（certbot 与证书目录都为空）"}
     if certbot_reason is None:
-        return {"certs": [], "source": "certbot", "expiring_days": line,
+        return {"certs": [], "source": "certbot", "expiring_days": line, "confirmable": True,
                 "reason": "certbot 报告本机没有证书"}
-    return {"certs": [], "source": "none", "expiring_days": line,
+    return {"certs": [], "source": "none", "expiring_days": line, "confirmable": False,
             "reason": f"{certbot_reason}；{live_reason or '证书目录为空'}"}
 
 

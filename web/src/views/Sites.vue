@@ -190,7 +190,10 @@ async function renew(c: any) {
     // 「续期已执行」不等于「续到了」：certbot 对未到期的证书同样正常退出，
     // 结论取后端按到期日变化算出来的 summary。
     renewSummary.value = r.summary || '';
-    if (r.reloaded === false && r.renewed?.length) msg.warning(`${r.summary}（nginx 重载失败，请手动 reload）`);
+    // confirmed=false 是后端没能读到期日清单（certbot 不可用 / 证书目录读不动），
+    // 这次既没证明续到、也没证明「没到期」，绝不能按成功绿字弹出（批次98）。
+    if (r.confirmed === false) msg.warning(`${r.summary}（别当作续期成功，请先核对证书清单）`, { duration: 8000 });
+    else if (r.reloaded === false && r.renewed?.length) msg.warning(`${r.summary}（nginx 重载失败，请手动 reload）`);
     else msg.success(r.summary || 'certbot 已执行');
     loadCerts();
   } catch (e: any) {
@@ -870,7 +873,7 @@ onMounted(refresh);
         <NAlert v-if="certsInfo.source === 'openssl'" type="info" :bordered="false" size="small">
           本机没有可用的 certbot，以下清单由 openssl 直接读取证书文件得到（{{ certsInfo.reason }}）。
         </NAlert>
-        <NAlert v-else-if="certsInfo.source === 'none'" type="error" :bordered="false" size="small">
+        <NAlert v-else-if="certsInfo.confirmable !== true" type="error" :bordered="false" size="small">
           证书清单不可用：{{ certsInfo.reason }}。此处不伪造到期信息。
         </NAlert>
 
@@ -892,7 +895,7 @@ onMounted(refresh);
           :row-key="(c: any) => c.name"
         >
           <template #empty>
-            <EmptyBox :text="certsInfo.source === 'none' ? '读不到任何证书，原因见上方提示' : '本机目前没有证书；为应用申请 HTTPS 后这里会出现到期与续期信息'" />
+            <EmptyBox :text="certsInfo.confirmable === true ? '本机目前没有证书；为应用申请 HTTPS 后这里会出现到期与续期信息' : '读不到任何证书，原因见上方提示'" />
           </template>
         </NDataTable>
 

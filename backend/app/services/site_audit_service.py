@@ -65,8 +65,11 @@ def _listen_state(exp: dict) -> tuple[bool, set[int], str]:
 def _cert_state(certs: dict) -> tuple[bool, set[str], str]:
     """证书覆盖到的域名集合，以及这份清单到底读没读到。
 
-    `source == "none"` 是 certbot 与证书目录都给不出东西（读不到），此时不能判某个域名缺证书；
-    `certbot`/`openssl` 给出的空清单是确认的「本机没有证书」，照判。
+    判据读 `list_certs()` 的 `confirmable`（批次98 定下的唯一出处），不在这里从
+    `source` 字符串重推第二次：`source == "none"` 有两种含义——两个读者都跑不通（读不到），
+    以及两个读者都跑通而本机确实一张证书都没有（已确认没有）。旧写法把后者也当成前者，
+    于是「certbot 正常、本机没有证书」的机器上，链路对账说「证书清单这一轮读不到，判不了」，
+    续期那边却说「没有证书到期，这是正常结果」——同一份清单两种说法。
     """
     covered: set[str] = set()
     for c in certs.get("certs") or []:
@@ -74,9 +77,9 @@ def _cert_state(certs: dict) -> tuple[bool, set[str], str]:
             n = str(d).strip().lower()
             if n:
                 covered.add(n)
-    if (certs.get("source") or "none") == "none":
-        return False, covered, certs.get("reason") or "证书清单读不到"
-    return True, covered, ""
+    if certs.get("confirmable"):
+        return True, covered, ""
+    return False, covered, certs.get("reason") or "证书清单读不到"
 
 
 def _apps_of(link_domains: list[str], attributed: dict[str, dict]) -> str | None:

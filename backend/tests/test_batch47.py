@@ -45,9 +45,15 @@ def _exp(ports=(80, 443, 3000), ss_ok=True, capped=False):
     return {"ports": [{"port": p} for p in ports], "ss_available": ss_ok, "ports_capped": capped}
 
 
-def _certs(domains=("a.com",), source="certbot", reason=""):
-    return {"certs": [{"domains": list(domains)}] if source != "none" else [],
-            "source": source, "reason": reason}
+def _certs(domains=("a.com",), source="certbot", reason="", confirmable=None):
+    """`list_certs()` 的载荷形状。`confirmable` 是「空清单到底可信不可信」的判据，
+    由 list_certs 自己给（批次98），链路对账只读它、不再从 source 重推。
+    这里按真实规律给默认值：有行或来源不是 none = 这次读到了东西（含确认没有）。
+    """
+    rows = [{"domains": list(domains)}] if source != "none" else []
+    if confirmable is None:
+        confirmable = bool(rows) or source != "none"
+    return {"certs": rows, "source": source, "reason": reason, "confirmable": confirmable}
 
 
 def _cfg(name, *, doms=(), listen=(80, 443), ssl=True, targets=(), redirect=True):
@@ -183,12 +189,25 @@ class CertIsCoverageOnly(unittest.TestCase):
         self.assertEqual(_ids(p, SEV_WARN), ["cert-unknown"])
 
     def test_confirmed_empty_list_is_a_real_gap(self):
-        """source 有值而清单为空 = 本机确实没有证书，这要照判，不能混进「读不到」。"""
+        """清单为空但 list_certs 确认过这次读到了 = 本机确实没有证书，这要照判，不能混进「读不到」。"""
         p = _build([_cfg("a.conf", doms=["a.com"])],
                    apps=[{"name": "api", "port": None, "domain": "a.com"}],
-                   certs={"certs": [], "source": "openssl", "reason": ""})
+                   certs={"certs": [], "source": "openssl", "reason": "", "confirmable": True})
         self.assertTrue(p["certs"]["ok"])
         self.assertIn("cert-coverage", _ids(p))
+
+    def test_source_none_but_confirmed_still_accuses(self):
+        """两个读者都跑通、certbot 一个 lineage 都没有时 source 也是 none。
+
+        这一档旧实现只看 source，把「确认本机没有证书」说成「这一轮读不到、判不了」，
+        于是同一个事实：证书页与续期接口说「没有证书到期，正常」，链路对账说「没查」。
+        """
+        p = _build([_cfg("a.conf", doms=["a.com"])],
+                   apps=[{"name": "api", "port": None, "domain": "a.com"}],
+                   certs=_certs(source="none", confirmable=True, reason="本机没有证书"))
+        self.assertTrue(p["certs"]["ok"])
+        self.assertIn("cert-coverage", _ids(p))
+        self.assertNotIn("cert-unknown", _ids(p))
 
     def test_plain_http_site_is_not_checked_for_cert(self):
         p = _build([_cfg("a.conf", doms=["a.com"], ssl=False, listen=(80,))],

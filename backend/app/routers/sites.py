@@ -254,7 +254,10 @@ async def ssl_renew(name: str, req: Request):
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": _cmd_error(e)})
     # 审计写在执行之后：续期失败也先记一条"已续期"，事后无法区分成功与失败
-    await aio_db.audit(req.state.cp_sub, "site:renew", name)
+    # detail 除了 name（是谁为哪张证书点的按钮）还带上这次结论：另一个续期入口
+    # （/api/system/certbot-renew）记的就是 summary，两边都只记名字的话，
+    # 事后翻审计仍然分不清这一次是"续到了"、"没到期"还是"清单根本没读到"。
+    await aio_db.audit(req.state.cp_sub, "site:renew", f"{name}：{res['summary']}")
     # summary/renewed 说明"这次到底续到了没有"：certbot 对没到期的证书同样返回 0，
     # 只回一句"续期已执行"用户会以为证书换新了，实际上什么都没发生。
     return {
@@ -263,4 +266,7 @@ async def ssl_renew(name: str, req: Request):
         "summary": res["summary"],
         "renewed": res["renewed"],
         "reloaded": res["reloaded"],
+        # 与 certbot-renew 接口同一字段：False 说明这次是"没读到清单"而非"确实没到期"，
+        # summary 已如实改写，这里再把判据原样带出去，别让两个续期入口对同一事实各说各话。
+        "confirmed": res.get("confirmed", True),
     }
