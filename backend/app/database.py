@@ -270,6 +270,48 @@ def execute(sql: str, params=()):
         return cur.lastrowid
 
 
+def execute_many(stmts: list[tuple[str, tuple]]) -> None:
+    """多条写语句走同一事务：要么全部生效，要么一条都没写进去。
+
+    `execute()` 每条都自己 commit，端点里连写两三列就会在中间失败（口令哈希那条撞了
+    磁盘满、库被别的进程锁到超时）时留下"role 已经是 admin、pass_hash 还是旧的"这种
+    半套状态：接口返回 500，审计一条没记，管理员以为没改成，重放一次又可能只补上后半截。
+    """
+    if not stmts:
+        return
+    with _lock:
+        try:
+            for sql, params in stmts:
+                conn.execute(sql, params)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+# settings 的 upsert 只写这一处：单条与批量共用，避免批量版偷偷换了冲突语义。
+_UPSERT_SETTING = "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+
+
+def set_setting(key: str, value) -> None:
+    set_settings({key: value})
+
+
+def set_settings(pairs: dict) -> None:
+    """一次事务写完多个 settings 键，写完统一失效认证缓存。
+
+    逐个 `set_setting` 是"一半新一半旧"的来源：告警通道一次保存 smtp_host + smtp_user +
+    smtp_to，第二条失败时第一条已经落库，下一条巡检就按"新地址 + 旧口令"发通知（发不出去
+    也发），而那次请求是 500、审计里查不到任何变更。
+    """
+    if not pairs:
+        return
+    with _lock:
+        execute_many([(_UPSERT_SETTING, (k, "" if v is None else str(v))) for k, v in pairs.items()])
+        for key in pairs:
+            _auth_cache.pop(key, None)
+
+
 def create_first_admin(username: str, pw_hash: str) -> str:
     """setup 唯一的写库入口：在同一把锁里确认「users 表为空」并落库。
 
@@ -324,15 +366,6 @@ def set_totp(username: str, secret: str) -> int:
 def _read_setting(key: str) -> str | None:
     row = query_one("SELECT value FROM settings WHERE key=?", (key,))
     return row["value"] if row and row["value"] is not None else None
-
-
-def set_setting(key: str, value) -> None:
-    execute(
-        "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, "" if value is None else str(value)),
-    )
-    with _lock:
-        _auth_cache.pop(key, None)
 
 
 # 删不得的键：token_epoch[:<用户>] 是 token 吊销墓碑，删掉它同名重建的用户会让上一个

@@ -1058,9 +1058,12 @@ async def delete_app(app_id: int, purge: bool, actor: str = "system"):
         await remove_env_link(app)
         if app.get("domain"):
             await nginx_ops.remove_vhost(app["name"])
-        dbm.execute("DELETE FROM apps WHERE id=?", (app_id,))
-        # 部署记录只属于这个应用，删掉应用后没有任何入口能读到它们（含完整日志文本）。
-        dbm.execute("DELETE FROM deployments WHERE app_id=?", (app_id,))
+        # 两条 DELETE 同一事务：应用记录删了而部署记录删失败，剩下的孤儿行带着完整日志
+        # 文本、没有任何入口能读到，也没有任何入口能再删它们（都按 app_id 关联）。
+        await aio_db.execute_many([
+            ("DELETE FROM apps WHERE id=?", (app_id,)),
+            ("DELETE FROM deployments WHERE app_id=?", (app_id,)),
+        ])
         # 告警标记的键名里带应用名，不跟着删就挂在一个不存在的对象上，
         # 而且同名新建的应用会直接继承（见 alerts_service.forget_app）。
         from . import alerts_service

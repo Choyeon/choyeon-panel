@@ -440,12 +440,14 @@ async def update_profile(req: Request):
     body = await _json_body(req)
     nickname = body.get("nickname")
     avatar = body.get("avatar")
+    stmts = []
     if nickname is not None:
-        nickname = str(nickname).strip()[:32]
-        dbm.execute("UPDATE users SET nickname=? WHERE id=?", (nickname, me["id"]))
+        stmts.append(("UPDATE users SET nickname=? WHERE id=?", (str(nickname).strip()[:32], me["id"])))
     if avatar is not None:
-        avatar = str(avatar).strip()[:256]
-        dbm.execute("UPDATE users SET avatar=? WHERE id=?", (avatar, me["id"]))
+        stmts.append(("UPDATE users SET avatar=? WHERE id=?", (str(avatar).strip()[:256], me["id"])))
+    # 一次事务：昵称与头像是一次保存的两个字段，逐条写会留下"名字换了、头像还是旧的"
+    # 而请求已经 500，用户在页面上看到的就是"改了一半"，重放第二次才可能补齐。
+    await aio_db.execute_many(stmts)
     await aio_db.audit(req.state.cp_sub, "profile:update")
     updated = dbm.query_one("SELECT nickname,avatar FROM users WHERE id=?", (me["id"],))
     return {"ok": True, "nickname": updated["nickname"], "avatar": updated["avatar"]}

@@ -22,5 +22,13 @@ async def execute(sql: str, params=()):
     return await run_in_threadpool(dbm.execute, sql, params)
 
 
+async def execute_many(stmts):
+    return await run_in_threadpool(dbm.execute_many, stmts)
+
+
+async def set_settings(pairs: dict):
+    return await run_in_threadpool(dbm.set_settings, pairs)
+
+
 async def audit(username, action: str, detail=None) -> None:
     return await run_in_threadpool(dbm.audit, username, action, detail)

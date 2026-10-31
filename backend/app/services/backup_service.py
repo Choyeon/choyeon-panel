@@ -13,7 +13,7 @@ from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
 
-from .. import backup_runner, config, locks
+from .. import aio_db, backup_runner, config, locks
 from .. import database as dbm
 from ..log import warn
 from ..util import (
@@ -505,12 +505,14 @@ async def delete_backup(bid: int):
         if os.path.exists(f):
             os.unlink(f)
     await run("systemctl", ["daemon-reload"])
-    dbm.execute("DELETE FROM backups WHERE id=?", (bid,))
-    # 推送台账跟着删：任务没了，这些行既不会被 `already_pushed` 再查到（它按任务取产物名），
-    # 又会让异地目标的 `pushed_count` 一直虚高——用户看到的是"这个目标推过 40 份"，
-    # 而目录里那条任务已经不存在，谁都无从核对。**远端的对象一个都不删**：
-    # 删配置不等于删数据，这一点和 delete_target 是同一条规矩。
-    dbm.execute("DELETE FROM backup_pushes WHERE backup_id=?", (bid,))
+    # 任务行与它的推送台账同一事务：只删掉任务而台账删失败，这些行既不会被
+    # `already_pushed` 再查到（它按任务取产物名），又会让异地目标的 `pushed_count`
+    # 一直虚高——用户看到"这个目标推过 40 份"，而目录里那条任务已经不存在，谁都无从核对。
+    # **远端的对象一个都不删**：删配置不等于删数据，这一点和 delete_target 是同一条规矩。
+    await aio_db.execute_many([
+        ("DELETE FROM backups WHERE id=?", (bid,)),
+        ("DELETE FROM backup_pushes WHERE backup_id=?", (bid,)),
+    ])
     # 告警标记跟着清（见 alerts_service.forget_backup）：巡检按 `backup:<id>` 编 code，
     # 任务删了这两个键就再没人读。局部导入是必须的——alerts_service 顶部就 import 了本模块。
     from . import alerts_service

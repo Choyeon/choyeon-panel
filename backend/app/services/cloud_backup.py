@@ -293,8 +293,12 @@ def delete_target(tid: int) -> dict:
     if not dbm.query_one("SELECT id FROM cloud_targets WHERE id=?", (int(tid),)):
         raise RuntimeError(f"异地目标 {tid} 不存在")
     n = dbm.query_one("SELECT COUNT(*) c FROM backup_pushes WHERE target_id=?", (int(tid),))
-    dbm.execute("DELETE FROM backup_pushes WHERE target_id=?", (int(tid),))
-    dbm.execute("DELETE FROM cloud_targets WHERE id=?", (int(tid),))
+    # 台账与目标同一事务：先删台账后删目标若第二条失败，目标照旧在列表里、
+    # 却已经"从没推过任何东西"，而 records_dropped 那句承诺也一并落空。
+    dbm.execute_many([
+        ("DELETE FROM backup_pushes WHERE target_id=?", (int(tid),)),
+        ("DELETE FROM cloud_targets WHERE id=?", (int(tid),)),
+    ])
     return {"ok": True, "id": int(tid), "records_dropped": int((n or {}).get("c") or 0)}
 
 

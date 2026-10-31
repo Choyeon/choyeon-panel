@@ -140,14 +140,17 @@ async def users_update(uid: str, req: Request):
         await aio_db.audit(req.state.cp_sub, "user:update", f"{u['username']}(无变更)")
         return {"ok": True}
 
-    if new_role is not None:
-        dbm.execute("UPDATE users SET role=? WHERE id=?", (new_role, u["id"]))
-    if new_hash is not None:
-        dbm.execute("UPDATE users SET pass_hash=? WHERE id=?", (new_hash, u["id"]))
-    if new_nickname is not None:
-        dbm.execute("UPDATE users SET nickname=? WHERE id=?", (new_nickname, u["id"]))
-    if new_avatar is not None:
-        dbm.execute("UPDATE users SET avatar=? WHERE id=?", (new_avatar, u["id"]))
+    # 四个字段一次事务：逐条 execute 每条自己 commit，中途失败（库被别的进程锁到超时、
+    # 磁盘满）就留下"角色已经升成 admin、口令还是旧的"这种半套状态——请求是 500、审计
+    # 一条不记，管理员以为没改成，而库里那个人确实已经被降权/提权了一半。
+    await aio_db.execute_many([
+        (sql, (val, u["id"])) for sql, val in (
+            ("UPDATE users SET role=? WHERE id=?", new_role),
+            ("UPDATE users SET pass_hash=? WHERE id=?", new_hash),
+            ("UPDATE users SET nickname=? WHERE id=?", new_nickname),
+            ("UPDATE users SET avatar=? WHERE id=?", new_avatar),
+        ) if val is not None
+    ])
     # role 与 password 都只存在于已签发的 token 里（中间件读的是 token 的 role，
     # 不是库里的），改完必须吊销旧 token，否则把 admin 降成 viewer 后
     # 对方手上的旧 token 在 TTL 内（最长 72h）依旧是 admin——连写操作都拦不住（实测）。
@@ -278,8 +281,9 @@ async def alerts_save(req: Request):
         # 校验不过时一个字段都没写，也就没有"变更"可记。旧写法先落一条
         # settings:alerts 审计再返回 400，事后翻审计会以为配置真的改过。
         return JSONResponse(status_code=400, content={"error": "；".join(errors), "code": "bad_input"})
-    for k, val in accepted.items():
-        dbm.set_setting(k, val)
+    # 校验过了也不等于原子：逐条 set_setting 每条自己 commit，第二条撞库锁时第一条已经
+    # 落库，下一轮巡检就按"新 SMTP 地址 + 旧口令"发通知。整批走同一事务。
+    await aio_db.set_settings(accepted)
     await aio_db.audit(req.state.cp_sub, "settings:alerts", ",".join(accepted.keys()) or "-")
     return {"ok": True}
 
