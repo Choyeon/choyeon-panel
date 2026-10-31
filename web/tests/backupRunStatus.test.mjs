@@ -64,7 +64,8 @@ test('两页把「未执行」写在同一列，结论列只放执行器的 toke
   const cronCell = cron.slice(cron.indexOf('function statusTag'), cron.indexOf('const cols'));
   assert.match(cronCell, /if \(!s\) return h\('span', \{ class: 'cell-sub' \}, '—'\);/,
     '定时任务页的结果格要写破折号，"从没跑过"归时间列说');
-  assert.match(cronCell, /:\s*'未执行';/, '定时任务页的时间格要显式写未执行');
+  assert.match(cronCell, /: \(why \? UNKNOWN_LABEL : '未执行'\);/,
+    '定时任务页的时间格要显式写未执行（批次106 起：systemctl 读不到时先写「未读到」，两者都不是空白）');
   // 着色档位也得同源：两页各判一次，迟早变成「这页红、那页橙」
   const TYPE = "const type = s === 'ok' ? 'success' : s === 'timeout' ? 'error' : 'warning';";
   assert.ok(script.includes(TYPE), '备份页按 ok / timeout / 其它三档着色');

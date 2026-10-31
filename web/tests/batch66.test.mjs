@@ -29,9 +29,11 @@ test('CronTasks.vue 引入 useMessage 并给新建/编辑/执行/启停都补成
   // 保存：区分新建与编辑，都带上任务名
   const save = fnBody(s, 'save');
   assert.match(save, /msg\.success\(editing\.value \? `任务「\$\{body\.name\}」已更新` : `任务「\$\{body\.name\}」已创建`\)/);
-  // 手动执行：把这一轮的结论（ok/timeout/exit N）直接说出口，不用点开抽屉
+  // 手动执行：把这一轮的结论（ok/timeout/exit N）直接说出口，不用点开抽屉。
+  // 批次106 起这句话先存进 done，重叠闸读不到时同文改走 msg.warning —— 回执的内容没变。
   const run = fnBody(s, 'runNow');
-  assert.match(run, /msg\.success\(`「\$\{r\.name\}」执行完成：\$\{res\?\.status \|\| '已运行'\}`\)/);
+  assert.match(run, /const done = `「\$\{r\.name\}」执行完成：\$\{res\?\.status \|\| '已运行'\}`/);
+  assert.match(run, /msg\.success\(done\)/);
   // 启停开关
   const tg = fnBody(s, 'toggle');
   assert.match(tg, /msg\.success\(val \? `「\$\{r\.name\}」已启用` : `「\$\{r\.name\}」已停用`\)/);

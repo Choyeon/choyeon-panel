@@ -145,3 +145,17 @@ export function uncheckedNote(list?: string[]): string {
   const more = list.length > 3 ? `；另有 ${list.length - 3} 节详见面板日志` : '';
   return `本轮有 ${list.length} 节没查成：${head}${more}`;
 }
+
+/**
+ * 「这一项本轮读不到」的说法只有一个出处：定时任务页的 Timer 列、上次执行列和
+ * 输出抽屉都要说它，三处各写一遍迟早只剩一处转述。
+ *
+ * 后端给的是原因（`systemctl 退出码 …：…`），不是结论——结论必须由这里说出来：
+ * 读不到不等于「定时器没挂」，也不等于「从没执行过」。
+ */
+export function unknownNote(what: string, why?: string): string {
+  return why ? `${what}本轮读不到：${why}` : `${what}本轮读不到`;
+}
+
+/** 上面那句用在 title/说明行；格子里放不下，第三态的短名也只有一个。 */
+export const UNKNOWN_LABEL = '未读到';

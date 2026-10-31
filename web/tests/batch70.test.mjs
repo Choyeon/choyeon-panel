@@ -32,7 +32,8 @@ test('CronTasks.runNow 与 openLog 共用 logSeq，迟到的执行结果不覆�
   assert.match(run, /catch \(e: any\) \{\s*if \(seq !== logSeq\) return;\s*err\.value = e\.message/,
     'catch 缺迟到守卫');
   // 回执 toast 仍在（执行确实完成了，只是不再乱动抽屉）
-  assert.match(run, /msg\.success\(`「\$\{r\.name\}」执行完成/);
+  assert.match(run, /const done = `「\$\{r\.name\}」执行完成/, '回执里没有任务名或这一轮的结论');
+  assert.match(run, /msg\.success\(done\)/, '回执 toast 不在了');
 });
 
 test('Sites.openConfig 用 cfgSeq 守卫，迟到的 A 不覆盖当前 B 也不关掉它的弹窗', () => {

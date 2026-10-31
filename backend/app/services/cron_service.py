@@ -542,13 +542,20 @@ def _row_out(row: dict) -> dict:
 async def list_tasks() -> list[dict]:
     rows = await aio_db.query("SELECT * FROM cron_task ORDER BY id")
     items = [_row_out(r) for r in rows]
-    states = await _timer_states([i["timer"] for i in items])
-    results = await _unit_results([_unit_base(i["id"]) for i in items])
+    unread: list[str] = []
+    states = await _timer_states([i["timer"] for i in items], unread)
+    results = await _unit_results([_unit_base(i["id"]) for i in items], unread)
+    #  systemctl 整轮没答上来时，两份读表都是空的——那不能写成「没挂表」「没执行」。
+    # 原因挂在行上而不是另开一个接口字段：这一列本来就是逐行渲染的，而列里那颗点
+    # 只能表达"是/否"，第三态必须带上它为什么是第三态。
+    why = "；".join(dict.fromkeys(unread))
     for i in items:
         st = states.get(i["timer"]) or {}
         i["timer_active"] = bool(st.get("active", False))
         i["timer_next"] = st.get("next", "")
         i["timer_unit_state"] = st.get("enabled", "")
+        if why:
+            i["systemd_unknown"] = why
         _merge_last_run(i, results.get(_unit_base(i["id"])) or {})
     return items
 
@@ -603,7 +610,27 @@ def _exec_result(block: dict) -> str:
     return f"result {result or 'failed'}"
 
 
-async def _unit_results(bases: list[str]) -> dict[str, dict]:
+def _show_unread(r: dict, what: str, sink: list[str] | None) -> None:
+    """systemctl 没答上来：既写面板日志，也把原因交给正在收集这一轮的那份清单。
+
+    「退出码非 0」和「unit 存在但没挂表」是两件事。前者过去被当成后者：没有 systemd
+    / dbus 连不上 / 非 root / 超时时 `show` 输出一片空白，解析结果与「查过，确实没挂」
+    完全相同，于是启用中的任务被写死成「未挂表」「未执行」——面板替 systemd 说了
+    一句它根本没说的话。
+
+    交给清单的只有原因本身（`systemctl 退出码 …：…`），「什么读不到」由界面上那一句
+    包住：同一件事在定时器列、上次执行列和输出抽屉三处要说，措辞只能有一个出处。
+
+    空白压平是因为 systemctl 的答复通常有两行（「本机不是 systemd 启动的」＋
+    「Failed to connect to bus」），按原样截断只会留下第一行，而那行往往不指向真正的坑。
+    """
+    reason = f"systemctl 退出码 {r['code']}：{' '.join((r['out'] or '').split())[:120]}"
+    warn(f"定时任务{what}读不到（{reason}）")
+    if sink is not None:
+        sink.append(reason)
+
+
+async def _unit_results(bases: list[str], unreadable: list[str] | None = None) -> dict[str, dict]:
     """每个 panel-cron-N.service 最近一次执行的时间/退出码/是否正在跑。"""
     if not bases:
         return {}
@@ -613,6 +640,9 @@ async def _unit_results(bases: list[str]) -> dict[str, dict]:
          "-p", "ExecMainStatus", "-p", "Result", *[f"{b}.service" for b in bases]],
         timeout=PROBE_TIMEOUT,
     )
+    if r["code"] != 0:
+        _show_unread(r, "执行记录", unreadable)
+        return {}
     out: dict[str, dict] = {}
     for block in _parse_show(r["out"]):
         uid = block.get("Id", "")
@@ -632,8 +662,13 @@ async def _unit_results(bases: list[str]) -> dict[str, dict]:
     return out
 
 
-async def _timer_states(units: list[str]) -> dict:
-    """systemctl show 批量取 timer 状态；unit 不存在或本机没有 systemd 时按未知处理。
+async def _timer_states(units: list[str], unreadable: list[str] | None = None) -> dict:
+    """systemctl show 批量取 timer 状态。
+
+    本机没有 systemd / dbus 连不上 / 超时时，这一节**不是**「查过，定时器没挂」：
+    退出码非 0 会把原因交给调用方收集（`unreadable`），列表行于是显示「未读到」，
+    而不是替 systemd 断言一个否定。unit 真的不存在时 systemctl 仍返回 0，
+    那种情况照旧按「没挂表」显示——那是一次成功的查询。
 
     属性名用 NextElapseUSecRealtime（systemd 的真实属性名；`NextElapsedUSec` 取不到值，
     照抄只会得到一个永远空白的"下次执行"列）。
@@ -645,6 +680,9 @@ async def _timer_states(units: list[str]) -> dict:
         ["show", "-p", "Id", "-p", "ActiveState", "-p", "UnitFileState", "-p", "NextElapseUSecRealtime", *units],
         timeout=PROBE_TIMEOUT,
     )
+    if r["code"] != 0:
+        _show_unread(r, "定时器状态", unreadable)
+        return {}
     out: dict[str, dict] = {}
     for block in _parse_show(r["out"]):
         uid = block.get("Id", "")
@@ -671,10 +709,15 @@ async def run_log(tid: int) -> dict:
     if not row:
         raise NotFound("定时任务不存在")
     base = _unit_base(tid)
-    res = (await _unit_results([base])).get(base) or {}
+    unread: list[str] = []
+    res = (await _unit_results([base], unread)).get(base) or {}
     stored = {"unit": f"{base}.service", "source": "stored", "start": row["last_run"] or "",
               "status": row["last_status"] or "", "running": bool(res.get("running")),
               "log": redact_creds(row["log_tail"] or "")}
+    if unread:
+        # 退到库里这一份要说清是"退"：否则界面把面板记的那次当成这台机器上唯一的一次，
+        # 而 timer 那一轮（很可能才是失败的那一轮）此刻只是读不到。
+        stored["systemd_unknown"] = "；".join(dict.fromkeys(unread))
     if not res.get("start") or (row["last_run"] or "") >= res["start"]:
         return stored
     args = ["-u", f"{base}.service", "--no-pager", "-o", "cat", "-n", "400", "--since", res["start"]]
@@ -774,7 +817,10 @@ async def run_now(tid: int, actor: str = "system") -> dict:
     # 两道闸各挡一种重叠：systemd 那条挡"timer 正在跑这一轮"，文件锁挡"两个管理员同时点"。
     # 重叠跑 `choyeonctl backup run` 会写出两份备份、pg_dump 会互相挤，出错的还是数据库。
     base = _unit_base(tid)
-    if (await _unit_results([base])).get(base, {}).get("running"):
+    unread: list[str] = []
+    # 这道闸读不到时不能假装它过去了：文件锁只挡得住面板自己发起的并发，
+    # timer 那一轮不经过面板。回答里带上原因，界面就不会说成「确认没有重叠」。
+    if (await _unit_results([base], unread)).get(base, {}).get("running"):
         raise BadInput("定时器正在执行这个任务，请等这一轮结束后再手动执行")
     lock = _lock_path(tid)
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -785,7 +831,10 @@ async def run_now(tid: int, actor: str = "system") -> dict:
         os.close(fd)
         raise BadInput("这个任务正在执行中（上一次还没跑完），请等它结束") from None
     try:
-        return await _exec_task(tid, row, argv, actor)
+        out = await _exec_task(tid, row, argv, actor)
+        if unread:
+            out["systemd_unknown"] = "；".join(dict.fromkeys(unread))
+        return out
     finally:
         os.close(fd)  # 关描述符即释放锁
 

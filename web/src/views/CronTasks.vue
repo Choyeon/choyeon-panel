@@ -3,7 +3,7 @@ import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   NAlert, NCard, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, NText, useMessage,
 } from 'naive-ui';
-import { NButton, useDrawerWidth } from '../ui';
+import { NButton, UNKNOWN_LABEL, unknownNote, useDrawerWidth } from '../ui';
 import { req, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useVisiblePoll } from '../composables/useVisiblePoll';
@@ -21,8 +21,10 @@ type Task = {
   log_tail: string; cmd: string; human: string; expr_error: boolean; timer: string;
   timer_active: boolean; timer_next: string; timer_unit_state: string; argv_list: string[];
   running: boolean; last_source: string;
+  // systemctl 整轮没答上来时后端给原因（退出码 + 前 80 字）；没有这个键就是真的查到了。
+  systemd_unknown?: string;
 };
-type RunLog = { unit: string; source: string; start: string; status: string; running: boolean; log: string };
+type RunLog = { unit: string; source: string; start: string; status: string; running: boolean; log: string; systemd_unknown?: string };
 type Options = {
   allowed: string[];
   presets: any[];
@@ -273,14 +275,18 @@ async function runNow(r: Task) {
     await reload();
     // 执行结论先说清楚：这一轮到底是 ok、timeout 还是 exit N，用户点完就该知道，
     // 而不是只把输出塞进抽屉、要再点开才看得见。
-    msg.success(`「${r.name}」执行完成：${res?.status || '已运行'}`);
+    // 但「没和定时器那一轮撞上」是后端的 systemd 闸证明的：那道闸本轮读不到时不能说成确认过。
+    const done = `「${r.name}」执行完成：${res?.status || '已运行'}`;
+    const note = res?.systemd_unknown ? unknownNote('重叠保护', res.systemd_unknown) : '';
+    if (note) msg.warning(`${done}，但${note}——定时器这一轮是否同时在跑无法确认`, { duration: 9000 });
+    else msg.success(done);
     if (seq !== logSeq) return;
     // 手动这一轮由面板当场捕获输出，直接放进抽屉，不必再回读 journald（那里没有它）。
     // 开始时间取刷新后的行：run 的响应里没有它，写死空串会让抽屉显示"未执行"。
     const row = rows.value.find((i) => i.id === r.id);
     logData.value = {
       unit: '', source: 'stored', start: row?.last_run || '', status: res?.status || '',
-      running: false, log: res?.log || '',
+      running: false, log: res?.log || '', systemd_unknown: res?.systemd_unknown || '',
     };
     logRow.value = row || r;
   } catch (e: any) {
@@ -364,10 +370,13 @@ function lastRunCell(r: Task) {
   const color = !s ? 'var(--cp-text-mute)' : s === 'ok' ? 'var(--cp-ok)' : 'var(--cp-err)';
   // 来源必须标出来：timer 那一轮的结果是 systemd 报的（退出码来自 unit），面板库里并没有这行
   const src = r.last_source === 'timer' ? '·定时' : r.last_source === 'manual' ? '·手动' : '';
-  const text = r.running ? '执行中…' : r.last_run ? fmtDateTime(r.last_run) + src : '未执行';
+  // systemctl 整轮没答上来时不许写「未执行」：定时器可能天天在跑，只是这一轮读不到。
+  // 库里那次（手动跑过的）照旧显示，但 title 要补上这一侧无法核对。
+  const why = r.systemd_unknown ? unknownNote('执行记录', r.systemd_unknown) : '';
+  const text = r.running ? '执行中…' : r.last_run ? fmtDateTime(r.last_run) + src : (why ? UNKNOWN_LABEL : '未执行');
   return h('div', { class: 'cell-lastrun' }, [
-    h(NIcon, { component: icons[icoName], size: 14, color }),
-    h('span', { class: 'mono-dim cp-prose', title: r.last_run ? `${r.last_run} (本地)${src}` : '' }, text),
+    h(NIcon, { component: icons[icoName], size: 14, color: why && !r.last_run ? 'var(--cp-warn)' : color }),
+    h('span', { class: 'mono-dim cp-prose', title: [r.last_run ? `${r.last_run} (本地)${src}` : '', why].filter(Boolean).join('；') }, text),
   ]);
 }
 
@@ -411,10 +420,17 @@ const cols: any[] = [
     title: 'Timer', key: 'timer', width: 116,
     // 颜色类只有 ok/err/warn/idle 四档（style.css 的 .st/.dot），以前写的 `run` 根本不存在，
     // 「已挂表」于是渲染成无色文字 + 一颗透明点，看起来和"没挂表"一模一样。
-    render: (r: Task) => h('span', { class: `st ${r.timer_active ? 'ok' : 'idle'}`, title: r.timer_next ? `下次：${r.timer_next}` : '下次执行时间未取到' }, [
-      h('span', { class: `dot ${r.timer_active ? 'ok' : 'idle'}` }),
-      r.timer_active ? '已挂表' : (r.enabled ? '未挂表' : '已停用'),
-    ]),
+    // 第三档是这批补的：systemctl 没答上来时既不能点绿也不能断言「未挂表」——那是替 systemd
+    // 说了一句它根本没说的话，而启用中的任务被这样标出来，管理员会去重建一个本来就在跑的表。
+    render: (r: Task) => r.systemd_unknown
+      ? h('span', { class: 'st warn', title: unknownNote('定时器状态', r.systemd_unknown) }, [
+          h('span', { class: 'dot warn' }),
+          UNKNOWN_LABEL,
+        ])
+      : h('span', { class: `st ${r.timer_active ? 'ok' : 'idle'}`, title: r.timer_next ? `下次：${r.timer_next}` : '下次执行时间未取到' }, [
+          h('span', { class: `dot ${r.timer_active ? 'ok' : 'idle'}` }),
+          r.timer_active ? '已挂表' : (r.enabled ? '未挂表' : '已停用'),
+        ]),
   },
   { title: '上次执行', key: 'last_run', width: 180, render: lastRunCell },
   { title: '结果', key: 'last_status', width: 96, render: statusTag },
@@ -555,11 +571,16 @@ const cols: any[] = [
         <NSpace vertical :size="10" style="width: 100%">
           <DescriptionsCard
             :items="[
-              { label: '开始时间', value: logData?.start ? fmtDateTime(logData.start) : (logLoading ? '读取中…' : '未执行') },
+              { label: '开始时间', value: logData?.start ? fmtDateTime(logData.start) : (logLoading ? '读取中…' : (logData?.systemd_unknown ? UNKNOWN_LABEL : '未执行')) },
               { label: '状态', value: logStatusText },
               { label: '来源', value: logData?.source === 'journal' ? 'systemd timer（journald）' : logData?.source === 'stored' ? '面板手动执行记录' : '—' },
             ]"
           />
+          <!-- 退到库里那一份是"退"，不是"查过了"：不说的话，界面等于把面板记的那一次
+               当成这台机器上唯一的一次，而 timer 那一轮（常常正是失败的那轮）只是读不到。 -->
+          <NAlert v-if="logData?.systemd_unknown" type="warning" :bordered="false" size="small">
+            {{ unknownNote('systemd 这一侧', logData.systemd_unknown) }}——这里只有面板自己那一份记录，定时器那一轮跑没跑过无法核对。
+          </NAlert>
           <NAlert type="warning" :bordered="false" size="small">服务端已对口令/连接串做脱敏；面板手动执行的记录只保留最后 {{ keepBytes }} 字节，定时器那一轮读的是 journald。</NAlert>
           <pre class="log-view log-drawer">{{ logLoading ? '读取中…' : (logData?.log || '（无输出）') }}</pre>
         </NSpace>
