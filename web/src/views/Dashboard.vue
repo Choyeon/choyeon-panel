@@ -2,7 +2,7 @@
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { NCard, NDropdown, NGrid, NGridItem, NIcon, NSelect, NSpace, NTag, NText } from 'naive-ui';
-import { NButton, UNKNOWN_LABEL, rateNum, rateText } from '../ui';
+import { NButton, UNKNOWN_LABEL, bytesText, rateNum, rateText } from '../ui';
 import { api, getRole, req } from '../api';
 import { icons, icon } from '../icons';
 import { fmtAgo, fmtBytes } from '../composables/useFormat';
@@ -153,7 +153,7 @@ const gauges = computed(() => {
     },
     {
       key: 'mem', label: '内存', percent: memVal.value, text: gaugeText(memVal.value),
-      unit: '%', detail: `${fmtBytes(stat.value.memUsed || 0)} / ${fmtBytes(stat.value.memTotal || 0)}`,
+      unit: '%', detail: `${bytesText(stat.value.memUsed)} / ${bytesText(stat.value.memTotal)}`,
       note: '',
       warn: num(stat.value.memWarnPct), crit: num(stat.value.memCritPct),
     },
@@ -171,7 +171,7 @@ const gauges = computed(() => {
     {
       key: 'disk', label: diskLabel.value, percent: diskVal.value,
       text: diskVal.value == null ? '-' : String(diskVal.value),
-      unit: '%', detail: `${fmtBytes(stat.value.diskUsed || 0)} / ${fmtBytes(stat.value.diskTotal || 0)}`,
+      unit: '%', detail: `${bytesText(stat.value.diskUsed)} / ${bytesText(stat.value.diskTotal)}`,
       note: stat.value.diskPath ? `量自数据目录 ${stat.value.diskPath}` : '',
       warn: num(stat.value.diskWarnPct), crit: num(stat.value.diskCritPct),
     },
@@ -243,12 +243,12 @@ const monChips = computed(() => {
   if (one) {
     return [
       { k: '上行', v: rateText(one.tx) }, { k: '下行', v: rateText(one.rx) },
-      { k: '总发送', v: fmtBytes(one.totalTx || 0) }, { k: '总接收', v: fmtBytes(one.totalRx || 0) },
+      { k: '总发送', v: bytesText(one.totalTx) }, { k: '总接收', v: bytesText(one.totalRx) },
     ];
   }
   return [
     { k: '上行', v: rateText(s.netTx) }, { k: '下行', v: rateText(s.netRx) },
-    { k: '总发送', v: fmtBytes(s.netTotalTx || 0) }, { k: '总接收', v: fmtBytes(s.netTotalRx || 0) },
+    { k: '总发送', v: bytesText(s.netTotalTx) }, { k: '总接收', v: bytesText(s.netTotalRx) },
   ];
 });
 const monNicDown = computed(() => {

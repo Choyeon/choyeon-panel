@@ -220,3 +220,14 @@ export function rateText(v: unknown): string {
   const n = rateNum(v);
   return n === null ? UNKNOWN_LABEL : `${fmtBytes(n)}/s`;
 }
+
+/**
+ * 绝对量（容量、占用、累计字节）一格的读法（批次111）：后端没给这个数就写短名，不许 `|| 0`。
+ *
+ * 速率没有分母时不能写 0（批次108），累计量与容量同理但更隐蔽：`fmtBytes(undefined || 0)` 画出的
+ * 「0 B」在首屏（stats 初值还没到货）与探测失败那两轮都是同一句「这台机器没有内存 / 一个字节也
+ * 没发过」，而同一个仪表圆心已经写着「未读到」——一格两句话。`0` 本身仍是读数（真读到 0 就印 0）。
+ */
+export function bytesText(v: unknown): string {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? fmtBytes(v) : UNKNOWN_LABEL;
+}
