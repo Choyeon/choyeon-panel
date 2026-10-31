@@ -96,9 +96,9 @@ class TestFrontendCell(unittest.TestCase):
         self.assertIn('<template v-else-if="!oomCounterOk">计数没读到</template>', SERVICES_VUE)
 
     def test_the_unknown_comes_before_the_claim(self):
-        unknown = SERVICES_VUE.index('!oomCounterOk">计数没读到')
-        quiet = SERVICES_VUE.index("没有杀过进程")
-        self.assertLess(unknown, quiet, "分支顺序反了就读空时也宣布「没杀过」")
+        chip = SERVICES_VUE[SERVICES_VUE.index("<i>OOM</i>"):]
+        self.assertLess(chip.index('!oomCounterOk">计数没读到'), chip.index("没有杀过进程"),
+                        "分支顺序反了就读空时也宣布「没杀过」")
 
     def test_the_siblings_already_tell_the_same_story(self):
         """同一排 chip 里速率那几格早就如实说「没采到」，OOM 不许例外。"""
