@@ -398,15 +398,21 @@ def _prune(buckets: dict, keep: int) -> int:
     return gone
 
 
-def collect_days(entries: list, days: int) -> dict:
+def collect_days(entries: list, days: int, *, series_total: int | None = None,
+                 series_capped: bool = False, series_unreadable: bool = False) -> dict:
     """按天聚合访问日志，并和"上一个同样长的周期"比一次。
 
     锚点是读到的最新一行那天，不是墙上时钟：站点可能两天没人访问，用今天做窗口
     只会得到一列 0，看上去像统计坏了（和分钟窗口同一个理由）。
     只翻到够覆盖两个周期为止——更老的世代对本次对比没有信息量，读到就停。
     `previous.partial` 说的是"上一周期没有足够依据"（reason：日志没那么长 = history，
-    扫描被封顶或有世代读不到 = clipped），此时不给百分比：
+    扫描被封顶或有世代读不到 = clipped，世代清单压根列不出来 = unreadable），此时不给百分比：
     拿 3 天的量去比 7 天的量，或者拿半份日志去比整份，得出的涨跌都是假的。
+
+    后三个参数由 `web_logs.series_scan()` 给（发现世代与读数是那一份在管，这里只搬运）：
+    `series_total` 是过滤后真正在盘上的世代份数，`entries` 只是被 `MAX_SERIES_FILES`
+    截过的那一段——少了这三个参数，`totalFiles` 就会把 31 报成全部历史，
+    界面于是能写出"读了 31/31 份世代"这种恰好最像读完一句话。
     """
     want = max(1, min(int(days) if days else DAY_LADDER[1], MAX_DAYS))
     buckets: dict = {}
@@ -471,13 +477,20 @@ def collect_days(entries: list, days: int) -> dict:
             break
 
     if anchor is None:
+        # 一份请求行都没读出来有两种截然不同的原因：日志里确实没人来过，和世代清单
+        # 根本列不出来（目录没权限、正被清理）。后者不能报成 no-data——那是在替盘上
+        # 可能存在的历史说"这里什么都没有"。
         return {"days": want, "anchor": "", "from": "", "prevFrom": "", "rows": [],
                 "current": _empty_span(), "previous": {"pv": 0, "uv": 0, "bytes": 0, "days": 0,
-                                                        "partial": True, "reason": "no-data"},
+                                                        "partial": True,
+                                                        "reason": "unreadable" if series_unreadable else "no-data"},
                 "comparable": False, "deltaPvPct": None,
                 "parsed": 0, "malformed": malformed, "outside": outside,
                 "scannedLines": scanned_lines, "scannedFiles": scanned_files,
-                "totalFiles": len(entries), "truncatedFiles": truncated_files,
+                "totalFiles": len(entries) if series_total is None else int(series_total),
+                "seriesTotal": len(entries) if series_total is None else int(series_total),
+                "seriesCapped": bool(series_capped), "seriesUnreadable": bool(series_unreadable),
+                "truncatedFiles": truncated_files,
                 "unreadableFiles": unreadable_files,
                 "bytesScanned": bytes_scanned, "diskBytes": disk_bytes,
                 "historyFrom": "", "uvFloored": False}
@@ -499,11 +512,19 @@ def collect_days(entries: list, days: int) -> dict:
     # 覆盖判断只看"最早读到哪天"：那天晚于 prev_from 就是日志本身没那么长，
     # 中间某天是 0 还是没日志，光看访问日志分不出来，所以这里只认文件边界这一个证据。
     short = history_from is not None and history_from > prev_from
-    clipped = capped or truncated_files > 0 or unreadable_files > 0
-    previous["partial"] = short or clipped
-    # 两个原因同时成立时先说 clipped：「历史没那么长」用户什么也做不了，
-    # 「这一份被截断/读不到」才是可以调 logrotate 或读量上限的线索。
-    previous["reason"] = "clipped" if clipped else "history" if short else "full"
+    # 世代列表被 `MAX_SERIES_FILES` 截断也算 clipped：更早的世代在盘上，只是这次没翻到，
+    # 于是"上一周期"读到的是被削短的一段——和单份被读量上限截断是同一类依据不足。
+    clipped = capped or truncated_files > 0 or unreadable_files > 0 or series_capped
+    previous["partial"] = short or clipped or series_unreadable
+    # 三种依据不足按"用户能做什么"排序：连清单都列不出来最要紧（先修权限/目录），
+    # 其次是这一轮被截断（可调读量上限或 logrotate），最后才是日志本身没那么长（改不了）。
+    if series_unreadable:
+        reason = "unreadable"
+    elif clipped:
+        reason = "clipped"
+    else:
+        reason = "history" if short else "full"
+    previous["reason"] = reason
     comparable = not previous["partial"] and previous["pv"] > 0 and current["pv"] > 0
     delta = None
     if comparable and previous["pv"]:
@@ -511,13 +532,17 @@ def collect_days(entries: list, days: int) -> dict:
     window_uv, uv_floored = _union_uv(buckets, from_day, anchor)
     current["uv"] = window_uv
     current["uvFloored"] = uv_floored
+    total_files = len(entries) if series_total is None else int(series_total)
     return {"days": want, "anchor": anchor.isoformat(), "from": from_day.isoformat(),
             "prevFrom": prev_from.isoformat(), "rows": rows,
             "current": current, "previous": previous,
             "comparable": comparable, "deltaPvPct": delta,
             "parsed": parsed, "malformed": malformed, "outside": outside,
             "scannedLines": scanned_lines, "scannedFiles": scanned_files,
-            "totalFiles": len(entries), "truncatedFiles": truncated_files,
+            "totalFiles": total_files,
+            "seriesTotal": total_files, "seriesCapped": bool(series_capped),
+            "seriesUnreadable": bool(series_unreadable),
+            "truncatedFiles": truncated_files,
             "unreadableFiles": unreadable_files,
             "bytesScanned": bytes_scanned, "diskBytes": disk_bytes,
             "historyFrom": history_from.isoformat() if history_from else "",

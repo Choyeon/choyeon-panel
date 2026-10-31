@@ -159,3 +159,31 @@ export function unknownNote(what: string, why?: string): string {
 
 /** 上面那句用在 title/说明行；格子里放不下，第三态的短名也只有一个。 */
 export const UNKNOWN_LABEL = '未读到';
+
+/**
+ * 日志来源清单被服务端扫描上限截断时的说法（尾读、分钟统计、按天回看三个页签共用）。
+ *
+ * 下拉里列出 60 个来源、而白名单里其实还有第 61 个时，界面看起来和「这台机器就 60 份日志」
+ * 完全同形：序号照旧、选中照旧，只是「3 号」之外还有没有来源这件事没人说。
+ * 服务端给不出真实总数（数它就得把为了封顶而省掉的那次走盘重做一遍），所以这里也只能
+ * 如实说「不代表全部」，而不是编一个总数。
+ */
+export function sourcesCappedNote(limit: number): string {
+  return `来源清单只列到本次扫描上限 ${limit} 个，排在其后的日志没有列出——这些序号不代表全部；`
+    + '把常看的目录单独加进 CP_LOG_ROOTS 可以收窄范围';
+}
+
+/** 回看世代数量触顶：更早的世代还在盘上，只是这一次没翻。 */
+export function seriesCappedNote(listed: number, total: number, limit: number): string {
+  return `回看只统计了 ${listed}/${total} 份世代（数量上限 ${limit} 份），`
+    + '更早的轮替件还在盘上但没进这一轮，环比因此比的是被削短的一段';
+}
+
+/**
+ * 连世代清单都列不出来时的一句。
+ *
+ * 原来这里和「这个站点没人访问」同形：接口交出空列表，界面就画一张空表。
+ * 列不出目录是权限或正好赶上 logrotate 改名，有没有历史是另一件事。
+ */
+export const SERIES_UNREADABLE_NOTE = '列不出这个来源的轮替世代（多半是所在目录没有读权限，'
+  + '或正被 logrotate 改名）——这一轮没看到历史，不等于盘上没有历史';

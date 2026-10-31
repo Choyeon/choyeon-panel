@@ -1998,15 +1998,21 @@ async def cmd_webstats(a: argparse.Namespace) -> dict:
     只往文件尾读有限字节，不写任何临时文件，也不把原始日志行打出来——
     访问日志的查询串里常带 token，统计用的是去掉查询串的路径。
     """
-    files = web_logs.nginx_log_files()
+    scan = web_logs.log_source_scan()
+    files = scan["files"]
     if a.list:
         data = {"files": [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"],
                            "path": f["path"]} for i, f in enumerate(files)],
-                "roots": web_logs.log_roots()}
+                "roots": web_logs.log_roots(),
+                "listed": scan["listed"], "limit": scan["limit"], "capped": scan["capped"]}
         if not files:
             Out.error(web_logs.discovery_hint(), EXIT_PRECONDITION)
+        head = (f"日志来源 {len(files)} 个（扫描根：{', '.join(web_logs.log_roots())}）"
+                if not scan["capped"] else
+                f"日志来源 {len(files)} 个 · {web_logs.source_cap_hint()}"
+                f"（扫描根：{', '.join(web_logs.log_roots())}）")
         Out.result(data, "\n".join(
-            [f"日志来源 {len(files)} 个（扫描根：{', '.join(web_logs.log_roots())}）"]
+            [head]
             + [f"  [{it['i']}] {it['kind']:<6} {it['label']}  {it['path']}" for it in data["files"]]))
         return data
     try:
@@ -2029,7 +2035,8 @@ async def cmd_webstats(a: argparse.Namespace) -> dict:
     if not files:
         Out.error(web_logs.discovery_hint(), EXIT_PRECONDITION)
     if not 0 <= idx < len(files):
-        Out.error(f"--file 序号超出范围（可用 0-{len(files) - 1}，先用 choyeonctl webstats --list 看清单）",
+        Out.error(f"--file 序号超出范围（可用 0-{len(files) - 1}，先用 choyeonctl webstats --list 看清单）"
+                  + (f"；{web_logs.source_cap_hint()}" if scan["capped"] else ""),
                   EXIT_USAGE)
     picked = files[idx]
     if picked["kind"] != "access":
@@ -2037,12 +2044,17 @@ async def cmd_webstats(a: argparse.Namespace) -> dict:
         Out.error(f"[{idx}] {picked['label']} 是错误日志，里面没有请求行可统计；"
                   f"访问日志的序号是 {'、'.join(access_idx) if access_idx else '无'}", EXIT_USAGE)
     if a.daily:
-        entries = web_logs.log_series(picked["path"])
-        data = access_stats.collect_days(entries, days)
+        series = web_logs.series_scan(picked["path"])
+        entries = series["entries"]
+        data = access_stats.collect_days(entries, days,
+                                        series_total=series["total"],
+                                        series_capped=series["capped"],
+                                        series_unreadable=series["unreadable"])
         data["source"] = picked["label"]
         data["site"] = picked["site"]
         data["series"] = [{"name": e["name"], "gen": e["gen"], "gz": e["gz"], "bytes": e["bytes"]}
                           for e in entries]
+        data["seriesListed"] = len(entries)
         Out.result(data, _webdaily_text(data))
         return data
     data = access_stats.collect(picked["path"], minutes)
@@ -2062,6 +2074,11 @@ def _webdaily_text(d: dict) -> str:
     out = [f"网站按天流量：{d.get('source')} · 最近 {d.get('days')} 天"
            f"（{rows[0]['date'] if rows else '—'} → {rows[-1]['date'] if rows else '—'}）"]
     if not rows:
+        if d.get("seriesUnreadable"):
+            # 列不出目录和"这个站点没人访问"是两件事：前者是这台机器的权限/清理状态，
+            # 后者是业务事实。把前者说成后者，管理员会去查流量而不是查权限。
+            # 判词只有 `series_discovery_hint()` 一份，这里只补上当前的来源名。
+            return "\n".join(out + [web_logs.series_discovery_hint()])
         return "\n".join(out + [
             f"没读到可解析的请求行：翻了 {d.get('scannedFiles')} 份世代"
             f"（盘上 {human_bytes(int(d.get('diskBytes') or 0))}），坏行 {d.get('malformed')} 条。"
@@ -2077,9 +2094,14 @@ def _webdaily_text(d: dict) -> str:
         out.append(f"环比：这 {d.get('days')} 天 {cur.get('pv')} 次请求，上一周期 {prev.get('pv')} 次"
                    f"（{arrow} {abs(delta)}%）")
     else:
+        # 「依据不足」有三种原因，说出来的必须是这一轮真的撞上的那一种：只笼统写"被截断或读不到"，
+        # 世代数触顶这一种就会被念成"文件有问题"，而盘上其实好得很。
+        clipped = (f"有 {d.get('truncatedFiles')} 份被单份读量上限截断、"
+                   f"{d.get('unreadableFiles')} 份这次读不到"
+                   + ("，世代总数已到本次回看上限" if d.get("seriesCapped") else ""))
         why = {"no-data": "上一周期一天日志都没读到",
                "history": f"日志只到 {d.get('historyFrom') or '—'}，往前凑不满一个周期",
-               "clipped": "有世代被读量上限截断或恰好读不到（撞上 logrotate），两边口径不一致"}
+               "clipped": f"{clipped}，两边口径不一致"}
         out.append(f"不做环比：{why.get(prev.get('reason'), '上一周期依据不足')}"
                    f"（上一周期只留住 {prev.get('days')} 天）")
     if d.get("uvFloored") or any(r.get("uvFloored") for r in rows):
@@ -2092,6 +2114,9 @@ def _webdaily_text(d: dict) -> str:
                    f"{human_bytes(access_stats.DAILY_FILE_BYTES)}，只读了开头")
     if d.get("unreadableFiles"):
         out.append(f"  注：{d['unreadableFiles']} 份世代这次没读到，多半正被 logrotate 改名或清理")
+    if d.get("seriesCapped"):
+        out.append(f"  注：{web_logs.series_cap_hint()}"
+                   f"（本次统计 {d.get('seriesListed')}/{d.get('seriesTotal')} 份）")
     out.append(f"回看：读了 {d.get('scannedFiles')}/{d.get('totalFiles')} 份世代、"
                f"{d.get('scannedLines')} 行，盘上 {human_bytes(int(d.get('diskBytes') or 0))}，"
                f"最早到 {d.get('historyFrom') or '—'}")

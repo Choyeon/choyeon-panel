@@ -519,15 +519,17 @@ async def nginx_log(request: Request):
         idx = int(qp.get("file") or 0)
     except ValueError:
         return _bad("file 参数是日志文件的序号（整数）")
-    files = await run_in_threadpool(web_logs.nginx_log_files)
+    scan = await run_in_threadpool(web_logs.log_source_scan)
+    files = scan["files"]
     if not files:
         return {
             "items": [],
             "files": [],
             "hint": web_logs.discovery_hint(),
+            **_source_meta(scan),
         }
     if not 0 <= idx < len(files):
-        return _bad(f"file 序号超出范围（可用 0-{len(files) - 1}）")
+        return _bad(_range_hint(files, scan))
     picked = files[idx]
     tail = await run_in_threadpool(web_logs.tail_file, picked["path"], lines, filt, MAX_ITEM_CHARS)
     # 来源在清单里 ≠ 读得动（0640 root:adm 的日志只要目录可 traversal 就会被列出来）。
@@ -541,7 +543,8 @@ async def nginx_log(request: Request):
         "window_truncated": tail["window_truncated"],
         "readError": read_error,
         "source": picked["label"],
-        "files": [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]} for i, f in enumerate(files)],
+        "files": _file_choices(files),
+        **_source_meta(scan),
         # 「这一页是不是全部」要同时看两把刀：行数上限裁掉的命中（dropped），和整个文件比
         # 单次读量大、连窗口都没读到底（window_truncated）。按返回条数判会把两者都说成完整答案。
         # 读不动是第三种事实，不是"没裁掉所以完整"。
@@ -554,14 +557,36 @@ def _file_choices(files: list) -> list:
     return [{"i": i, "label": f["label"], "kind": f["kind"], "site": f["site"]} for i, f in enumerate(files)]
 
 
-def _pick_access_source(files: list, want):
+def _source_meta(scan: dict) -> dict:
+    """来源清单触顶时把「这是不完整的」一起带出去。
+
+    列表截到 `MAX_LOG_FILES` 时真实总数无从得知：要数清就得把刚才为了封顶而跳过的
+    扫描重做一遍，所以这里只报"到了上限、还有更多没数"，不编一个总数。
+    """
+    return {"filesCapped": bool(scan.get("capped")),
+            "filesLimit": scan.get("limit", web_logs.MAX_LOG_FILES),
+            "filesListed": scan.get("listed", len(scan.get("files") or []))}
+
+
+def _range_hint(files: list, scan: dict) -> str:
+    """序号越界的判词：清单被封顶时"可用 0-N"本身就是会误导人的。"""
+    base = f"file 序号超出范围（可用 0-{len(files) - 1}）"
+    if not scan.get("capped"):
+        return base
+    return f"{base}；{web_logs.source_cap_hint()}"
+
+
+def _pick_access_source(scan: dict, want):
     """把 `?file=` 序号换成一个"能统计的访问日志"。
 
     返回（要直接回给浏览器的响应或 None, （序号, 文件）或 None）。分钟窗口和按天趋势必须
     共用这一段：两处各挑各的，"同一个 3 号文件"就会在两个页签里指两个来源。
+    取 `log_source_scan()` 而不是只取列表：统计页签也得能说清"这份清单到没到上限"。
     """
+    files = scan["files"]
+    meta = _source_meta(scan)
     if not files:
-        return {"hint": web_logs.discovery_hint(), "files": [], "source": ""}, None
+        return {"hint": web_logs.discovery_hint(), "files": [], "source": "", **meta}, None
     if want is None:
         # 不带 file 时取第一个"能统计的"来源：页面的下拉要先有一次响应才有清单，
         # 而第一枪撞进 error.log 会变成 400，用户看到的是"点了统计却报错"。
@@ -569,11 +594,11 @@ def _pick_access_source(files: list, want):
         if idx < 0:
             return {"hint": "白名单里只有错误日志，没有可统计的访问日志；给站点开一份 access.log，"
                             "或把它的目录加进 CP_LOG_ROOTS",
-                    "files": _file_choices(files), "source": ""}, None
+                    "files": _file_choices(files), "source": "", **meta}, None
     else:
         idx = want
     if not 0 <= idx < len(files):
-        return _bad(f"file 序号超出范围（可用 0-{len(files) - 1}）"), None
+        return _bad(_range_hint(files, scan)), None
     picked = files[idx]
     if picked["kind"] != "access":
         return _bad(f"{picked['label']} 是错误日志，里面没有请求行可统计；"
@@ -614,8 +639,8 @@ async def nginx_stats(request: Request):
             return _bad(f"minutes 参数是分钟数（整数，1-{access_stats.SERIES_MAX}）")
     if not 1 <= minutes <= access_stats.SERIES_MAX:
         return _bad(f"minutes 只能是 1-{access_stats.SERIES_MAX}（最多统计 24 小时）")
-    files = await run_in_threadpool(web_logs.nginx_log_files)
-    bad, picked_source = _pick_access_source(files, want)
+    scan = await run_in_threadpool(web_logs.log_source_scan)
+    bad, picked_source = _pick_access_source(scan, want)
     if bad is not None:
         return bad
     idx, picked = picked_source
@@ -623,7 +648,8 @@ async def nginx_stats(request: Request):
     data["source"] = picked["label"]
     data["site"] = picked["site"]
     data["file"] = idx
-    data["files"] = _file_choices(files)
+    data["files"] = _file_choices(scan["files"])
+    data.update(_source_meta(scan))
     return data
 
 
@@ -633,7 +659,8 @@ async def nginx_daily(request: Request):
 
     分钟窗口只能回答"这一小时忙不忙"，"这个星期比上个工作日多还是少"要看轮替掉的那几份，
     而那一层正是 tail 故意不读的 gzip（解压完再截尾，读的是随机中段）。所以按天趋势单独走
-    `web_logs.log_series()`：同一份白名单、同一个序号，只是换了一种读法，世代数与每份字节都有封顶。
+    `web_logs.series_scan()`：同一份白名单、同一个序号，只是换了一种读法，世代数与每份字节都有封顶，
+    而封顶这件事本身要跟着结果一起出去（见 `seriesTotal` / `seriesCapped` / `seriesUnreadable`）。
 
     `days` 只接受 1-30，档位由 `/api/system/log-options` 的 `stats_days` 给前端，别处不抄。
     """
@@ -652,18 +679,25 @@ async def nginx_daily(request: Request):
             return _bad(f"days 参数是天数（整数，1-{access_stats.MAX_DAYS}）")
     if not 1 <= days <= access_stats.MAX_DAYS:
         return _bad(f"days 只能是 1-{access_stats.MAX_DAYS}（最多回看 {access_stats.MAX_DAYS} 天）")
-    files = await run_in_threadpool(web_logs.nginx_log_files)
-    bad, picked_source = _pick_access_source(files, want)
+    scan = await run_in_threadpool(web_logs.log_source_scan)
+    bad, picked_source = _pick_access_source(scan, want)
     if bad is not None:
         return bad
     idx, picked = picked_source
-    entries = await run_in_threadpool(web_logs.log_series, picked["path"])
-    data = await run_in_threadpool(access_stats.collect_days, entries, days)
+    series = await run_in_threadpool(web_logs.series_scan, picked["path"])
+    entries = series["entries"]
+    data = await run_in_threadpool(access_stats.collect_days, entries, days,
+                                   series_total=series["total"],
+                                   series_capped=series["capped"],
+                                   series_unreadable=series["unreadable"])
     data["source"] = picked["label"]
     data["site"] = picked["site"]
     data["file"] = idx
-    data["files"] = _file_choices(files)
-    # 世代只报"读到了哪几份、多大"，路径不出这道门
+    data["files"] = _file_choices(scan["files"])
+    data.update(_source_meta(scan))
+    # 世代只报"读到了哪几份、多大"，路径不出这道门；触顶/列不出目录另说
     data["series"] = [{"name": e["name"], "gen": e["gen"], "gz": e["gz"], "bytes": e["bytes"]}
                       for e in entries]
+    data["seriesListed"] = len(entries)
+    data["seriesLimit"] = series["limit"]
     return data

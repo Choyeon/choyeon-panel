@@ -470,7 +470,7 @@ class TestOneSourceOnly(unittest.TestCase):
     def test_router_picks_the_source_in_exactly_one_place(self):
         src = (ROOT / "backend" / "app" / "routers" / "system.py").read_text(encoding="utf-8")
         self.assertEqual(src.count("def _pick_access_source"), 1)
-        self.assertEqual(src.count("_pick_access_source(files, want)"), 2,
+        self.assertEqual(src.count("_pick_access_source(scan, want)"), 2,
                          "分钟窗口与按天趋势要共用同一个挑选函数")
         self.assertEqual(src.count('kind"] != "access'), 1, "「哪个来源能统计」的判断只能有一处")
         self.assertNotIn("DAY_LADDER = ", src)

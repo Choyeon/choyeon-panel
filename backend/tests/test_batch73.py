@@ -142,7 +142,11 @@ class RouterHonestyTests(unittest.TestCase):
                        "kind": "access", "site": ""}]
 
     def _files(self):
-        return mock.patch.object(web_logs, "nginx_log_files", lambda: list(self.files))
+        # 路由读的是 `log_source_scan()`（列表 + 触顶标记），不是只给列表的那份投影
+        return mock.patch.object(
+            web_logs, "log_source_scan",
+            lambda: {"files": list(self.files), "listed": len(self.files),
+                     "limit": web_logs.MAX_LOG_FILES, "capped": False})
 
     def test_tail_route_says_readerror_instead_of_500(self):
         with self._files():

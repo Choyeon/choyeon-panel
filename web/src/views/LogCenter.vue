@@ -4,7 +4,7 @@ import {
   NAlert, NCard, NDataTable, NGrid, NGridItem, NInput, NSelect, NSpace, NTabPane, NTabs,
   NSwitch, NTag, NText,
 } from 'naive-ui';
-import { NButton, tapEllipsis } from '../ui';
+import { NButton, SERIES_UNREADABLE_NOTE, seriesCappedNote, sourcesCappedNote, tapEllipsis } from '../ui';
 import { req } from '../api';
 import { icon } from '../icons';
 import { fmtBytes } from '../composables/useFormat';
@@ -19,7 +19,9 @@ import { useVisiblePoll } from '../composables/useVisiblePoll';
 type JItem = { ts: string; unit: string; prio: number; text: string };
 type JResp = { items: JItem[]; count: number; truncated: boolean };
 type SFile = { i: number; label: string; kind: string; site: string };
-type NResp = { items: string[]; count: number; source: string; files: SFile[]; truncated: boolean; hint?: string; readError?: string };
+/** 来源清单的"这是不是被截断的那一份"三个数（服务端 log_source_scan 的账）。 */
+type SrcMeta = { filesCapped?: boolean; filesLimit?: number; filesListed?: number };
+type NResp = { items: string[]; count: number; source: string; files: SFile[]; truncated: boolean; hint?: string; readError?: string } & SrcMeta;
 type LogOpts = {
   lines_default: number; lines_max: number; ladder: number[];
   nginx_tail_bytes: number; stats_minutes: number[]; stats_days: number[];
@@ -37,7 +39,7 @@ type SResp = {
   topClients?: { key: string; count: number }[];
   methods?: { key: string; count: number }[];
   series?: { ts: number; count: number }[];
-};
+} & SrcMeta;
 type DSpan = {
   pv: number; uv: number; uvFloored?: boolean; bytes: number; e4xx: number; e5xx: number;
 };
@@ -53,7 +55,11 @@ type DResp = {
   truncatedFiles?: number; unreadableFiles?: number;
   bytesScanned?: number; diskBytes?: number; historyFrom?: string;
   series?: { name: string; gen: number; gz: boolean; bytes: number }[];
-};
+  // 世代这一层的账：`totalFiles` 是盘上真实份数，`seriesListed` 是这次翻到的份数，
+  // `seriesCapped` 说两者为什么不一样，`seriesUnreadable` 说"连清单都没列出来"。
+  seriesListed?: number; seriesTotal?: number; seriesLimit?: number;
+  seriesCapped?: boolean; seriesUnreadable?: boolean;
+} & SrcMeta;
 
 const err = ref('');
 const tab = ref<'journal' | 'nginx' | 'stats'>('journal');
@@ -121,6 +127,13 @@ function applyPreset(p: { patch: Record<string, string> }) {
 const nginxFileOpts = computed(() =>
   (nResult.value?.files || []).map((f) => ({ label: f.label, value: f.i }))
 );
+
+// 来源清单是不是被扫描上限截断的，只有服务端知道（它才知道自己为了省一次走盘
+// 跳过了后面多少个目录）。三个页签各读自己那份响应里的标记，措辞只有一个出处。
+function sourcesCapNote(d?: SrcMeta): string {
+  return d && d.filesCapped ? sourcesCappedNote(Number(d.filesLimit) || 0) : '';
+}
+const tailCap = computed(() => sourcesCapNote(nResult.value ?? undefined));
 
 // 「一次看多少行」由服务端给：档位、默认值、nginx 尾读的字节上限同出一个出处
 // （backend/app/util.py 的 LOG_LINES_DEFAULT / HTTP_LOG_LINES_MAX 与 system.py 的 TAIL_BYTES）。
@@ -325,6 +338,7 @@ const statsInfo = computed<InfoItem[]>(() => {
     },
   ];
   if (d.outsideWindow) rows.push({ k: '窗口外', v: `${d.outsideWindow} 行更早，未计入本次窗口` });
+  if (d.filesCapped) rows.push({ k: '来源清单', v: sourcesCappedNote(Number(d.filesLimit) || 0) });
   if (d.malformed) rows.push({ k: '解析不了', v: `${d.malformed} 行（不是 common/combined 格式，或时间戳读不出）` });
   if (d.pathsOverflow) rows.push({ k: '路径溢出', v: `${d.pathsOverflow} 次请求的路径没进键表（已并入榜单的「…其他」）` });
   if (d.pathsFloored) rows.push({ k: '唯一路径', v: `记满 ${d.paths} 个就停止计数，实际更多` });
@@ -387,11 +401,14 @@ const dailyVerdict = computed(() => {
     };
   }
   const r = d.previous?.reason || 'history';
-  const why = r === 'no-data'
-    ? '这些日志里读不出可用的时间戳'
-    : r === 'clipped'
-      ? `上一周期那几份有被截断或读不到的（截断 ${d.truncatedFiles ?? 0} 份、读不到 ${d.unreadableFiles ?? 0} 份）`
-      : `日志只到 ${d.historyFrom || '?'}，往前凑不满一个周期（上一周期只留住 ${d.previous?.days ?? 0} 天）`;
+  const why = r === 'unreadable'
+    ? SERIES_UNREADABLE_NOTE
+    : r === 'no-data'
+      ? '这些日志里读不出可用的时间戳'
+      : r === 'clipped'
+        ? `上一周期那几份有被截断或读不到的（截断 ${d.truncatedFiles ?? 0} 份、读不到 ${d.unreadableFiles ?? 0} 份`
+          + `${d.seriesCapped ? '、世代数已到本次回看上限' : ''}）`
+        : `日志只到 ${d.historyFrom || '?'}，往前凑不满一个周期（上一周期只留住 ${d.previous?.days ?? 0} 天）`;
   return { tone: 'none', text: `不做环比：${why}` };
 });
 
@@ -421,6 +438,13 @@ const dailyInfo = computed<InfoItem[]>(() => {
   ];
   if (d.truncatedFiles) rows.push({ k: '读到底的世代', v: `${d.truncatedFiles} 份比单次读量还大，只算了读进来的那部分` });
   if (d.unreadableFiles) rows.push({ k: '这次读不到', v: `${d.unreadableFiles} 份（多半正好赶上 logrotate 改名）` });
+  // 「列不出清单」和「清单到顶」是两种不完整：前者一份都没看到，后者看到的是被削短的一段。
+  if (d.seriesUnreadable) rows.push({ k: '世代清单', v: SERIES_UNREADABLE_NOTE });
+  else if (d.seriesCapped) {
+    rows.push({ k: '世代清单', v: seriesCappedNote(Number(d.seriesListed) || 0,
+      Number(d.seriesTotal) || 0, Number(d.seriesLimit) || 0) });
+  }
+  if (d.filesCapped) rows.push({ k: '来源清单', v: sourcesCappedNote(Number(d.filesLimit) || 0) });
   if (d.outside) rows.push({ k: '窗口外', v: `${d.outside} 行比日历天窗口更早，未计入` });
   if (d.malformed) rows.push({ k: '解析不了', v: `${d.malformed} 行（不是 common/combined 格式，或时间戳读不出）` });
   return rows;
@@ -611,6 +635,8 @@ const nEmptyText = computed(() => {
           {{ nResult.source }} · 返回 {{ nResult.count }} 行{{ nResult.truncated ? '（已到上限）' : '' }}；
           {{ tailNote }}
         </div>
+        <!-- 清单触顶说的是"下拉框外还有别的日志"，与这一份读得动读不动无关，所以单独一条 -->
+        <NAlert v-if="tailCap" type="warning" :bordered="false" size="small" style="margin-bottom: var(--space-2)">{{ tailCap }}</NAlert>
         <NDataTable
           :columns="nCols" :data="nRows" size="small" :bordered="false" :loading="nLoading"
           :scroll-x="'auto'" :max-height="tableH" :virtual-scroll="true" class="cp-tbl tbl-log"
@@ -747,7 +773,11 @@ const nEmptyText = computed(() => {
               :columns="dCols" :data="dResult.rows || []" size="small" :bordered="false"
               :scroll-x="'auto'" :max-height="tableH" :row-key="(r: { date: string }) => r.date"
             >
-              <template #empty><EmptyBox text="这些世代里没有落在窗口内的请求行" /></template>
+              <template #empty>
+                <EmptyBox :text="dResult.seriesUnreadable
+                  ? '这一轮连世代清单都没列出来，空表是因为没看到，不是因为站点没有历史'
+                  : '这些世代里没有落在窗口内的请求行'" />
+              </template>
             </NDataTable>
           </template>
           <EmptyBox v-else-if="!dLoading" text="换好来源与天数后点「按天回看」" />

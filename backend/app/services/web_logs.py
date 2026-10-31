@@ -56,17 +56,32 @@ def _inside_roots(real: str, roots: list[str]) -> bool:
 
 
 def nginx_log_files() -> list[dict]:
-    """白名单目录里的 nginx/应用访问日志（每个根最多扫到一级子目录）。
+    """来源清单本身（不含"这是不是被截断的那一份"）。
+
+    只给列表的读法保留这一个名字，但它天生说不清封顶：要判「这台机器上还有没有别的日志」
+    请改用 `log_source_scan()`，两者是同一个扫描器，不是两份口径。
+    """
+    return log_source_scan()["files"]
+
+
+def log_source_scan() -> dict:
+    """白名单目录里的 nginx/应用访问日志 + 这一份清单是不是被 `MAX_LOG_FILES` 截断的。
 
     只从这份白名单里找文件，等价于「文件管理页能打开的目录才能被 tail」：
     新加一个日志接口就新开一条任意文件读取的思路，不复用白名单迟早出事。
     结果按 label 排序——网页端、CLI 与统计接口都用同一份序号，
     所以顺序必须稳定，否则同一份日志在三个地方是三个号。
+
+    到 `MAX_LOG_FILES` 就停是有意省下的那次走盘（装了 200 个站点的机器会把几百条塞进下拉框），
+    但省下扫描不等于可以顺带把"一共几个来源"报成 60：`capped` 就是为这件事留的。
+    这里给不出真实总数——数它就得把刚才省掉的那次扫描再做一遍——所以判词只说
+    「还有更多，没数」，并给出把范围收窄的办法（把目录精确加进 CP_LOG_ROOTS）。
     """
     roots = log_roots()
     real_roots = [os.path.realpath(r) for r in roots]
     out: list[dict] = []
     seen: set[str] = set()
+    capped = False
     for root in real_roots:
         bases = [root]
         try:
@@ -102,16 +117,34 @@ def nginx_log_files() -> list[dict]:
                     "site": m.group("site") or "-",
                 })
                 if len(out) >= MAX_LOG_FILES:
-                    return sorted(out, key=lambda f: f["label"])
-    return sorted(out, key=lambda f: f["label"])
+                    capped = True
+                    break
+            if capped:
+                break
+        if capped:
+            break
+    return {"files": sorted(out, key=lambda f: f["label"]), "listed": len(out),
+            "limit": MAX_LOG_FILES, "capped": capped}
 
 
 def log_series(path: str) -> list:
-    """同一个日志的轮替世代，从新到旧：当前文件、`.1`、`.2.gz`……
+    """同一个日志的轮替世代列表（不含封顶与读不到的信息），见 `series_scan()`。"""
+    return series_scan(path)["entries"]
+
+
+def series_scan(path: str) -> dict:
+    """同一个日志的轮替世代，从新到旧：当前文件、`.1`、`.2.gz`……外加两份诚实的账。
 
     只在原文件所在的那一个目录里找同名世代，并且每份都要重新过一遍白名单与
     "普通文件"判定——"回看历史"不构成第二条任意文件读取的路径。世代数封顶
     `MAX_SERIES_FILES`，按代数排序，所以 `.10` 排在 `.2` 之后而不是按字符串排。
+
+    返回的三个字段各挡一种谎：
+    - `total`：过滤后真正在盘上的世代份数（目录名一次就读回来了，数它不额外花钱）。
+      只回列表的话，`[:31]` 之后 `len()` 就是 31，按天趋势于是能说成"读了 31/31 份"。
+    - `capped`：`total > MAX_SERIES_FILES`，即更早的世代确实存在但这次没翻。
+    - `unreadable`：连目录都列不出来（权限、正在被清理）。原本这里 `return out`
+      交出空表，与"盘上确实只有当前这一份"完全同形——于是"没有历史"成了最省事的解释。
     """
     real = os.path.realpath(path)
     directory = os.path.dirname(real)
@@ -122,7 +155,8 @@ def log_series(path: str) -> list:
     try:
         names = sorted(e.name for e in os.scandir(directory))
     except OSError:
-        return out
+        return {"entries": [], "total": 0, "limit": MAX_SERIES_FILES,
+                "capped": False, "unreadable": True}
     for name in names:
         if name == stem:
             gen, gz = 0, False
@@ -146,7 +180,8 @@ def log_series(path: str) -> list:
             continue
         out.append({"path": cand, "name": name, "gen": gen, "gz": gz, "bytes": st.st_size})
     out.sort(key=lambda f: (f["gen"], f["name"]))
-    return out[:MAX_SERIES_FILES]
+    return {"entries": out[:MAX_SERIES_FILES], "total": len(out), "limit": MAX_SERIES_FILES,
+            "capped": len(out) > MAX_SERIES_FILES, "unreadable": False}
 
 
 def _stem_and_gen(name: str) -> tuple:
@@ -181,6 +216,34 @@ def readable_hint() -> str:
             "通常是 0640 root:adm，只有 traversal 权限的目录能让它出现在来源清单里，读内容要"
             "真正的读权限；让面板服务保持 root（deploy/choyeon-panel.service 默认就是），"
             "或把该文件的读权限放开给面板进程。终端排障可以用 root 跑 choyeonctl webstats。")
+
+
+def source_cap_hint() -> str:
+    """来源清单被 `MAX_LOG_FILES` 截断时的判词（tail、统计接口与 CLI 共用这一份）。
+
+    这里给不出"一共有几个来源"：数清就得把为了封顶而省掉的那次走盘重做一遍。
+    所以判词只说"到上限了，列出的不是全部"，并把收窄范围的办法给出来。
+    """
+    return (f"来源清单已到本次扫描上限 {MAX_LOG_FILES} 个，白名单里排在这之后的日志没有列出，"
+            f"列出的序号不代表全部；把要常看的目录单独加进 CP_LOG_ROOTS 收窄范围，"
+            f"或改完 .env 执行 choyeonctl upgrade --no-pull。")
+
+
+def series_cap_hint() -> str:
+    """轮替世代触顶时的判词：更早的世代确实在盘上，只是这一次没翻。"""
+    return (f"回看世代的数量上限是 {MAX_SERIES_FILES} 份，更老的轮替件还在盘上但这次没有统计；"
+            f"要看得更久就调小 --days/天数档位，或者把 logrotate 的 rotate 数控制在"
+            f"这个上限之内。")
+
+
+def series_discovery_hint() -> str:
+    """世代所在目录连列表都拿不到时的判词。
+
+    和"这个日志没有历史"是两句话：前者是权限或正在被清理，后者是业务事实。
+    在没有历史的世界里，接口交出空列表与列不出目录完全同形，所以这里必须分开。
+    """
+    return ("列不出这个来源所在目录里的轮替世代——多半是目录本身没有读权限，"
+            "或正被 logrotate 改名。这不等于盘上没有历史。")
 
 
 def tail_file(path: str, lines: int, filt: str, max_chars: int) -> dict:
