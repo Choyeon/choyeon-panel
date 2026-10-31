@@ -764,6 +764,9 @@ const unitKills = computed<Record<string, number>>(() => oomBlock.value.unit_kil
 const killTotal = computed(() => Number(oomBlock.value.kernel_total) || 0);
 // OOM 不设阈值：内核计数是一个整数，非 0 就是要紧，没有「杀得还不多」这一档。
 const memKilled = computed(() => killTotal.value > 0 || Object.keys(unitKills.value).length > 0);
+// 「这一轮的 oom_kill 计数到底读回来没有」由后端说（批次110）：读空时不许写「没有杀过进程」，
+// 那一格和旁边的「速率没采到」正在互相矛盾。取 true 而不是取非 false：没有旗标就当没读到。
+const oomCounterOk = computed(() => oomBlock.value.counter_ok === true);
 // 「知道就好」那档（顶到上限被拦过、承诺超过启发式上限）默认收着，和存储那页同一条理由：
 // 一进来先看见一堆无关痛痒的行，真正的风险反而被埋在下面。
 const memOnlySerious = ref(true);
@@ -2445,6 +2448,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         <span class="mm-chip" :class="{ err: memKilled }">
           <i>OOM</i><template v-if="killTotal">内核杀过 {{ killTotal }} 次</template>
           <template v-else-if="memKilled">{{ Object.keys(unitKills).length }} 个单元被自己的上限杀过</template>
+          <template v-else-if="!oomCounterOk">计数没读到</template>
           <template v-else>没有杀过进程</template>
         </span>
         <span class="mm-chip"><i>承诺</i>{{ memInfo.commit_limit ? `${fmtBytes(memInfo.committed)} / ${fmtBytes(memInfo.commit_limit)}` : '读不到' }}</span>

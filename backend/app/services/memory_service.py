@@ -427,11 +427,18 @@ def _oom(vm_now: dict, units: list[dict]) -> dict:
     kernel_total = int(vm_now.get("oom_kill") or 0)
     unit_kills = {u["unit"]: int(u["events"].get("oom_kill") or 0) for u in units
                   if u.get("events") and int(u["events"].get("oom_kill") or 0)}
+    # 「整机这一轮 boot 杀过几次」只有 vmstat 的 oom_kill 能回答，而读空和读到 0 是两件事：
+    # 同一个页面上「速率没采到」正写着这一次 /proc/vmstat 没读回来，这里却可以直接说出
+    # 「没有杀过进程」，自检也能写出「没有…OOM 记录」——把一个没做的测量写成一条绿灯。
+    counter_ok = "oom_kill" in vm_now
     out = {"kernel_total": kernel_total, "unit_kills": unit_kills,
            "events": [], "events_total": 0, "events_omitted": 0,
            "truncated": False, "line_limit": OOM_LOG_LINES,
-           "source": "counter", "reason": ""}
+           "source": "counter", "reason": "", "counter_ok": counter_ok}
     if not kernel_total and not unit_kills:
+        if not counter_ok:
+            out["source"] = "unknown"
+            out["reason"] = "读不到 /proc/vmstat 的 oom_kill 计数（这一轮没读到，不代表没杀过进程）"
         return out
     cmd = f"journalctl -k -b -n {OOM_LOG_LINES} --no-pager -o short-iso"
     try:
@@ -767,7 +774,11 @@ def doctor_item(data: dict) -> dict:
                 "detail": tallied([f["title"] for f in risky_f], " 项内存压力值得处理") + f"；{head}",
                 "fix": "choyeonctl memory"}
     info = int((data.get("counts") or {}).get("info") or 0)
-    detail = f"内存没有压力：{head}，没有停顿、换页与 OOM 记录"
+    if oom.get("counter_ok") is False:
+        # 这一轮没读到 oom_kill 计数，就不能替它宣布「没有 OOM 记录」——内存页自己会写着「速率没采到」。
+        detail = f"内存没有压力：{head}，没有停顿与换页；OOM 计数这一轮没读到，不代表没杀过进程"
+    else:
+        detail = f"内存没有压力：{head}，没有停顿、换页与 OOM 记录"
     if info:
         detail += f"（另有 {info} 条只是让你知道）"
     return {"status": "pass", "detail": detail, "fix": ""}
