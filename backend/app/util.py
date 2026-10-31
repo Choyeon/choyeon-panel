@@ -433,18 +433,23 @@ def like_contains(q: str) -> str:
     return f"%{q}%"
 
 
-def name_list(items, limit: int, *, sep: str = "、", unit: str = "个") -> str:
+def name_list(items, limit: int, *, sep: str = "、", unit: str = "个",
+              total: int | None = None) -> str:
     """把名字清单截到 limit 个；真的截了就把总数和未列出数一起交出来。
 
     这些清单出现在自检详情里，位置有限，截断本身不可避免。但「只列了 6 个」和
     「一共只有 6 个」在界面上是同一句话——前者会让人以为已经处理完，于是漏掉后面
     那段没修的东西。截断时把真实总数说出来，是这一条能如实汇报的最低要求。
+
+    `total` 供「名单已被上游按展示预算截过」的调用方传真实总数：这种名单自身的
+    len 只是下限，拿它当总数会把"实际几十条"念成"就这 12 条"。不传则沿用 len(items)。
     """
     items = [str(x) for x in items]
+    n = len(items) if total is None else int(total)
     shown = sep.join(items[:limit])
-    if len(items) <= limit:
+    if n <= limit:
         return shown
-    return f"{shown}…（共 {len(items)} {unit}，另 {len(items) - limit} {unit}未列出）"
+    return f"{shown}…（共 {n} {unit}，另 {n - limit} {unit}未列出）"
 
 
 def clip_text(text, limit: int, *, what: str = "输出") -> str:

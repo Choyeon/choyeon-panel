@@ -1176,12 +1176,15 @@ const reloadColumns: any[] = [
     render: (r: any) => {
       if (!r.ok) return h('span', { class: 'st idle' }, r.reason || '读不到');
       if (r.kind === 'systemd') {
-        return r.need_reload?.length
-          ? h('div', { class: 'cell-txt' }, [
-            h('span', { class: 'st warn' }, `${r.need_reload.length} 个 unit 改过还没 daemon-reload`),
-            h('div', { class: 'cell-sub mono ls-wrap mm-break' }, r.need_reload.join('、')),
-          ])
-          : h('span', { class: 'st ok' }, `查过 ${r.checked} 个单元，没有改过没重载的`);
+        const listed = r.need_reload || [];
+        if (!listed.length) return h('span', { class: 'st ok' }, `查过 ${r.checked} 个单元，没有改过没重载的`);
+        // 总数读后端 need_reload_total，名单本身是载荷预算截过的：截到 12 条不能念成"12 个待重载"。
+        const total = r.need_reload_total ?? listed.length;
+        const tail = total > listed.length ? `…（共 ${total} 个，另 ${total - listed.length} 个未列出）` : '';
+        return h('div', { class: 'cell-txt' }, [
+          h('span', { class: 'st warn' }, `${total} 个 unit 改过还没 daemon-reload`),
+          h('div', { class: 'cell-sub mono ls-wrap mm-break' }, listed.join('、') + tail),
+        ]);
       }
       if (r.pending) return h('span', { class: 'st warn' }, '盘上的配置比进程里的新');
       return h('span', { class: 'st ok' }, '进程里就是当前这份配置');
@@ -2608,7 +2611,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
           <i>sshd 配置</i>{{ reloadInfo.sshd?.ok ? (reloadInfo.sshd.pending === true ? '盘上的比进程里的新，还没重启进程' : reloadInfo.sshd.pending === false ? '进程里就是当前这份' : '判定不了') : (reloadInfo.sshd?.reason || '读不到') }}
         </span>
         <span class="mm-chip" :class="{ warn: (reloadInfo.systemd?.need_reload || []).length > 0 }">
-          <i>unit 文件</i>{{ reloadInfo.systemd?.ok ? ((reloadInfo.systemd.need_reload || []).length ? `${reloadInfo.systemd.need_reload.length} 个改过还没 daemon-reload` : `查了 ${reloadInfo.systemd.checked} 个单元，没有待重载`) : (reloadInfo.systemd?.reason || '读不到') }}
+          <i>unit 文件</i>{{ reloadInfo.systemd?.ok ? ((reloadInfo.systemd.need_reload || []).length ? `${reloadInfo.systemd.need_reload_total ?? reloadInfo.systemd.need_reload.length} 个改过还没 daemon-reload` : `查了 ${reloadInfo.systemd.checked} 个单元，没有待重载`) : (reloadInfo.systemd?.reason || '读不到') }}
         </span>
         <span class="mm-chip">
           <i>apt</i>{{ aptInfo.ok ? `最近一笔事务 ${aptInfo.last_start_date || '读不到'}（历史里共 ${aptInfo.transactions} 笔）` : (aptInfo.reason || '读不到') }}

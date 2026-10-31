@@ -1654,8 +1654,12 @@ def _pending_text(d: dict) -> str:
             lines.append(f"{name}：{v.get('reason') or '读不到'}")
         elif key == "systemd":
             need = v.get("need_reload") or []
+            # 名单是载荷预算截过的，总数另读 need_reload_total：40 条改过时不能念成"12 个待重载"。
+            total = v.get("need_reload_total", len(need))
             lines.append(f"{name}：查了 {v.get('checked')} 个单元，"
-                         + (f"{len(need)} 个待 daemon-reload（{', '.join(need[:4])}）" if need else "没有待重载"))
+                         + (f"{total} 个待 daemon-reload（前 {min(len(need), 4)}：{', '.join(need[:4])}）"
+                            + (f"，另有 {total - min(len(need), 4)} 个未列出" if total > min(len(need), 4) else "")
+                            if need else "没有待重载"))
         else:
             pend = {True: "有待重载的改动", False: "没有待重载的改动"}.get(v.get("pending"), "判定不了")
             cnt = v.get("conf_files") if key == "nginx" else v.get("files")

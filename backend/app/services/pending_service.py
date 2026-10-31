@@ -568,7 +568,7 @@ def _sshd_conf_paths() -> list[str]:
 
 def _systemd_state() -> dict:
     """unit 文件改过但没 daemon-reload：systemd 自己知道，直接问它。"""
-    out = {"ok": False, "reason": None, "checked": 0, "need_reload": []}
+    out = {"ok": False, "reason": None, "checked": 0, "need_reload": [], "need_reload_total": 0}
     try:
         listed = subprocess.run(
             ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--no-pager"],
@@ -599,6 +599,10 @@ def _systemd_state() -> dict:
     for props in systemd_ops.parse_show(shown.stdout or ""):
         if (props.get("NeedDaemonReload") or "").strip() == "yes":
             out["need_reload"].append(props["Id"])
+    # MAX_STALE_UNITS 是载荷的展示预算，不是这台机器的待重载总数：真有几十字条 unit 改过时，
+    # 截完只剩 12 条，若下游拿 len(need_reload) 当总数念就成了"12 个待重载"——和同文件
+    # units / unit_total 一样，真实总数单独放 need_reload_total，判词与 CLI、页面都读它。
+    out["need_reload_total"] = len(out["need_reload"])
     out["need_reload"] = out["need_reload"][:MAX_STALE_UNITS]
     out["ok"] = True
     return out
@@ -729,11 +733,17 @@ def _findings(kernel: dict, stale: dict, reloads: dict) -> list[dict]:
             "fix": "sshd -t && systemctl reload ssh   # 先 sshd -t，配置有错时 reload 会留下旧进程还是新进程的不确定态",
         })
     sysd = reloads.get("systemd") or {}
-    if sysd.get("need_reload"):
+    listed = sysd.get("need_reload") or []
+    if listed:
+        # 判词里的数读 need_reload_total（真实总数），不是被载荷预算截过的 len(need_reload)：
+        # 真有几十字条 unit 改过时，只列 12 条的名单本身说不出"到底多少条"。总数只有一个出处，
+        # 交给 name_list 的 total 覆写，沿用同一份「共 N 个，另 M 个未列出」措辞。
+        total = sysd.get("need_reload_total", len(listed))
         out.append({
             "id": "daemon-reload", "severity": SEV_WARN,
-            "title": f"{len(sysd['need_reload'])} 个 unit 文件改过但没 daemon-reload",
-            "detail": f"systemd 自己报 NeedDaemonReload=yes：{name_list(sysd['need_reload'], 5, sep=', ')}。"
+            "title": f"{total} 个 unit 文件改过但没 daemon-reload",
+            "detail": f"systemd 自己报 NeedDaemonReload=yes："
+                      f"{name_list(listed, 5, sep=', ', total=total)}。"
                       "在这之前 systemctl restart 用的还是旧版的 unit 定义。",
             "fix": "systemctl daemon-reload",
         })
