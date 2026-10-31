@@ -376,14 +376,14 @@ class TestAvatarPurge(unittest.TestCase):
         for name in ("7.png", "7.jpg", "8.png", "77.png", "notes.txt"):
             with open(os.path.join(self.dir, name), "wb") as f:
                 f.write(PNG)
-        self.assertEqual(avatars.purge(7), 2)
+        self.assertEqual(avatars.purge(7), {"purged": 2, "kept": [], "unread": None})
         self.assertEqual(sorted(os.listdir(self.dir)), ["77.png", "8.png", "notes.txt"])
 
     def test_missing_dir_is_not_an_error(self):
         p = mock.patch.object(config, "AVATAR_DIR", os.path.join(self.dir, "nope"))
         p.start()
         self.addCleanup(p.stop)
-        self.assertEqual(avatars.purge(1), 0)
+        self.assertEqual(avatars.purge(1), {"purged": 0, "kept": [], "unread": None})
 
     def test_reupload_with_different_format_leaves_one_file(self):
         """先传 PNG 再传 JPEG：旧格式必须被清掉，否则两张脸同时挂在公开路由上，

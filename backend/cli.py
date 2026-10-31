@@ -507,7 +507,9 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         dbm.execute("DELETE FROM users WHERE username=?", (a.name,))
         # 头像文件也要跟着走：/api/avatars/<id>.png 免登录可取，行删了图还在，
         # 这张脸就永久挂在一个已不存在的账号上，面板里没有任何地方能清它。
-        avatars.purge(u["id"])
+        # 读不动目录或删不掉文件时不能照报"已删除"——那张脸还在，得说给操作的人听（批次97）。
+        res = avatars.purge(u["id"])
+        avatar_warn = avatars.residue_note(res)
         security.bump_user_epoch(a.name)
         dbm.audit(a.name, "cli:user:delete")
         # 删掉最后一个管理员后，面板回到「未创建管理员」状态——此时任何能访问到面板的人
@@ -516,7 +518,10 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         note = "" if left else (
             "；本机已无管理员，请立即 printf '%s' \"$PW\" | choyeonctl user create <name> --password-stdin --role admin"
         )
-        Out.result({"ok": True, "username": a.name, "adminLeft": left}, f"已删除 {a.name}{note}")
+        if avatar_warn:
+            note += f"；{avatar_warn}"
+        Out.result({"ok": True, "username": a.name, "adminLeft": left, "avatar": res},
+                   f"已删除 {a.name}{note}")
         return {"ok": True, "adminLeft": left}
 
     Out.error(f"未知子命令: {a.user_cmd}", EXIT_USAGE)

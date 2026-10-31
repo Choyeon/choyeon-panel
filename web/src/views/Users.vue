@@ -115,8 +115,11 @@ async function delUser(u: any) {
   if (rowBusy(u.id)) return;
   startRowOp(u.id, 'del');
   try {
-    await api.deleteUser(u.id);
-    msg.success('已删除');
+    const res = await api.deleteUser(u.id);
+    // 账号行删了但旧头像没删掉时，那张脸还挂在免登录的 /api/avatars/ 上，面板里没有任何
+    // 地方能再看清它——不能说"已删除"了事，把后端交出的残留原因如实提示（批次97）。
+    if (res?.warn) msg.warning(res.warn, { duration: 8000 });
+    else msg.success('已删除');
     reload();
   } catch (e: any) {
     msg.error(e.message);

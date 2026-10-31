@@ -181,13 +181,16 @@ async def users_delete(uid: str, req: Request):
     if u["username"] == req.state.cp_sub:
         return JSONResponse(status_code=400, content={"error": "不能删除自己"})
     dbm.execute("DELETE FROM users WHERE id=?", (u["id"],))
-    await run_in_threadpool(avatars.purge, u["id"])
+    res = await run_in_threadpool(avatars.purge, u["id"])
+    # 行删了但旧头像没删掉，这张脸就还挂在 /api/avatars/ 上免登录可取，而面板里没有任何
+    # 地方能再看清它——不能因为"行删成功"就报 ok 了事，把没删干净并进响应与审计（批次97）。
+    warn = avatars.residue_note(res)
     security.bump_user_epoch(u["username"])
     # 已用口令的步数桶是按用户名记的，删号不清就等于把"这个人名下用过哪一步"留给了
     # 下一个同名账号（⑤L 的同名继承口径）：新建同名用户后，第一枚撞上旧步数的口令会被当重放拒掉。
     totp.forget_used(u["username"])
-    await aio_db.audit(req.state.cp_sub, "user:delete", u["username"])
-    return {"ok": True}
+    await aio_db.audit(req.state.cp_sub, "user:delete", f"{u['username']}（{warn}）" if warn else u["username"])
+    return {"ok": True, "warn": warn} if warn else {"ok": True}
 
 
 @router.get("/api/settings/alerts")
