@@ -1,7 +1,8 @@
 """仪表盘两条接口的回归测试：每网卡速率明细 + 概览计数。
 
 锁定的语义：
-- 每网卡速率与整机一样要防计数器回绕，新出现的网卡首帧记 0 而不是开机累计量；
+- 每网卡速率与整机一样要防计数器回绕：新出现的网卡、首帧、回绕这几轮**没有分母或差值不成立**，
+  速率记 null（未读到）而不是 0——0 是一个从没发生过的测量，会被曲线和小时均值当成真读数；
 - lo 不进列表（回环流量对运维没有意义，还会把"总发送"虚高）；
 - 网卡链路状态读不到时按 up 处理，未知不等于故障；
 - 概览的站点数在 nginx 缺失时是 null + reason，不是 0（0 会被读成"没有站点"）。
@@ -61,12 +62,12 @@ class NicRateCase(unittest.TestCase):
              mock.patch.object(system_metrics, "_RT_INTERVAL", 0.0):
             return asyncio.run(system_metrics.snapshot())
 
-    def test_first_frame_has_zero_rates_but_keeps_totals(self):
+    def test_first_frame_reports_no_rate_but_keeps_totals(self):
         d = self._snap(_raw({"eth0": (1000, 500)}))
         self.assertEqual(len(d["nics"]), 1)
         n = d["nics"][0]
         self.assertEqual(n["name"], "eth0")
-        self.assertEqual((n["rx"], n["tx"]), (0, 0), "首帧没有分母，速率记 0")
+        self.assertEqual((n["rx"], n["tx"]), (None, None), "首帧没有分母，速率是未读到，不是 0")
         self.assertEqual((n["totalRx"], n["totalTx"]), (1000, 500))
 
     def test_second_frame_divides_by_elapsed(self):
@@ -77,12 +78,13 @@ class NicRateCase(unittest.TestCase):
         self.assertEqual((d["netRx"], d["netTx"]), (1000, 200))
         self.assertEqual((d["netTotalRx"], d["netTotalTx"]), (3000, 900))
 
-    def test_counter_wrap_and_new_nic_report_zero(self):
+    def test_counter_wrap_and_new_nic_report_no_rate(self):
         self._snap(_raw({"eth0": (5000, 5000)}))
         d = self._snap(_raw({"eth0": (100, 100), "eth1": (9000, 4000)}), advance=1.0)
         by = {n["name"]: n for n in d["nics"]}
-        self.assertEqual((by["eth0"]["rx"], by["eth0"]["tx"]), (0, 0), "回绕按 0 处理，不报负数")
-        self.assertEqual((by["eth1"]["rx"], by["eth1"]["tx"]), (0, 0), "新出现的网卡首帧记 0")
+        self.assertEqual((by["eth0"]["rx"], by["eth0"]["tx"]), (None, None),
+                         "回绕这一轮差值不成立：宁可未读到，也不报 0（0 会被当成真的零流量）")
+        self.assertEqual((by["eth1"]["rx"], by["eth1"]["tx"]), (None, None), "新出现的网卡没有可比的前一刻")
 
     def test_loopback_excluded_and_order_stable(self):
         d = self._snap(_raw({"wlan0": (10, 10), "eth0": (20, 20)}))
@@ -163,10 +165,14 @@ class SampleReuseCase(unittest.TestCase):
         first = self._run(self._counters(1000, 2000, 1000, 500), 0.0)
         second = self._run(self._counters(1050, 2100, 91000, 45500), 0.4)
         self.assertIs(second, first, "区间内复用同一份快照，不再各算各的窗口")
+        self.assertEqual(len(system_metrics._history), 0, "首帧没有分母，连一个点都不落")
+        self._run(self._counters(1050, 2100, 91000, 45500), 2.0)
         self.assertEqual(len(system_metrics._history), 1, "一个区间只落一个采样点")
 
     def test_a_late_reader_does_not_read_zero_or_a_spike(self):
-        self._run(self._counters(1000, 2000, 1000, 500), 0.0)
+        cold = self._run(self._counters(1000, 2000, 1000, 500), 0.0)
+        self.assertIsNone(cold["cpu"], "首帧那一份连 CPU 都没有差值，不该是个 0")
+        self.assertFalse(cold["measured"])
         good = self._run(self._counters(1050, 2100, 3000, 1500), 2.0)
         self.assertAlmostEqual(good["cpu"], 50.0)
         self.assertEqual(good["netRx"], 1000)
@@ -178,9 +184,11 @@ class SampleReuseCase(unittest.TestCase):
         self._run(self._counters(1000, 2000, 1000, 500), 0.0)
         for _ in range(2):
             self._run(self._counters(1000, 2000, 1000, 500), 0.4)
-        d = self._run(self._counters(1000, 2000, 3800, 1900), 2.0)
+        d = self._run(self._counters(1001, 2001, 3800, 1900), 2.0)
         self.assertEqual(d["netRx"], 1000, "分母是整个采样窗口 2.8s，不是最后一次请求的间隔")
-        self.assertEqual(len(system_metrics._history), 2)
+        self.assertEqual(d["cpu"], 0.0, "有分母且确实没忙：这一轮的 0 是真读数")
+        self.assertTrue(d["measured"])
+        self.assertEqual(len(system_metrics._history), 1, "量不出来的首帧不进实时曲线")
 
     def test_history_is_capped_for_the_realtime_curve(self):
         self.assertEqual(

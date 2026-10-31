@@ -743,14 +743,15 @@ async def _check_resources() -> None:
         _unchecked("CPU／内存／负载阈值", f"读取系统指标失败：{type(e).__name__}")
         return
 
-    hist = snap.get("history")
-    if isinstance(hist, list) and len(hist) < 2:
-        # 进程第一次采样没有差值基线，cpu 恒为 0.0：那是"没测到"不是"很空闲"，
-        # 据此记一行"CPU 正常"等于谎报平安，等下一轮有基线了再说。
-        _unchecked("CPU／内存／负载阈值", "面板刚启动，还没有采样差值")
-        return
-
-    cpu = float(snap.get("cpu") or 0.0)
+    # CPU 是差值量：首帧、两次采样落在同一秒、或计数器回绕时后端给的是 null（见
+    # system_metrics._sample 的 `measured`）。原来这里拿 len(history)<2 猜这一帧，猜中的
+    # 那轮把整节判掉——内存与负载都是绝对量，没有差值分母也量得准，跟着一起跳过等于
+    # 面板刚启动的那一轮连"内存是不是已经 95%"都不看。
+    raw_cpu = snap.get("cpu")
+    cpu = None if raw_cpu is None else float(raw_cpu)
+    if cpu is None:
+        _unchecked("CPU／内存／负载阈值",
+                   "CPU 这一轮量不出差值（面板刚启动的第一帧，或两次采样之间没有可用的时间／计数分母）")
     mem_total = float(snap.get("memTotal") or 0)
     mem_used = float(snap.get("memUsed") or 0)
     mem = round(mem_used * 100 / mem_total) if mem_total > 0 else 0.0
@@ -761,13 +762,14 @@ async def _check_resources() -> None:
     load_risk = round(cores * LOAD_RISK_PER_CORE, 2)
     per_core = round(load1 / cores, 2)
 
-    await _check("cpu", cpu >= cpu_pct,
-                 f"CPU 使用率 {cpu}%（阈值 {cpu_pct}%，要紧档 {rt['cpu_crit']}%）",
-                 code="cpu", level="crit" if cpu >= rt["cpu_crit"] else "warn",
-                 log_message=f"CPU 使用率超过阈值（阈值 {cpu_pct}%）",
-                 ok_message=f"CPU 使用率正常（阈值 {cpu_pct}%）",
-                 meta=_meta(value=cpu, threshold=cpu_pct, crit=rt["cpu_crit"]),
-                 debounce=RESOURCE_NOTIFY_ROUNDS)
+    if cpu is not None:
+        await _check("cpu", cpu >= cpu_pct,
+                     f"CPU 使用率 {cpu}%（阈值 {cpu_pct}%，要紧档 {rt['cpu_crit']}%）",
+                     code="cpu", level="crit" if cpu >= rt["cpu_crit"] else "warn",
+                     log_message=f"CPU 使用率超过阈值（阈值 {cpu_pct}%）",
+                     ok_message=f"CPU 使用率正常（阈值 {cpu_pct}%）",
+                     meta=_meta(value=cpu, threshold=cpu_pct, crit=rt["cpu_crit"]),
+                     debounce=RESOURCE_NOTIFY_ROUNDS)
     await _check("mem", mem >= mem_pct,
                  f"内存使用率 {mem}%（阈值 {mem_pct}%，要紧档 {rt['mem_crit']}%）",
                  code="mem", level="crit" if mem >= rt["mem_crit"] else "warn",

@@ -2,7 +2,7 @@
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { NCard, NDropdown, NGrid, NGridItem, NIcon, NSelect, NSpace, NTag, NText } from 'naive-ui';
-import { NButton } from '../ui';
+import { NButton, UNKNOWN_LABEL, rateNum, rateText } from '../ui';
 import { api, getRole, req } from '../api';
 import { icons, icon } from '../icons';
 import { fmtAgo, fmtBytes } from '../composables/useFormat';
@@ -143,15 +143,16 @@ interface GaugeRow {
   warn: number | null;
   crit: number | null;
 }
+const gaugeText = (v: number | null) => (v == null ? UNKNOWN_LABEL : String(v));
 const gauges = computed(() => {
   const rows: GaugeRow[] = [
     {
-      key: 'cpu', label: 'CPU', percent: cpuVal.value, text: cpuVal.value == null ? '-' : String(cpuVal.value),
+      key: 'cpu', label: 'CPU', percent: cpuVal.value, text: gaugeText(cpuVal.value),
       unit: '%', detail: `${cores.value || '?'} 核`, note: '',
       warn: num(stat.value.cpuWarnPct), crit: num(stat.value.cpuCritPct),
     },
     {
-      key: 'mem', label: '内存', percent: memVal.value, text: memVal.value == null ? '-' : String(memVal.value),
+      key: 'mem', label: '内存', percent: memVal.value, text: gaugeText(memVal.value),
       unit: '%', detail: `${fmtBytes(stat.value.memUsed || 0)} / ${fmtBytes(stat.value.memTotal || 0)}`,
       note: '',
       warn: num(stat.value.memWarnPct), crit: num(stat.value.memCritPct),
@@ -192,10 +193,10 @@ const monNic = ref(ALL_NIC);
 const MON_CAP = 240;
 interface MonPoint {
   t: number;
-  net: Record<string, [number, number]>;
-  all: [number, number];
-  ioR: number;
-  ioW: number;
+  net: Record<string, [number | null, number | null]>;
+  all: [number | null, number | null];
+  ioR: number | null;
+  ioW: number | null;
 }
 const monBuf = ref<MonPoint[]>([]);
 
@@ -220,7 +221,9 @@ const monSeries = computed(() => {
       { name: '写入', color: '--cp-warn', data: buf.map((p) => p.ioW), area: true, straight: true },
     ];
   }
-  const pick = (p: MonPoint, i: 0 | 1) => (monNic.value === ALL_NIC ? p.all[i] : p.net[monNic.value]?.[i] ?? 0);
+  // 选中的网卡这一轮没有速率（例如刚启动的第一帧）时留 null，曲线在这一格断开：
+  // 写成 0 会让「没测到」和「链路真的没流量」长成同一条贴底直线。
+  const pick = (p: MonPoint, i: 0 | 1) => (monNic.value === ALL_NIC ? p.all[i] : p.net[monNic.value]?.[i] ?? null);
   return [
     { name: '上行', color: '--cp-ok', data: buf.map((p) => pick(p, 1)), area: true, straight: true },
     { name: '下行', color: '--cp-warn', data: buf.map((p) => pick(p, 0)), area: true, straight: true },
@@ -228,21 +231,23 @@ const monSeries = computed(() => {
 });
 const monChips = computed(() => {
   const s = stat.value;
+  // 速率格一律走 rateText：分母不成立时后端给的是 null，这里就写「未读到」，
+  // 不许 `${fmtBytes(null || 0)}/s` 把没测到印成 0 B/s。
   if (monMode.value === 'io') {
     return [
-      { k: '读取', v: `${fmtBytes(s.ioRead || 0)}/s` },
-      { k: '写入', v: `${fmtBytes(s.ioWrite || 0)}/s` },
+      { k: '读取', v: rateText(s.ioRead) },
+      { k: '写入', v: rateText(s.ioWrite) },
     ];
   }
   const one = monNic.value === ALL_NIC ? null : nicList.value.find((n: any) => n.name === monNic.value);
   if (one) {
     return [
-      { k: '上行', v: `${fmtBytes(one.tx || 0)}/s` }, { k: '下行', v: `${fmtBytes(one.rx || 0)}/s` },
+      { k: '上行', v: rateText(one.tx) }, { k: '下行', v: rateText(one.rx) },
       { k: '总发送', v: fmtBytes(one.totalTx || 0) }, { k: '总接收', v: fmtBytes(one.totalRx || 0) },
     ];
   }
   return [
-    { k: '上行', v: `${fmtBytes(s.netTx || 0)}/s` }, { k: '下行', v: `${fmtBytes(s.netRx || 0)}/s` },
+    { k: '上行', v: rateText(s.netTx) }, { k: '下行', v: rateText(s.netRx) },
     { k: '总发送', v: fmtBytes(s.netTotalTx || 0) }, { k: '总接收', v: fmtBytes(s.netTotalRx || 0) },
   ];
 });
@@ -349,15 +354,14 @@ async function tick() {
     if (disposed) return;
     stat.value = s;
     statError.value = '';
-    const net: Record<string, [number, number]> = {};
-    let ar = 0;
-    let at = 0;
-    for (const n of s.nics || []) {
-      net[n.name] = [n.rx || 0, n.tx || 0];
-      ar += n.rx || 0;
-      at += n.tx || 0;
-    }
-    const point: MonPoint = { t: Date.now(), net, all: [ar, at], ioR: s.ioRead || 0, ioW: s.ioWrite || 0 };
+    const net: Record<string, [number | null, number | null]> = {};
+    for (const n of s.nics || []) net[n.name] = [rateNum(n.rx), rateNum(n.tx)];
+    // 「全部网卡」这一格读后端算好的总速率，不在浏览器里把各卡再加一遍：两种算法只差
+    // 舍入，而首帧各卡都是 null 时自己加会得出一个 0——那是"量不出"被加成了一条真实流量。
+    const point: MonPoint = {
+      t: Date.now(), net, all: [rateNum(s.netRx), rateNum(s.netTx)],
+      ioR: rateNum(s.ioRead), ioW: rateNum(s.ioWrite),
+    };
     monBuf.value = [...monBuf.value.slice(-(MON_CAP - 1)), point];
   } catch (e: any) {
     // 401 时 api 层已跳转登录；网络抖动等下个周期自动恢复。

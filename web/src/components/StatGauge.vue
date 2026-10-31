@@ -99,8 +99,9 @@ const ticks = computed(() => {
   return out;
 });
 
+// 读数是文字（「未读到」）时不拼单位：屏幕阅读器念出「CPU 未读到%」比少了更糟。
 const ariaText = computed(
-  () => `${props.label} ${props.text}${props.unit}${props.detail ? `，${props.detail}` : ''}${props.note ? `，${props.note}` : ''}`,
+  () => `${props.label} ${props.text}${numeric.value === null ? '' : props.unit}${props.detail ? `，${props.detail}` : ''}${props.note ? `，${props.note}` : ''}`,
 );
 </script>
 
@@ -128,7 +129,7 @@ const ariaText = computed(
       />
     </svg>
     <div class="gauge-mid">
-      <div class="gauge-num">{{ display }}<span v-if="unit" class="gauge-unit">{{ unit }}</span></div>
+      <div class="gauge-num">{{ display }}<span v-if="unit && numeric !== null" class="gauge-unit">{{ unit }}</span></div>
       <div class="gauge-label">{{ label }}</div>
     </div>
     <div class="gauge-detail">{{ detail || ' ' }}</div>

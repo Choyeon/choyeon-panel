@@ -167,7 +167,8 @@ class TestSectionsMarkThemselves(unittest.TestCase):
 class TestServiceBranches(unittest.TestCase):
     def test_resources_without_baseline_are_not_quiet(self):
         async def snapshot():
-            return {"history": [{"cpu": 0.0}], "cpu": 0.0, "memTotal": 0, "memUsed": 0, "load": [0.0]}
+            # 批次108 后"量不出差值"由后端直说：cpu 是 None，不再拿 0.0 冒充一个读数
+            return {"cpu": None, "measured": False, "memTotal": 0, "memUsed": 0, "load": [0.0]}
 
         async def go():
             with ALS.collect_unchecked() as sink:
@@ -176,7 +177,7 @@ class TestServiceBranches(unittest.TestCase):
 
         with mock.patch.object(ALS.system_metrics, "snapshot", snapshot):
             sink = asyncio.run(go())
-        self.assertEqual(len(sink), 1, "没有差值基线时 cpu 恒为 0，那是没测到不是空闲")
+        self.assertEqual(len(sink), 1, "没有差值基线时 CPU 是量不出，不是空闲")
         self.assertIn("CPU", sink[0])
 
     def test_probes_with_no_apps_configured_is_not_unchecked(self):

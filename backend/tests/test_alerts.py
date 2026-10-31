@@ -596,7 +596,7 @@ class TestRunChecksHistory(_HistoryCase):
     """整轮巡检的历史写入：状态不变不增行，状态变了才增行，恢复留 ok 痕。"""
 
     SNAP = {"cpu": 12.0, "memTotal": 1000, "memUsed": 200, "load": [0.4, 0.3, 0.2], "cpuCores": 4,
-            # history 要两点：只有一点时 snapshot() 的 cpu 是"还没基线"，不是"0% 空闲"
+            # 有基线时 cpu 才是数；批次108 后没基线那一轮直接给 cpu=None（见 cold_snap）
             "history": [{"t": 0, "cpu": 11.0}, {"t": 3000, "cpu": 12.0}]}
 
     def setUp(self):
@@ -628,10 +628,14 @@ class TestRunChecksHistory(_HistoryCase):
               mock.patch.object(alerts_service.system_metrics, "snapshot", fake_snap)):
             asyncio.run(alerts_service.run_checks())
 
-    def test_no_baseline_sample_writes_no_resource_rows(self):
-        """没有差值基线的那一轮（进程刚起来）cpu=0.0：既不报也不记"正常"。"""
+    def test_no_baseline_sample_writes_no_cpu_row_but_still_judges_the_rest(self):
+        """没有差值分母的那一轮只欠 CPU 这一格：内存与负载是绝对量，照样要判。
+
+        批次108 前这里靠 history 长度猜，猜中就整节跳过——面板刚起来那一轮连
+        "内存是不是已经 95%" 都不看，而那一格跟差值没关系。
+        """
         async def cold_snap():
-            return dict(self.SNAP, cpu=99.0, history=[{"t": 0, "cpu": 0.0}])
+            return dict(self.SNAP, cpu=None, history=[])
 
         with (mock.patch.object(alerts_service, "run", _run_stub),
               mock.patch.object(alerts_service, "disk_usage_pct", lambda p: 40),
@@ -639,8 +643,8 @@ class TestRunChecksHistory(_HistoryCase):
               mock.patch.object(alerts_service, "notify", _no_notify),
               mock.patch.object(alerts_service.system_metrics, "snapshot", cold_snap)):
             asyncio.run(alerts_service.run_checks())
-        self.assertEqual({r["code"] for r in _metric_rows()}, {"disk", "failed-units"},
-                         "资源三项本轮没有可信读数，其它巡检照常留痕")
+        self.assertEqual({r["code"] for r in _metric_rows()}, {"mem", "load1", "disk", "failed-units"},
+                         "CPU 这一轮没有可信读数所以不记账，内存/负载/磁盘照常留痕")
 
     def test_resource_notify_is_debounced(self):
         """瞬时尖峰只进历史不推送，连续两轮才发：备份压满 CPU 不该变成通知噪音。

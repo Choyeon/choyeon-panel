@@ -1,6 +1,7 @@
 """metrics_store 回归测试。
 
-锁定五条真实语义：累计计数器回绕不产生负值/开机量 spike、首帧记 0；
+锁定五条真实语义：累计计数器回绕不产生负值/开机量 spike，首帧与回绕这几轮没有可用分母、
+速率记 NULL（不是 0，0 会被小时均值当成一次真读数）；
 小时 rollup 重跑只替换不重复、raw 过期后不销毁已固化的 hour 行；
 history 分桶保证响应不超 300 点；非法 range 回 400 中文错误且不泄漏路径；
 采样循环单轮报错不中断、取消后干净退出并把心跳清零。
@@ -75,7 +76,7 @@ class MetricsCase(unittest.TestCase):
 
 
 class TestCounterDelta(MetricsCase):
-    """累计量差值：首帧 0、正常轮出速率、回绕记 0、回绕后以新基线恢复。"""
+    """累计量差值：首帧 NULL、正常轮出速率、回绕记 NULL、回绕后以新基线恢复。"""
 
     def test_delta_sequence(self):
         seq = [
@@ -90,26 +91,32 @@ class TestCounterDelta(MetricsCase):
                 with mock.patch.object(metrics_store, "_read_counters", _counters(*c)):
                     out.append(asyncio.run(metrics_store.sample(ts=1000 + i * 30)))
         first = out[0]
-        self.assertEqual((first["netRx"], first["netTx"], first["ioR"], first["ioW"]), (0, 0, 0, 0))
+        self.assertEqual((first["netRx"], first["netTx"], first["ioR"], first["ioW"]),
+                         (None, None, None, None), "首帧没有分母：这一轮压根没量到，不是零流量")
         self.assertEqual(first["cpu"], 40.0)
         self.assertEqual(first["load1"], 1.5)
         self.assertEqual((out[1]["netRx"], out[1]["netTx"], out[1]["ioR"], out[1]["ioW"]), (100, 200, 1000, 500))
-        self.assertEqual((out[2]["netRx"], out[2]["netTx"], out[2]["ioR"], out[2]["ioW"]), (0, 0, 0, 0))
+        self.assertEqual((out[2]["netRx"], out[2]["netTx"], out[2]["ioR"], out[2]["ioW"]),
+                         (None, None, None, None), "差值为负等于这一轮不可比，写成 0 就成了一次假测量")
         self.assertEqual(out[3]["netRx"], 50)
-        self.assertEqual((out[3]["netTx"], out[3]["ioR"], out[3]["ioW"]), (0, 0, 0))
+        self.assertEqual((out[3]["netTx"], out[3]["ioR"], out[3]["ioW"]), (0, 0, 0),
+                         "有分母且累计量确实没涨：这里的 0 是真读数")
         row = dbm.query_one("SELECT * FROM metrics WHERE gran='raw' AND ts=?", (1090,))
         self.assertEqual(row["net_rx"], 50)
+        first_row = dbm.query_one("SELECT * FROM metrics WHERE gran='raw' AND ts=?", (1000,))
+        self.assertIsNone(first_row["net_rx"], "NULL 要真的落到那一列，而不是 0 混进后续均值")
         for r in out:
             for k in ("netRx", "netTx", "ioR", "ioW"):
-                self.assertGreaterEqual(r[k], 0, "任何一轮都不得为负")
+                if r[k] is not None:
+                    self.assertGreaterEqual(r[k], 0, "量出来的轮次不得为负")
 
-    def test_same_timestamp_yields_zero(self):
+    def test_same_timestamp_yields_no_rate(self):
         with mock.patch.object(system_metrics, "snapshot", _fake_snap), \
              mock.patch.object(metrics_store, "_read_counters", _counters(100, 100, 100, 100)):
             asyncio.run(metrics_store.sample(ts=2000))
             with mock.patch.object(metrics_store, "_read_counters", _counters(999, 999, 999, 999)):
                 again = asyncio.run(metrics_store.sample(ts=2000))  # dt=0：没有分母就没有速率
-        self.assertEqual(again["netRx"], 0)
+        self.assertIsNone(again["netRx"])
 
 
 class TestRollup(MetricsCase):

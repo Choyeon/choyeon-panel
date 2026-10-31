@@ -2,8 +2,9 @@
 
 system_metrics.snapshot() 的速率只在内存里、重启即失忆，仪表盘曲线需要历史行。
 网络与磁盘 IO 的原始计数器是累计量，这里单独留住上一轮的累计值、逐轮做差得到
-每秒速率：计数器回绕（主机重启/换网卡/兜底路径切换）时记 0，既不报负数，也不会
-把"自开机累计量"当成一轮的流量 spike；进程内首帧同样记 0。
+每秒速率：量不出来的一轮写 NULL（进程内首帧没有分母、计数器回绕后差值无意义、
+两次采样落在同一秒），而不是记 0——0 是一个从没发生过的测量，会被小时均值算进
+分母，让那一个小时看着比实际空闲。
 """
 import asyncio
 import math
@@ -47,10 +48,10 @@ def _read_counters() -> dict:
     return {"rx": raw["rx"], "tx": raw["tx"], "ioRead": raw["ioRead"], "ioWrite": raw["ioWrite"]}
 
 
-def _delta_bps(cur: int, prev: int, dt: int) -> int:
-    """累计量差值 → 每秒字节数。dt 非正或计数器回绕时记 0（重置语义见模块头）。"""
+def _delta_bps(cur: int, prev: int, dt: int) -> int | None:
+    """累计量差值 → 每秒字节数；分母不成立或计数器回绕时给 None（重置语义见模块头）。"""
     if dt <= 0 or cur < prev:
-        return 0
+        return None
     return round((cur - prev) / dt)
 
 
@@ -70,7 +71,9 @@ async def sample(ts: int | None = None) -> dict:
     cum = await asyncio.to_thread(_read_counters)
     ts = int(time.time()) if ts is None else int(ts)
     if _prev_cum is None:
-        net_rx = net_tx = io_r = io_w = 0  # 重启后首帧没有可靠分母，记 0 而不是开机累计量
+        # 重启后首帧没有可靠分母：这四列写 NULL，而不是"这一轮零流量"。
+        # 记 0 的那版会把假测量落进 raw 行，小时均值（_avg 只挡 None）照着把它算进分母。
+        net_rx = net_tx = io_r = io_w = None
     else:
         dt = ts - _prev_cum["at"]
         net_rx = _delta_bps(cum["rx"], _prev_cum["rx"], dt)

@@ -1,5 +1,6 @@
 import { computed, defineComponent, h, onBeforeUnmount, ref, type ComputedRef, type PropType } from 'vue';
 import { NButton as NaiveButton } from 'naive-ui';
+import { fmtBytes } from './composables/useFormat';
 
 /**
  * NButton 的图标只认 `#icon` 插槽（naive-ui 没有 icon prop），而全站按钮写的是
@@ -187,3 +188,21 @@ export function seriesCappedNote(listed: number, total: number, limit: number): 
  */
 export const SERIES_UNREADABLE_NOTE = '列不出这个来源的轮替世代（多半是所在目录没有读权限，'
   + '或正被 logrotate 改名）——这一轮没看到历史，不等于盘上没有历史';
+
+/**
+ * 速率（每秒字节）的「这一轮没有分母」：后端给 null，不是 0（批次108）。
+ *
+ * CPU 占用率与网速/IO 都是两次累计量的差除以时间，面板刚启动的第一帧、两次采样落在
+ * 同一秒、或计数器回绕之后都算不出这个差。`x || 0` 那种写法会把"量不出"渲染成
+ * 「0 B/s」——看着像一台闲得发慌的机器，而它只是刚起来。绝对量（总收发字节、容量）
+ * 不走这里：那些是真读到了数。
+ */
+export function rateNum(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/** 速率一格的读法：有分母写 `12.3 KB/s`，没有分母就明说未读到。 */
+export function rateText(v: unknown): string {
+  const n = rateNum(v);
+  return n === null ? UNKNOWN_LABEL : `${fmtBytes(n)}/s`;
+}

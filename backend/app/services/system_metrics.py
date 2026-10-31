@@ -235,12 +235,18 @@ def _psutil_raw() -> dict:
     }
 
 
-def _rate(cur, prev, dt_s: float) -> int:
-    """累计字节 → 每秒字节数。计数器回绕（重启/换网卡）时按 0 处理而不是报负数。"""
+def _rate(cur, prev, dt_s: float) -> int | None:
+    """累计字节 → 每秒字节数；**没有分母就没有答案**（None），不许画成 0。
+
+    原来这三种情况都返回 0：分母非正（同一秒里连采两次）、计数器回绕（主机重启、换网卡、
+    兜底路径切换）、以及回绕后的第一轮。前两种是"这一轮量不出速率"，写成 0 就成了一个
+    从没发生过的测量——概览会说"这一秒零流量"，小时均值会把这一轮当成 0 计入。
+    真·零流量仍然是 0：有分母、且累计量确实没涨。
+    """
     if dt_s <= 0:
-        return 0
+        return None
     delta = cur - prev
-    return max(0, round(delta / dt_s)) if delta >= 0 else 0
+    return round(delta / dt_s) if delta >= 0 else None
 
 
 async def snapshot() -> dict:
@@ -259,11 +265,15 @@ async def _sample() -> dict:
     mono = time.monotonic()
     raw = await asyncio.to_thread(_psutil_raw if psutil else _proc_raw)
 
-    cpu = 0.0
-    per_core = [0.0] * len(raw["perCore"])
-    net_rx = net_tx = io_r = io_w = 0
+    # 占用率与速率都是"两次累计量的差 ÷ 分母"，首帧根本没有分母。原来这里写死 0.0/0，
+    # 于是面板每次重启都产出一批"没测到却是个数"的读数：告警据此记一行"CPU 正常"，
+    # metrics_store 把 0 落进 raw 行、小时均值再把它算进去（见 metrics_store.sample）。
+    has_base = _prev is not None
+    cpu: float | None = None
+    per_core: list = [None] * len(raw["perCore"])
+    net_rx = net_tx = io_r = io_w = None
     elapsed = 0.0
-    if _prev:
+    if has_base:
         dt = raw["total"] - _prev["total"]
         di = raw["idle"] - _prev["idle"]
         if dt > 0:
@@ -279,15 +289,16 @@ async def _sample() -> dict:
         net_tx = _rate(raw["tx"], _prev["tx"], elapsed)
         io_r = _rate(raw["ioRead"], _prev["ioRead"], elapsed)
         io_w = _rate(raw["ioWrite"], _prev["ioWrite"], elapsed)
-    # 每网卡明细：首帧没有分母，速率记 0 而不是把开机累计量当成瞬时值。
+    # 每网卡明细：这块网卡这一轮没有上一刻可比（首帧，或它刚出现）时速率记 None，
+    # 而不是把开机累计量除以一个小分母当成瞬时值。
     prev_nics = (_prev or {}).get("nics") or {}
     nic_rows = []
     for name, (c_rx, c_tx) in sorted(raw["nics"].items()):
         p = prev_nics.get(name)
         nic_rows.append({
             "name": name,
-            "rx": _rate(c_rx, p[0], elapsed) if p else 0,
-            "tx": _rate(c_tx, p[1], elapsed) if p else 0,
+            "rx": _rate(c_rx, p[0], elapsed) if p else None,
+            "tx": _rate(c_tx, p[1], elapsed) if p else None,
             "totalRx": c_rx,
             "totalTx": c_tx,
             "up": bool(raw["nicUp"].get(name, True)),
@@ -305,10 +316,17 @@ async def _sample() -> dict:
         "t": now_ms, "cpu": cpu, "memUsed": mem_used, "memTotal": raw["memTotal"],
         "netRx": net_rx, "netTx": net_tx,
     }
-    _history.append(point)
+    # 实时曲线里不放"这一格还没有分母"的点：ECharts 会把 null 画成断口，而这条曲线只留
+    # 最近 60 帧，一个永远量不出来的点占掉一格，比空着更误导。
+    if cpu is not None:
+        _history.append(point)
 
     return {
         "cpu": cpu,
+        # 「这一轮的 CPU 差值到底算出来了没有」。读取者别再拿 `len(history) < 2` 这类代理去猜：
+        # 首帧、两次采样之间 jiffies 没走、计数器回绕都会让 cpu（以及同源的 netRx/ioRead 等速率）
+        # 是 None，而内存与磁盘容量那些绝对量照样是准的。
+        "measured": cpu is not None,
         "cpuPerCore": per_core,
         "cpuCores": len(per_core) or (os.cpu_count() or 0),
         "memUsed": mem_used,
