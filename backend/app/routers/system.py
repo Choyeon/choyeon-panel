@@ -225,6 +225,17 @@ def _rule_desc(body: dict, outcome: str) -> str:
     return " ".join(parts)[:200] + f" -> {outcome[:120]}"
 
 
+def _written_or_live(out: dict, live: str, written: str) -> str:
+    """审计判词分「现在就生效」与「只写进表里」：判据只有响应体那一个 `reloaded`。
+
+    firewalld 命中防自锁保护时，add/remove 只改 permanent 表，面板主动不跑 `--reload`
+    （reload 会冲掉管理员在 SSH 里的运行期应急放行），响应体带 `reloaded: false`。
+    端点原来无条件写「已生效」/「已删除」，而同一次请求回给前端的 detail 明说「没有执行
+    --reload」——两条通道对同一事实各说各话，事后翻审计的人会以为那条规则早已生效。
+    """
+    return written if out.get("reloaded") is False else live
+
+
 @router.post("/api/firewall/rules")
 async def firewall_add(req: Request):
     """新增放行/拒绝规则。拒绝理由（含自锁保护）原样回给前端，成功与失败都进审计。"""
@@ -237,7 +248,8 @@ async def firewall_add(req: Request):
     except Exception as e:  # noqa: BLE001
         await aio_db.audit(req.state.cp_sub, "firewall:add", _rule_desc(body or {}, f"拒绝：{public_message(e)}"))
         return err_json(e)
-    await aio_db.audit(req.state.cp_sub, "firewall:add", _rule_desc(body or {}, "已生效"))
+    await aio_db.audit(req.state.cp_sub, "firewall:add", _rule_desc(
+        body or {}, _written_or_live(out, "已生效", "已写入 permanent，未 reload（尚未生效）")))
     return out
 
 
@@ -254,7 +266,9 @@ async def firewall_remove(num: int, req: Request):
     except Exception as e:  # noqa: BLE001
         await aio_db.audit(req.state.cp_sub, "firewall:remove", f"num={num} -> 拒绝：{public_message(e)}")
         return err_json(e)
-    await aio_db.audit(req.state.cp_sub, "firewall:remove", f"num={num} -> 已删除 {out.get('removed', '')}")
+    removed = out.get("removed", "")
+    await aio_db.audit(req.state.cp_sub, "firewall:remove", f"num={num} -> " + _written_or_live(
+        out, f"已删除 {removed}", f"已从 permanent 删除 {removed}，未 reload（运行期规则仍在放行）"))
     return out
 
 

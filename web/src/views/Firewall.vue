@@ -166,7 +166,10 @@ async function submitAdd() {
   if (f.comment.trim()) body.comment = f.comment.trim();
   try {
     const r = await api.add(body);
-    msg.success(r.detail || '规则已添加');
+    // reloaded===false：规则只进了 permanent 表，面板为防自锁故意没替用户跑 --reload，
+    // 这条放行此刻还没生效。同页的删除路径早就按这一条分黄字，添加路径不能只看 200 就报绿。
+    if (r.reloaded === false) msg.warning(`${r.detail || '规则已写入，但未重载（尚未生效）'}`, { duration: 8000 });
+    else msg.success(r.detail || '规则已添加');
     showAdd.value = false;
     form.value = { port: '', port_to: '', proto: 'tcp', action: 'allow', rate: false, source: '', comment: '' };
     await load();
