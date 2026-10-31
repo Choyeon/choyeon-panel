@@ -101,7 +101,7 @@ class AttemptsUnreadTests(unittest.TestCase):
         """对照：日志读得到时那句照旧，别把修诚实做成把好消息也删掉。"""
         got = LA.doctor_item(_login_data(attempts=_att(failed=11, distinct_ips=4)))
         self.assertEqual(got["status"], "pass")
-        self.assertIn("24h 失败认证 11 次", got["detail"])
+        self.assertIn("过去 24 小时失败认证 11 次", got["detail"])
 
     def test_cli_overview_line_says_unread(self):
         text = cli._ssh_audit_text(_login_data(attempts=_att(ok=False, note="journalctl 退出码 1，这段窗口没读到")))

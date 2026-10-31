@@ -1188,7 +1188,9 @@ def _ssh_audit_text(d: dict) -> str:
     reach = {True: "对外可达", False: "仅本机或内网", None: "可达性判不出"}[ssh.get("reachable")]
     # ok=false 时 failed / distinct_ips 是"读不到"那一份的占位 0，念出来就成了"一夜没人试、
     # 零个来源"——这句恰恰把最该看的那件事说成已核对过。与网页那条横幅同一个口径。
-    att_line = (f"过去 24 小时失败认证 {att.get('failed', 0)} 次（{att.get('distinct_ips', 0)} 个来源地址）"
+    # 覆盖多久只认服务端的 window_label：日志读满行数上限时它不是 24 小时。
+    att_line = (f"{att.get('window_label') or '过去 24 小时'}失败认证 {att.get('failed', 0)} 次"
+                f"（{att.get('distinct_ips', 0)} 个来源地址）"
                 if att.get("ok")
                 else f"过去 24 小时认证日志读不到（{att.get('note') or '原因未知'}）")
     lines = [
@@ -1196,6 +1198,8 @@ def _ssh_audit_text(d: dict) -> str:
         f"概览：要紧 {counts.get('risk', 0)} 项 · 值得处理 {counts.get('warn', 0)} 项 · "
         f"知道就好 {counts.get('note', 0)} 项 · {att_line}",
     ]
+    if att.get("ok") and att.get("window_note"):
+        lines.append(f"说明：{att['window_note']}")
     for f in d.get("findings") or []:
         sev = severity.SEV_LABEL.get(f["severity"], f["severity"])
         lines.append(f"[{sev}] {f['title']}")
@@ -2128,7 +2132,7 @@ async def cmd_schema(_a: argparse.Namespace) -> dict:
                        "ufw 用规则备注 choyeon-ban 标记，firewalld 用同名 ipset（rich rule 没有备注字段）",
                        "每一次写都重新列表确认：命令返回 0 而地址不在表里，按失败处理（退出码 1）",
                        "上限 50 条；重复封同一个地址只回「已经在列表里」，不会写第二条",
-                       "地址过去 24 小时成功登录过照样封，但会先说明那会断开它的会话",
+                       "地址在认证日志窗口内成功登录过照样封，但会先说明那会断开它的会话",
                        "rm（ufw）要带 ban list 读回的 --num 与 --expect；没有防火墙工具时退出码 3"]},
             {"name": "updates", "args": ["--refresh"],
              "desc": "待装系统补丁与安全更新（只读探测，面板不代跑 apt update/upgrade）",
@@ -2360,7 +2364,8 @@ def build_parser() -> argparse.ArgumentParser:
     bn = sub.add_parser("ban", help="sshd 爆破来源封禁（写的还是本机防火墙）", parents=[common])
     bn.add_argument("ban_cmd", choices=["list", "add", "rm"])
     bn.add_argument("ip", nargs="?", help="add/rm：单个公网地址，不接受 CIDR、域名或内网地址")
-    bn.add_argument("--hits", type=int, help="add：过去 24 小时失败次数，只写进备注，不参与判定")
+    bn.add_argument("--hits", type=int,
+                    help="add：认证日志窗口内的失败次数（见 ssh-audit 的来源排行），只写进备注，不参与判定")
     bn.add_argument("--num", type=int, help="rm（ufw）：ban list 里这条封禁的规则编号")
     bn.add_argument("--expect", help="rm（ufw）：ban list 里这条封禁的 sig，服务端重新列表比对")
     bn.set_defaults(fn=cmd_ban)

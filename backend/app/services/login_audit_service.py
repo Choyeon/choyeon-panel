@@ -39,6 +39,13 @@ JOURNAL_TIMEOUT = 25.0
 MAX_KEYS = 60  # 单个 authorized_keys 最多逐条列这么多行，再多只报总数
 MAX_FILES = 64
 JOURNAL_LINES = 50000
+# 认证日志这一段覆盖多长，说法只有一份：`_attempts` 给出 window_label / window_note，
+# doctor 判词、CLI 与登录安全页签都从这里读。`-n` 限的是行数不是时间——窗口里日志超过
+# 上限时，读到的只是 24h 的最后一段，把次数写成「过去 24 小时 N 次」就是拿面板自己的
+# 读取上限冒充一次测量（批次85）。
+WINDOW_FULL = "过去 24 小时"
+# journalctl -o short-iso 的行首是 2026-10-30T07:57:09+0800；取到分钟够人核对日期。
+_STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})")
 # 失败来源与成功来源各列前几名。两处用同一个数：只列失败的 Top5 而看不到"这个人其实
 # 登录成功过"，封禁那条路上的提醒就无从谈起。
 TOP_IPS = 5
@@ -457,8 +464,9 @@ def _guard_phrase(guard: dict) -> str:
 
 def _no_attempts(note: str) -> dict:
     """读不到日志时如实返回"这一项没核对成"，不给出 0 次这种看着像好消息的数。"""
-    return {"ok": False, "window": "24h", "failed": 0, "distinct_ips": 0, "top": [],
-            "accepted": [], "accepted_ips": [], "note": note}
+    return {"ok": False, "failed": 0, "distinct_ips": 0, "top": [], "accepted": [],
+            "accepted_ips": [], "note": note, "truncated": False,
+            "window_label": WINDOW_FULL, "window_note": ""}
 
 
 async def attempts() -> dict:
@@ -470,6 +478,38 @@ async def attempts() -> dict:
     return await _attempts()
 
 
+def _first_seen(lines: list[str]) -> str:
+    """这一轮读到的第一行是什么时候（`journalctl -o short-iso` 的时间前缀）。
+
+    只为把「最后 5 万行」翻成人能核对的时间跨度。行首不是 ISO 时间（老格式日志、
+    测试里喂的裸日志行）就回空串：判词照旧说「这一轮只读到最后 N 行」，不编日期。
+    """
+    for line in lines:
+        m = _STAMP_RE.match(line.strip())
+        if m:
+            return f"{m.group(1)} {m.group(2)}"
+    return ""
+
+
+def window_label(attempts: dict) -> str:
+    """「这些次数覆盖多久」的唯一说法。未截断时就是过去 24 小时。"""
+    if not attempts.get("ok") or not attempts.get("truncated"):
+        return WINDOW_FULL
+    since = attempts.get("covered_from") or ""
+    return f"这一轮读到的最后 {JOURNAL_LINES} 行日志里" + (f"（自 {since} 起）" if since else "")
+
+
+def window_note(attempts: dict) -> str:
+    """截断时的一句完整说明；未截断时为空，读的人不必自己拼。"""
+    if not attempts.get("ok") or not attempts.get("truncated"):
+        return ""
+    since = attempts.get("covered_from") or ""
+    span = f"（从 {since} 起，覆盖不足 24 小时）" if since else ""
+    return (f"24 小时窗口的 sshd 日志超过这一轮读取上限（{JOURNAL_LINES} 行），"
+            f"只数到最后 {JOURNAL_LINES} 行{span}：失败次数、来源数与此处排行都是这一段的下限，"
+            "不是整窗口的数。全量请自己跑 journalctl --since '24 hours ago' 数一遍。")
+
+
 async def _attempts() -> dict:
     """过去 24h 的 sshd 认证日志：失败次数、来源 IP 排行、成功登录各用了什么方式。"""
     if not shutil.which("journalctl"):
@@ -477,7 +517,8 @@ async def _attempts() -> dict:
     r = await run(
         "journalctl",
         ["-u", "ssh", "-u", "sshd", "-u", "ssh.service",
-         "--since", "24 hours ago", "-n", str(JOURNAL_LINES), "--no-pager", "-q"],
+         "--since", "24 hours ago", "-n", str(JOURNAL_LINES), "--no-pager", "-q",
+         "-o", "short-iso"],
         timeout=JOURNAL_TIMEOUT,
     )
     out = r["out"] or ""
@@ -485,8 +526,12 @@ async def _attempts() -> dict:
         return _no_attempts(f"journalctl 退出码 {r['code']}，这段窗口没读到")
     if r["code"] == 1 and not out:
         return _no_attempts("这台机器上没有 ssh 相关的 journal 单元（sshd 日志可能写在别处）")
+    lines = out.splitlines()
+    # 读满上限就是窗口被切过：`-n` 取的是 24h 里的最后 N 行，不是"24h 里只有这些"。
+    cut = len(lines) >= JOURNAL_LINES
+    seen = _first_seen(lines) if cut else ""
     failed, ips, accepted, ok_ips = 0, {}, {}, {}
-    for line in out.splitlines():
+    for line in lines:
         if _FAILED_RE.search(line):
             failed += 1
             m = _IP_RE.search(line)
@@ -502,13 +547,16 @@ async def _attempts() -> dict:
                     ok_ips[im.group("ip")] = ok_ips.get(im.group("ip"), 0) + 1
     top = sorted(ips.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_IPS]
     tops_ok = sorted(ok_ips.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_IPS]
-    return {
-        "ok": True, "window": "24h", "failed": failed, "distinct_ips": len(ips),
+    payload = {
+        "ok": True, "failed": failed, "distinct_ips": len(ips),
         "top": [{"ip": ip, "count": c} for ip, c in top],
         "accepted": [{"method": k, "count": v} for k, v in sorted(accepted.items(), key=lambda kv: (-kv[1], kv[0]))],
         "accepted_ips": [{"ip": ip, "count": c} for ip, c in tops_ok],
-        "note": "",
+        "note": "", "truncated": cut, "covered_from": seen, "line_limit": JOURNAL_LINES,
     }
+    payload["window_label"] = window_label(payload)
+    payload["window_note"] = window_note(payload)
+    return payload
 
 
 def _panel_2fa() -> dict:
@@ -557,6 +605,10 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
     # 由 notes 如实说明这一项没核对成。
     no_guard = guard["status"] in ("unguarded", "absent")
     failed = attempts["failed"] if attempts["ok"] else 0
+    # 「这些次数覆盖多久」只有 window_label 一个出处：读满行数上限时它就不是 24 小时，
+    # 判词照旧写"过去 24 小时"等于拿面板自己的读取上限冒充一次测量。
+    wl = window_label(attempts)
+    wn = window_note(attempts)
 
     if accounts["empty_password"]:
         out.append({
@@ -577,7 +629,7 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
             "id": "root-password", "severity": "risk",
             "title": "sshd 同时允许 root 登录和口令认证，且端口对外可达",
             "detail": "这是撞库最省事的一组组合：用户名固定是 root，只需要猜口令。"
-                      + (f"过去 24 小时已有 {failed} 次失败认证。" if attempts["ok"] else ""),
+                      + (f"{wl}已有 {failed} 次失败认证。" if attempts["ok"] else ""),
             "fix": "先确认自己的钥匙能登进来，再把 PermitRootLogin 改成 prohibit-password",
         })
     elif pw and reachable:
@@ -585,7 +637,7 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
             "id": "password-auth", "severity": "warn",
             "title": "sshd 允许口令认证且端口对外可达",
             "detail": "root 直登已经关了，但普通账号的口令仍是可猜目标。"
-                      + (f"过去 24 小时 {failed} 次失败认证。" if attempts["ok"] else ""),
+                      + (f"{wl} {failed} 次失败认证。" if attempts["ok"] else ""),
             "fix": "改用 SSH 钥匙后设 PasswordAuthentication no（关之前拿另一台机器验证钥匙能登进来）",
         })
     if pw and no_guard:
@@ -594,7 +646,7 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
             "id": "no-guard",
             "severity": "risk" if failed >= 100 else "warn",
             "title": "口令认证开着，却没有正在运行的爆破防护",
-            "detail": (f"{phrase}，过去 24 小时 {failed} 次失败认证、来自 "
+            "detail": (f"{phrase}，{wl} {failed} 次失败认证、来自 "
                        f"{attempts['distinct_ips']} 个地址，全靠 sshd 自己扛。")
                       if attempts["ok"] else f"{phrase}，而这段窗口又读不到 sshd 日志。",
             "fix": "二选一：装上并启用 fail2ban 的 sshd jail，或者干脆关掉口令认证（后者更彻底）",
@@ -660,16 +712,18 @@ def _findings(ssh: dict, keys: dict, accounts: dict, attempts: dict, guard: dict
     if failed >= 500 and not guarded:
         out.append({
             "id": "brute-volume", "severity": "risk",
-            "title": f"过去 24 小时 {failed} 次失败认证，来自 {attempts['distinct_ips']} 个地址",
-            "detail": "排行靠前：" + "、".join(f"{t['ip']}（{t['count']} 次）" for t in attempts["top"][:3]),
+            "title": f"{wl} {failed} 次失败认证，来自 {attempts['distinct_ips']} 个地址",
+            "detail": "排行靠前：" + "、".join(f"{t['ip']}（{t['count']} 次）" for t in attempts["top"][:3])
+                      + (f"。{wn}" if wn else ""),
             "fix": "在网关侧封来源，或让 sshd 只监听跳板/内网；量持续大时配合 fail2ban",
         })
     accepted_password = next((a["count"] for a in attempts.get("accepted", []) if a["method"] == "password"), 0)
     if accepted_password:
         out.append({
             "id": "accepted-password", "severity": "warn" if not guarded else "note",
-            "title": f"过去 24 小时有 {accepted_password} 次口令方式登录成功",
-            "detail": "即使配置允许，口令登录成功本身也值得逐条核对是不是本人、是不是已知来源。",
+            "title": f"{wl}有 {accepted_password} 次口令方式登录成功",
+            "detail": "即使配置允许，口令登录成功本身也值得逐条核对是不是本人、是不是已知来源。"
+                      + (f" {wn}" if wn else ""),
             "fix": "choyeonctl ssh-audit --json 看 accepted 明细，并核对该 IP 与时间",
         })
     # 面板账号的两步验证覆盖面。panel 为 None 表示调用方没给这一层数据（比如单测只关心
@@ -803,7 +857,12 @@ def doctor_item(data: dict) -> dict:
                           f"（{data['attempts'].get('note') or '没有可读的 sshd 日志'}），"
                           "有没有人在撞库无从核对",
                 "fix": "choyeonctl ssh-audit", "fixable": False}
-    detail = f"sshd 端口 {data['sshd']['port']} 的登录方式没有要紧项；24h 失败认证 {data['attempts']['failed']} 次"
+    att = data["attempts"]
+    # 绿灯这一行也要把窗口说对：日志读满上限时"24h 失败认证 N 次"里的 N 只是最后
+    # 一段的下限，而这正是 doctor 最容易被当成"全部核对过"的那句话。
+    detail = (f"sshd 端口 {data['sshd']['port']} 的登录方式没有要紧项；"
+              f"{window_label(att)}失败认证 {att['failed']} 次"
+              + ("（日志超过这一轮读取上限，这是下限）" if att.get("truncated") else ""))
     if not data["as_root"]:
         detail += "（非 root，空口令与他人的 authorized_keys 未核对）"
     return {"status": "pass", "detail": detail, "fix": "", "fixable": False}

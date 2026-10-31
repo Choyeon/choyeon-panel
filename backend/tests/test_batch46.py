@@ -162,7 +162,7 @@ class TestUfwPath(unittest.TestCase):
         with mock.patch.object(fw, "detect", mock.AsyncMock(return_value=fw.UFW)), \
              _ufw([_read([]), _read([_rule(1, IP, f"{B.MARKER} ssh 爆破 12 次/24h")])]), \
              mock.patch.object(B, "run", runner), \
-             mock.patch.object(B, "_accepted_ips", mock.AsyncMock(return_value={})):
+             mock.patch.object(B, "_attempts", mock.AsyncMock(return_value={})):
             out = asyncio.run(B.ban(IP, None, 12))
         self.assertTrue(out["ok"])
         self.assertEqual(len(runner.ran("ufw insert 1 deny from")), 1)
@@ -177,7 +177,7 @@ class TestUfwPath(unittest.TestCase):
             with mock.patch.object(fw, "detect", mock.AsyncMock(return_value=fw.UFW)), \
                  _ufw([_read([])]), \
                  mock.patch.object(B, "run", runner), \
-                 mock.patch.object(B, "_accepted_ips", mock.AsyncMock(return_value={})):
+                 mock.patch.object(B, "_attempts", mock.AsyncMock(return_value={})):
                 with self.assertRaises(ExecFailed, msg=out):
                     asyncio.run(B.ban(IP, None, 30))
 
@@ -218,7 +218,7 @@ class TestUfwPath(unittest.TestCase):
             with mock.patch.object(fw, "detect", mock.AsyncMock(return_value=fw.UFW)), \
                  _ufw([_read([]), after]), \
                  mock.patch.object(B, "run", runner), \
-                 mock.patch.object(B, "_accepted_ips", mock.AsyncMock(return_value={})):
+                 mock.patch.object(B, "_attempts", mock.AsyncMock(return_value={})):
                 out = asyncio.run(B.ban(IP, None, hits))
             self.assertTrue(out["ok"], hits)
             self.assertIn(B.MARKER, runner.calls[0])
@@ -231,7 +231,8 @@ class TestUfwPath(unittest.TestCase):
         with mock.patch.object(fw, "detect", mock.AsyncMock(return_value=fw.UFW)), \
              _ufw([_read([]), _read([_rule(1, IP)])]), \
              mock.patch.object(B, "run", runner), \
-             mock.patch.object(B, "_accepted_ips", mock.AsyncMock(return_value={IP: 2})):
+             mock.patch.object(B, "_attempts", mock.AsyncMock(return_value={
+                 "ok": True, "accepted_ips": [{"ip": IP, "count": 2}]})):
             out = asyncio.run(B.ban(IP, None, 40))
         self.assertTrue(out["ok"])
         self.assertIn("成功登录过 2 次", out["detail"])
@@ -292,7 +293,8 @@ class TestFirewalldPath(unittest.TestCase):
     def _ban(self, fake: _FakeIpset, accepted=None):
         with mock.patch.object(fw, "detect", mock.AsyncMock(return_value=fw.FIREWALLD)), \
              mock.patch.object(B, "run", fake.run), \
-             mock.patch.object(B, "_accepted_ips", mock.AsyncMock(return_value=accepted or {})):
+             mock.patch.object(B, "_attempts", mock.AsyncMock(return_value={
+                 "ok": True, "accepted_ips": [{"ip": k, "count": v} for k, v in (accepted or {}).items()]})):
             return asyncio.run(B.list_bans()), asyncio.run(B.ban(IP, None, 8))
 
     def test_ban_lands_in_both_scopes(self):
@@ -308,7 +310,7 @@ class TestFirewalldPath(unittest.TestCase):
         fake = _FakeIpset(fail_runtime=True)
         with mock.patch.object(fw, "detect", mock.AsyncMock(return_value=fw.FIREWALLD)), \
              mock.patch.object(B, "run", fake.run), \
-             mock.patch.object(B, "_accepted_ips", mock.AsyncMock(return_value={})):
+             mock.patch.object(B, "_attempts", mock.AsyncMock(return_value={})):
             with self.assertRaises(ExecFailed):
                 asyncio.run(B.ban(IP, None, 8))
 

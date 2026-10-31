@@ -164,6 +164,9 @@ const guardLine = computed(() => guardInfo.value.phrase || '这一项没核对�
 // 判据用服务端给的 attempts.ok，与上面那条横幅同一个：不许一处写"读不到"、另一处写"0 次"。
 const attemptsLine = computed(() => (loginAttempts.value.ok ? `${loginAttempts.value.failed} 次` : '读不到'));
 const sourcesLine = computed(() => (loginAttempts.value.ok ? `${loginAttempts.value.distinct_ips} 个` : '读不到'));
+// 日志读满行数上限时，这一段就不是 24 小时：说法（window_label）由服务层给，
+// 这里只按 truncated 换 caption，不自己拼窗口——两个出处迟早会对不上。
+const attemptsCaption = computed(() => (loginAttempts.value.truncated ? '日志尾部失败认证' : '24h 失败认证'));
 const acceptedLine = computed(() => {
   if (!loginAttempts.value.ok) return '读不到';
   const list = loginAttempts.value.accepted ?? [];
@@ -205,7 +208,7 @@ const loginAlert = computed(() => {
   }
   return {
     type: 'success' as const,
-    text: `登录方式核对通过：过去 24 小时 ${a.failed} 次失败认证、来自 ${a.distinct_ips} 个地址，成功登录 ${acceptedLine.value}。`,
+    text: `登录方式核对通过：${a.window_label || '过去 24 小时'}失败认证 ${a.failed} 次、来自 ${a.distinct_ips} 个地址，成功登录 ${acceptedLine.value}。`,
   };
 });
 
@@ -294,7 +297,7 @@ function askBan(t: any) {
     title: '封禁来源地址',
     names: [t.ip],
     msg: `此操作会把 ${t.ip} 写进 ${banTool.value} 的入站拒绝规则（标记 ${banMarker.value}），`
-      + `过去 24 小时它认证失败 ${t.count} 次。`
+      + `${loginAttempts.value.window_label || '过去的认证日志里'}它认证失败 ${t.count} 次。`
       + (acc ? `注意：这个地址还成功登录过 ${acc.count} 次，封掉会同时断开那个会话。` : '')
       + '面板不会自动解封，要在这里解除。',
     api: () => writeBan(t),
@@ -2145,7 +2148,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         <span class="ls-chip" :class="{ err: loginCounts.risk > 0 }"><i>要紧</i>{{ loginCounts.risk }} 项</span>
         <span class="ls-chip" :class="{ warn: loginCounts.warn > 0 }"><i>值得处理</i>{{ loginCounts.warn }} 项</span>
         <span class="ls-chip"><i>知道就好</i>{{ loginCounts.note }} 项</span>
-        <span class="ls-chip" :class="{ warn: !loginAttempts.ok }"><i>24h 失败认证</i>{{ attemptsLine }}</span>
+        <span class="ls-chip" :class="{ warn: !loginAttempts.ok || loginAttempts.truncated }"><i>{{ attemptsCaption }}</i>{{ attemptsLine }}</span>
         <span class="ls-chip" :class="{ warn: !loginAttempts.ok }"><i>来源地址</i>{{ sourcesLine }}</span>
         <span class="ls-chip" :class="{ warn: !loginAttempts.ok }"><i>成功登录</i>{{ acceptedLine }}</span>
         <span class="ls-chip" :class="{ warn: !guardRunning }"><i>爆破防护</i>{{ guardLine }}</span>
@@ -2153,6 +2156,11 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         <span class="ls-chip" :class="{ err: loginData.sshd.reachable === true }">
           <i>sshd 端口</i>{{ loginData.sshd.port }} {{ reachLine }}
         </span>
+      </div>
+
+      <!-- 行数上限截断时，窗口长度必须写在页面上：否则上面那两个数会被读成「过去 24 小时」。 -->
+      <div v-if="loginData && loginAttempts.ok && loginAttempts.truncated" class="ls-notes">
+        <div class="ls-note">{{ loginAttempts.window_note }}</div>
       </div>
 
       <!-- 来源排行紧跟失败次数：只报"7187 次"是没有信息量的，攻击永远在打，

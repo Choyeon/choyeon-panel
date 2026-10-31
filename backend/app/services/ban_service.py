@@ -78,26 +78,41 @@ def _is_mine(comment: str) -> bool:
     return text == MARKER or text.startswith(MARKER + " ")
 
 
-def _comment(hits: int) -> str:
+def _comment(hits: int, window: str = "24h") -> str:
     """备注必须过 `firewall_service.COMMENT_RE`：只放中英文、数字、空格与 . : @ / # + _ -。
 
     数字夹进 `MAX_HITS` 才算：`hits` 是客户端列表里读回来的显示值，服务端替它决定
     "是不是爆破"是不行的，但也不能让它把备注写得连规则都落不下去。
+
+    `window` 是这条次数的覆盖范围：日志读满行数上限时它是「窗口内」而不是 24h，
+    备注是 `ban list` 与 `ufw status` 里唯一留下的说法，不能跟着一起错。
     """
     try:
         n = max(0, min(int(hits), MAX_HITS))
     except (TypeError, ValueError):
         n = 0
-    return f"{MARKER} ssh 爆破 {n} 次/24h" if n else f"{MARKER} ssh 爆破"
+    return f"{MARKER} ssh 爆破 {n} 次/{window}" if n else f"{MARKER} ssh 爆破"
 
 
-async def _accepted_ips() -> dict[str, int]:
-    """过去 24h **成功**登录过的来源 → 次数。读不到日志时返回空表，不返回"没人登录过"。"""
-    data = await login_audit.attempts()
-    if not data.get("ok"):
+async def _attempts() -> dict:
+    """封禁提醒要的那份认证日志。
+
+    成功登录的来源和「这一段覆盖多久」必须出自同一次读取：`login_audit.attempts` 自己
+    就是带缓存的读入口，分两次读会在截断边界上拼出两种覆盖范围。
+    """
+    return await login_audit.attempts()
+
+
+def _accepted_from(attempts: dict) -> dict[str, int]:
+    """过去 24h **成功**登录过的来源 → 次数。读不到日志时返回空表，不返回"没人登录过"。
+
+    纯函数：窗口说法（`window_label`）必须与次数出自同一份读取——分两次读，截断的那一次
+    与没截断的那一次可能对不上，句子里就会同时出现两种覆盖范围。
+    """
+    if not attempts.get("ok"):
         return {}
     out: dict[str, int] = {}
-    for row in data.get("accepted_ips") or []:
+    for row in attempts.get("accepted_ips") or []:
         ip = str(row.get("ip") or "")
         if ip:
             out[ip] = int(row.get("count") or 0)
@@ -199,12 +214,17 @@ async def ban(ip: str, request=None, hits: int = 0) -> dict:
     # 这个地址既在爆破又成功登录过（口令被猜中过一次）时照样封，但要把话说在前面：
     # 静默踢掉一个正在工作的会话，比多打一行提醒难查得多。
     note = ""
-    accepted = await _accepted_ips()
+    att = await _attempts()
+    accepted = _accepted_from(att)
     if accepted.get(target):
-        note = f"提醒：{target} 过去 24 小时还成功登录过 {accepted[target]} 次，封掉会同时断开那个会话。"
+        # 覆盖多久一律从 attempts 的 window_label 读：日志读满行数上限时它不是 24 小时。
+        note = (f"提醒：{target} {login_audit.window_label(att)}还成功登录过 {accepted[target]} 次，"
+                "封掉会同时断开那个会话。")
 
     if tool == fw.UFW:
-        r = await run("ufw", ["insert", "1", "deny", "from", target, "comment", _comment(hits)], timeout=CMD_TIMEOUT)
+        window = "窗口内" if att.get("truncated") else "24h"
+        r = await run("ufw", ["insert", "1", "deny", "from", target, "comment", _comment(hits, window)],
+                      timeout=CMD_TIMEOUT)
         if r["code"] != 0:
             raise _fail(r["out"] or "", "ufw")
     else:
