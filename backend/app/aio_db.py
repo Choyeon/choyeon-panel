@@ -22,8 +22,8 @@ async def execute(sql: str, params=()):
     return await run_in_threadpool(dbm.execute, sql, params)
 
 
-async def execute_many(stmts):
-    return await run_in_threadpool(dbm.execute_many, stmts)
+async def execute_many(stmts, invalidate=()):
+    return await run_in_threadpool(dbm.execute_many, stmts, tuple(invalidate))
 
 
 async def set_settings(pairs: dict):

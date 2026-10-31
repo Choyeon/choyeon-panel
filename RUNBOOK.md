@@ -68,7 +68,8 @@ choyeonctl start|stop|restart|logs|upgrade
 - 任何命令都能加 `--json`（写在子命令前后都行），输出结构化结果；
 - 退出码：`0` 成功、`1` 执行失败、`2` 用法错误、`3` 前置条件不满足；
 - 破坏性操作需显式 `--yes`（如 `user delete`）；
-- 改密与删号都会吊销该用户旧 token（`security.bump_user_epoch`），这是预期行为。
+- 改密、降权、删号都会吊销该用户旧 token（`security.user_epoch_stmt` / `bump_user_epoch`），
+  且吊销与那次改动写在同一个事务里——失败就一起回滚，不会留下"权限改了而旧票照用"，这是预期行为。
 
 **就绪探针**（反代/容器用）：`/api/health` 是存活探针，`/api/ready` 是就绪探针（会查库，库不可用时返回 503）。两者都在认证白名单里，不要给它们加鉴权。
 

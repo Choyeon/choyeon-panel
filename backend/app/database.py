@@ -270,12 +270,17 @@ def execute(sql: str, params=()):
         return cur.lastrowid
 
 
-def execute_many(stmts: list[tuple[str, tuple]]) -> None:
+def execute_many(stmts: list[tuple[str, tuple]], invalidate: tuple[str, ...] = ()) -> None:
     """多条写语句走同一事务：要么全部生效，要么一条都没写进去。
 
     `execute()` 每条都自己 commit，端点里连写两三列就会在中间失败（口令哈希那条撞了
     磁盘满、库被别的进程锁到超时）时留下"role 已经是 admin、pass_hash 还是旧的"这种
     半套状态：接口返回 500，审计一条没记，管理员以为没改成，重放一次又可能只补上后半截。
+
+    `invalidate` 带上这批语句写到的 settings 键：缓存与库要在同一次持锁里对齐。
+    留给调用方自己去 pop 就会有两种坏结果——忘了 pop（刚吊销的 token 版本号还要在缓存里
+    活满 TTL，那几秒旧票照过验签），或者 pop 在失败回滚之后（库里没变、缓存却空了，
+    下一次读又回填旧值，等于什么都没发生）。
     """
     if not stmts:
         return
@@ -287,10 +292,22 @@ def execute_many(stmts: list[tuple[str, tuple]]) -> None:
         except Exception:
             conn.rollback()
             raise
+        for key in invalidate:
+            _auth_cache.pop(key, None)
 
 
-# settings 的 upsert 只写这一处：单条与批量共用，避免批量版偷偷换了冲突语义。
+# settings 的 upsert 只写这一处：单条、批量、以及并进别的事务的那条共用同一份冲突语义。
 _UPSERT_SETTING = "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+
+
+def upsert_setting_stmt(key: str, value: str) -> tuple[str, tuple]:
+    """给「这条 settings 要和别的写挤进同一个事务」的调用方，返回 (SQL, 参数)。
+
+    不在这里 commit，也不碰缓存——那由拿着这副语句的人交给 `execute_many(..., invalidate=…)`
+    一次做完。写出来只有一个读者（`security.user_epoch_stmt`）：token 版本号必须和它所
+    保护的那次改动同生同死。
+    """
+    return (_UPSERT_SETTING, (key, value))
 
 
 def set_setting(key: str, value) -> None:
@@ -306,10 +323,10 @@ def set_settings(pairs: dict) -> None:
     """
     if not pairs:
         return
-    with _lock:
-        execute_many([(_UPSERT_SETTING, (k, "" if v is None else str(v))) for k, v in pairs.items()])
-        for key in pairs:
-            _auth_cache.pop(key, None)
+    execute_many(
+        [(_UPSERT_SETTING, (k, "" if v is None else str(v))) for k, v in pairs.items()],
+        tuple(pairs),
+    )
 
 
 def create_first_admin(username: str, pw_hash: str) -> str:
@@ -344,21 +361,24 @@ def totp_state(username: str) -> str:
     return str((row or {}).get("totp_secret") or "")
 
 
-def set_totp(username: str, secret: str) -> int:
-    """写入（或清空）两步验证密钥的唯一入口，返回真正被改动的行数。
+def set_totp_stmt(username: str, secret: str) -> tuple[str, tuple]:
+    """给「关掉第二因子要和吊销会话挤进同一个事务」的调用方（CLI 逃生口），返回 (SQL, 参数)。
 
-    列名只出现在这里：路由开启/关闭、CLI 逃生口、登录索要口令三处都要动它，抄三次 SQL
-    就会有第四处漏掉。传空串表示关闭——`totp_secret=''` 就是"没开"的唯一判据，没有第二个
-    enabled 位可写。
+    列名仍然只出现在这一处：`set_totp` 用的就是它，不是在别处又抄了一遍 SQL。
+    """
+    return ("UPDATE users SET totp_secret=? WHERE username=?", (str(secret or ""), str(username or "")))
+
+
+def set_totp(username: str, secret: str) -> int:
+    """写入（或清空）两步验证密钥的单条入口，返回真正被改动的行数。
+
+    传空串表示关闭——`totp_secret=''` 就是"没开"的唯一判据，没有第二个 enabled 位可写。
 
     不走 `execute()`：它返回的是 `lastrowid`，UPDATE 之后那个数与"改了几行"无关，
     而这里要拿 rowcount 判"账号还在不在"。
     """
     with _lock:
-        cur = conn.execute(
-            "UPDATE users SET totp_secret=? WHERE username=?",
-            (str(secret or ""), str(username or "")),
-        )
+        cur = conn.execute(*set_totp_stmt(username, secret))
         conn.commit()
         return int(cur.rowcount or 0)
 

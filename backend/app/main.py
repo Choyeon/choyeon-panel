@@ -425,9 +425,15 @@ async def change_password(req: Request):
         return JSONResponse(status_code=400, content={"error": pw_err})
     role = me["role"] or "admin"
     new_hash = await security.hash_pass_async(body["new"])
-    dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (new_hash, me["username"]))
-    # 仅让当前用户的旧 token 失效，并立即签发新 token，避免用户被踢下线
-    security.bump_user_epoch(me["username"])
+    # 换口令与吊销旧 token 一起提交：两次分开 commit 时，中间失败留下的是最坏的一种半套——
+    # "新口令已经生效、旧票还能再用 72 小时"，而这个人改口令多半正因为怀疑手里那张票泄露了。
+    # 反过来 bump 成功、UPDATE 失败也一样坏：库里还是旧口令，人却被踢下线，重登时用新口令进不去。
+    epoch_key = security.user_epoch_key(me["username"])
+    await aio_db.execute_many([
+        ("UPDATE users SET pass_hash=? WHERE username=?", (new_hash, me["username"])),
+        security.user_epoch_stmt(me["username"]),
+    ], (epoch_key,))
+    # 立即签发新 token，避免用户被踢下线
     await aio_db.audit(me["username"], "password_change")
     return _user_token(me["username"], role, me.get("nickname", ""), me.get("avatar", ""))
 

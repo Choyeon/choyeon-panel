@@ -30,7 +30,8 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app.routers import extras, sites  # noqa: E402
-from app.services import cert_ops, nginx_ops, site_audit_service as SA  # noqa: E402
+from app.services import cert_ops, nginx_ops  # noqa: E402
+from app.services import site_audit_service as SA  # noqa: E402
 
 
 def _req(sub: str = "renewer"):

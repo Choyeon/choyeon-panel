@@ -654,7 +654,8 @@ class TestUserCreateErrorHonesty(unittest.TestCase):
 class TestDeletedUserNameReuse(unittest.TestCase):
     """删号 → 同名重建，旧 token 必须永久失效。
 
-    users_delete 里那句 `security.bump_user_epoch(u["username"])` 看着多余
+    users_delete 里那条 `token_epoch:<name>` 的写（批次102 之前是单独一次
+    `security.bump_user_epoch`，现在和删行同一个事务）看着多余
     （用户都删了，吊销谁的 token？），实际是唯一挡住这件事的东西：
     从没改过密的用户，token 里带的是**全局** epoch；删号时若不写一条
     `token_epoch:<name>`，把这个名字发给下一个人时，旧 token 的 ver 又会

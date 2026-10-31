@@ -31,7 +31,8 @@ BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from app import aio_db, database as dbm, main  # noqa: E402
+from app import aio_db, main  # noqa: E402
+from app import database as dbm  # noqa: E402
 from app.routers import extras  # noqa: E402
 from app.services import cloud_backup  # noqa: E402
 
@@ -120,16 +121,18 @@ class UserUpdateAtomicTests(unittest.TestCase):
         calls = []
         orig = aio_db.execute_many
 
-        async def spy(stmts):
+        async def spy(stmts, invalidate=()):
             calls.append(stmts)
-            return await orig(stmts)
+            return await orig(stmts, invalidate)
 
         with mock.patch.object(aio_db, "execute_many", spy):
             r = asyncio.run(extras.users_update(
                 str(uid), _req({"role": "admin", "nickname": "小张", "avatar": "/a.png"})))
         self.assertEqual(r["ok"], True)
         self.assertEqual(len(calls), 1, "多个字段分多次写就不是一个事务")
-        self.assertEqual(len(calls[0]), 3)
+        # 只数这四个业务列：批次102 之后同一批里还会多带一条吊销 token 版本号的写，
+        # 它不属于"字段"，不该算进这里问的那件事。
+        self.assertEqual(sum(1 for s in calls[0] if "UPDATE users" in s[0]), 3)
         row = dbm.query_one("SELECT role,nickname,avatar FROM users WHERE id=?", (uid,))
         self.assertEqual((row["role"], row["nickname"], row["avatar"]), ("admin", "小张", "/a.png"))
 

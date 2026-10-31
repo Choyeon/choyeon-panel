@@ -123,6 +123,11 @@ def _epoch_head(v: str) -> int:
         return -1
 
 
+def user_epoch_key(username: str) -> str:
+    """该账号 token 版本号的 settings 键名：读它、写它、和吊销它都只能用这个函数拼。"""
+    return f"token_epoch:{username}"
+
+
 def _user_epoch(username: str) -> str:
     """当前生效的 token 版本号：全局值与该用户墓碑里较新的那个。
 
@@ -133,7 +138,7 @@ def _user_epoch(username: str) -> str:
     """
     from . import database as dbm
 
-    user_v = dbm.get_setting(f"token_epoch:{username}")
+    user_v = dbm.get_setting(user_epoch_key(username))
     global_v = _global_epoch()
     if user_v and _epoch_head(user_v) > _epoch_head(global_v):
         return user_v
@@ -152,8 +157,8 @@ def session_epoch(username: str) -> str:
 def session_identity(username: str) -> tuple[str, str]:
     """长连接复验用的身份快照 =（库里的角色，token 版本号）。同步 sqlite，调用方放线程里跑。
 
-    只看 epoch 不够：降权改的是 users.role，虽然 `user_update` 现在也会顺手 bump epoch
-    （extras.py 里 role/password 变更都调 bump_user_epoch），但复验要的答案是"这条连接
+    只看 epoch 不够：降权改的是 users.role，虽然 `user_update` 现在也会顺手把 epoch
+    和那次改动一起提交（extras.py 里 role/password 变更走 `user_epoch_stmt`），但复验要的答案是"这条连接
     此刻该不该继续、以什么身份继续"，直接读库里的角色才是那句答案——把正确性押在
     "每个改权限的地方都记得 bump 那个计数器"上，和押在"每个改角色的人都记得改名"一样脆。
     账号不存在按 LookupError 抛：调用方把"查不到人"
@@ -168,11 +173,30 @@ def session_identity(username: str) -> tuple[str, str]:
 
 
 def bump_user_epoch(username: str) -> str:
+    """单独吊销这个账号的全部会话（登出、`user revoke`）——它自己就是那次改动。
+
+    要改的是别的字段（口令、角色、第二因子、删号）时**不要**用它：那次改动和吊销隔着一次
+    commit，中间失败就是"改动生效了、旧票照用"，用 `user_epoch_stmt` 把两条写并进同一个事务。
+    """
     from . import database as dbm
 
     v = dbm.new_epoch()
-    dbm.set_setting(f"token_epoch:{username}", v)
+    dbm.set_setting(user_epoch_key(username), v)
     return v
+
+
+def user_epoch_stmt(username: str) -> tuple[str, tuple]:
+    """吊销这个账号全部已签发 token 的那条写，交给调用方并进同一个事务。
+
+    单独提交的那次 bump 与被它保护的那次改动之间隔着一次提交：bump 失败（库被别的
+    进程锁到超时、盘满）留下的状态是「口令已经换了 / 角色已经降了，旧 token 照用」，
+    而接口和 CLI 当场报的都是成功，最长 72h 内那张票还能拿来开网页终端。
+    `session_identity` 那段说的「押在每个改权限的地方都记得 bump」是这个洞的一半，
+    这一句是另一半——记了但没和改动一起提交，失败时照样漏。
+    """
+    from . import database as dbm
+
+    return dbm.upsert_setting_stmt(user_epoch_key(username), dbm.new_epoch())
 
 
 def sign_token(username: str, role: str) -> str:

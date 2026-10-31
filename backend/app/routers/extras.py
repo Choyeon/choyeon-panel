@@ -140,25 +140,33 @@ async def users_update(uid: str, req: Request):
         await aio_db.audit(req.state.cp_sub, "user:update", f"{u['username']}(无变更)")
         return {"ok": True}
 
-    # 四个字段一次事务：逐条 execute 每条自己 commit，中途失败（库被别的进程锁到超时、
-    # 磁盘满）就留下"角色已经升成 admin、口令还是旧的"这种半套状态——请求是 500、审计
-    # 一条不记，管理员以为没改成，而库里那个人确实已经被降权/提权了一半。
-    await aio_db.execute_many([
+    # 四个字段 + 吊销旧 token 一次事务：逐条 execute 每条自己 commit，中途失败（库被别的
+    # 进程锁到超时、磁盘满）就留下"角色已经升成 admin、口令还是旧的"这种半套状态——请求是
+    # 500、审计一条不记，管理员以为没改成，而库里那个人确实已经被降权/提权了一半。
+    #
+    # 吊销那条也一起进来（批次102）：它单独提交时，两次 commit 之间失败留下的是最坏的一种
+    # 半套——"口令已经换了 / admin 已经降了，旧 token 照用"。而且现场看不出来：接口返回 500
+    # 但 bump 已经成功，或者 bump 失败而改动已经生效，两种情况都只有一处报错，谁都不会去
+    # 查那张票还剩 72 小时有效期。
+    stmts = [
         (sql, (val, u["id"])) for sql, val in (
             ("UPDATE users SET role=? WHERE id=?", new_role),
             ("UPDATE users SET pass_hash=? WHERE id=?", new_hash),
             ("UPDATE users SET nickname=? WHERE id=?", new_nickname),
             ("UPDATE users SET avatar=? WHERE id=?", new_avatar),
         ) if val is not None
-    ])
+    ]
     # role 与 password 都只存在于已签发的 token 里（中间件读的是 token 的 role，
     # 不是库里的），改完必须吊销旧 token，否则把 admin 降成 viewer 后
     # 对方手上的旧 token 在 TTL 内（最长 72h）依旧是 admin——连写操作都拦不住（实测）。
     # 昵称与头像不在 token 里（票面只有 sub/role/ver），跟着一起吊销就是误伤：
     # 管理员只想改个显示名，对方下一个请求即 401、网页终端被 4401 关掉，
     # 而审计里只留下一条看不出原因的 user:update。
-    if new_role is not None or new_hash is not None:
-        security.bump_user_epoch(u["username"])
+    revoke = new_role is not None or new_hash is not None
+    epoch_key = security.user_epoch_key(u["username"])
+    if revoke:
+        stmts.append(security.user_epoch_stmt(u["username"]))
+    await aio_db.execute_many(stmts, (epoch_key,) if revoke else ())
     # 审计里写清改了哪几项：一条光写人名的 user:update，事后既看不出管理员
     # 有没有把某个人升成 admin，也看不出是谁把谁的口令重置了。
     # 只记字段名——口令、头像路径这些值本身不进审计表。
@@ -183,12 +191,18 @@ async def users_delete(uid: str, req: Request):
         return JSONResponse(status_code=404, content={"error": "用户不存在"})
     if u["username"] == req.state.cp_sub:
         return JSONResponse(status_code=400, content={"error": "不能删除自己"})
-    dbm.execute("DELETE FROM users WHERE id=?", (u["id"],))
+    # 删行与「给这个名字留下 token 版本号墓碑」一起提交：分开两次 commit 时，bump 失败留下的是
+    # "行已经没了、墓碑没写"——把这个名字发给下一个人，旧 token 的 ver 又和 _user_epoch(name)
+    # 相等（双双回落到全局 epoch），离职管理员的 admin 权限原地复活（test_hardening 实测过）。
+    epoch_key = security.user_epoch_key(u["username"])
+    await aio_db.execute_many([
+        ("DELETE FROM users WHERE id=?", (u["id"],)),
+        security.user_epoch_stmt(u["username"]),
+    ], (epoch_key,))
     res = await run_in_threadpool(avatars.purge, u["id"])
     # 行删了但旧头像没删掉，这张脸就还挂在 /api/avatars/ 上免登录可取，而面板里没有任何
     # 地方能再看清它——不能因为"行删成功"就报 ok 了事，把没删干净并进响应与审计（批次97）。
     warn = avatars.residue_note(res)
-    security.bump_user_epoch(u["username"])
     # 已用口令的步数桶是按用户名记的，删号不清就等于把"这个人名下用过哪一步"留给了
     # 下一个同名账号（⑤L 的同名继承口径）：新建同名用户后，第一枚撞上旧步数的口令会被当重放拒掉。
     totp.forget_used(u["username"])

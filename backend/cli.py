@@ -442,9 +442,13 @@ async def cmd_user(a: argparse.Namespace) -> dict:
         pw_err = security.password_error(pw)
         if pw_err:
             Out.error(pw_err, EXIT_USAGE)
-        dbm.execute("UPDATE users SET pass_hash=? WHERE username=?", (security.hash_pass(pw), a.name))
-        # 改密后吊销该用户所有已签发 token，避免旧凭证继续可用
-        security.bump_user_epoch(a.name)
+        # 改密与吊销旧 token 同一条事务：分开两次 commit 时，bump 失败（库被别的进程锁到超时、
+        # 盘满）留下的状态是"新口令已生效、旧票照用"，而终端当场就把 revokedTokens 打成 true。
+        epoch_key = security.user_epoch_key(a.name)
+        dbm.execute_many([
+            ("UPDATE users SET pass_hash=? WHERE username=?", (security.hash_pass(pw), a.name)),
+            security.user_epoch_stmt(a.name),
+        ], (epoch_key,))
         dbm.audit(a.name, "cli:user:reset")
         Out.result({"ok": True, "username": a.name, "revokedTokens": True}, f"已重置 {a.name} 密码并吊销旧 token")
         return {"ok": True, "username": a.name}
@@ -487,10 +491,15 @@ async def cmd_user(a: argparse.Namespace) -> dict:
                 f"choyeonctl user 2fa-disable {a.name} --yes",
                 EXIT_USAGE,
             )
-        dbm.set_totp(a.name, "")
         # 连带把这个账号的会话全部吊销：会来跑这条命令的原因通常是"手机不在手边"，
         # 而这种时候并不确定手里有票的是不是本人。留一句提醒，比留一个后门便宜。
-        security.bump_user_epoch(a.name)
+        # 关掉第二因子与吊销同一条事务：分开两次 commit 时，bump 失败留下的状态是
+        # "这个账号只剩口令保护，而旧票照用"，正是这条命令要避免的情形。
+        epoch_key = security.user_epoch_key(a.name)
+        dbm.execute_many([
+            dbm.set_totp_stmt(a.name, ""),
+            security.user_epoch_stmt(a.name),
+        ], (epoch_key,))
         dbm.audit(a.name, "cli:user:2fa-disable", "该账号两步验证已关闭，会话全部吊销")
         Out.result({"ok": True, "username": a.name, "enabled": False, "revokedSessions": True},
                    f"已关闭 {a.name} 的两步验证并吊销其全部会话（请重新登录，并在设置页重新绑定验证器）")
@@ -504,13 +513,19 @@ async def cmd_user(a: argparse.Namespace) -> dict:
             Out.error(f"用户 {a.name} 不存在", EXIT_FAIL)
         if not a.yes:
             Out.error(f"删除用户不可撤销，确认请加 --yes：choyeonctl user delete {a.name} --yes", EXIT_USAGE)
-        dbm.execute("DELETE FROM users WHERE username=?", (a.name,))
+        # 删行与「给这个名字留下 token 版本号墓碑」一起提交（同 extras.users_delete）：
+        # 分开两次 commit 时 bump 失败，这个名字转给下一个人，旧 token 的 ver 又会和
+        # _user_epoch(name) 相等，离职管理员的权限原地复活。
+        epoch_key = security.user_epoch_key(a.name)
+        dbm.execute_many([
+            ("DELETE FROM users WHERE username=?", (a.name,)),
+            security.user_epoch_stmt(a.name),
+        ], (epoch_key,))
         # 头像文件也要跟着走：/api/avatars/<id>.png 免登录可取，行删了图还在，
         # 这张脸就永久挂在一个已不存在的账号上，面板里没有任何地方能清它。
         # 读不动目录或删不掉文件时不能照报"已删除"——那张脸还在，得说给操作的人听（批次97）。
         res = avatars.purge(u["id"])
         avatar_warn = avatars.residue_note(res)
-        security.bump_user_epoch(a.name)
         dbm.audit(a.name, "cli:user:delete")
         # 删掉最后一个管理员后，面板回到「未创建管理员」状态——此时任何能访问到面板的人
         # 都可以先一步把管理员注册走。只说"已删除"没人会意识到这一点。
