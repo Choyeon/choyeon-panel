@@ -2162,6 +2162,25 @@
   钉住差值算术、首帧载荷、接口的 null、raw/hour 的 NULL 与「NULL + 100 均值得 100」、告警跳过未测档，
   以及页面不许再用 `|| 0` 把没量到印成 0 B/s；线上复验：重启后第一问 `/api/system/stats` 给
   `measured=false` 且速率全 null（开机累计与内存/磁盘照给），同一次运行的第一条 raw 行是 NULL。
+- 应用详情的进程读数里，「这次没查到」不再冒充三条已知事实（批次109）。`GET /api/apps/{id}/proc`
+  的判词早在批次㉜就只有一处出处（systemctl 查不成时 `state` 如实是 unknown），可同一轮返回的另外
+  几格还在各自兜底：`restarts = _int("NRestarts") or 0` 把查不到写成「重启 0 次」——0 不是空格，是一个
+  断言（这个服务从没重启过），而 `StartLimitBurst` 那套账就记在这个数上，偏偏反复 crash-loop 的应用
+  最容易在 systemctl 超时的那一轮被读成「一次都没重启」，照着界面判断的人会整条排掉重启线索；老
+  systemd 与外部 unit 不回显这个属性，答案同样是 0。`subState = got.get("SubState") or "unknown"` 把
+  「没读到子状态」当 systemd 报的子状态端出去，中文界面里就是一格 `unknown`，和旁边的「状态未知」标签
+  看着像两回事。前端 `p.running && p.pid ? … : '未运行'` 更直接：`running` 在 state 读不成时是 False，
+  于是 PID 格把「这次没查到」画成「这个服务已停止」（正是批次㉜从存活口径里清掉的那句，而照着它点
+  「启动」的人是在对一个可能正活着的服务下判断），CPU 累计、重启次数、自启动时间、子状态四格没读到
+  时留空白，而空白格和「这个页面没有这个字段」同形。
+  现在后端逐字段说「读到了多少」（读不到就是 `None`），前端一格一条读法（`ui.ts` 新增 `cellText`，短名
+  仍只有 `UNKNOWN_LABEL` 一个出处），真读到的 0 照原样印成 `0`。`backend/tests/test_batch109.py` 钉住
+  探测失败／属性不支持／空值／未启动四种 systemctl 原文都给 null、活跃且 `NRestarts=0` 仍是 0、服务层与
+  路由都不许再把 null 折回 0，以及页面六格不留空白、PID 不许在 state 之外另起一套存活口径；
+  `web/tests/batch109.test.mjs` 用真输入跑 `cellText`（`0` → `0`、null/空串 → 短名）。
+  线上复验（本机真 unit 走真 systemctl）：`choyeon-panel.service` 仍是 `state=active`、`subState=running`、
+  `pid` 有值、`restarts=0`（真实读数照旧），而 systemctl 查不成那一轮给 `state=unknown`、`subState=None`、
+  `restarts=None`——界面据此只能写「未读到」，写不出「重启 0 次」或「未运行」。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
