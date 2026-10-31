@@ -5,7 +5,7 @@ import {
   NCard, NSpace, NText, NTag, NInput, NDynamicInput,
   useMessage, NPopconfirm, NIcon, NForm, NFormItem, NSkeleton, NGrid, NGridItem, NSelect, NAlert,
 } from 'naive-ui';
-import { NButton, unitTag } from '../ui';
+import { NButton, UNKNOWN_LABEL, cellText, unitTag } from '../ui';
 import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
@@ -104,16 +104,24 @@ const infoItems = computed(() => {
   ];
 });
 
+// PID 一格的三种账：读到 pid 报号；systemctl 连判词都没给（超时、非 root、本机没有 systemd）
+// 写「未读到」——「未运行」是「这个服务已停止」的断言，正是批次㉜从存活口径里清掉的那句，
+// 而照着它点「启动」的人，是在对一个可能正活着的服务下判断。
+function pidText(p: any): string {
+  if (p.pid) return String(p.pid);
+  return p.state === 'unknown' ? UNKNOWN_LABEL : '未运行';
+}
+
 const resItems = computed(() => {
   const p = proc.value;
   if (!p) return [];
   return [
-    { label: '进程 PID', value: p.running && p.pid ? String(p.pid) : '未运行', mono: true },
+    { label: '进程 PID', value: pidText(p), mono: true },
     { label: '内存', value: fmtBytes(p.memoryBytes), mono: true },
-    { label: 'CPU 累计', value: p.cpuSeconds != null ? `${p.cpuSeconds}s` : '', mono: true },
-    { label: '重启次数', value: p.restarts != null ? String(p.restarts) : '' },
-    { label: '自启动时间', value: p.execStartAt || p.activeSince || '', mono: true },
-    { label: '子状态', value: p.subState || '' },
+    { label: 'CPU 累计', value: p.cpuSeconds == null ? UNKNOWN_LABEL : `${p.cpuSeconds}s`, mono: true },
+    { label: '重启次数', value: cellText(p.restarts) },
+    { label: '自启动时间', value: cellText(p.execStartAt || p.activeSince), mono: true },
+    { label: '子状态', value: cellText(p.subState) },
   ];
 });
 

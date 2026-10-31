@@ -164,6 +164,18 @@ export function unknownNote(what: string, why?: string): string {
 export const UNKNOWN_LABEL = '未读到';
 
 /**
+ * 键值卡一格的读法（批次109）：后端给 null / 空串就是这一次没读到，写短名，不留空白。
+ *
+ * 空白格和「这个页面没有这个字段」同形，`0` 更是一个断言（「重启 0 次」＝这个服务从没重启过，
+ * 而 systemd 的 StartLimitBurst 账就记在这个数上）。所以 `0` 照原样印出来，只有读不到的
+ * 那些才走这里。带单位的（`…s`、`…%`）由调用方自己拼，短名仍出自 UNKNOWN_LABEL 这一处。
+ */
+export function cellText(v: unknown): string {
+  if (v === null || v === undefined || v === '') return UNKNOWN_LABEL;
+  return String(v);
+}
+
+/**
  * 日志来源清单被服务端扫描上限截断时的说法（尾读、分钟统计、按天回看三个页签共用）。
  *
  * 下拉里列出 60 个来源、而白名单里其实还有第 61 个时，界面看起来和「这台机器就 60 份日志」

@@ -2036,15 +2036,19 @@ async def app_proc(app_id: int) -> dict:
     # 判词走 systemd_ops 那一份：MainPID>0 不代表在运行（failed 的 unit 会把死 pid 挂在上面
     # 等清理），而"这个 unit 本机没有"和"systemctl 查失败"都不是"进程没起来"。
     st = systemd_ops.derive_state(got) if got else dict(systemd_ops.UNKNOWN_STATE)
+    # 一格一条事实，各自说「这一次读到了没有」：`or 0` 会把 systemctl 查不成（超时、非 root、
+    # 本机没有 systemd）写成「重启 0 次」，而 0 是一个断言——StartLimitBurst 那套账就记在这个数上，
+    # 同一份响应里 state 明明还是 unknown。SubState 的兜底 "unknown" 同理：那是「没读到子状态」，
+    # 不是 systemd 报的子状态，直接端给中文界面就是一格英文。
     return {
         "unit": unit,
-        "subState": got.get("SubState") or "unknown",
+        "subState": got.get("SubState") or None,
         "state": st["state"],
         "unitMissing": st["missing"],
         "running": st["busy"],
         "pid": pid if st["busy"] else None,
         "memoryBytes": mem,
-        "restarts": _int("NRestarts") or 0,
+        "restarts": _int("NRestarts"),
         "activeSince": _ts("ActiveEnterTimestamp"),
         "execStartAt": _ts("ExecMainStartTimestamp"),
         "cpuSeconds": round(cpu_ns / 1e6) / 1000 if cpu_ns is not None else None,
