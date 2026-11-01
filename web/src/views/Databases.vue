@@ -5,7 +5,7 @@ import {
   NPopconfirm, NCard, NText, NTag, useMessage, NIcon, NGrid, NGridItem, NSkeleton,
   NSelect, NPagination, NTooltip,
 } from 'naive-ui';
-import { NButton, cutChars } from '../ui';
+import { NButton, cutChars, unknownNote } from '../ui';
 import { api, getRole } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
@@ -203,6 +203,9 @@ onMounted(load);
 const brDb = ref<string | null>(null);
 const tables = ref<any[]>([]);
 const tablesBusy = ref(false);
+// 「这一轮没读到」与「这个库里一张表也没有」是两种答案，而失败路径把 tables 清成空之后
+// 两者在屏幕上同形（批次113）：原因必须留在状态里，不能只飘一条 toast 就丢掉。
+const tablesFailed = ref('');
 const curTable = ref<any>(null);
 const tRows = ref<any[]>([]);
 const tCols = ref<string[]>([]);
@@ -212,12 +215,46 @@ const tTotal = ref(0);
 const tPage = ref(1);
 const tSize = ref(50);
 const tBusy = ref(false);
+const tFailed = ref('');
 const showRow = ref(false);
 const rowModel = ref<any>(null);
 const rowInsert = ref(false);
 const rowFocus = ref<string | null>(null);
 
 const dbOptions = computed(() => (Array.isArray(dbs.value) ? dbs.value : []).map((d: any) => ({ label: d.name, value: d.name })));
+
+/**
+ * 三处计数各有一条「这一轮没读到」的话（批次113）。
+ *
+ * 三个 loader 的 catch 都把数组清成空再飘一条 toast：接口失败那两轮，页面上写的是
+ * 「共 0 张表 / 这个库里没有表」「0 行 · 0 列 / 这张表没有数据」「已加载 0 个 key」——
+ * 每一句都是对库内容的断言，而真实情况是那次请求没成。toast 会自己消失，格子上的假结论留着。
+ * 只有读成功的那一轮才报数；读不到时把接口给的原因带出来。
+ */
+const tablesCountText = computed(() => (tablesFailed.value
+  ? unknownNote('表清单', tablesFailed.value)
+  : `共 ${tables.value.length} 张表`));
+const rowsCountText = computed(() => (tFailed.value
+  ? unknownNote('表数据', tFailed.value)
+  : `${tTotal.value} 行 · ${tCols.value.length} 列`));
+const keysCountText = computed(() => (rFailed.value
+  ? unknownNote('key 清单', rFailed.value)
+  : `已加载 ${rKeys.value.length} 个 key`));
+
+/**
+ * Redis 的 INFO 里没这个键就是没读到，「0 小时」是「这个 redis 刚起来」的断言（批次113）；
+ * 同排格子读不到写 `—`，跟着同一判法。
+ *
+ * INFO 的字段全是字符串（服务层 `info: dict[str, str]`，`hitRate` 同一口径），所以这里要 `Number()`；
+ * 但 `Number(null)` 是 0、`Number('')` 也是 0，缺字段必须在看板之前就按「没读到」挡掉，
+ * 否则接口少给一个键会被念成「这个 redis 跑了 0 小时」。
+ */
+function uptimeText(info: any): string {
+  const raw = info?.uptime_in_seconds;
+  if (raw === null || raw === undefined || raw === '') return '—';
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? `${Math.round(v / 3600)} 小时` : '—';
+}
 // PG 未运行时 dbs 是空数组：控制台至少要有 postgres 可选，否则下拉是空的、执行库显示成空白。
 const sqlOptions = computed(() => {
   const o = dbOptions.value;
@@ -317,6 +354,7 @@ async function loadTables() {
   tCols.value = [];
   tColMeta.value = [];
   tPk.value = [];
+  tablesFailed.value = '';
   if (!brDb.value) return;
   tablesBusy.value = true;
   try {
@@ -326,6 +364,7 @@ async function loadTables() {
   } catch (e: any) {
     if (seq !== tablesSeq) return;
     tables.value = [];
+    tablesFailed.value = e.message || '表清单读取失败';
     msg.error(e.message);
   } finally {
     if (seq === tablesSeq) tablesBusy.value = false;
@@ -343,6 +382,7 @@ async function loadTableData() {
   if (!brDb.value || !curTable.value) return;
   const seq = ++tableSeq;
   tBusy.value = true;
+  tFailed.value = '';
   try {
     const r = await api.pgTable(brDb.value, curTable.value.schema, curTable.value.name, tPage.value, tSize.value);
     if (seq !== tableSeq) return;
@@ -354,6 +394,7 @@ async function loadTableData() {
   } catch (e: any) {
     if (seq !== tableSeq) return;
     tRows.value = [];
+    tFailed.value = e.message || '表数据读取失败';
     msg.error(e.message);
   } finally {
     if (seq === tableSeq) tBusy.value = false;
@@ -376,6 +417,7 @@ const rPattern = ref('*');
 const rKeys = ref<string[]>([]);
 const rCursor = ref('0');
 const rBusy = ref(false);
+const rFailed = ref('');
 const rDetail = ref<any>(null);
 const rSel = ref<string[]>([]);
 const rDetailBusy = ref(false);
@@ -386,13 +428,15 @@ async function scanKeys(more = false) {
   // 键重复显示一遍，条数也对不上 r.dbsize。
   if (rBusy.value) return;
   rBusy.value = true;
+  if (!more) rFailed.value = '';
   try {
     const r = await api.redisKeys(more ? rCursor.value : '0', rPattern.value || '*');
     rKeys.value = more ? [...rKeys.value, ...(r.keys || [])] : (r.keys || []);
     rCursor.value = r.cursor || '0';
     if (!more && rDetail.value) rDetail.value = null;
   } catch (e: any) {
-    if (!more) rKeys.value = [];
+    // 只有第一页失败才让「已加载 N 个 key」作废：续页失败时屏幕上那批键名是真的读到的。
+    if (!more) { rKeys.value = []; rFailed.value = e.message || 'key 扫描失败'; }
     msg.error(e.message);
   } finally {
     rBusy.value = false;
@@ -497,22 +541,22 @@ async function delKeys(keys: string[]) {
             <NSpace align="center" :size="10" wrap>
               <NText depth="3" style="font-size: var(--fs-xs)">数据库</NText>
               <NSelect v-model:value="brDb" :options="dbOptions" size="small" style="width: 200px; max-width: 100%" placeholder="选择数据库" aria-label="浏览的数据库" @update:value="loadTables" />
-              <NText depth="3" style="font-size: var(--fs-xs)">共 {{ tables.length }} 张表</NText>
+              <NText depth="3" style="font-size: var(--fs-xs)">{{ tablesCountText }}</NText>
             </NSpace>
             <NDataTable v-if="!curTable" size="small" :bordered="false" :columns="browseCols" :data="tables" :loading="tablesBusy" :row-key="(r: any) => `${r.schema}.${r.name}`" class="cp-tbl tbl-dbs-browse" max-height="var(--table-h)" :scroll-x="'auto'">
-              <template #empty><EmptyBox :text="brDb ? (tablesBusy ? '加载中…' : '这个库里没有表') : '先选择一个数据库'" /></template>
+              <template #empty><EmptyBox :text="brDb ? (tablesBusy ? '加载中…' : (tablesFailed ? unknownNote('表清单', tablesFailed) : '这个库里没有表')) : '先选择一个数据库'" /></template>
             </NDataTable>
             <template v-else>
               <NSpace align="center" :size="10" wrap>
                 <NButton size="tiny" tertiary :icon="ico('ArrowBackOutline')" @click="curTable = null">表列表</NButton>
                 <NTag size="small" :bordered="false" type="info">{{ curTable.schema }}.{{ curTable.name }}</NTag>
-                <NText depth="3" style="font-size: var(--fs-xs)">{{ tTotal }} 行 · {{ tCols.length }} 列 · 点击任意行{{ isAdmin ? '查看/编辑' : '查看详情' }}</NText>
+                <NText depth="3" style="font-size: var(--fs-xs)">{{ rowsCountText }} · 点击任意行{{ isAdmin ? '查看/编辑' : '查看详情' }}</NText>
                 <NButton size="tiny" tertiary :icon="ico('RefreshOutline')" @click="loadTableData">刷新</NButton>
                 <NButton v-if="isAdmin" size="tiny" type="primary" tertiary :icon="ico('AddOutline')" :disabled="!tColMeta.length" @click="openRow(null, true)">新增行</NButton>
                 <NPagination v-model:page="tPage" :page-count="Math.max(1, Math.ceil(tTotal / tSize))" :page-size="tSize" size="small" :show-quick-jumper="false" @update:page="onPage" />
               </NSpace>
               <NDataTable size="small" :bordered="false" :columns="dataCols" :data="tRows" :loading="tBusy" class="cp-tbl tbl-dbs-data" :max-height="'var(--table-h)'" :row-key="(r: any) => r._ctid" :row-props="rowProps" :scroll-x="'auto'">
-                <template #empty><EmptyBox text="这张表没有数据" /></template>
+                <template #empty><EmptyBox :text="tFailed ? unknownNote('表数据', tFailed) : '这张表没有数据'" /></template>
               </NDataTable>
             </template>
           </NSpace>
@@ -524,7 +568,7 @@ async function delKeys(keys: string[]) {
               <NInput v-model:value="rPattern" size="small" placeholder="匹配模式，如 session:*" style="width: 220px; max-width: 100%" :input-props="{ 'aria-label': 'Redis key 匹配模式', class: 'mono' }" @keyup.enter="scanKeys(false)" />
               <NButton size="small" type="primary" :loading="rBusy" :disabled="rBusy || deletingKeys" :icon="ico('SearchOutline')" @click="scanKeys(false)">扫描</NButton>
               <NButton v-if="rCursor !== '0'" size="small" tertiary :loading="rBusy" :disabled="deletingKeys" :icon="ico('RefreshCircleOutline')" @click="scanKeys(true)">加载更多</NButton>
-              <NText depth="3" style="font-size: var(--fs-xs)">已加载 {{ rKeys.length }} 个 key</NText>
+              <NText depth="3" style="font-size: var(--fs-xs)">{{ keysCountText }}</NText>
               <NPopconfirm v-if="isAdmin && rSel.length" @positive-click="delKeys(rSel)">
                 <template #trigger>
                   <NButton size="small" tertiary type="error" :loading="deletingKeys" :disabled="deletingKeys || rBusy" :icon="ico('TrashOutline')">删除选中（{{ rSel.length }}）</NButton>
@@ -573,7 +617,7 @@ async function delKeys(keys: string[]) {
               <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">连接客户端</div><div class="rv">{{ redis.info?.connected_clients ?? '—' }}</div></NCard></NGridItem>
               <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">Key 总数</div><div class="rv">{{ redis.dbsize ?? '—' }}</div></NCard></NGridItem>
               <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">内存占用</div><div class="rv">{{ redis.info?.used_memory_human || '—' }}</div></NCard></NGridItem>
-              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">运行时长</div><div class="rv">{{ Math.round((redis.info?.uptime_in_seconds || 0) / 3600) }} 小时</div></NCard></NGridItem>
+              <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">运行时长</div><div class="rv">{{ uptimeText(redis.info) }}</div></NCard></NGridItem>
               <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">累计命令</div><div class="rv">{{ redis.info?.total_commands_processed ?? '—' }}</div></NCard></NGridItem>
               <NGridItem span="1 s:1 m:1"><NCard size="small" class="rstat"><div class="rk">命中率</div><div class="rv" :style="{ color: 'var(--cp-ok)' }">{{ hitRate() }}</div></NCard></NGridItem>
             </NGrid>

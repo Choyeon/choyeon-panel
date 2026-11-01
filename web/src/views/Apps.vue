@@ -6,7 +6,7 @@ import {
   NRadioGroup, NRadioButton, NIcon, NAlert, NTag, NCollapse, NCollapseItem,
   useMessage,
 } from 'naive-ui';
-import { NButton, unitTag } from '../ui';
+import { NButton, unknownNote, unitTag } from '../ui';
 import { api, repoHref, siteHref, getRole } from '../api';
 import { icon, icons } from '../icons';
 import { useDelayedRefresh } from '../composables/useDelayedRefresh';
@@ -262,6 +262,23 @@ const loading = ref(false);
 // 那是把一次接口失败粉饰成"这台机器没应用"，用户还可能照着提示建一个和真实应用重名的。
 const loadFailed = ref('');
 /**
+ * 页头那两个数说的是「读到几个」还是「这一轮没读到」，必须是两句话（批次113）。
+ *
+ * 原来这里是裸模板串 `共 ${topLevel.length} 个项目 · ${runningCount} 个服务运行中`：`load()` 失败那两轮
+ * 只把原因写进 `loadFailed`（表格空态会如实说「应用列表读取失败」），页头却照样画「共 0 个项目 ·
+ * 0 个服务运行中」——一台跑着三个应用的机器在页头读起来像空的。而失败时 rows 保留上一帧，
+ * 那组旧数又被当成当前值念出来。空态与页头必须同一判据，否则一格两句话。
+ */
+const headerSub = computed(() => {
+  if (!rows.value.length) {
+    return loadFailed.value
+      ? `${unknownNote('应用清单', loadFailed.value)}——下面没有任何列表，空态是同一条原因`
+      : '共 0 个项目 · 0 个服务运行中';
+  }
+  const stale = loadFailed.value ? `；${unknownNote('本轮刷新', loadFailed.value)}，下面是上一次读到的` : '';
+  return `共 ${topLevel.value.length} 个项目 · ${runningCount.value} 个服务运行中${stale}`;
+});
+/**
  * 行内动作按 id 各占一格，verb 决定名称列的「同步」该不该转圈，
  * 操作列的文字按钮没有加载态，靠 rowBusy 整行置灰挡住连点。
  * 以前是一个单槽 `{id, verb}`：B 行点一下就把 A 行在飞的那份顶掉，A 的 finally 又清掉 B 的，
@@ -455,7 +472,7 @@ onMounted(() => {
 
 <template>
   <div>
-    <PageHeader title="应用" :sub="`共 ${topLevel.length} 个项目 · ${runningCount} 个服务运行中`" />
+    <PageHeader title="应用" :sub="headerSub" />
 
     <!-- 1Panel 把长说明从标题里挪到表头上方的 info alert，并在尾部给一个快捷跳转 -->
     <NAlert type="info" :bordered="false" class="apps-prompt">
