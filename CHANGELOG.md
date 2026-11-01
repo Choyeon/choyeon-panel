@@ -2243,6 +2243,43 @@
   是本批之前就存在的账（内核 OOM 历史杀过 3 次；`choyeon-video` 记录有变量而目录无 `.panel.env`、
   `rosetta-frontend` 磁盘那份非面板会写的那份），第三项 fail「每核排队 2.08」是我这一轮跑全量测试
   造成的，两项 warn 是过去 24 小时 16609 次失败认证来自 356 个地址、站点链路两处默认档与配置归属。
+- 应用页头与数据库页的计数不再把「这一轮没读到」写成 0（批次113）。两处同一类塌陷：
+  `Apps.vue` 页头原来是裸模板串 `` 共 ${topLevel.length} 个项目 · ${runningCount} 个服务运行中 ``，而
+  `load()` 的 catch **不清空** `rows`（只把原因写进 `loadFailed`）——失败那一轮页头画「共 0 个项目 ·
+  0 个服务运行中」，同一屏下面的表格却还留着上一次读到的行，一台跑着三个应用的机器在页头读起来是空的，
+  那组旧数又被当成当前值念出来；`Databases.vue` 更直接，三个 loader 的 catch 都把数组清成空再飘一条
+  toast，于是同一次失败里写「共 0 张表 / 这个库里没有表」「0 行 · 0 列 / 这张表没有数据」
+  「已加载 0 个 key」——每一句都是对库内容的断言，而真实情况只是那次请求没成（`pg_tables`/`pg_table`
+  的 `except → err_json(e, 502)` 证明这一轮确实是 HTTP 失败，不是空结果）。toast 会自己消失，格子上的
+  假结论留着。另外 Redis 概览「运行时长」那一格写 `Math.round((redis.info?.uptime_in_seconds || 0) / 3600)`，
+  INFO 少给一个键就念成「0 小时」，等于断言这个 redis 刚起来。
+  现在页头与三处计数各有一条 `unknownNote` 分支（`应用清单`／`本轮刷新`／`表清单`／`表数据`／`key 清单`），
+  失败旗标（`loadFailed`、新增的 `tablesFailed`/`tFailed`/`rFailed`）在三处读取前置空、只在失败路径赋值，
+  读数只在读成功那一轮报出；`rows` 保留上一帧时页头补「本轮刷新读不到…下面是上一次读到的」，不再把旧数
+  当现值；两处空态（表列表、表数据）的失败分支排在「这个库里没有表 / 这张表没有数据」之前；`uptimeText`
+  先在 `Number()` 之前挡掉 `null`/`undefined`/空串（`Number(null)` 是 0，会把缺字段念成 0 小时），缺字段
+  与同排格子一样写 `—`。键扫描的失败旗标只在 `!more` 那一支置位——续页失败时屏幕上那批键名是真读到的，
+  不许作废整份清单。`web/tests/batch113.test.mjs` 钉住页头不再裸念计数、三个 computed 的失败分支都排在
+  报数之前、模板只念 computed（八条裸计数写法钉死）、旗标复位语句三处都在、续页失败不作废已读清单，
+  以及两个页面都不另写一份「未读到」短名（与批次106 同源）。
+  同一轮的其它候选点读代码后判定**不是**缺陷，因此没有改动：`Dashboard.vue` 的 `alertTotal` 读的是
+  `/api/alerts/open`，那个接口成功路径总是带 `total`，失败走错误响应由 `alertsState` 说话；
+  `LogCenter.vue` 的 `bytesOut`/`diskBytes` 与 `BackupFiles.vue` 的字节和都是服务端算好的字段，不在
+  「没读到」这一档。
+  线上复验：部署后的 `Apps-B2aHUH9d.js` 含 `本轮刷新`/`应用清单`/`下面是上一次读到的` 各一处，
+  `Databases-CGiQ3pUG.js` 含 `key 扫描失败`/`key 清单` 各一处、`表清单`/`表数据` 各三处，且产物里那一行是
+  `uptime_in_seconds;if(e==null||e==="")return"—";const n=Number(e)` 这一行守卫；两份 chunk 经
+  `GET /assets/...` 取回 200 且仍含这些标记，证明服务的是新产物。另用面板自己的服务层真读一次本机 Redis：
+  `uptime_in_seconds` 到手是字符串 `'852079'`（237 小时）——这既证明成功路径照样报数，也说明 INFO 字段
+  全是字符串（与服务层 `info: dict[str, str]` 及 `hitRate` 同一口径），若按 `typeof === 'number'` 判定
+  就会把正常读数写成 `—`。
+  **没有做的复验**：没有在生产上真的制造一次接口 502 去截渲染后的字符串（要停 PG/Redis 才会触发，属于
+  越界动作），也没有在生产 Redis 上删字段验证 `—` 那一档——失败分支的正确性由用例与代码形态保证，
+  浏览器内的渲染证据缺一档。
+  `choyeonctl upgrade --no-pull` 给 `ok/healthy=true`；`doctor` 为 17 pass / 3 warn / 2 fail，两项 fail 都是
+  本批之前就存在的账（内核 OOM 历史杀过 3 次；`choyeon-video` 记录有变量而目录无 `.panel.env`、
+  `rosetta-frontend` 磁盘那份非面板会写的那份），三项 warn 是 2 个待装安全更新、过去 24 小时 11410 次
+  失败认证来自 301 个地址、站点链路两处默认档与配置归属——都与这次改动无关。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
