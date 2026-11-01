@@ -2280,6 +2280,50 @@
   本批之前就存在的账（内核 OOM 历史杀过 3 次；`choyeon-video` 记录有变量而目录无 `.panel.env`、
   `rosetta-frontend` 磁盘那份非面板会写的那份），三项 warn 是 2 个待装安全更新、过去 24 小时 11410 次
   失败认证来自 301 个地址、站点链路两处默认档与配置归属——都与这次改动无关。
+- 自检与终端里四处「读不动」不再写成「确认没有」（批次114）。四处同一类塌陷各自站着一份：
+  `meta._check_backup` 的份数来自 `glob`，而 glob 把 `opendir` 的异常吞成空列表，于是备份全在、
+  面板却读不动 `/root/backups/panel` 的机器在自检里读到「备份目录下还没有备份」——这一项查的正是
+  「出事还能不能重来」；现在先由 `dir_state` 判读不读得动，读不动只说「确认不了」。同一处的
+  `_recent_backups` 顺带跳过 glob 与 `getmtime` 之间被轮替删掉的文件（原来是未处理异常，整条
+  doctor 打成 500）。`meta._unit_environment` 改回（表，原因）：读不动时旧写法回一张空表，调用方拿
+  `k in unit_env` 当筛子，空表让每一项都落不进对账，最后交出「N 项部署参数一致」这条绿灯。
+  `updates_service._apt_cache_age` 同样改回（年龄，原因）并改用 `dir_state`，`index_age_reason` 进载荷，
+  `_clean_verdict`、CLI 与补丁页签共用一个判据——量不到龄就没有可比的分母，「没有待装安全更新」从
+  pass 降级为 warn，而「这台机器不是 Debian 族、压根没有索引这回事」不带原因，仍是真 pass。
+  `cli._memory_text` 补上批次110 定下的 `counter_ok`（终端是漏下的那条读者），读空时不再印
+  「OOM：自启动以来没有杀过进程」；`choyeonctl backup list` 的 `(无备份)` 那条平铺 glob 也三分。
+  页面上补丁页签多出「索引龄读不到（原因）」一档，红点条件带上 `index_age_reason`，短名与
+  `_clean_verdict` 同源，不在页面重推阈值。
+  **这批自己带的用例原本是死的**：`test_batch114._detect` 把 `_const(v)`（返回 awaitable 的工厂）
+  又包了一层 `lambda`，patch 进去的是函数对象本身，`_collect` 里 `await` 它就是 `TypeError`，两条
+  Debian 三态用例从没真正跑起来过；`test_batch75` 的「共用闸门只在 util 定义一次」钉的是那行导入的
+  字面列序，本批往 `updates_service` 加进 `dir_state` 就把它绊红（改成与 meta 同一口径的逐名断言）；
+  `test_batch14a._oom` 夹具还停在批次109 之前的形状（`source=counter` 却不带 `counter_ok`），于是
+  批次110/114 给终端定的判据把它读成「没读到」——三条都是这次跑门禁才暴露的，不是改代码引入的。
+  `backend/tests/test_batch114.py`（30 条）钉住四处三态与 fail-closed 的分支顺序，五处
+  `_apt_cache_age` 夹具改到新元组契约。
+  门禁：ruff 通过、聚焦三件 117 通过、前端 171/171、构建通过、全量 `run_tests.py` 为
+  `Ran 3990 tests ... OK (skipped=1)`。
+  线上复验（读得到那一档）：`choyeonctl updates --json` 的载荷带着新字段
+  `index_age_hours=14.3 / index_age_reason="" / index_stale=false`，`doctor` 的 `backup` 为
+  「共 33 份备份，最近 0.0 天前」、`env` 为「.env 与 unit 的 6 项部署参数一致」、
+  `choyeonctl memory` 印「OOM：内核自启动以来杀掉过 3 个进程」、`backup list` 列得出真实文件；
+  部署后的 `Services-C-PH-J9U.js` 含 `index_age_reason` 十处、`索引龄读不到` 两处、`没有可比的分母` 一处，
+  且 `GET /assets/Services-C-PH-J9U.js` 取回的那份与磁盘那份 md5 相同（`c5bbc4f5…`），证明服务的是新产物。
+  线上复验（读不动那一档）：用一个符号链接环当读不动的目录（`chmod 000` 对 root 无效，而面板进程就是
+  root，ELOOP 在任何权限下都是 `OSError`），把 `CP_BACKUP_DIR` 指过去后 `choyeonctl backup list` 印
+  「读不到备份目录 …（OSError），本机到底有没有备份确认不了」而不再是 `(无备份)`，同一份已部署代码里
+  `meta._check_backup()` 给 `warn` + 「都确认不了」、`meta._unit_environment()` 给 `({}, 'OSError')`；
+  `dir_state` 替身下 `_apt_cache_age()` 给 `(None, 'PermissionError')`、`_clean_verdict` 给
+  `warn` + 「这句「没有待装」没有可比的分母」。探针目录与脚本已清理，未在服务上留下账号或文件。
+  **没有做的复验**：没有在生产把 `/var/lib/apt/lists` 真的弄成读不动（那会同时挡住 apt 与面板自己），
+  apt 那一档靠替身在同版本代码上取证；没有在真实 unit 文件上触发 `env` 项的读不动分支（只做进程内）；
+  也没有在生产截补丁页签渲染后的字符串——页签证据是产物 grep 与 `/assets` 一致性，浏览器内渲染缺一档。
+  `choyeonctl upgrade --no-pull` 给 `ok/healthy=true`（v1.1.10）；`doctor` 为 17 pass / 3 warn / 2 fail，
+  两项 fail 是本批之前就存在的账（内核 OOM 历史杀过 3 次；`choyeon-video` 记录有变量而目录无
+  `.panel.env`、`rosetta-frontend` 磁盘那份非面板会写的那份），三项 warn 是 2 个待装安全更新（共 3 个
+  待装）、过去 24 小时 11959 次失败认证来自 312 个地址、站点链路两处（端口 80 默认档是具名站点、
+  5 份配置 7 个域名）——都与这次改动无关。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
