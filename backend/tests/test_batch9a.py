@@ -195,7 +195,7 @@ class DetectTests(unittest.TestCase):
             mock.patch.object(up, "REBOOT_FLAG", _Path("", reboot)),
             mock.patch.object(up, "shutil", types.SimpleNamespace(which=lambda c: c in which)),
             mock.patch.object(up, "run", _fake_run(table)),
-            mock.patch.object(up, "_apt_cache_age", lambda: None),
+            mock.patch.object(up, "_apt_cache_age", lambda: (None, "")),
             # ⑰A 起 Debian 的重启判定改走 pending_service 的内核包比对。不把它钉住，用例
             # 断言的就是"跑测试这台机器装了什么内核"，而不是被测逻辑。
             mock.patch.object(up.pending_service, "kernel_reboot_verdict",
@@ -245,7 +245,7 @@ class DetectTests(unittest.TestCase):
         table = {"apt list": (0, APT_OUT)}
         patches = self._patch(os_text=_os_release("debian"), table=table)
         with patches[0], patches[1], patches[2], patches[3], patches[5], \
-             mock.patch.object(up, "_apt_cache_age", lambda: 72.0):
+             mock.patch.object(up, "_apt_cache_age", lambda: (72.0, "")):
             data = asyncio.run(up.detect())
         self.assertTrue(any("索引" in n for n in data["notes"]), data["notes"])
         self.assertEqual(data["index_age_hours"], 72.0)

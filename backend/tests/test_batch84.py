@@ -75,7 +75,7 @@ def _collect(family: str, *, apt=None, dnf=None, adv=None, code: int = 0):
     patches = [
         mock.patch.object(us, "run", fake_run),
         mock.patch.object(us, "family_of", lambda m, a: family),
-        mock.patch.object(us, "_apt_cache_age", lambda: None),
+        mock.patch.object(us, "_apt_cache_age", lambda: (None, "")),
         mock.patch.object(us, "_auto_updates", lambda f: _const({"state": "enabled", "unit": "u"})),
         mock.patch.object(us, "_reboot_verdict", lambda f: _const((False, None))),
         mock.patch.object(us.shutil, "which", lambda c: f"/usr/bin/{c}"),

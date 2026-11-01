@@ -1654,8 +1654,13 @@ const totalPending = computed<number | null>(() => {
 });
 const pendingText = computed(() => (totalPending.value === null ? '读不到' : `${totalPending.value} 个`));
 const indexAgeText = computed(() => {
-  const v = patches.value?.index_age_hours;
-  return typeof v === 'number' ? `${v.toFixed(0)} 小时前刷新` : '索引年龄未知';
+  const p = patches.value;
+  const v = p?.index_age_hours;
+  if (typeof v === 'number') return `${v.toFixed(0)} 小时前刷新`;
+  // 量不到龄（目录读不动、里面没有索引文件）与"这台机器不是 Debian 族、压根没有 apt 索引"
+  // 是两件事：前者没有可比的分母，页签不能拿一个 0 待装写成「已全部装上」（批次114，
+  // 判据与 updates_service._clean_verdict 同源，不在页面重推）。
+  return p?.index_age_reason ? `索引龄读不到（${p.index_age_reason}）` : '索引年龄未知';
 });
 const autoState = computed(() => patches.value?.auto_updates?.state || 'unknown');
 const patchBusy = computed(() => patchLoading.value || patchRefreshing.value || probing.value);
@@ -1677,6 +1682,10 @@ const patchAlert = computed(() => {
   // 绿灯的条件比"数出来是 0"更严：本地索引超过一周，这个 0 说的是上周的世界。
   if (p.index_stale) {
     return { type: 'warning' as const, text: `没有待装安全更新，但清单读的是 ${indexAgeText.value}的本地索引，超过一周的「已经打全」不能当结论用。面板不代跑 apt update，刷新后重探一次。` };
+  }
+  if (p.index_age_reason) {
+    // 与上一支同一个道理，只是连分母都没有：doctor 已经降级成 warn，页签不能继续给 success。
+    return { type: 'warning' as const, text: `没有待装安全更新，但本地 apt 索引龄读不到（${p.index_age_reason}），这句「已经打全」没有可比的分母。面板不代跑 apt update，刷新后重探一次。` };
   }
   return { type: 'success' as const, text: `补丁已全部装上（按本地包索引判断，${indexAgeText.value}）。` };
 });
@@ -1708,8 +1717,8 @@ const filtered = computed(() => {
 const tabs = computed(() => [
   { key: 'services', label: '系统服务' },
   // 有待装安全更新时页签上点一颗红点：这一页平时没人看，而它恰恰是最需要被看见的。
-  // 读不到清单和索引过期同样点亮：这一页此刻给不出「干净」的证明，别让它安静地待着。
-  { key: 'patches', label: '系统补丁', badge: (secCount.value ?? 0) > 0 || !!patches.value?.probe_error || !!patches.value?.index_stale },
+  // 读不到清单、索引过期与索引龄量不到同样点亮：这一页此刻给不出「干净」的证明，别让它安静地待着。
+  { key: 'patches', label: '系统补丁', badge: (secCount.value ?? 0) > 0 || !!patches.value?.probe_error || !!patches.value?.index_stale || !!patches.value?.index_age_reason },
   // 端口同理：外部可达、以及"防火墙读不到所以判不了"都点亮——后者给不出「没有多开口子」的证明，
   // 让它安静地待着就等于替面板撒了一个没人核对过的绿灯。被防火墙挡住的仍用页内告警说话。
   { key: 'ports', label: '端口暴露面', badge: exposedCount.value > 0 || unknownCount.value > 0 },
@@ -2031,7 +2040,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
           <template v-else-if="secCount === null">判不出</template>
           <template v-else>{{ secCount }} 个</template>
         </span>
-        <span v-if="typeof patches.index_age_hours === 'number'" class="pt-chip" :class="{ warn: patches.index_stale }">
+        <span v-if="typeof patches.index_age_hours === 'number' || patches.index_age_reason" class="pt-chip" :class="{ warn: patches.index_stale || patches.index_age_reason }">
           <i>本地索引</i>{{ indexAgeText }}
         </span>
         <span class="pt-chip">
@@ -2051,8 +2060,8 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
       </div>
       <NText v-if="advisoryLine" depth="3" class="pt-advisories">安全通告：{{ advisoryLine }}</NText>
 
-      <div v-if="patches && (totalPending || secCount || patches.probe_error || patches.index_stale)" class="pt-cmds">
-        <div v-if="patches.commands?.refresh_index && (patches.probe_error || patches.index_stale)" class="pt-cmd">
+      <div v-if="patches && (totalPending || secCount || patches.probe_error || patches.index_stale || patches.index_age_reason)" class="pt-cmds">
+        <div v-if="patches.commands?.refresh_index && (patches.probe_error || patches.index_stale || patches.index_age_reason)" class="pt-cmd">
           <NText depth="3" class="pt-cmd-label">刷新包索引</NText>
           <code class="mono pt-cmd-text">{{ patches.commands.refresh_index }}</code>
           <NButton size="tiny" quaternary :icon="icon('CopyOutline', 13)" @click="copy(patches.commands.refresh_index, '已复制，请到 SSH 会话里执行')">复制</NButton>
@@ -2079,7 +2088,7 @@ const loginPaging = { pageSize: 10, showSizePicker: false, showQuickJumper: fals
         :row-key="(r: any) => r.name" class="cp-tbl tbl-patches"
       >
         <template #empty>
-          <EmptyBox :text="patchError && !patches ? '补丁清单获取失败，点上方「重新探测」重试' : (patches?.probe_error ? '这一轮读不到待装清单，空表不代表没有更新' : '按本地包索引，没有待装更新')" />
+          <EmptyBox :text="patchError && !patches ? '补丁清单获取失败，点上方「重新探测」重试' : (patches?.probe_error || patches?.index_age_reason ? '这一轮读不到待装清单或本地索引龄，空表不代表没有更新' : '按本地包索引，没有待装更新')" />
         </template>
       </NDataTable>
     </CpToolbarCard>

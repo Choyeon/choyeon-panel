@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import probe
-from ..util import PROBE_TIMEOUT, path_state, run
+from ..util import PROBE_TIMEOUT, dir_state, path_state, run
 from . import pending_service
 
 CACHE_TTL = 1800.0
@@ -327,16 +327,32 @@ async def _auto_updates(family: str) -> dict:
     return {"state": "unknown", "unit": None}
 
 
-def _apt_cache_age() -> float | None:
-    """apt 索引距上次刷新的小时数：`apt list` 读的是本地索引，索引旧则结论旧。"""
-    try:
-        entries = [p for p in APT_LISTS.glob("*") if p.is_file()]
-        if not entries:
-            return None
-        newest = max(p.stat().st_mtime for p in entries)
-    except OSError:
-        return None
-    return round((time.time() - newest) / 3600.0, 1)
+def _apt_cache_age() -> tuple[float | None, str]:
+    """（apt 索引距上次刷新的小时数，读不到的原因）。
+
+    `apt list` 读的是本地索引，索引旧则结论旧。原因非空就是这一轮量不到龄：目录列不动、
+    目录不存在、或里面一个索引文件都没有（从没跑过 `apt update`）。这三种与"这台机器不是
+    Debian 族，压根没有索引这回事"必须分开——旧写法一律回 None，`_clean_verdict` 就把
+    None 当"没有陈旧问题"，对着量不到龄的机器给「没有待装安全更新」的绿灯。
+    探针用 `util.dir_state`：glob 会把 opendir 的异常吞成空列表，拿它当"读不读得动"的探针
+    正好把这三态塌成一态。
+    """
+    readable, names, why = dir_state(APT_LISTS)
+    if readable is None:
+        return None, why
+    if not readable:
+        return None, "索引目录不存在"
+    stamps = []
+    for n in names:
+        try:
+            p = APT_LISTS / n
+            if p.is_file():
+                stamps.append(p.stat().st_mtime)
+        except OSError as e:
+            return None, type(e).__name__
+    if not stamps:
+        return None, "索引目录里没有索引文件（这台机器还没跑过 apt update？）"
+    return round((time.time() - max(stamps)) / 3600.0, 1), ""
 
 
 def _clean_verdict(data: dict, detail: str, auto_note: str) -> dict:
@@ -349,7 +365,15 @@ def _clean_verdict(data: dict, detail: str, auto_note: str) -> dict:
     """
     cmds = data.get("commands") or {}
     age = data.get("index_age_hours")
+    reason = data.get("index_age_reason") or ""
     if age is None:
+        if reason:
+            # 量不到龄就是没有可比的分母，"没有待装"这句话失去依据；这与索引超 168 小时
+            # 同一档，都是 warn，不许留成绿灯。非 Debian 族不带原因，仍走下面那条 pass。
+            return {"status": "warn",
+                    "detail": f"{detail}，但本地 apt 索引龄读不到（{reason}），"
+                              f"这句「没有待装」没有可比的分母" + auto_note,
+                    "fix": cmds.get("refresh_index") or ""}
         return {"status": "pass", "detail": detail + auto_note, "fix": ""}
     if age > STALE_TRUST_HOURS:
         return {"status": "warn",
@@ -410,6 +434,7 @@ async def _collect() -> dict:
     security_known = False
     probe_error: str | None = None
     index_age: float | None = None
+    index_age_reason = ""
 
     if osr_unreadable:
         # 不把"读不到"说成"这机器没有 os-release"：页面至少要让人看见判词是哪一路来的
@@ -425,9 +450,13 @@ async def _collect() -> dict:
         # 探测失败时连「安全更新有几个」都不能假称知道——旧代码在这里照旧置 True，
         # 于是 doctor 拿着 security_count=0 输出「没有待装安全更新」。
         security_known = probe_error is None
-        index_age = _apt_cache_age()
+        index_age, index_age_reason = _apt_cache_age()
         if index_age is not None and index_age > 24:
             notes.append(f"apt 索引已 {int(index_age)} 小时未刷新，结论可能偏旧（面板不代跑 apt update）")
+        elif index_age_reason:
+            # 量不到龄与龄太大是同一件事的两半：都没有可比的分母，页签的说明行要说一句。
+            notes.append(f"apt 索引龄读不到（{index_age_reason}），"
+                         f"「没有待装更新」这句话没有可比的分母（面板不代跑 apt update）")
     elif family == RHEL:
         cmd = "dnf" if "dnf" in available else "yum"
         r = await run(cmd, ["-q", "check-update"], timeout=DNF_TIMEOUT)
@@ -486,6 +515,9 @@ async def _collect() -> dict:
         "probe_error": probe_error,
         # 只有 Debian 走 apt 索引，其余族给 None：自检项不会拿一个不存在的年龄去判新旧。
         "index_age_hours": index_age,
+        # 非空就是这一轮量不到龄（Debian 族才有）；空串加 age=None 是"这台机器没有 apt 索引这回事"。
+        # 自检与终端拿它分开「索引旧」与「索引龄没读到」，不再一起给绿灯。
+        "index_age_reason": index_age_reason,
         # 阈值只在这里算一次：网页拿布尔值着色，不许自己抄一份 168。
         "index_stale": index_age is not None and index_age > STALE_TRUST_HOURS,
         "security_count": security_count,

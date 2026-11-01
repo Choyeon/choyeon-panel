@@ -63,7 +63,7 @@ from app.services import (  # noqa: E402
     updates_service,
     web_logs,
 )
-from app.util import CLI_LOG_LINES_MAX, human_bytes, redact_creds, timeout_note  # noqa: E402
+from app.util import CLI_LOG_LINES_MAX, dir_state, human_bytes, redact_creds, timeout_note  # noqa: E402
 
 SERVICE = "choyeon-panel"
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -695,8 +695,18 @@ async def cmd_backup(a: argparse.Namespace) -> dict:
         omitted = total - len(rows)
         note = f"\n（共 {total} 份，另 {omitted} 份未列出，只列最近 {max_shown} 份）" if omitted else ""
         payload = {"backups": rows, "total": total, "omitted": omitted}
-        Out.result(payload,
-                   ("\n".join(f"{r['size']:>10}  {r['file']}" for r in rows) or "(无备份)") + note)
+        empty_text = "(无备份)"
+        if not rows:
+            # glob 会把「目录读不动」和「目录里确实没有」压成同一个空列表，这里必须分开说：
+            # 一台有备份但面板读不到权限的机器，终端原来照样印 "(无备份)"（批次114）。
+            readable, _entries, why = dir_state(Path(config.BACKUP_DIR))
+            if readable is None:
+                payload["dir_unreadable"] = why
+                empty_text = f"读不到备份目录 {config.BACKUP_DIR}（{why}），本机到底有没有备份确认不了"
+            elif not readable:
+                payload["dir_missing"] = True
+                empty_text = f"{config.BACKUP_DIR} 这个目录还不存在，一份备份也没有"
+        Out.result(payload, ("\n".join(f"{r['size']:>10}  {r['file']}" for r in rows) or empty_text) + note)
         return payload
 
     if a.backup_cmd == "jobs":
@@ -1178,12 +1188,18 @@ def _updates_text(d: dict) -> str:
     for n in d.get("notes") or []:
         lines.append(f"[note] {n}")
     age = d.get("index_age_hours")
+    age_reason = d.get("index_age_reason") or ""
     if age is not None and not err and age > updates_service.STALE_TRUST_HOURS:
         # 索引旧到什么程度就不能当结论用了：判据在服务层，终端和自检项说同一句话。
         lines.append(
             f"清单读的是 {age:.0f} 小时前的本地索引，超过 "
             f"{updates_service.STALE_TRUST_HOURS:.0f} 小时，「没有安全更新」这句话不可信"
         )
+    elif age is None and age_reason and not err:
+        # 连索引龄都量不到（目录读不动、没有索引文件）就没有分母，与"索引 30 天前"同一档：
+        # 旧写法把 None 当成"没有陈旧问题"，绿灯照常亮。
+        lines.append(f"本地 apt 索引龄读不到（{age_reason}），"
+                     f"「没有待装安全更新」这句没有可比的分母")
     pkgs = d.get("packages") or []
     shown = pkgs[:20]
     for p in shown:
@@ -1199,7 +1215,8 @@ def _updates_text(d: dict) -> str:
     elif len(pkgs) > len(shown):
         lines.append(f"  ...共 {total} 个，完整清单用 --json")
     cmds = d.get("commands") or {}
-    if cmds.get("refresh_index") and (err or (age is not None and age > updates_service.STALE_TRUST_HOURS)):
+    stale_index = age is not None and age > updates_service.STALE_TRUST_HOURS
+    if cmds.get("refresh_index") and (err or age_reason or stale_index):
         lines.append(f"刷新索引：  {cmds['refresh_index']}")
     if sec and cmds.get("apply_security"):
         lines.append(f"只装安全更新：{cmds['apply_security']}")
@@ -1561,6 +1578,10 @@ def _memory_text(d: dict) -> str:
             lines.append(f"  （内核计数 {kills} 次，日志里只认到 {total} 次）")
         if oom.get("reason"):
             lines.append(f"  {oom['reason']}")
+    elif oom.get("counter_ok") is not True:
+        # 批次110 给网页与 doctor 定了「读空 ≠ 真 0」，这条终端读者是漏下的：同一个字段读不到时
+        # 这里原来直接印「自启动以来没有杀过进程」，把一次没做的测量念成一条绿灯。
+        lines.append(f"OOM：{oom.get('reason') or '这一轮没读到 /proc/vmstat 的 oom_kill 计数，不代表没杀过进程'}")
     else:
         lines.append("OOM：自启动以来没有杀过进程")
 

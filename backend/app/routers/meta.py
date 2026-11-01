@@ -77,13 +77,19 @@ def _recent_backups() -> tuple[int, float | None]:
     刚跑完的 PG 备份不算数，容易误报陈旧。
     """
     suffixes = backup_service.ARTIFACT_SUFFIXES
-    files: list[str] = []
+    stamps: list[float] = []
     for p in glob.iglob(f"{config.BACKUP_DIR}/**/*", recursive=True):
-        if p.endswith(suffixes) and os.path.isfile(p):
-            files.append(p)
-    if not files:
+        if not p.endswith(suffixes) or not os.path.isfile(p):
+            continue
+        try:
+            stamps.append(os.path.getmtime(p))
+        except OSError:
+            # glob 与 stat 之间正好被备份轮替/清理删掉：少算一份，也不能让整条自检崩掉
+            # （批次96 给 CLI 那条读者修过同一件事，这里是它的另一半）。
+            continue
+    if not stamps:
         return 0, None
-    return len(files), max(os.path.getmtime(f) for f in files)
+    return len(stamps), max(stamps)
 
 
 async def _check_listen() -> dict:
@@ -213,6 +219,25 @@ async def _check_backup() -> dict:
             "fix": "choyeonctl backup jobs 看每条任务的最近执行与原因，修好后在备份页「立即备份」补跑一次",
         }
     if count == 0:
+        # 份数为 0 有两件相反的事：目录读得动而里面确实没有备份，与目录根本列不动
+        # （glob 把 scandir 的异常吞成空表，见 util.dir_state 的说明）。旧写法只有一句话，
+        # 于是一台备份全在、但面板读不到那个目录的机器，在自检里读起来是「你还没有备份」——
+        # 这一项查的就是「出事还能不能重来」，把没查成说成没有，等于把最要紧的账销掉。
+        readable, _entries, why = dir_state(config.BACKUP_DIR)
+        if readable is None:
+            return {
+                "status": "warn",
+                "detail": f"读不到备份目录 {config.BACKUP_DIR}（{why}），"
+                          f"本机到底有没有备份、最近一份多少天前都确认不了",
+                "fix": "让面板服务保持 root（deploy/choyeon-panel.service 默认就是），"
+                       f"或放开该目录的读权限；手工核对：ls -l {config.BACKUP_DIR}",
+            }
+        if not readable:
+            return {
+                "status": "warn",
+                "detail": f"{config.BACKUP_DIR} 这个目录还不存在，一份备份也没有",
+                "fix": "choyeonctl backup run",
+            }
         return {"status": "warn", "detail": f"{config.BACKUP_DIR} 下还没有备份", "fix": "choyeonctl backup run"}
     days = (time.time() - (mtime or 0)) / 86400
     if days > 7:
@@ -541,13 +566,19 @@ async def _check_sites() -> dict:
 ENV_DEPLOY_KEYS = ("CP_HOST", "CP_PORT", "CP_DATA_DIR", "CP_BACKUP_DIR", "CP_APP_ROOT", "CP_FILE_ROOTS")
 
 
-def _unit_environment(path: Path) -> dict[str, str]:
-    """解析 unit 里的 `Environment=KEY=VALUE`；读不到就回空表，由调用方决定怎么说。"""
+def _unit_environment(path: Path) -> tuple[dict[str, str], str]:
+    """解析 unit 里的 `Environment=KEY=VALUE`，返回（键值表，读不到的原因）。
+
+    原因非空就是这一轮没读到，调用方必须分开说「一致」与「没核对成」——旧写法读不动时回一张
+    空表，而调用方拿 `k in unit_env` 当筛子，空表让每一项都落不进对账，最后交出
+    「N 项部署参数一致」这个绿灯：文件在盘上、就是读不动（权限、EISDIR、ELOOP），
+    与两边真的对齐，在自检里同形。异常只带类型名，绝对路径不进响应。
+    """
     out: dict[str, str] = {}
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
+    except OSError as e:
+        return {}, type(e).__name__
     for raw in text.splitlines():
         line = raw.strip()
         if not line.startswith("Environment="):
@@ -555,7 +586,7 @@ def _unit_environment(path: Path) -> dict[str, str]:
         key, sep, value = line[len("Environment="):].partition("=")
         if sep:
             out[key.strip()] = value.strip().strip("\"'")
-    return out
+    return out, ""
 
 
 async def _check_env_file() -> dict:
@@ -582,7 +613,16 @@ async def _check_env_file() -> dict:
                       f"Environment= 上，AGENTS.md 说的 .env 编辑入口还没落地",
             "fix": "choyeonctl upgrade --no-pull   # 从 .env.example 生成并按 unit 对齐部署参数",
         }
-    unit_env = _unit_environment(unit)
+    unit_env, unit_env_why = _unit_environment(unit)
+    if unit_env_why:
+        # 文件明明在盘上（上面刚过了 exists 这一关）却读不动：这一轮对账没有做成，
+        # 不能因为"没发现差异"就报一致。
+        return {
+            "status": "warn",
+            "detail": f"读不到 {SERVICE_NAME}.service 里的 Environment= 行（{unit_env_why}），"
+                      f"与 .env 是否同一套部署参数确认不了",
+            "fix": f"让面板服务保持 root，或手工核对：systemctl show {SERVICE_NAME} -p Environment",
+        }
     drift = [(k, env.get(k), unit_env[k]) for k in ENV_DEPLOY_KEYS
              if k in unit_env and env.get(k) != unit_env[k]]
     if drift:

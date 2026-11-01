@@ -97,7 +97,9 @@ def _collect_updates(code, out, family=us.DEBIAN, reboot=(False, None), age=None
     patches = [
         mock.patch.object(us, "run", fake_run),
         mock.patch.object(us, "family_of", lambda m, a: family),
-        mock.patch.object(us, "_apt_cache_age", lambda: age),
+        # 新契约是（年龄，读不到的原因）：这里只测时效阈值，原因一律留空，
+        # 让 None 继续代表"这台机器没有 apt 索引这回事"而不是"这一轮量不到"。
+        mock.patch.object(us, "_apt_cache_age", lambda: (age, "")),
         mock.patch.object(us, "_auto_updates", lambda f: _const({"state": "enabled", "unit": "u"})),
         mock.patch.object(us, "_reboot_verdict", lambda f: _const(reboot)),
         mock.patch.object(us.shutil, "which", lambda c: f"/usr/bin/{c}"),
