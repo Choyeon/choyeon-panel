@@ -160,7 +160,8 @@ def _units(*rows, **over):
 
 
 def _oom(**over):
-    d = {"kernel_total": 0, "unit_kills": {}, "events": [], "source": "counter", "reason": ""}
+    d = {"kernel_total": 0, "unit_kills": {}, "events": [], "source": "counter", "reason": "",
+         "counter_ok": True}
     d.update(over)
     return d
 
