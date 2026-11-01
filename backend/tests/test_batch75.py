@@ -441,7 +441,10 @@ class SourceContractTests(unittest.TestCase):
     def test_gate_defined_once_in_util_and_imported(self):
         self.assertIn("def path_state(", UTIL_PY)
         self.assertIn("def dir_state(", UTIL_PY)
-        self.assertIn("from ..util import PROBE_TIMEOUT, path_state, run", UPDATES_PY)
+        updates_import = next(ln for ln in UPDATES_PY.splitlines()
+                              if ln.startswith("from ..util import"))
+        for name in ("PROBE_TIMEOUT", "dir_state", "path_state", "run"):
+            self.assertIn(name, updates_import)
         meta_import = next(ln for ln in META_PY.splitlines() if ln.startswith("from ..util import"))
         for name in ("CTRL_TIMEOUT", "dir_state", "disk_usage_pct", "run"):
             self.assertIn(name, meta_import)
