@@ -2324,6 +2324,55 @@
   `.panel.env`、`rosetta-frontend` 磁盘那份非面板会写的那份），三项 warn 是 2 个待装安全更新（共 3 个
   待装）、过去 24 小时 11959 次失败认证来自 312 个地址、站点链路两处（端口 80 默认档是具名站点、
   5 份配置 7 个域名）——都与这次改动无关。
+- 仓库里没有任何读者的定义与产物删掉了（批次115，12 个文件 −85 行，另删一个图片）。扫描口径：
+  Python 取模块级/类级 def 与模块级大写常量，引用语料只算代码文件（`CHANGELOG` 提到某个函数名
+  不算有人在用它），判死 = 全仓词边界计数只等于它自己定义行里那一次；前端取 `web/src` 里
+  `export` 的名字，看在 `web/` 全体文件里还有没有第二次出现；shell 取 `scripts/*.sh` 里 `name()`
+  形式的定义，看在所有 source 了它或被它 source 的语料里有没有被调用；另加两遍文件级检查
+  （孤立文件、同模块重复顶层定义）。探针脚本跑完即删，仓库里没留。
+  删掉的九处：`apps_service.TEMPLATE_TOKENS`（一份 `{{name}}/{{path}}/{{start_cmd}}/{{port}}`
+  的字面量清单，而 `render_unit_from` 一直是就地 `.replace(...)`，四个 token 在那儿照样读得出来）、
+  `site_audit_service.NOTE_LISTEN_UNKNOWN` / `NOTE_CERT_UNKNOWN`（这两句早已就地写在
+  `_listen_state` / `_cert_state` 的返回值里）、`updates_service.AUTO_UNITS`（按族拆出
+  `AUTO_UNITS_BY_FAMILY` 之后没删的旧总表，连上面那段「命中第一个 enabled」的说明一起走——
+  留着它，下一个人就会去改一份改了不生效的名单）、`security.session_epoch`（网页终端与
+  `/api/system` 的复验拿的是 `session_identity` 那对（角色, 版本号），只读版本号的这条包装没有读者）、
+  `systemd_ops.is_busy`（当初把判词收拢到 `unit_state` 时把 `is_active`/`is_busy` 一起留作薄封装，
+  如今生产各处直接读 `st["busy"]`，只剩 `is_active` 还有人叫）、`scripts/common.sh` 的
+  `unit_is_active` 与 `random_pass`（五个部署脚本一个都没调；口令那条正规入口是
+  `choyeonctl user create --password-stdin`）、`useFormat` 的 `format` 聚合导出与只被它带着的
+  `fmtDate/pctOf/fmtPct/fmtNum`（各页 import 的是具体函数，聚合对象从没被 import，于是这四个
+  也就没有别的读者——注意页面仍在各自 `Math.round((n/total)*100)`，占比格式化并没有真的收拢）、
+  `useAppProgress.appProgress` 同理、`theme.ts` 的 `palette`（注释写着「改品牌/语义色只改这里」，
+  真正出数的是同文件下面的 `darkSemantic`/`lightSemantic`）、以及 `web/public/favicon-48.png`
+  （入口那五个图标链接与 `site.webmanifest` 都不点它）。
+  两处测试跟着改：`test_batch32` 那句「`is_active` 与 `is_busy` 读同一个出处」改成比
+  `is_active` 与 `unit_state(...)["busy"]`（要守的是"同一个出处"这条契约，不是那个已没人用的函数名），
+  `test_batch5k` 终端身份快照的比对源换成 `security._user_epoch`。
+  **判过之后没删的三组**：`redis_client.pool.close_all` 与 `totp.reset_used` 确实只被测试读，
+  但它们是连接池与口令重放缓存唯一成文的清场入口（`reset_used` 的 docstring 就写着"测试夹具用"），
+  删了只会让 17 处夹具各自去摸私有字典；`progressState`/`cacheSize`/`liveResizeObservers` 三个
+  一行 getter 带着「探针用」注释，是给 jsdom 整页探针留的手，代价三行；`web/src` 没有孤立文件，
+  同模块也没有重复定义。
+  门禁：ruff 通过、聚焦（batch32/5k + repo_hygiene + deploy_contract + scripts/scripts_prefix）
+  156 通过、CHANGELOG 契约（repo_hygiene + batch11a/110/114）201 通过、前端 171/171、
+  `vue-tsc --noEmit` + `vite build` 通过、全量 `run_tests.py` 为 `Ran 3990 tests ... OK (skipped=1)`。
+  线上复验：`choyeonctl upgrade --json` 给 `ok/healthy=true`（v1.1.10，新进程 uptime 36 秒），
+  `doctor` 仍是 18 pass / 3 warn / 1 fail，四条非 pass 与清理前同一份账（4 个待装安全更新（共 5 个待装）、
+  过去 24 小时 13456 次失败认证来自 399 个地址、内核 OOM 历史 3 次、站点链路两处默认档）；
+  `choyeonctl updates --json` 的 `auto_updates` 仍是 `{state: enabled, unit: unattended-upgrades.service}`
+  ——这一句同时证明删掉的 `AUTO_UNITS` 旧总表确实没人读，生效的是 `AUTO_UNITS_BY_FAMILY`；
+  `site-audit`/`ports`/`memory` 三段终端判词照旧（含「本机判不了，标未确认而不是没人听」那几行注），
+  入口页 `GET /` 200、5 个应用的 unit（`panel-choyeon-{video,book,music}`、
+  `panel-rosetta-{backend,frontend}`）全 `active`；
+  `GET /favicon-48.png` 给 404 而同目录 `/favicon-32.png` 给 200，重建后的 `web/dist` 里只剩
+  16/32/ico/svg 四张图标，证明那张 48px 确实没有任何使用者。
+  **没有做的复验**：没有在浏览器里逐页走查。这一批删的全是零读者的定义，压缩后标识符本就改名，
+  `dist` 的 chunk grep 既不能证实也不能证伪（唯一命中来自 `echarts-*.js` 自带的 `palette`，与本批
+  无关），所以浏览器内渲染那一档缺证据，正确性靠「全仓零读者」的扫描口径加全量测试；共享模块删了
+  几行之后 `index` 那份 chunk 的 hash 照常重算（现为 `index-DH53J4gV.js`），没有拿产物一致性当证据。
+  占比/数字格式化（页面各自 `Math.round((n/total)*100)`、`toFixed`）本该由 `useFormat` 收拢却从未
+  接上，这一批按「删死码」处理而不是顺手改造页面，收拢留给单独一批。
 
 ### 安全
 - `vite` 6.4.3 → 6.4.5（`web/package.json` + lock，同大版本补丁）。CI 的「依赖漏洞审计（前端）」
