@@ -2360,6 +2360,9 @@
   线上复验：`choyeonctl upgrade --json` 给 `ok/healthy=true`（v1.1.10，新进程 uptime 36 秒），
   `doctor` 仍是 18 pass / 3 warn / 1 fail，四条非 pass 与清理前同一份账（4 个待装安全更新（共 5 个待装）、
   过去 24 小时 13456 次失败认证来自 399 个地址、内核 OOM 历史 3 次、站点链路两处默认档）；
+  这组数字写成「多数值」而不是「那一次的值」：同一台机器连着跑三次 `doctor`，`load` 那一项在
+  其中一次是 warn（每核排队按一个采样窗口现读，负载本身在跳），其余项三次一致——本批删的定义
+  不在这条读数路径上，但把 18/3/1 当成恒定的账会让人以为每次复验都得对上同一个数；
   `choyeonctl updates --json` 的 `auto_updates` 仍是 `{state: enabled, unit: unattended-upgrades.service}`
   ——这一句同时证明删掉的 `AUTO_UNITS` 旧总表确实没人读，生效的是 `AUTO_UNITS_BY_FAMILY`；
   `site-audit`/`ports`/`memory` 三段终端判词照旧（含「本机判不了，标未确认而不是没人听」那几行注），
