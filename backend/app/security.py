@@ -145,15 +145,6 @@ def _user_epoch(username: str) -> str:
     return global_v
 
 
-def session_epoch(username: str) -> str:
-    """当前 token 版本号，给长连接（网页终端）复核身份用。
-
-    握手时抓一份，之后定时再读一次比对：改密、CLI 重置/删号、管理员降权都会 bump
-    这个版本号，对不上就说明签发那一刻的授权已经收回了。
-    """
-    return _user_epoch(username)
-
-
 def session_identity(username: str) -> tuple[str, str]:
     """长连接复验用的身份快照 =（库里的角色，token 版本号）。同步 sqlite，调用方放线程里跑。
 

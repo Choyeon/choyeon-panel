@@ -37,16 +37,6 @@ APT_LISTS = Path("/var/lib/apt/lists")
 
 PKG_CMDS = ("apt", "dnf", "yum", "zypper", "pacman", "apk")
 
-# 自动安全更新的单元名：Debian 系是 unattended-upgrades.service，RHEL 系是 dnf-automatic 的
-# timer，SUSE 系是 zypp-update。命中第一个 enabled 的就算开启，都不在才算未开启。
-AUTO_UNITS = (
-    "unattended-upgrades.service",
-    "dnf-automatic-install.timer",
-    "dnf-automatic.timer",
-    "yum-cron.service",
-    "zypp-update.timer",
-)
-
 DEBIAN = "debian"
 RHEL = "rhel"
 ARCH = "arch"

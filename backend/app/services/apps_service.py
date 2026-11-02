@@ -70,8 +70,6 @@ DEPLOY_BUDGET_SEC = (
     max(GIT_CLONE_T, GIT_FETCH_T + GIT_CHECKOUT_T + GIT_RESET_T) + INSTALL_T + DEPLOY_ONLINE_T
 )
 
-TEMPLATE_TOKENS = ("{{name}}", "{{path}}", "{{start_cmd}}", "{{port}}")
-
 _VERB_CN = {"start": "启动", "stop": "停止", "restart": "重启"}
 
 

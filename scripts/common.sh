@@ -460,11 +460,6 @@ unit_restart() {
   systemctl restart "$SERVICE_NAME"
 }
 
-unit_is_active() {
-  have_systemd || return 1
-  systemctl is-active --quiet "$SERVICE_NAME"
-}
-
 # ---------- .env 同步 ----------
 # sync_env <KEY> <值>：只改这一行，其余键（密钥、限额、手改的开关）原样保留；
 # .env 里没有这个键时追加。用临时文件 + mv，而不是就地读写同一个 fd。
@@ -622,13 +617,6 @@ read_value() {
     read -r -p "$prompt${default:+ [$default]}: " input || true
   fi
   REPLY="${input:-$default}"
-}
-
-# 生成随机密码（32 位）
-random_pass() {
-  if have_cmd openssl; then openssl rand -base64 24 | tr -d '/+=' | head -c 32
-  else tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; fi
-  printf '\n'
 }
 
 # ---------- 入口校验 ----------

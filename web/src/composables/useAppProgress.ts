@@ -82,5 +82,3 @@ export function chunkFailed() {
 export function progressState() {
   return { requests, chunks, running };
 }
-
-export const appProgress = { bindLoadingBar, beginRequest, endRequest, beginChunk, endChunk, chunkFailed, progressState };

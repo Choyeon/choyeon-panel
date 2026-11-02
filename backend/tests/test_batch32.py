@@ -177,7 +177,7 @@ class TestUnitStates(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(systemd_ops, "run", boom):
             self.assertEqual(await systemd_ops.unit_states([]), {})
 
-    async def test_is_active_and_is_busy_read_the_same_source(self):
+    async def test_is_active_and_busy_read_the_same_source(self):
         out = "MainPID=7\nId=a.service\nLoadState=loaded\nActiveState=activating\n"
 
         async def fake_run(cmd, args, **kw):
@@ -186,7 +186,7 @@ class TestUnitStates(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(systemd_ops, "run", fake_run):
             self.assertFalse(await systemd_ops.is_active("a.service"))
         with mock.patch.object(systemd_ops, "run", fake_run):
-            self.assertTrue(await systemd_ops.is_busy("a.service"))
+            self.assertTrue((await systemd_ops.unit_state("a.service"))["busy"])
 
 
 class TestHasSystemd(unittest.TestCase):

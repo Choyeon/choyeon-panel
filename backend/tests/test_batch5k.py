@@ -339,7 +339,7 @@ class TestTerminalIdentity(unittest.TestCase):
     def test_snapshot_is_role_and_epoch(self):
         role, epoch = terminal._identity(self.user)
         self.assertEqual(role, "admin")
-        self.assertEqual(epoch, security.session_epoch(self.user))
+        self.assertEqual(epoch, security._user_epoch(self.user))
 
     def test_demotion_changes_snapshot(self):
         before = terminal._identity(self.user)

@@ -4,18 +4,6 @@
    =========================================================== */
 import { type GlobalThemeOverrides } from 'naive-ui';
 
-export const palette = {
-  brand: '#005EEB',
-  brandHover: '#4c8ef1',
-  brandPressed: '#196eed',
-  brandAccent: '#7F5BFF',
-  brandSoft: '#7faef5',
-  ok: '#34C77B',
-  warn: '#F5A623',
-  err: '#F5616C',
-  info: '#5B8DEF',
-};
-
 /* naive 的按钮文字 / 标签文字 / 链接直接取这里的语义色，跟 style.css 的 --cp-*
    一样必须按主题分两套：暗色要够亮（深底 4.5:1），亮色要够深（白底 4.5:1）。
    1Panel 的两档主色是 #3d8eff（暗）/ #005eeb（亮），实测分别为 4.7:1、5.1:1，

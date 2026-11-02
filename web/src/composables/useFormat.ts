@@ -38,11 +38,6 @@ export function fmtDateTime(v: unknown): string {
   return s.replace('T', ' ').slice(0, 19);
 }
 
-/** 只到日期：`2026-10-05` */
-export function fmtDate(v: unknown): string {
-  return String(v ?? '').slice(0, 10) || '—';
-}
-
 /** ISO / SQLite 空格格式都按 UTC 解析；无法解析返回 NaN */
 export function toTime(v: unknown): number {
   const s = String(v ?? '').trim();
@@ -68,27 +63,6 @@ export function fmtAgo(v: unknown, now = Date.now()): string {
   return fmtDateTime(v);
 }
 
-/** 占比取整（0-100 的数值，不带百分号）：分母为 0 时给 0 而不是 NaN */
-export function pctOf(part: number, total: number): number {
-  const p = Number(part);
-  const t = Number(total);
-  if (!Number.isFinite(p) || !Number.isFinite(t) || t <= 0) return 0;
-  return Math.max(0, Math.min(100, Math.round((p / t) * 100)));
-}
-
-/** `0.953` → `95%`；已是百分数值时直接取整 */
-export function fmtPct(v: number | null | undefined, digits = 0): string {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return '—';
-  return `${n.toFixed(digits)}%`;
-}
-
-/** 保留位数的普通数字（负载、命中率之类） */
-export function fmtNum(v: number | null | undefined, digits = 1): string {
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toFixed(digits) : '—';
-}
-
 /** 时长：秒 → `2 天 3 小时` / `5 分钟`；uptime 这类字段用 */
 export function fmtDuration(sec: number | null | undefined): string {
   const s = Math.floor(Number(sec));
@@ -107,5 +81,3 @@ export function fmtDuration(sec: number | null | undefined): string {
   }
   return parts.join(' ') || '0 分钟';
 }
-
-export const format = { fmtBytes, fmtSize, fmtDateTime, fmtDate, fmtAgo, pctOf, fmtPct, fmtNum, fmtDuration };

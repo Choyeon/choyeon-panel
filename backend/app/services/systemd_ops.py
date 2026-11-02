@@ -179,11 +179,6 @@ async def is_active(unit: str) -> bool:
     return (await unit_state(unit))["active"]
 
 
-async def is_busy(unit: str) -> bool:
-    """"现在有没有进程活着或正在起停"——覆盖文件、恢复数据库之前必须按这个问。"""
-    return (await unit_state(unit))["busy"]
-
-
 async def unit_state(unit: str) -> dict:
     return (await unit_states([unit])).get(unit) or dict(UNKNOWN_STATE)
 

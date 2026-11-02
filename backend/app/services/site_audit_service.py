@@ -43,8 +43,6 @@ from .nginx_ops import LOCAL_TARGETS
 CACHE_TTL = 60.0
 # 判词里点名点几条：与自检项那句同源，所以两处看到的名单是同一份。
 NAME_LIMIT = 3
-NOTE_LISTEN_UNKNOWN = "监听表这一轮读不到：反代目标是不是没人听，这里判不了"
-NOTE_CERT_UNKNOWN = "证书清单这一轮读不到：域名与证书的覆盖关系判不了"
 
 
 def _listen_state(exp: dict) -> tuple[bool, set[int], str]:
