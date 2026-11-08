@@ -698,7 +698,8 @@
   `app/routers/terminal.py`、`app/services/cron_service.py` 在 import 期就 `import fcntl`，
   Windows 实测 `ModuleNotFoundError: No module named 'fcntl'`。改成如实写清哪些能在本机跑、
   全量后端测试必须上 Linux / WSL2 / 部署机。
-- README 的后端测试数从 3334 同步为 3990：批次65 写下之后再没人同步过，批次113–115 新增的用例没算进去。
+- README 的后端测试数从 3334 同步为 3992：批次65 写下之后再没人同步过，批次113–115 新增的用例没算进去；
+  3992 里含本批新增的两条守卫用例，2026-11-08 在部署机全量实测 `Ran 3992 tests ... OK (skipped=1)`。
 
 ### 修复
 - 说明句里点名的接口，现在都要在路由表上对上号（批次㊼A）。概览页「最近告警」那张卡曾经写着「告警历史
