@@ -24,11 +24,6 @@ export type TableHeightOptions = {
 
 const OBSERVERS = new Set<ResizeObserver>();
 
-/** 探针用：卸载后必须是 0 */
-export function liveResizeObservers(): number {
-  return OBSERVERS.size;
-}
-
 export function useTableHeight(opts: TableHeightOptions = {}) {
   const reserve = opts.reserve ?? 12;
   const min = opts.min ?? 220;

@@ -77,8 +77,3 @@ export function chunkFailed() {
   }
   sync();
 }
-
-/** 探针 / 调试用快照 */
-export function progressState() {
-  return { requests, chunks, running };
-}

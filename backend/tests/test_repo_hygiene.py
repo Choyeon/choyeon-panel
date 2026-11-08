@@ -71,6 +71,27 @@ class TestRepoHygiene(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue((REPO / name).is_file(), f"缺少 {name}")
 
+    def test_文本文件统一LF(self):
+        """`.gitattributes` 锁的是 LF，但本地编辑器仍能把文件写回 CRLF——shell 脚本带 CRLF
+        在 Linux 上会报 ``$'\\r': command not found``，而 git 提交时又会把它规范化，
+        于是"仓库里看着是 LF、本地却是 CRLF"这一档没有任何检查会响。这里把契约变成断言。
+        """
+        skip = {".git", ".venv", "node_modules", "dist", "data", "__pycache__", ".workbuddy",
+                ".ruff_cache", ".mypy_cache", ".pytest_cache"}
+        ext = {".py", ".ts", ".vue", ".mjs", ".js", ".css", ".html", ".sh", ".yml", ".yaml",
+               ".toml", ".json", ".md", ".service", ".example", ".svg"}
+        named = {"Makefile", "choyeonctl", "LICENSE", ".gitignore", ".gitattributes", ".editorconfig"}
+        offenders = []
+        for base, dirs, files in os.walk(REPO):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for name in files:
+                p = Path(base) / name
+                if p.suffix not in ext and name not in named:
+                    continue
+                if b"\r\n" in p.read_bytes():
+                    offenders.append(str(p.relative_to(REPO)))
+        self.assertEqual(offenders, [], "这些文件含 CRLF（.gitattributes 要求全仓 LF）：" + "、".join(offenders))
+
     def test_readme_引用的本地文件存在(self):
         text = (REPO / "README.md").read_text(encoding="utf-8")
         refs = re.findall(r"""(?:\]\(|src=")(?!https?:)([^)"'\s#]+)""", text)

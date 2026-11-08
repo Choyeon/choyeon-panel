@@ -27,7 +27,7 @@ make fmt           # ruff 格式化
 make release-dry   # 本地模拟发布打包（不推送）
 ```
 
-Windows 也能开发：systemd / journalctl / nginx 这类 Linux 专属能力会降级为提示，API、页面与测试均可运行。
+Windows 能开发前端：`npm run typecheck` / `npm run build` / `npm run test:unit` 都能跑，仓库卫生那类纯 Python 守卫测试也能跑。**后端不行**：`app/locks.py`、`app/routers/terminal.py`、`app/services/cron_service.py` 在 import 期就 `import fcntl`，Windows 上直接 `ModuleNotFoundError: No module named 'fcntl'`，API 起不来，全量 `run_tests.py` 也跑不了。后端开发请用 Linux 或 WSL2（或直接在部署机上用 `backend/.venv`）；本机只改文档、前端、静态守卫时不需要这层环境。
 
 ## 跑测试要注意的三件事
 
@@ -42,6 +42,7 @@ Windows 也能开发：systemd / journalctl / nginx 这类 Linux 专属能力会
 - 文件路径操作必须过 `safe_path` 一类的 realpath 守卫，限制在 `CP_FILE_ROOTS` 内。
 - CLI 的每个命令都要支持 `--json`，退出码只用 `0/1/2/3` 四态；改了参数就同步更新 `choyeonctl schema` 与 [AGENTS.md](AGENTS.md) 的命令表。
 - 前端：`<script setup>` + TypeScript；样式与主题值走 `web/src/style.css` 的设计令牌，不要在组件里硬编码颜色；文案用中文，图标用 naive-ui / 内置 SVG，不用 emoji。
+- 编辑器按仓库根 `.editorconfig` 走：UTF-8、LF、文件末尾换行，Python 4 空格、前端 2 空格、Makefile 用 tab。`.gitattributes` 已把全仓锁成 LF，`test_repo_hygiene` 会在 CI 里把 CRLF 判成失败。
 
 ## 提 PR 的流程
 

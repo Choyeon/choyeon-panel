@@ -8,7 +8,7 @@ SCRIPT := $(PREFIX)/scripts
 
 .DEFAULT_GOAL := help
 .PHONY: help install update backup health status restart stop logs \
-        backend-dev web-dev build build-web test lint fmt clean release-dry
+        backend-dev web-dev build build-web test lint fmt clean distclean release-dry
 
 help: ## 显示帮助
 	@printf 'choyeon-panel 常用命令\n\n'
@@ -59,11 +59,16 @@ lint: ## 静态检查（ruff 阻断、mypy 提示、vue-tsc 阻断——与 CI �
 	cd web && npm run typecheck
 
 fmt: ## 格式化（ruff）
-	cd backend && ruff format . || ruff check --fix .
+	cd backend && ruff format .
 
-clean: ## 清理构建产物与缓存
-	rm -rf web/dist backend/.venv backend/data
-	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
+clean: ## 清理构建产物与缓存（保留 .venv 与数据目录）
+	rm -rf web/dist
+	find backend -name '__pycache__' -type d -prune -exec rm -rf {} +
+	rm -rf backend/.ruff_cache backend/.mypy_cache backend/.pytest_cache
+
+distclean: clean ## 连同本地 venv 与数据目录一起清掉（不可恢复，先备份）
+	@echo '注意：即将删除 backend/.venv 与 backend/data；要取消现在按 Ctrl-C'
+	rm -rf backend/.venv backend/data
 
 release-dry: ## 本地模拟发布打包（不推送）
 	cd web && npm run build

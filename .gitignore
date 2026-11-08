@@ -13,3 +13,9 @@ __pycache__/
 *.egg-info/
 coverage/
 *.local
+
+# 本地工具状态：智能体工作区、编辑器配置、TS 增量编译缓存（不是源码）
+.workbuddy/
+.idea/
+.vscode/
+*.tsbuildinfo

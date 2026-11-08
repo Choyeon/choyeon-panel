@@ -36,7 +36,8 @@ def _py_texts(*roots):
             # 本文件把后缀字面量抄在常量里当被检对象，不能把自己算成第二份出处
             if f.name == Path(__file__).name:
                 continue
-            yield str(f.relative_to(ROOT)), f.read_text(encoding="utf-8")
+            # as_posix()：Windows 上 str(Path) 会给反斜杠，和下面断言里的正斜杠口径对不上
+            yield f.relative_to(ROOT).as_posix(), f.read_text(encoding="utf-8")
 
 
 def web_sources():
@@ -116,7 +117,9 @@ class DeadCodeStaysDead(unittest.TestCase):
              "bin", "scripts", "deploy", ".env.example", "README.md", "AGENTS.md",
              "SECURITY.md", "RUNBOOK.md", "web/src")
     MARKERS = ("CP_PYTHON", "SYS_HELPER", "config.as_dict", "def as_dict",
-               "import sys_helper", "from sys_helper", "backend/python")
+               "import sys_helper", "from sys_helper", "backend/python",
+               "export type CachedFetch<", "function cacheSize",
+               "function progressState", "function liveResizeObservers")
 
     def _texts(self):
         for rel in self.SCOPE:
@@ -151,6 +154,42 @@ class DeadCodeStaysDead(unittest.TestCase):
     def test_sys_helper_file_is_gone(self):
         self.assertFalse((ROOT / "backend" / "python").exists(),
                          "backend/python 里那个第二套 /proc 解析器已经没人调用了")
+
+
+class WebNamedExportsAreUsed(unittest.TestCase):
+    """web/src 的具名 export 必须在 web/ 里有第二个词边界出现。
+
+    批次115 留下三个"探针用"的一行 getter，注释说有 jsdom 整页探针在读，仓库里却一个
+    读者都没有；`CachedFetch<T>` 类型同理——`useCachedFetch()` 的返回体一直是推断的。
+    这四类东西 vue-tsc / vite build 全绿也照不出来。Vue SFC 的 default export 按路径被
+    router 引，不在这条口径里；`web/tests` 算读者，注释里写"探针用"不算。
+    """
+
+    def _corpus(self):
+        out = []
+        for p in (ROOT / "web").rglob("*"):
+            if not p.is_file() or any(part in SKIP_DIRNAME for part in p.parts):
+                continue
+            if p.suffix in (".ts", ".vue", ".mjs", ".js", ".html", ".css", ".json"):
+                out.append(p.read_text(encoding="utf-8", errors="ignore"))
+        return "\n".join(out)
+
+    def test_no_zero_reader_export(self):
+        corpus = self._corpus()
+        self.assertGreater(len(corpus), 10000, "web/ 语料没读到，先看 _corpus 的过滤条件")
+        dead = []
+        for p in sorted(WEB.rglob("*.ts")):
+            text = p.read_text(encoding="utf-8")
+            names = re.findall(
+                r"^export\s+(?:default\s+)?(?:async\s+)?"
+                r"(?:const|let|function|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)",
+                text, re.M,
+            )
+            for name in names:
+                hits = len(re.findall(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])", corpus))
+                if hits < 2:
+                    dead.append(f"{p.relative_to(ROOT)}: {name}")
+        self.assertEqual(dead, [], "这些具名 export 除了定义行没有任何读者（死代码）：" + "、".join(dead))
 
 
 if __name__ == "__main__":

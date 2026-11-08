@@ -1,6 +1,6 @@
 import {
   computed, getCurrentScope, onScopeDispose, ref, shallowRef, toValue, watch,
-  type ComputedRef, type MaybeRefOrGetter, type Ref,
+  type MaybeRefOrGetter, type Ref,
 } from 'vue';
 
 /**
@@ -101,11 +101,6 @@ export function clearCache() {
 
 export function cachedKeys(): string[] {
   return [...store.keys()];
-}
-
-/** 探针用：验证 LRU 真的有上界。生产代码不要依赖。 */
-export function cacheSize(): number {
-  return store.size;
 }
 
 async function run<T>(e: CacheEntry, loader: (key: string) => Promise<T>): Promise<T> {
@@ -262,16 +257,3 @@ export function useCachedFetch<T = unknown>(opts: CachedFetchOptions<T>) {
 
   return { data, loading, refreshing, busy, error, stale, hasData: computed(() => data.value !== undefined), load, refresh, invalidate };
 }
-
-export type CachedFetch<T> = {
-  data: Ref<T | undefined>;
-  loading: Ref<boolean>;
-  refreshing: Ref<boolean>;
-  busy: ComputedRef<boolean>;
-  error: Ref<unknown>;
-  stale: ComputedRef<boolean>;
-  hasData: ComputedRef<boolean>;
-  load: (force?: boolean) => Promise<T | undefined>;
-  refresh: () => Promise<T | undefined>;
-  invalidate: () => number;
-};

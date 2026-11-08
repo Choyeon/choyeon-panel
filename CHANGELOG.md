@@ -676,6 +676,30 @@
   一个看着正常的数——对端 LIST 不给 Size 时，`{None:>12}` 会把整条命令崩在一份好端端的产物上，
   折成 0 又会把「没读到」说成「桶里是份空对象」。拉回成功后回源重读本机产物，行随之翻成「本机有」。
 
+### 变更
+- 仓库卫生（批次116）：按「引用语料只算代码文件、全仓词边界计数只等于自身定义行」的口径重扫，
+  删掉 4 个没有任何读者的前端导出——`useCachedFetch.ts` 的 `CachedFetch<T>`（`useCachedFetch()`
+  的返回体一直是推断的，没有注解在用它）与 `cacheSize()`、`useAppProgress.progressState()`、
+  `useTableHeight.liveResizeObservers()`。后三个是批次115 以「探针用」名义留下的调试快照，
+  仓库里没有任何探针读它们，LRU 上界另有 `cachedKeys()` 覆盖；只为死类型存在的
+  `ComputedRef` import 一并撤掉。删完复扫：前端具名导出零读者 0，生产 Python 定义、
+  CSS 自定义类、图标导出、public 资产、shell 函数均无零读者项；孤立文件只剩 git、issue 模板
+  与 tsconfig 这三个本来就被工具直接消费的配置。
+- 新增两处守卫：`test_repo_hygiene` 把 `.gitattributes` 的 LF 契约变成会失败的断言（14 个文件
+  曾在工作区被编辑器写成 CRLF，其中 3 个是 shell 脚本）；`test_batch48` 增加「具名 export 必须有
+  第二个读者」与「这次删掉的导出不许回来」。以后再沉淀零读者代码会在 CI 直接红，不必等下一轮人工审计。
+- `Makefile` 的 `clean` 不再顺手删掉 `backend/.venv` 与 `backend/data`：重建 venv 要重下依赖，
+  数据目录更不该由清缓存带走，现在只清 `web/dist` 与各类缓存；真要连 venv 一起清走改用新增的
+  `distclean`。`fmt` 去掉「format 失败就 `ruff check --fix`」的兜底——语法错时自动改代码只会把错误藏得更深。
+- 补 `.editorconfig`（UTF-8 / LF / 末尾换行；Python 4 空格、前端 2 空格、Makefile 用 tab），
+  `.gitignore` 收进本地智能体状态、编辑器目录与 `*.tsbuildinfo`；`backend/tests/README.md`
+  说明测试文件为何刻意保持单层（数十个模块用 `parents[2]` 定位仓库根）。
+- `CONTRIBUTING.md` 里「Windows 上 API、页面与测试均可运行」是假的：`app/locks.py`、
+  `app/routers/terminal.py`、`app/services/cron_service.py` 在 import 期就 `import fcntl`，
+  Windows 实测 `ModuleNotFoundError: No module named 'fcntl'`。改成如实写清哪些能在本机跑、
+  全量后端测试必须上 Linux / WSL2 / 部署机。
+- README 的后端测试数从 3334 同步为 3990：批次65 写下之后再没人同步过，批次113–115 新增的用例没算进去。
+
 ### 修复
 - 说明句里点名的接口，现在都要在路由表上对上号（批次㊼A）。概览页「最近告警」那张卡曾经写着「告警历史
   接口未接入：后端暂未提供可查询的告警列表接口」，而写下这句话的时候 `/api/alerts/open` 与
