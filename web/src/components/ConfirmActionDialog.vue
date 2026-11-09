@@ -3,7 +3,7 @@
  * 1Panel 的 OpDialog（components/del-dialog）等价物：标题 + 被操作对象名单 +
  * 一句后果 + 取消/确认。acceptParams 签名与 1Panel 一致，页面里不再现写弹窗。
  */
-import { nextTick, ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NModal, NAlert, NSpace, useMessage } from 'naive-ui';
 import { NButton } from '../ui';
 
@@ -22,23 +22,41 @@ const p = ref<Params | null>(null);
 const msg = useMessage();
 const cancelBtn = ref<any>(null);
 let returnFocus: HTMLElement | null = null;
+// 触发按钮常在 dropdown 里：菜单项被点掉的那一瞬间浏览器就把 activeElement 抖回 body，
+// acceptParams() 里只读当前焦点会记到 body，取消后自然没地方还。额外记一份
+// 「最近真正聚焦过的控件」兜底；它随组件常驻，所以能覆盖打开前的那次点击。
+let lastFocused: HTMLElement | null = null;
+function rememberFocus(e: FocusEvent) {
+  const t = e.target;
+  if (t instanceof HTMLElement && t !== document.body) lastFocused = t;
+}
+onMounted(() => document.addEventListener('focusin', rememberFocus));
+onBeforeUnmount(() => document.removeEventListener('focusin', rememberFocus));
+
+function focusable(el: HTMLElement | null): HTMLElement | null {
+  return el && el !== document.body && el.isConnected && typeof el.focus === 'function' ? el : null;
+}
 
 function acceptParams(next: Params) {
   // 弹窗是 acceptParams() 程序化打开的，没有 trigger 元素：关掉后焦点会掉回 body，
   // 键盘用户得从页首重新 Tab。记下打开时的焦点，关闭时还回去。
-  returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  returnFocus = focusable(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    || focusable(lastFocused);
   p.value = next;
   show.value = true;
   // 破坏性操作默认停在「取消」上：误按 Enter 不会直接把东西删掉。
   nextTick(() => cancelBtn.value?.$el?.focus?.());
 }
 
+// NModal 关掉时自己的焦点回收还会再动一次 activeElement：watch 排在 DOM 更新之后
+// 再加一拍 nextTick，才不会被它覆盖掉（实测直接 focus 的话取消后焦点仍是 BODY）。
 watch(show, (visible) => {
-  if (!visible && returnFocus) {
-    returnFocus.focus();
-    returnFocus = null;
-  }
-});
+  if (visible) return;
+  const el = focusable(returnFocus);
+  returnFocus = null;
+  if (!el) return;
+  nextTick(() => el.focus());
+}, { flush: 'post' });
 
 async function run() {
   if (!p.value || loading.value) return;

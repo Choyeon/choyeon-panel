@@ -35,6 +35,7 @@ export function useTableHeight(opts: TableHeightOptions = {}) {
 
   let ro: ResizeObserver | null = null;
   let varHost: HTMLElement | null = null;
+  let rafId = 0;
 
   function el(): HTMLElement | null {
     const raw = anchor.value as { $el?: HTMLElement } | HTMLElement | null;
@@ -64,7 +65,20 @@ export function useTableHeight(opts: TableHeightOptions = {}) {
       varHost?.style.removeProperty(varName);
       varHost = host;
     }
-    varHost.style.setProperty(varName, `${heightPx.value}px`);
+    const value = `${heightPx.value}px`;
+    // 同值不写：反复 setProperty 会让观测目标被自己上一轮的写入再标脏。
+    if (varHost.style.getPropertyValue(varName) !== value) varHost.style.setProperty(varName, value);
+  }
+
+  // ResizeObserver 回调里读 rect 又立刻写 CSS 变量，浏览器会在同一帧攒下新的 resize
+  // 通知，控制台刷 "ResizeObserver loop completed with undelivered notifications"。
+  // 把测量推到下一帧，一帧内只量一次，循环就断了（表格高度晚一帧到位，肉眼无感）。
+  function scheduleMeasure() {
+    if (rafId) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      measure();
+    });
   }
 
   /** 表格上方的内容高度变了（展开日志卡、出现提示条）时手动调用 */
@@ -95,7 +109,7 @@ export function useTableHeight(opts: TableHeightOptions = {}) {
         measure();
         return;
       }
-      ro = new ResizeObserver(measure);
+      ro = new ResizeObserver(scheduleMeasure);
       OBSERVERS.add(ro);
       observeTargets();
       window.addEventListener('resize', measure);
@@ -106,6 +120,10 @@ export function useTableHeight(opts: TableHeightOptions = {}) {
     onScopeDispose(() => {
       stopData();
       window.removeEventListener('resize', measure);
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
       if (ro) {
         ro.disconnect();
         OBSERVERS.delete(ro);

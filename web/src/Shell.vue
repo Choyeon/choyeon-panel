@@ -21,6 +21,12 @@ const collapsed = ref(false);
 const showPwd = ref(false);
 const showProfile = ref(false);
 const showLogout = ref(false);
+// 取消退出后把焦点还给账号菜单：NModal 关闭时会把 activeElement 清成 body，
+// 键盘用户否则要从页首重新 Tab 回来。post + nextTick 排在弹窗自己的焦点回收之后。
+watch(showLogout, (visible) => {
+  if (visible) return;
+  nextTick(() => document.querySelector<HTMLElement>('.user-chip')?.focus());
+}, { flush: 'post' });
 const oldPwd = ref('');
 const newPwd = ref('');
 const pwdBusy = ref(false);
@@ -468,6 +474,7 @@ function toggleTheme(ev: MouseEvent) {
       preset="dialog"
       type="warning"
       title="退出登录"
+      :aria-label="'退出登录'"
       content="退出会注销该账号的全部登录（包括其他浏览器与设备上的），之后需要重新输入账号密码才能进入面板。"
       positive-text="退出"
       negative-text="取消"

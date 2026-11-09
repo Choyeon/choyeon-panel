@@ -739,6 +739,15 @@
   命令族全览、功能清单（防火墙 / 站点纳管 / 端口暴露面 / 待装补丁）、FAQ 两问，并去掉过期的硬编码测试数。
   `.env.example` 修正 `CP_LOG`「会回显异常详情」的错误说明（实际只开日志），`CP_TRUST_PROXY` 与
   `CP_DATA_DIR` 的样例值不再伪装成默认值。AGENTS.md / CONTRIBUTING.md 同步这条链路的二选一约定。
+- 真实浏览器逐页验收的三处回补（批次117b）：E2E 实测发现共享确认弹窗「取消」后焦点仍停在
+  `BODY`——`watch(show)` 的归还动作被 NModal 自己的焦点回收覆盖，而且 dropdown 触发时
+  `acceptParams()` 读到的 activeElement 已经是 body。现在用 `focusin` 记下最近一次真实焦点，
+  `watch(..., { flush: 'post' })` + `nextTick` 排在弹窗清理之后，并检查节点是否还在文档里。
+  退出登录弹窗（`Shell.vue`）补 `aria-label` 与同样的焦点归还；它保留 warning 色，
+  与「不可逆删除」的 error 色有意区分。`useTableHeight` 的 ResizeObserver 回调改为
+  `requestAnimationFrame` 排到下一帧再测量、CSS 变量同值不写，消除 /files 与 /audit 页的
+  `ResizeObserver loop completed with undelivered notifications` 控制台报错。
+  `backend/tests/test_batch117b.py`（3 条）钉住这三条口径。
 - 说明句里点名的接口，现在都要在路由表上对上号（批次㊼A）。概览页「最近告警」那张卡曾经写着「告警历史
   接口未接入：后端暂未提供可查询的告警列表接口」，而写下这句话的时候 `/api/alerts/open` 与
   `/api/alerts/history` 都已经注册着——句子是接口还没有时留下的，接口补上后没人回头改它。这类漂移不会让
