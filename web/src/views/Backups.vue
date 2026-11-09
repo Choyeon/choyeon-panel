@@ -874,7 +874,7 @@ function confirmDeleteTarget(r: any) {
       </template>
       <template #right>
         <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px; max-width: 100%" aria-label="自动刷新间隔" />
-        <NButton size="small" tertiary :loading="loading || refreshing" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
+        <NButton size="small" tertiary :loading="loading || refreshing" :disabled="loading || refreshing" :icon="icon('RefreshOutline', 14)" @click="reload">刷新</NButton>
       </template>
 
       <NAlert type="info" :bordered="false" size="small" style="margin-bottom: var(--space-3)">

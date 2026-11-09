@@ -6,6 +6,7 @@ import { NButton } from '../ui';
 import { api, saveLoginData } from '../api';
 import { icons } from '../icons';
 import LogoMark from '../components/LogoMark.vue';
+import { checkAccount, USERNAME_HINT, PASSWORD_HINT, USERNAME_MAX_LENGTH, PASSWORD_MAX_LENGTH } from '../validation';
 
 const router = useRouter();
 // 登录/初始化的错误已经有就地 NAlert 说明错在哪；成功原来只靠跳转体现，
@@ -17,6 +18,12 @@ const password = ref('');
 const password2 = ref('');
 const err = ref('');
 const loading = ref(false);
+const errAlert = ref<HTMLElement | null>(null);
+// /api/auth/status 决定这一页是「初始化」还是「登录」。服务刚起来还没就绪、
+// 或者用户手快刷新时请求会失败，旧写法只留一条死错误、表单停在登录态，
+// 于是全新安装看起来像「装完了却登不进去」。给三态 + 一个明确的重试出口。
+const checking = ref(true);
+const statusFailed = ref(false);
 // 两步验证的输入框只在后端**要**的时候才出现：登录页不预先查"这个账号开没开 2FA"，
 // 因为 /auth/login 是唯一免认证入口，任何提前分流的响应都会变成账号名单探测面。
 const code = ref('');
@@ -29,21 +36,28 @@ const period = ref(0);
 // 用户名由本机记忆提供：/auth/status 不再回显账号名，避免未登录就泄露管理员用户名
 const LAST_USER = 'cp_last_user';
 
-onMounted(async () => {
+async function readStatus() {
+  checking.value = true;
+  statusFailed.value = false;
+  err.value = '';
   try {
     const s = await api.status();
     needsSetup.value = s.needsSetup;
   } catch {
-    err.value = '无法连接面板后端，请确认服务已启动';
+    statusFailed.value = true;
+  } finally {
+    checking.value = false;
   }
-  if (!needsSetup.value) {
+  if (!needsSetup.value && !statusFailed.value) {
     try {
       username.value = localStorage.getItem(LAST_USER) || '';
     } catch {
       /* 隐私模式下 localStorage 不可用，留空即可 */
     }
   }
-});
+}
+
+onMounted(readStatus);
 
 const FEATS = [
   'Node / Python 项目一键部署与回滚日志',
@@ -53,9 +67,9 @@ const FEATS = [
 ];
 
 function validate(): string {
-  if (!username.value) return '请输入用户名';
-  if (password.value.length < 8) return '密码至少 8 位';
-  if (needsSetup.value && password.value !== password2.value) return '两次密码不一致';
+  // 与用户管理页、后端 security.py 同一把尺子：用户名正则、密码 8-128 位、两次一致。
+  const reason = checkAccount(username.value, password.value, needsSetup.value ? password2.value : undefined);
+  if (reason) return reason;
   // 已经要过一次了就别再空着提交：这一轮无论如何都会被拒，白等一个 scrypt 的往返。
   if (codeVisible.value && !code.value) return '请输入验证器里的动态口令';
   return '';
@@ -80,7 +94,11 @@ async function submit() {
   // 第二次带着同样的凭据撞进登录限速，把一次成功的登录判成"尝试过多"。
   if (loading.value) return;
   err.value = validate();
-  if (err.value) return;
+  if (err.value) {
+    // 出错时把焦点交给那条说明，键盘/读屏用户不用自己去找页面里飘出来的红字。
+    nextTick(() => errAlert.value?.focus?.());
+    return;
+  }
   loading.value = true;
   try {
     const r = needsSetup.value
@@ -95,7 +113,10 @@ async function submit() {
     msg.success(needsSetup.value ? '管理员已创建，已自动登录' : '登录成功，欢迎回来');
     router.replace('/dashboard');
   } catch (e: any) {
-    if (!acceptTotpError(e)) err.value = e.message || '请求失败';
+    if (!acceptTotpError(e)) {
+      err.value = e.message || '请求失败';
+      nextTick(() => errAlert.value?.focus?.());
+    }
   } finally {
     loading.value = false;
   }
@@ -127,29 +148,36 @@ async function submit() {
         <h2>{{ needsSetup ? '初始化面板' : '欢迎回来' }}</h2>
         <p class="sub">{{ needsSetup ? '创建管理员账号开始使用' : '登录以管理 choyeon 服务器' }}</p>
 
-        <NAlert
-          v-if="err"
-          type="error"
-          :bordered="false"
-          size="small"
-          class="err-alert"
-          role="alert"
-          aria-live="polite"
-          tabindex="0"
-        >
-          {{ err }}
-        </NAlert>
+        <div v-if="err" id="cp-login-error" ref="errAlert" tabindex="-1" class="err-alert">
+          <NAlert type="error" :bordered="false" size="small" role="alert" aria-live="assertive">{{ err }}</NAlert>
+        </div>
 
-        <form @submit.prevent="submit">
+        <!-- 状态没读回来之前不渲染表单：否则全新安装会先闪一下「欢迎回来」，
+             再跳成「初始化面板」，用户以为页面坏了。失败时给一个能点的重试。 -->
+        <div v-if="checking" class="status-pending" role="status">正在检测面板状态…</div>
+        <template v-else-if="statusFailed">
+          <NAlert type="error" :bordered="false" size="small" role="alert" class="err-alert">
+            无法连接面板后端。全新安装时服务可能还在启动，请稍等几秒后重试。
+          </NAlert>
+          <NButton block size="large" :loading="checking" :disabled="checking" @click="readStatus">重新检测</NButton>
+        </template>
+        <form v-else @submit.prevent="submit">
           <NSpace vertical :size="16">
             <div class="field">
               <label for="cp-username">用户名</label>
               <NInput
                 v-model:value="username"
-                :placeholder="needsSetup ? '3-32 位字母、数字、下划线' : '请输入用户名'"
+                :placeholder="needsSetup ? USERNAME_HINT : '请输入用户名'"
+                :maxlength="USERNAME_MAX_LENGTH"
                 size="large"
                 :autofocus="true"
-                :input-props="{ id: 'cp-username', name: 'username', autocomplete: 'username' }"
+                :input-props="{
+                  id: 'cp-username',
+                  name: 'username',
+                  autocomplete: 'username',
+                  'aria-describedby': 'cp-login-error',
+                  'aria-invalid': err ? 'true' : undefined,
+                }"
               />
             </div>
             <div class="field">
@@ -159,11 +187,14 @@ async function submit() {
                 type="password"
                 size="large"
                 show-password-on="click"
-                placeholder="至少 8 位"
+                :placeholder="PASSWORD_HINT"
+                :maxlength="PASSWORD_MAX_LENGTH"
                 :input-props="{
                   id: 'cp-password',
                   name: 'password',
                   autocomplete: needsSetup ? 'new-password' : 'current-password',
+                  'aria-describedby': 'cp-login-error',
+                  'aria-invalid': err ? 'true' : undefined,
                 }"
               />
             </div>
@@ -192,11 +223,15 @@ async function submit() {
                 v-model:value="password2"
                 type="password"
                 size="large"
+                show-password-on="click"
                 placeholder="再输入一次"
+                :maxlength="PASSWORD_MAX_LENGTH"
                 :input-props="{
                   id: 'cp-password2',
                   name: 'password2',
                   autocomplete: 'new-password',
+                  'aria-describedby': 'cp-login-error',
+                  'aria-invalid': err ? 'true' : undefined,
                 }"
               />
             </div>
@@ -290,7 +325,8 @@ h1 {
 }
 html[data-theme='dark'] .card { background: color-mix(in srgb, var(--cp-elevated) 86%, transparent); backdrop-filter: blur(8px); }
 .card h2 { margin: 0 0 var(--space-1); font-size: var(--fs-xl); color: var(--cp-text-strong); }
-.err-alert { margin-bottom: var(--space-3); }
+.err-alert { margin-bottom: var(--space-3); outline: none; }
+.status-pending { padding: var(--space-5) 0; text-align: center; color: var(--cp-text-mute); font-size: var(--fs-sm); }
 .sub { margin: 0 0 var(--space-5); color: var(--cp-text-mute); font-size: var(--fs-sm); }
 .field label { display: block; font-size: var(--fs-xs); color: var(--cp-text-dim); margin-bottom: var(--space-2); }
 .hint { margin: var(--space-2) 0 0; font-size: var(--fs-xs); color: var(--cp-text-mute); line-height: 1.6; }

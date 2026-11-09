@@ -9,6 +9,8 @@
 #
 # 可注入环境变量：CP_PREFIX / CP_REPO / CP_BRANCH / CP_PORT / CP_HOST /
 #                 CP_DATA_DIR / CP_BACKUP_DIR / CP_SKIP_NGINX=1 / CP_SKIP_DEPS=1
+# 管理员账号（非交互自动化）：CP_ADMIN_USER=admin + CP_ADMIN_PASSWORD_FILE=/path/to/0600
+#                 口令只从文件读，不要写进环境变量或命令行参数
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
@@ -63,6 +65,115 @@ chmod 0700 "$BACKUP_DIR"
 # ---------- 4. 构建 ----------
 venv_create
 web_build
+
+# ---------- 4.5 管理员账号 ----------
+# 放在服务第一次启动之前。/api/auth/setup 是零用户态下唯一免认证的写端点：谁先
+# POST 谁就是 admin。装完再让用户「打开网页注册」，这个窗口会一直留到他手工开
+# 浏览器为止，而下面的 nginx 步骤还可能先把面板暴露到公网。安装阶段就把账号
+# 建好，服务起来的那一刻窗口已经关上。
+ADMIN_STATE="skipped"          # created | existing | skipped
+ADMIN_USER=""
+
+admin_count() {
+  # 不用 sqlite3 CLI：CP_SKIP_DEPS=1 时它可能不存在，缺命令会让「已有账号」误判成 0。
+  # venv 里的 Python 一定有，且只读打开，绝不替服务抢先建表。
+  "$VENV/bin/python" -c '
+import sqlite3, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+try:
+    if not p.is_file():
+        raise sqlite3.Error("no database yet")
+    con = sqlite3.connect("file:" + str(p) + "?mode=ro", uri=True)
+    print(con.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+except Exception:
+    print(0)
+' "$DATA_DIR/panel.db"
+}
+
+# 与 backend/app/security.py 的 USERNAME_RE / password_error 同一把尺子：
+# 用户名 3-32 位 [A-Za-z0-9_-]，口令 8-128 位。这里先挡一道，CLI 还会再验一次。
+valid_admin_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{3,32}$ ]]; }
+valid_admin_password() {
+  local n=${#1}
+  [ "$n" -ge 8 ] && [ "$n" -le 128 ] && [[ "$1" != *$'\n'* ]]
+}
+
+create_admin_now() {
+  step "设置管理员账号"
+  if [ "$(admin_count)" != "0" ]; then
+    ok "数据库已有账号，跳过创建（直接登录即可）"
+    ADMIN_STATE="existing"
+    return 0
+  fi
+
+  local user="" pw="" pw2="" choice="n"
+  # 非交互自动化的凭据只认 0600 文件：stdin 已被脚本本体占用，环境变量与命令行
+  # 参数会把口令留在 /proc/<pid>/environ、ps 与 shell 历史里。
+  local pwfile="${CP_ADMIN_PASSWORD_FILE:-}"
+  if [ -n "$pwfile" ]; then
+    if [ ! -r "$pwfile" ]; then
+      warn "口令文件不可读：$pwfile；跳过创建"
+      return 0
+    fi
+    local mode=""
+    mode="$(stat -c '%a' "$pwfile" 2>/dev/null || true)"
+    if [ -n "$mode" ] && [ "$mode" != "600" ] && [ "$mode" != "400" ]; then
+      warn "口令文件 $pwfile 权限为 $mode，建议 chmod 600（仅属主可读）"
+    fi
+    user="${CP_ADMIN_USER:-admin}"
+    pw="$(< "$pwfile")"
+    pw2="$pw"
+    choice="y"
+  elif [ -t 0 ]; then
+    read_value "现在创建管理员账号？(Y/n)" "Y"
+    choice="${REPLY:-Y}"
+    if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
+      read_value "管理员用户名（3-32 位字母、数字、下划线或连字符）" "admin"
+      user="${REPLY:-admin}"
+      # -s 静默：口令不回显、不进 argv、不进 shell history
+      printf '设置密码（8-128 位，输入不回显）：' >&2
+      IFS= read -rs pw || true
+      printf '\n再输入一次：' >&2
+      IFS= read -rs pw2 || true
+      printf '\n' >&2
+    fi
+  fi
+
+  if [ "$choice" != "y" ] && [ "$choice" != "Y" ]; then
+    warn "跳过创建管理员。把面板暴露到公网之前必须建号，两种方式二选一："
+    warn "  A) 打开面板地址，首次访问会出现「初始化面板」引导创建（仅本机/本机反代可用）"
+    warn "  B) printf '%s' \"\$PW\" | choyeonctl user create admin --password-stdin --json"
+    return 0
+  fi
+
+  if ! valid_admin_name "$user"; then
+    warn "用户名不合法（只允许 3-32 位字母、数字、下划线、连字符）：跳过创建"
+    return 0
+  fi
+  if ! valid_admin_password "$pw"; then
+    warn "密码不合法（需要 8-128 位）：跳过创建"
+    return 0
+  fi
+  if [ "$pw" != "$pw2" ]; then
+    warn "两次输入的密码不一致：跳过创建"
+    return 0
+  fi
+
+  local out=""
+  if out="$(printf '%s\n' "$pw" | CP_DATA_DIR="$DATA_DIR" "$VENV/bin/python" \
+        "$BACKEND_DIR/cli.py" user create "$user" --password-stdin --json 2>&1)"; then
+    ok "管理员 $user 已创建（口令只经 stdin 传入，未写入命令行或日志）"
+    ADMIN_STATE="created"
+    ADMIN_USER="$user"
+  else
+    warn "创建管理员失败，安装继续；请在验收前手工执行："
+    warn "  printf '%s' \"\$PW\" | choyeonctl user create admin --password-stdin --json"
+    warn "  CLI 输出：$out"
+  fi
+  unset pw pw2
+}
+create_admin_now
 
 # ---------- 5. systemd ----------
 if have_systemd; then
@@ -191,12 +302,14 @@ else
 fi
 
 # ---------- 7. 收尾提示 ----------
-ADMIN_HINT="请打开 $PANEL_URL 完成管理员注册（首次访问会引导创建）"
-if [ -f "$DATA_DIR/panel.db" ] && have_cmd sqlite3; then
-  if [ "$(sqlite3 "$DATA_DIR/panel.db" 'SELECT COUNT(*) FROM users;' 2>/dev/null || echo 0)" != "0" ]; then
-    ADMIN_HINT="管理员已存在，直接登录即可"
-  fi
-fi
+# 管理员状态只认上面那一步的结果：旧写法依赖 sqlite3 命令存在且 .db 恰好在
+# $DATA_DIR/panel.db，缺命令或 CP_DATA_DIR 指到别处时会把「已有账号」误报成
+# 「请打开网页注册」，用户对着登录页以为安装坏了。
+case "$ADMIN_STATE" in
+  created)  ADMIN_HINT="管理员 $ADMIN_USER 已在安装时创建，打开上面的地址直接登录" ;;
+  existing) ADMIN_HINT="数据库已有管理员账号，打开上面的地址直接登录" ;;
+  *)        ADMIN_HINT="尚未创建管理员：先按上面两种方式之一建号，再打开地址登录" ;;
+esac
 
 cat <<EOF
 
@@ -210,7 +323,8 @@ ${C_GREEN}安装完成${C_RESET}
   $ADMIN_HINT
 
 后续建议：
-  1) 若未配置 HTTPS，务必执行 scripts/install.sh 的 nginx 步骤或手动接入 TLS；
+  1) 若未配置 HTTPS，务必接入 TLS；面板默认只听 $HOST:$PORT，不要用明文 HTTP 暴露管理入口；
   2) 用 ufw/firewalld 只放行 80/443，不要直接暴露 $PORT；
-  3) 更新版本执行：$PREFIX/scripts/update.sh
+  3) 登录后立刻在「设置」里开启两步验证，并跑一次 choyeonctl doctor --json 看 counts.fail 是否为 0；
+  4) 更新版本执行：$PREFIX/scripts/update.sh
 EOF

@@ -78,7 +78,16 @@ echo "$PW"   # 记录到交付信息里，不要写进仓库
 ```
 
 验收：返回 `{"ok": true, "username": "admin", "role": "admin"}`。
-口令规则：≥ 8 位；用户名规则 `^[A-Za-z0-9_-]{3,32}$`。
+口令规则：8–128 位；用户名规则 `^[A-Za-z0-9_-]{3,32}$`。
+
+> **交互式安装例外**：`bash scripts/install.sh` 会在 systemd 服务**首次启动之前**问是否创建
+> 管理员（用户名 + 两次静默输入，规则同上，口令只经 stdin 传给 CLI），装完直接登录即可。
+> 它和本节步骤 2 是**二选一**：安装已建号就别再跑 `user create`（会报「用户已存在」）；
+> 只有安装时选了跳过、或走 `choyeonctl deploy --json`（非交互、不建号）才需要本节。
+> 无人值守安装用 `CP_ADMIN_USER=admin` + `CP_ADMIN_PASSWORD_FILE=/path/to/0600` 注入，
+> 口令文件用完即删，不要写进环境变量或命令行参数。
+> `/api/auth/setup` 这个零用户初始化端点默认只接受本机 TCP 对端（同机 nginx 反代也算），
+> 公网直连返回 403；反代在另一台机器上时才设 `CP_SETUP_ALLOW_REMOTE=1`。
 
 口令**必须**走 `--password-stdin`：`--password` 的写法会把它留在 argv 里，同机任何用户
 `ps -ef` 都能看到、`/proc/<pid>/cmdline` 世界可读、root 的 `~/.bash_history` 再存一条，

@@ -675,6 +675,24 @@
 - 备份页看得见异地桶并真拉得回：逐条给大小/远端时间/本机有没有同一份，「读不到」一律写未知而不是
   一个看着正常的数——对端 LIST 不给 Size 时，`{None:>12}` 会把整条命令崩在一份好端端的产物上，
   折成 0 又会把「没读到」说成「桶里是份空对象」。拉回成功后回源重读本机产物，行随之翻成「本机有」。
+- 安装脚本补上管理员账号设置（批次117）：`scripts/install.sh` 在 systemd 服务**首次启动之前**问要不要建号，
+  用户名走 `read_value`、密码走 `read -rs` 静默输入并确认两次，校验口径与 `security.py` 一致
+  （`^[A-Za-z0-9_-]{3,32}$` / 8–128 位），最后只经 stdin 交给 `cli.py user create --password-stdin`——
+  口令不回显、不进 argv、不进 `/proc/<pid>/cmdline`、不进 shell 历史。已有账号直接跳过；交互回答 N 时
+  打印两条补救路径；无人值守用 `CP_ADMIN_USER` + `CP_ADMIN_PASSWORD_FILE`（0600 文件，用完即删），
+  stdin 已被脚本本体占用，所以不设计 stdin 口令注入。建号失败只 warn、不打断安装，收尾提示按
+  `created / existing / skipped` 三态给准确结论。
+- 零用户初始化端点加本机门槛：`/api/auth/setup` 是全面板唯一免认证的写端点，库里一个账号都没有时
+  谁先 POST 谁就是 admin。现在 `_setup_peer_allowed()` 只认 TCP 对端是回环（`127.0.0.0/8`、`::1`，
+  同机 nginx 反代也算），公网直连 403；反代确实装在另一台机器上时显式设 `CP_SETUP_ALLOW_REMOTE=1`。
+  判据刻意不看 XFF——那个头可伪造，而零用户态还没有任何可信来源清单。初始化与登录改用各自的限流桶，
+  「首次创建时填错几次」不再把紧接着的登录判成 429「尝试过多」。
+- `backend/tests/test_install_admin.py`（10 条）：安装脚本 `bash -n`、建号在 `unit_restart` 之前、
+  口令不进 argv、旧 `sqlite3` 误报写法不许回来、回环/远程/TestClient 三种对端的裁定、真实 ASGI 栈上
+  远程 setup 返回 403、以及两条限流桶的源码契约。依赖 `fcntl` 的用例在 Windows 自动 skip。
+- 前端账号规则收成一份：`web/src/validation.ts` 提供 `checkAccount` / `passwordError` 与
+  `USERNAME_HINT` / `PASSWORD_HINT` / 两个 maxlength 常量，登录页与用户管理页共用，
+  文案统一为「3-32 位字母、数字、下划线或连字符」与「8-128 位」。
 
 ### 变更
 - 仓库卫生（批次116）：按「引用语料只算代码文件、全仓词边界计数只等于自身定义行」的口径重扫，
@@ -702,6 +720,25 @@
   3992 里含本批新增的两条守卫用例，2026-11-08 在部署机全量实测 `Ran 3992 tests ... OK (skipped=1)`。
 
 ### 修复
+- 全新安装的初始化与登录链路（批次117）：登录页原先只在 `onMounted` 调一次 `/api/auth/status`，
+  服务刚起来还没就绪或网络抖动时只留一条死错误、表单停在「欢迎回来」，用户对着登录框以为装坏了。
+  现在分「检测中 / 检测失败（带可点的重新检测）/ 表单」三态，检测失败不渲染表单；出错时焦点交给
+  错误条（`role=alert` + `aria-live=assertive`），字段补 `aria-invalid` / `aria-describedby`。
+  前端校验与后端对齐（含 128 位上限、用户名正则、连字符），密码框补 `maxlength` 与确认框的显示切换。
+- 错误提示与状态反馈统一（批次117）：`api.ts` 的兜底从裸 `HTTP 404` 改成「请求失败（HTTP 404）」并兜住
+  FastAPI 的 `detail`；404 响应体改中文。文件上传原先绕开 `parse()`，会话过期只弹一句 HTTP 401、
+  本地 token 还在，用户卡在假登录态——现在两处原始 `fetch` 复用导出的 `parseResponse()`，
+  401 一律登出并跳登录。共享确认弹窗的破坏性按钮改 `error` 色，补 `aria-label` / `aria-describedby`、
+  默认聚焦「取消」、关闭后归还焦点。设置页串行四请求补页面级 loading 与防连点；站点/备份/防火墙的
+  刷新按钮补 `:disabled`；防火墙四个输入框补 `aria-label`；二维码库加载失败从静默降级改为明确 warning；
+  站点读取失败的错误条从 `warning` 统一成 `error`。
+- README 重写（批次117）：此前一键部署节只写 CLI 建号，`install.sh` 却提示「打开网页首次注册」，
+  两条互斥路径互不告知；环境变量表 32 个键只列 19 个；`deploy` 被说成与 `install.sh` 等价（实际强制跳过
+  nginx 询问且不建号）；手动安装让人裸 `cp` 一份写死 `/root/choyeon-panel` 路径的 unit 模板，装到别处必然起不来。
+  现在补齐安装七步、首次访问三条建号路径与安全边界、安装期变量与运行期变量分表、32 个 `CP_*` 全表、
+  命令族全览、功能清单（防火墙 / 站点纳管 / 端口暴露面 / 待装补丁）、FAQ 两问，并去掉过期的硬编码测试数。
+  `.env.example` 修正 `CP_LOG`「会回显异常详情」的错误说明（实际只开日志），`CP_TRUST_PROXY` 与
+  `CP_DATA_DIR` 的样例值不再伪装成默认值。AGENTS.md / CONTRIBUTING.md 同步这条链路的二选一约定。
 - 说明句里点名的接口，现在都要在路由表上对上号（批次㊼A）。概览页「最近告警」那张卡曾经写着「告警历史
   接口未接入：后端暂未提供可查询的告警列表接口」，而写下这句话的时候 `/api/alerts/open` 与
   `/api/alerts/history` 都已经注册着——句子是接口还没有时留下的，接口补上后没人回头改它。这类漂移不会让

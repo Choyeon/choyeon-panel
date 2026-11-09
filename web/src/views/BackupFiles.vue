@@ -6,7 +6,7 @@ import {
   NSwitch, NSelect, NTag, NText, useMessage,
 } from 'naive-ui';
 import { NButton, useDrawerWidth } from '../ui';
-import { api, apiUrl, getRole, getToken } from '../api';
+import { api, apiUrl, getRole, getToken, parseResponse } from '../api';
 import { icon, icons } from '../icons';
 import EmptyBox from '../components/EmptyBox.vue';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
@@ -222,8 +222,7 @@ async function doUpload() {
       headers: { Authorization: `Bearer ${getToken()}` },
       body: form,
     });
-    const data = await res.json().catch(() => ({}) as any);
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const data = await parseResponse(res);
     msg.success(`已登记 ${data.name}（${fmtBytes(data.size)}）`);
     showUpload.value = false;
     load();

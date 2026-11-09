@@ -107,6 +107,11 @@ TRUSTED_PROXIES = [
     ip.strip() for ip in os.environ.get("CP_TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if ip.strip()
 ]
 LOG = _bool("CP_LOG")
+# /api/auth/setup 是全面板唯一免认证的写端点：库里一个账号都没有时，谁先 POST 谁就是 admin。
+# 默认只认本机 TCP 对端（127.0.0.0/8、::1，含本机 nginx 反代），公网直连或非本机反代
+# 一律拒绝。反向代理装在另一台机器上、又确实要走网页初始化时显式设为 1，并在建号前
+# 先限制来源；install.sh 会主动建号，正常部署用不到这个开关。
+SETUP_ALLOW_REMOTE = _bool("CP_SETUP_ALLOW_REMOTE")
 
 # ---------- 路径 ----------
 DATA_DIR = _path("CP_DATA_DIR", str(BASE / "data"))

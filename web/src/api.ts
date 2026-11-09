@@ -120,12 +120,24 @@ async function parse(res: Response) {
   if (isExpired) notifyUnauthorized();
   // /auth/avatar 的响应体只有 {"detail": ...}（FastAPI 默认字段名，不是面板统一的 error），
   // 不加这条特例界面会显示 "HTTP 413" 这种空话。
+  // FastAPI 的 422/413 等响应体用的是 detail，面板自己的错误用 error；
+  // 两条都没有时也不能把裸状态码当文案抛给管理员。
+  const fallback = `请求失败（HTTP ${res.status}）`;
   if (!res.ok && res.url.includes('/auth/avatar')) {
-    throw toError((data as any).error || (data as any).detail || `HTTP ${res.status}`, data);
+    throw toError((data as any).error || (data as any).detail || fallback, data);
   }
   if (isExpired) throw toError('登录已过期，请重新登录', data);
-  if (!res.ok) throw toError((data as any).error || `HTTP ${res.status}`, data);
+  if (!res.ok) throw toError((data as any).error || (data as any).detail || fallback, data);
   return data as any;
+}
+
+/**
+ * 文件上传走原始 fetch（multipart 需要浏览器自己生成 boundary，不能套 req() 的
+ * JSON Content-Type），但错误解析与 401 登出必须复用同一套：否则会话过期时
+ * 页面只弹一句「HTTP 401」，本地 token 还在，用户卡在假登录态里反复重试。
+ */
+export function parseResponse(res: Response) {
+  return parse(res);
 }
 
 export async function req(path: string, opts: { method?: string; body?: any; timeout?: number } = {}) {

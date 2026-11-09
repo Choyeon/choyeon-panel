@@ -5,7 +5,7 @@ import {
   NPopconfirm, useMessage, useDialog, NIcon, NCard,
 } from 'naive-ui';
 import { NButton } from '../ui';
-import { api, getToken, apiUrl } from '../api';
+import { api, getToken, apiUrl, parseResponse } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
@@ -258,9 +258,8 @@ async function send<T>(path: string, init: RequestInit, timeout: number): Promis
       headers: { Authorization: `Bearer ${getToken()}`, ...(init.headers || {}) },
       signal: ctrl.signal,
     });
-    const data = await res.json().catch(() => ({}) as any);
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    return data as T;
+    // 复用 api.ts 的 parse：401 要登出、detail/error 都要兜住、裸状态码要翻成中文。
+    return (await parseResponse(res)) as T;
   } catch (e: any) {
     ok = false;
     if (e?.name === 'AbortError') throw new Error('请求超时，请稍后重试');

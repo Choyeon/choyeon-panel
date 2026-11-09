@@ -754,7 +754,7 @@ onMounted(refresh);
           最早到期 {{ earliest.name }} · {{ earliest.days_left == null ? '未知' : `${earliest.days_left} 天` }}
         </NTag>
         <NTag v-else-if="certsInfo.reason" size="small" :bordered="false" type="default">证书最早到期：未知</NTag>
-        <NButton size="small" tertiary :loading="loadingSites || loadingCerts" :icon="ico('RefreshOutline')" @click="refresh">刷新</NButton>
+        <NButton size="small" tertiary :loading="loadingSites || loadingCerts" :disabled="loadingSites || loadingCerts" :icon="ico('RefreshOutline')" @click="refresh">刷新</NButton>
       </template>
     </PageHeader>
 
@@ -777,7 +777,9 @@ onMounted(refresh);
         </div>
       </template>
 
-      <NAlert v-if="sitesReason" type="warning" :bordered="false" size="small" style="margin-bottom: var(--space-3)">
+      <!-- 读不到就是错误，不是「有风险但读到了」：与证书/链路那两处同为 error，
+           warning 留给判词里确实拿到了数据、只是需要留意的情况。 -->
+      <NAlert v-if="sitesReason" type="error" :bordered="false" size="small" role="alert" style="margin-bottom: var(--space-3)">
         {{ sitesReason }}
       </NAlert>
       <NDataTable

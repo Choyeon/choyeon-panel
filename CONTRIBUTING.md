@@ -73,6 +73,17 @@ Windows 能开发前端：`npm run typecheck` / `npm run build` / `npm run test:
 - `assets/social.svg` 是 GitHub「Settings → Social preview」的图源，导出 1200×600 PNG 上传；GitHub 会缩到 640×320 显示，正文最小字号不要低于 22。
 - README 的徽章走 GitHub 图片代理 `camo.githubusercontent.com`：**代理失败在 GitHub 页面表现为破图，直接 curl `img.shields.io` 却是 200**，所以要用浏览器打开仓库首页、数 `naturalWidth === 0` 的 `<img>` 才算验证。徽章 URL 的自定义参数一律从 `?` 起（`/badge/label-message-color?cacheSeconds=3600`）；`/badge/…-颜色&cacheSeconds=…` 这种写法 shields 仍回 200，但 `&…` 被并进颜色段解析失败，自定义色和缓存时长会一起丢掉——`test_readme_徽章链接形态` 拦的就是这个。
 
+## 首次安装与初始化链路
+
+改动这条链路时请连着看四处，别只改其中一处：
+
+- `scripts/install.sh` 的 `create_admin_now()`：在 systemd 服务启动**之前**建号，交互走 `read -rs` 静默输入、非交互走 0600 口令文件；口令只经 stdin 传给 `cli.py user create --password-stdin`。校验口径（用户名 `^[A-Za-z0-9_-]{3,32}$`、口令 8–128 位、两次一致）必须与 `backend/app/security.py` 一致。
+- `backend/app/main.py` 的 `/api/auth/setup` 与 `/api/auth/status`：前者是零用户态下唯一免认证的写端点，默认只允许本机 TCP 对端；后者决定登录页画「初始化面板」还是「欢迎回来」。
+- `web/src/views/Login.vue` 与 `web/src/validation.ts`：前端校验和提示文案的唯一出处，与用户管理页共用；`/auth/status` 读失败要能重试，不能停在登录表单里。
+- `README.md`「首次访问与管理员账号」与本文：三条建号路径（安装脚本 / 网页引导 / CLI）二选一，文档必须同时说清，不能只写一条。
+
+对应守卫在 `backend/tests/test_install_admin.py`：安装脚本语法、建号顺序、口令不进 argv、回环门槛、初始化与登录分桶。后端用例依赖 `fcntl`，Windows 本地跑会 skip，请在 Linux / WSL2 / 部署机上跑全量 `run_tests.py` 验收。
+
 ## 行为与沟通
 
 - 项目讨论、Issue、提交信息默认中文；代码标识符用英文。

@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import mimetypes
 import os
 import re
@@ -111,7 +112,9 @@ async def validation_handler(_req: Request, _exc: RequestValidationError):
 
 @app.exception_handler(404)
 async def not_found(_req: Request, _exc):
-    return JSONResponse(status_code=404, content={"error": "not found"})
+    # 兜底文案也走中文：浏览器直接把后端的 error 拿去当 toast，英文 "not found"
+    # 对一个只是点错路径的管理员没有任何可操作性。
+    return JSONResponse(status_code=404, content={"error": "请求的资源不存在，请检查地址"})
 
 
 @app.exception_handler(Exception)
@@ -149,8 +152,19 @@ def _user_token(username: str, role: str, nickname: str = '', avatar: str = '') 
 
 @app.post("/api/auth/setup")
 async def setup(req: Request):
+    # 零用户态是唯一能被陌生人抢注的窗口。先看 TCP 对端，再看限流：
+    # 远端请求连桶都不该占，更不该让它试探出"库里还有没有账号"。
+    if not _setup_peer_allowed(req):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "首次创建管理员只能从本机发起；请在服务器上执行 choyeonctl user create，"
+                              "或设置 CP_SETUP_ALLOW_REMOTE=1 后重试"},
+        )
     ip = client_ip(req)
-    if security.rate_limited(ip):
+    # 与登录分开计桶：初始化时用户名/密码写错几次是常事，共用 IP 桶会把
+    # 「刚建完号第一次登录」直接判成 429「尝试过多」，看起来像登录坏了。
+    bucket = f"setup:{ip}"
+    if security.rate_limited(bucket):
         return JSONResponse(status_code=429, content={"error": "尝试过多，请稍后再试"})
     body = await _json_body(req)
     # 判据是"表里一个账号都没有"，与 /api/auth/status 的 needsSetup 同一个口径：
@@ -176,7 +190,7 @@ async def setup(req: Request):
     if status == "name-taken":
         return JSONResponse(status_code=400, content={"error": "该用户名已被占用"})
     await aio_db.audit(username, "setup", "创建管理员")
-    security.clear_attempts(ip)
+    security.clear_attempts(bucket)
     return _user_token(username, "admin")
 
 
@@ -409,6 +423,26 @@ async def _json_body(req: Request) -> dict:
     except Exception:  # noqa: BLE001
         body = None
     return body if isinstance(body, dict) else {}
+
+
+def _setup_peer_allowed(req: Request) -> bool:
+    """首次创建管理员只允许本机（或同机反向代理）发起。
+
+    判据只用 TCP 对端，不看 X-Forwarded-For：后者可任意伪造，而零用户态的面板
+    还没有任何可信来源清单。nginx 与面板同机时 peer 就是 127.0.0.1，网页初始化
+    这条路不受影响；反代在另一台机器上时需要显式打开 CP_SETUP_ALLOW_REMOTE。
+    Starlette TestClient 的占位对端 "testclient" 视作本机，否则单测里所有
+    初始化用例都会撞在 403 上——那不是真实请求，也不是安全边界。
+    """
+    if config.SETUP_ALLOW_REMOTE:
+        return True
+    peer = req.client.host if req.client else ""
+    if peer in ("", "testclient"):
+        return True
+    try:
+        return ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return False
 
 
 def client_ip(req: Request) -> str:

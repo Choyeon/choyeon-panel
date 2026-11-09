@@ -130,15 +130,23 @@ async function grab(fn: () => Promise<any>, set: (v: any) => void, err?: typeof 
     msg.error(e.message);
   }
 }
+const pageLoading = ref(false);
 async function load() {
-  // 两步验证是每个账号自己的事，只读账号也要能开：这一条不在 isAdmin 里面。
-  await grab(() => api.twofa(), (v) => (twofa.value = v));
-  if (isAdmin.value) await grab(() => api.alertSettings(), (v) => (alerts.value = normalizeAlerts(v)), alertsError);
-  // 防火墙规则表（开了哪些端口、来源地址）按 admin 收口，与后端 /api/firewall 同一口径；
-  // 少了这个判断，只读账号一进设置页就吃到一条 403 报错。
-  if (isAdmin.value) await grab(() => api.firewall(), (v) => (fw.value = v), fwError);
-  // 面板入口同样是 admin 口径：域名本身就是攻击面信息，后端 GET 也是这么收的。
-  if (isAdmin.value) await grab(() => api.panelEntry(), (v) => (panelEntry.value = v), panelEntryError);
+  // 四个请求是串行的，没状态也没防连点时，连点「刷新」会叠出四组并发读取。
+  if (pageLoading.value) return;
+  pageLoading.value = true;
+  try {
+    // 两步验证是每个账号自己的事，只读账号也要能开：这一条不在 isAdmin 里面。
+    await grab(() => api.twofa(), (v) => (twofa.value = v));
+    if (isAdmin.value) await grab(() => api.alertSettings(), (v) => (alerts.value = normalizeAlerts(v)), alertsError);
+    // 防火墙规则表（开了哪些端口、来源地址）按 admin 收口，与后端 /api/firewall 同一口径；
+    // 少了这个判断，只读账号一进设置页就吃到一条 403 报错。
+    if (isAdmin.value) await grab(() => api.firewall(), (v) => (fw.value = v), fwError);
+    // 面板入口同样是 admin 口径：域名本身就是攻击面信息，后端 GET 也是这么收的。
+    if (isAdmin.value) await grab(() => api.panelEntry(), (v) => (panelEntry.value = v), panelEntryError);
+  } finally {
+    pageLoading.value = false;
+  }
 }
 function openPe() {
   if (!canChangePe.value) return;
@@ -424,8 +432,10 @@ async function renderQr(otpauth: string) {
     const { default: QRCode } = await import('qrcode');
     twQr.value = await QRCode.toDataURL(otpauth, { margin: 1, width: 220 });
   } catch {
-    // 库没加载成也不挡流程：下面还给了能手工录入的密钥与 otpauth 文本
+    // 库没加载成也不挡流程：下面还给了能手工录入的密钥与 otpauth 文本。
+    // 但「二维码那块空白」必须点破，否则用户以为绑定还没开始。
     twQr.value = '';
+    msg.warning('二维码组件没能加载，请用下方密钥在验证器里手工添加账号');
   }
 }
 
@@ -499,7 +509,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
   <div>
     <PageHeader title="系统设置" sub="本账号两步验证、告警通道、防火墙状态与证书维护；用户与审计已升级为独立页面">
       <template #actions>
-        <NButton size="small" tertiary :icon="ico('RefreshOutline')" @click="load">刷新</NButton>
+        <NButton size="small" tertiary :icon="ico('RefreshOutline')" :loading="pageLoading" :disabled="pageLoading" @click="load">刷新</NButton>
       </template>
     </PageHeader>
 

@@ -11,6 +11,7 @@ import PageHeader from '../components/PageHeader.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 import { useCachedFetch, invalidateCache } from '../composables/useCachedFetch';
 import { fmtDateTime } from '../composables/useFormat';
+import { checkAccount, passwordError, USERNAME_HINT, PASSWORD_HINT, USERNAME_MAX_LENGTH, PASSWORD_MAX_LENGTH } from '../validation';
 
 const msg = useMessage();
 const kw = ref('');
@@ -58,8 +59,9 @@ function reload() {
 
 async function createUser() {
   if (creating.value) return;
-  if (!userForm.value.username || userForm.value.password.length < 8 || userForm.value.password.length > 128)
-    return msg.error('用户名必填，密码需 8–128 位');
+  // 与登录页、后端同一把尺子；旧写法只查长度，用户名含非法字符要等后端 400 才知道。
+  const reason = checkAccount(userForm.value.username, userForm.value.password);
+  if (reason) return msg.error(reason);
   creating.value = true;
   try {
     await api.createUser(userForm.value.username, userForm.value.password, userForm.value.role);
@@ -96,7 +98,8 @@ function openReset(u: any) {
 }
 async function confirmReset() {
   if (resetting.value) return;
-  if (resetPwd.value.length < 8 || resetPwd.value.length > 128) return msg.error('密码需 8–128 位');
+  const reason = passwordError(resetPwd.value, '新密码');
+  if (reason) return msg.error(reason);
   resetting.value = true;
   try {
     await api.updateUser(resetTarget.value.id, { password: resetPwd.value });
@@ -224,8 +227,8 @@ const filtered = computed(() => {
     <NModal v-model:show="showUser" preset="card" title="新建用户" style="width: 420px; max-width: 94vw">
       <NForm label-placement="left" label-width="70">
         <NSpace vertical :size="12">
-          <NFormItem label="用户名"><NInput v-model:value="userForm.username" placeholder="字母/数字/-/_，3-32 位" maxlength="32" :input-props="{ 'aria-label': '用户名' }" /></NFormItem>
-          <NFormItem label="密码"><NInput v-model:value="userForm.password" type="password" show-password-on="click" placeholder="8–128 位" maxlength="128" :input-props="{ 'aria-label': '密码' }" /></NFormItem>
+          <NFormItem label="用户名"><NInput v-model:value="userForm.username" :placeholder="USERNAME_HINT" :maxlength="USERNAME_MAX_LENGTH" :input-props="{ 'aria-label': '用户名' }" /></NFormItem>
+          <NFormItem label="密码"><NInput v-model:value="userForm.password" type="password" show-password-on="click" :placeholder="PASSWORD_HINT" :maxlength="PASSWORD_MAX_LENGTH" :input-props="{ 'aria-label': '密码' }" /></NFormItem>
           <NFormItem label="角色">
             <NSelect v-model:value="userForm.role" :options="[{ label: '只读 viewer', value: 'viewer' }, { label: '管理员 admin', value: 'admin' }]" aria-label="用户角色" />
           </NFormItem>
@@ -237,7 +240,7 @@ const filtered = computed(() => {
     <NModal v-model:show="showReset" preset="card" :title="`重置密码 · ${resetTarget?.username || ''}`" style="width: 420px; max-width: 94vw">
       <NSpace vertical :size="12">
         <NText depth="3" style="font-size: var(--fs-xs)">重置后该用户的旧登录令牌立即失效，需要重新登录。</NText>
-        <NInput v-model:value="resetPwd" type="password" show-password-on="click" placeholder="新密码（8–128 位）" maxlength="128" :input-props="{ 'aria-label': '新密码' }" @keyup.enter="confirmReset" />
+        <NInput v-model:value="resetPwd" type="password" show-password-on="click" :placeholder="`新密码（${PASSWORD_HINT}）`" :maxlength="PASSWORD_MAX_LENGTH" :input-props="{ 'aria-label': '新密码' }" @keyup.enter="confirmReset" />
         <NSpace justify="end">
           <NButton tertiary @click="showReset = false">取消</NButton>
           <NButton type="primary" class="cp-press" :loading="resetting" :disabled="resetting" :icon="icon('SaveOutline', 14)" @click="confirmReset">确认重置</NButton>
