@@ -15,19 +15,31 @@ export function getToken() {
 export function setToken(t: string) {
   t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY);
 }
+/**
+ * 顶栏 Shell 只挂载一次，换账号登录时它的 setup 不会重跑。角色（roleRef）早已做成
+ * 响应式，名字/头像却一直直读 localStorage：实测「退出 admin → 登录 viewer」后
+ * cp_username 已经是 viewer，顶栏仍写着 admin，非得整页刷新才对。
+ * 三个字段与 roleRef 同一套口径：读 ref，写 ref + localStorage。
+ */
+const usernameRef = ref(localStorage.getItem(USER_KEY) || '');
+const nicknameRef = ref(localStorage.getItem(NICK_KEY) || '');
+const avatarRef = ref(localStorage.getItem(AVA_KEY) || '');
+
 export function getUsername() {
-  return localStorage.getItem(USER_KEY) || '';
+  return usernameRef.value;
 }
 export function getNickname() {
-  return localStorage.getItem(NICK_KEY) || '';
+  return nicknameRef.value;
 }
 export function setNickname(n: string) {
+  nicknameRef.value = n;
   localStorage.setItem(NICK_KEY, n);
 }
 export function getAvatar() {
-  return localStorage.getItem(AVA_KEY) || '';
+  return avatarRef.value;
 }
 export function setAvatar(a: string) {
+  avatarRef.value = a;
   localStorage.setItem(AVA_KEY, a);
 }
 /**
@@ -47,6 +59,9 @@ export function setRole(r: string) {
 }
 export function clearSession() {
   roleRef.value = 'viewer';
+  usernameRef.value = '';
+  nicknameRef.value = '';
+  avatarRef.value = '';
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(ROLE_KEY);
   localStorage.removeItem(NICK_KEY);
@@ -371,8 +386,14 @@ export function siteHref(domain: any): string {
 export function saveLoginData(r: { token: string; role: string; username?: string; nickname?: string; avatar?: string }) {
   setToken(r.token);
   setRole(r.role || 'admin');
+  // 走 ref 而不是只写 localStorage：Shell 的 displayName/avatarUrl 靠它们响应式更新，
+  // 否则同一标签页里换账号，顶栏会一直显示上一个账号的名字直到整页刷新。
+  usernameRef.value = r.username || '';
   if (r.username) localStorage.setItem(USER_KEY, r.username);
+  else localStorage.removeItem(USER_KEY);
+  nicknameRef.value = r.nickname || '';
   localStorage.setItem(NICK_KEY, r.nickname || '');
+  avatarRef.value = r.avatar || '';
   localStorage.setItem(AVA_KEY, r.avatar || '');
 }
 

@@ -4,10 +4,14 @@ E2E 实测记录（隔离零用户实例 + 真实浏览器）：
 1. ConfirmActionDialog 取消后 activeElement 仍是 BODY——焦点归还被 NModal 自己
    的焦点回收覆盖，且 dropdown 触发时打开瞬间就读不到有效 trigger；
 2. Shell.vue 的退出确认缺 aria-label，取消后同样丢焦点；
-3. /files 与 /audit 页控制台刷 "ResizeObserver loop completed with undelivered
+3. /files 页控制台刷 "ResizeObserver loop completed with undelivered
    notifications"——RO 回调里读 rect 又同步写 CSS 变量，把观测目标标脏。
+   （/audit 页另有一条同类告警来自 Naive UI 虚拟滚动表格内部，修完本项目这处后仍在，
+   不影响功能，未纳入本批修复范围。）
+4. 退出 admin 再登录 viewer（不整页刷新）后，顶栏账号菜单仍显示 admin：
+   身份字段里只有角色是响应式的，用户名/昵称/头像直读 localStorage，而 Shell 只挂载一次。
 
-这三条都不是"看起来不整齐"，而是键盘用户和控制台可复现的行为，钉住修复口径。
+这四条都不是"看起来不整齐"，而是键盘用户、控制台与账号状态可复现的行为，钉住修复口径。
 """
 
 from __future__ import annotations
@@ -53,6 +57,26 @@ class TestLogoutDialogA11y(unittest.TestCase):
         # 退出不是不可逆删除：保留 warning，与 ConfirmActionDialog 的 error 有意区分
         self.assertIn('type="warning"', s)
         self.assertIn(":positive-button-props=\"{ type: 'warning' }\"", s)
+
+
+class TestIdentityIsReactive(unittest.TestCase):
+    """换账号不刷新页面，顶栏也要跟着换名字（E2E 实测：退出 admin → 登录 viewer 仍显示 admin）。"""
+
+    def test_identity_reads_ref_and_every_write_updates_it(self):
+        s = _src(WEB / "api.ts")
+        self.assertIn("const usernameRef = ref(localStorage.getItem(USER_KEY) || '')", s)
+        self.assertIn("const nicknameRef = ref(localStorage.getItem(NICK_KEY) || '')", s)
+        self.assertIn("const avatarRef = ref(localStorage.getItem(AVA_KEY) || '')", s)
+        self.assertIn("return usernameRef.value", s)
+        self.assertIn("return nicknameRef.value", s)
+        self.assertIn("return avatarRef.value", s)
+        self.assertIn("usernameRef.value = r.username || ''", s)
+        self.assertIn("nicknameRef.value = r.nickname || ''", s)
+        self.assertIn("avatarRef.value = r.avatar || ''", s)
+        # 退出时三个 ref 也要清，否则下次登录前顶栏会残留上一个账号
+        clear = s.split("export function clearSession()", 1)[1].split("export const onUnauthorized", 1)[0]
+        for name in ("usernameRef", "nicknameRef", "avatarRef"):
+            self.assertIn(f"{name}.value = ''", clear)
 
 
 class TestTableHeightObserverLoop(unittest.TestCase):

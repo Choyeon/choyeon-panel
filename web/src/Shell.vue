@@ -47,8 +47,8 @@ watch(
 
 const isMobile = ref(false);
 const drawer = ref(false);
-// 头像/昵称存在 localStorage（不是响应式源），模态框开关时正好是值可能变了的时刻，
-// 用它做依赖让顶栏在保存资料或上传头像后立即刷新，而不是等到下次整页重载。
+// 名字/头像已在 api.ts 里改成响应式 ref，换账号会立即刷新；profileTick 只留作
+// 「资料弹窗刚关掉」这一拍的兜底依赖，保证保存资料/上传头像后顶栏也不滞后。
 const profileTick = ref(0);
 watch(showProfile, (v) => { if (!v) profileTick.value += 1; });
 const isLogin = computed(() => route.path === '/login');

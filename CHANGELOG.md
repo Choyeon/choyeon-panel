@@ -744,10 +744,17 @@
   `acceptParams()` 读到的 activeElement 已经是 body。现在用 `focusin` 记下最近一次真实焦点，
   `watch(..., { flush: 'post' })` + `nextTick` 排在弹窗清理之后，并检查节点是否还在文档里。
   退出登录弹窗（`Shell.vue`）补 `aria-label` 与同样的焦点归还；它保留 warning 色，
-  与「不可逆删除」的 error 色有意区分。`useTableHeight` 的 ResizeObserver 回调改为
-  `requestAnimationFrame` 排到下一帧再测量、CSS 变量同值不写，消除 /files 与 /audit 页的
-  `ResizeObserver loop completed with undelivered notifications` 控制台报错。
-  `backend/tests/test_batch117b.py`（3 条）钉住这三条口径。
+  与「不可逆删除」的 error 色有意区分。  `useTableHeight` 的 ResizeObserver 回调改为 `requestAnimationFrame` 排到下一帧再测量、
+  CSS 变量同值不写；/files 页的 `ResizeObserver loop completed with undelivered notifications`
+  实测消失。/audit 页仍有一条同类告警，来自 Naive UI 虚拟滚动表格自己的观测器，
+  不影响渲染与交互，作为已知项留待后续评估（不为消警告去关掉虚拟滚动）。
+  `backend/tests/test_batch117b.py` 钉住这三条口径。
+- 同一标签页换账号后顶栏仍显示旧用户名（批次117b 续）：E2E 实测「退出 admin → 登录 viewer」
+  后 `cp_username` 已是 viewer，账号菜单却还写着 admin，必须整页刷新才对。根因是 `api.ts`
+  只把角色做成了响应式 `roleRef`，用户名/昵称/头像三个 getter 仍直读 localStorage，
+  而 `Shell.vue` 只挂载一次、setup 不会重跑。现在三个字段与角色同一套口径（读 ref，
+  写 ref + localStorage），`saveLoginData` / `clearSession` / `setNickname` / `setAvatar`
+  都同步更新；`test_batch117b.py` 第 4 条钉住读写与清理契约。
 - 说明句里点名的接口，现在都要在路由表上对上号（批次㊼A）。概览页「最近告警」那张卡曾经写着「告警历史
   接口未接入：后端暂未提供可查询的告警列表接口」，而写下这句话的时候 `/api/alerts/open` 与
   `/api/alerts/history` 都已经注册着——句子是接口还没有时留下的，接口补上后没人回头改它。这类漂移不会让
