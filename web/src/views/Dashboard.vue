@@ -340,8 +340,12 @@ const loadSeries = computed(() => [
   { name: '进程数', color: '--cp-text-dim', data: (hist.value?.procs || []) as (number | null)[], axis: 1 },
 ]);
 
-/* ---------- 进程 Top 10（折叠）/ 最近告警（诚实占位） ---------- */
+/* ---------- 进程列表（前 10 条常显，其余折叠）/ 最近告警（诚实占位） ---------- */
 const procs = ref<any[]>([]);
+/* 折叠态从"完全收起来只给一行摘要"改成"默认摊开前 10 条，多的折在后面"。
+   一行摘要读不出"到底哪些进程在吃 CPU"——那正是这张卡存在的理由；
+   真要收起全部，页面已经有很多别的地方能收了。 */
+const PROCS_FOLD = 10;
 const procsOpen = ref(false);
 const alertsState = ref<'loading' | 'ready' | 'absent' | 'error'>('loading');
 const alertsMsg = ref('');
@@ -463,7 +467,9 @@ async function loadInfo() {
 
 async function loadProcs() {
   try {
-    const d = await req('/system/processes?limit=10');
+    // 取 50 条（后端上限）：前 10 条常显，剩下的是"可折叠的部分"，
+    // 不取够的话折叠区永远是空的，这个"展开"按钮就成了摆设。
+    const d = await req('/system/processes?limit=50');
     if (!disposed) procs.value = d.items || [];
   } catch { /* 保留上一帧，进程表偶发失败不清空列表 */ }
 }
@@ -494,6 +500,12 @@ async function refresh() {
 }
 
 const appCardTitle = computed(() => (appsError.value ? '应用' : `应用（${runningApps.value}/${apps.value.length} 运行中）`));
+
+/* 进程列表分两段：常显前 10 条，展开后露出其余（后端最多给 50 条）。
+   procsOpen 控制的只是"多的那一段"，不是整张卡——整张卡现在默认就是摊开的。 */
+const procsHead = computed(() => procs.value.slice(0, PROCS_FOLD));
+const procsRest = computed(() => procs.value.slice(PROCS_FOLD));
+const procsShown = computed(() => (procsOpen.value ? procs.value : procsHead.value));
 
 const quickOpts = [
   { label: '部署新应用', key: 'deploy', icon: 'AddOutline', to: '/apps' },
@@ -540,6 +552,9 @@ onBeforeUnmount(() => {
 
 <template>
   <NSpace vertical :size="16">
+    <!-- 顶部眉标：标识这一屏是"实时系统状态"，强化层级（原型 .page-eyebrow） -->
+    <div class="cp-eyebrow">实时系统状态 · LIVE</div>
+
     <!-- hero -->
     <div class="hero cp-rise">
       <div style="min-width: 0">
@@ -554,10 +569,12 @@ onBeforeUnmount(() => {
         <span v-if="sideError" class="st warn"><span class="dot warn"></span>服务状态未知</span>
         <span v-else-if="!failedUnits.length" class="st ok"><span class="dot ok"></span>服务正常</span>
         <span v-else class="st err"><span class="dot err"></span>{{ failedUnits.length }} 个服务异常</span>
+        <!-- 最常用动作从「快捷操作」下拉里提级为显式主按钮，层级更清楚（原型 hero 显式操作） -->
+        <NButton type="primary" size="small" class="cp-press" :icon="icon('AddOutline')" @click="router.push('/apps')">部署应用</NButton>
         <!-- 统计每 3s 自动刷，这里的手动刷新是为了立刻确认刚做过的操作（部署/改配置）生效 -->
         <NButton size="small" tertiary :loading="refreshing" :icon="icon('RefreshOutline')" title="立即刷新状态" @click="refresh">刷新</NButton>
         <NDropdown trigger="click" :options="quickMenu" :on-select="quickGo">
-          <NButton type="primary" round size="small" class="cp-press">快捷操作</NButton>
+          <NButton round size="small" class="cp-press">快捷操作</NButton>
         </NDropdown>
       </NSpace>
     </div>
@@ -566,8 +583,13 @@ onBeforeUnmount(() => {
     <div class="home-grid">
       <div class="home-main">
         <!-- 概览：1Panel 的卡片高 166px，格子里"标签在上、数字在下"，数字是 link 按钮 -->
-        <NCard size="small" class="ov-card cp-rise" style="--i:1">
-          <template #header><span class="section-title">概览</span></template>
+        <NCard size="small" class="ov-card cp-card-primary cp-rise" style="--i:1">
+          <template #header>
+            <div class="cp-card-head">
+              <div class="cp-eyebrow">关键指标</div>
+              <span class="section-title">概览</span>
+            </div>
+          </template>
           <div class="ov-row">
             <div
               v-for="(it, i) in ovItems" :key="it.label" class="ov-item cp-rise" :class="{ danger: it.danger }"
@@ -585,8 +607,13 @@ onBeforeUnmount(() => {
           <EmptyBox v-if="ovError" :text="`概览计数获取失败：${ovError}，30 秒轮询会自动重试`" />
         </NCard>
 
-        <NCard size="small" class="cp-rise" style="--i:2">
-          <template #header><span class="section-title">状态</span></template>
+        <NCard size="small" class="cp-card-primary cp-rise" style="--i:2">
+          <template #header>
+            <div class="cp-card-head">
+              <div class="cp-eyebrow">资源占用</div>
+              <span class="section-title">状态</span>
+            </div>
+          </template>
           <template #header-extra>
             <NText v-if="statError" depth="3" class="sfoot" :title="statError">
               <span class="dot err" aria-hidden="true"></span>采样中断，显示的是上一帧
@@ -633,14 +660,24 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="home-aside">
-        <NCard size="small" class="cp-rise" style="--i:1">
-          <template #header><span class="section-title">系统信息</span></template>
+        <NCard size="small" class="cp-card-primary cp-rise" style="--i:1">
+          <template #header>
+            <div class="cp-card-head">
+              <div class="cp-eyebrow">主机信息</div>
+              <span class="section-title">系统信息</span>
+            </div>
+          </template>
           <InfoList :items="sysItems" />
           <div v-if="infoError" class="cp-help">系统信息获取失败：{{ infoError }}——上面几行为空是因为没取到，不是这台机器没有该项</div>
         </NCard>
 
-        <NCard size="small" class="cp-rise" style="--i:2">
-          <template #header><span class="section-title">{{ appCardTitle }}</span></template>
+        <NCard size="small" class="cp-card-primary cp-rise" style="--i:2">
+          <template #header>
+            <div class="cp-card-head">
+              <div class="cp-eyebrow">应用实例</div>
+              <span class="section-title">{{ appCardTitle }}</span>
+            </div>
+          </template>
           <template #header-extra>
             <NButton text type="primary" size="tiny" aria-label="查看全部应用" @click="router.push('/apps')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
           </template>
@@ -656,8 +693,13 @@ onBeforeUnmount(() => {
           <div v-else-if="appsError" class="cp-help">应用列表最近一次获取失败：{{ appsError }}——上面是上一轮取到的结果</div>
         </NCard>
 
-        <NCard size="small" class="cp-rise" style="--i:3">
-          <template #header><span class="section-title">服务健康</span></template>
+        <NCard size="small" class="cp-rise" style="--i:3" :class="['cp-card-primary', { 'cp-card-danger': failedUnits.length }]">
+          <template #header>
+            <div class="cp-card-head">
+              <div class="cp-eyebrow">系统服务</div>
+              <span class="section-title">服务健康</span>
+            </div>
+          </template>
           <template #header-extra>
             <NButton text type="primary" size="tiny" aria-label="查看全部服务" @click="router.push('/services')">全部 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
           </template>
@@ -736,43 +778,49 @@ onBeforeUnmount(() => {
     <NGrid cols="1 m:2" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGridItem span="1">
         <NCard size="small">
-          <template #header><span class="section-title">进程 Top 10</span></template>
+          <template #header>
+            <div class="cp-card-head">
+              <div class="cp-eyebrow">资源占用</div>
+              <span class="section-title">{{ procs.length > PROCS_FOLD ? `进程 Top ${PROCS_FOLD}` : '进程' }}</span>
+            </div>
+          </template>
           <template #header-extra>
-            <NButton text type="primary" size="tiny" :aria-expanded="procsOpen" @click="procsOpen = !procsOpen">
-              {{ procsOpen ? '收起' : '展开' }}
+            <!-- 只有真有多余进程时才给折叠入口；只有 10 条时给个点不动的"收起"是骗人的按钮 -->
+            <NButton v-if="procsRest.length" text type="primary" size="tiny" :aria-expanded="procsOpen" @click="procsOpen = !procsOpen">
+              {{ procsOpen ? '收起' : `展开其余 ${procsRest.length} 条` }}
               <NIcon :component="icons.ChevronForwardOutline" class="proc-chev" :style="procsOpen ? 'transform: rotate(90deg)' : ''" />
             </NButton>
           </template>
           <!-- 折叠只做进出挂载，不给它套 out-in 模式的 <Transition>：out-in 要等离场那一拍播完才挂新内容，
                而 transitionend 依赖帧调度——页面拿不到帧时列表就永远不出现（Shell.vue 也因「多等一拍」
                明确不用 out-in）。展开走 cp-rise 逐行错峰，收起瞬时，不需要戏。 -->
-          <div v-if="!procsOpen" class="sfoot">
-            {{ procs.length ? `CPU 最高：${procs[0]?.name || '-'}（${procs[0]?.cpu}%）· 共 ${procs.length} 条` : '暂无进程数据' }}
-          </div>
+          <div v-if="!procs.length" class="sfoot">暂无进程数据</div>
           <div v-else>
             <div class="proc-row proc-head">
               <span>PID</span><span>进程</span><span class="proc-user">用户</span><span class="num">CPU</span><span class="num">内存</span>
             </div>
-            <div v-for="(p, pi) in procs" :key="p.pid" class="proc-row cp-rise" :style="`--i:${pi}`">
+            <div v-for="(p, pi) in procsShown" :key="p.pid" class="proc-row cp-rise" :style="`--i:${pi}`">
               <span class="proc-pid">{{ p.pid }}</span>
               <span class="proc-name cp-break">{{ p.name }}</span>
               <span class="proc-user">{{ p.user }}</span>
               <span class="num">{{ p.cpu }}%</span>
               <span class="num">{{ p.memMb }} MB</span>
             </div>
-            <EmptyBox v-if="!procs.length" text="进程列表为空或获取失败，15 秒轮询会自动重试" />
           </div>
         </NCard>
       </NGridItem>
       <NGridItem span="1">
-        <NCard size="small">
+        <NCard size="small" class="cp-card-primary">
           <template #header>
-            <NSpace align="center" :size="8" :wrap="false">
-              <span class="section-title">最近告警</span>
-              <NTag size="tiny" :bordered="false" :type="alertsState === 'ready' ? 'success' : alertsState === 'error' ? 'warning' : 'default'">
-                {{ alertsState === 'ready' ? '正常读取' : alertsState === 'absent' ? '接口缺失' : alertsState === 'error' ? '获取失败' : '检查中' }}
-              </NTag>
-            </NSpace>
+            <div class="cp-card-head">
+              <div class="cp-eyebrow">实时告警</div>
+              <NSpace align="center" :size="8" :wrap="false">
+                <span class="section-title">最近告警</span>
+                <NTag size="tiny" :bordered="false" :type="alertsState === 'ready' ? 'success' : alertsState === 'error' ? 'warning' : 'default'">
+                  {{ alertsState === 'ready' ? '正常读取' : alertsState === 'absent' ? '接口缺失' : alertsState === 'error' ? '获取失败' : '检查中' }}
+                </NTag>
+              </NSpace>
+            </div>
           </template>
           <template #header-extra>
             <NButton text type="primary" size="tiny" aria-label="前往告警中心" @click="router.push('/alerts')">告警中心 <NIcon :component="icons.ChevronForwardOutline" /></NButton>
@@ -853,13 +901,15 @@ onBeforeUnmount(() => {
 .ov-label { font-size: var(--fs-md); color: var(--cp-text-dim); }
 .ov-num {
   margin-top: 10px;
-  font-size: 18px;
+  font-size: 26px;
   line-height: 32px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--cp-brand);
   font-variant-numeric: tabular-nums;
 }
 .ov-item.danger .ov-num { color: var(--cp-err); }
+/* 危险项（未确认告警 > 0）整格淡红底，和「危险主卡」同一红档，让问题项在概览里立刻跳出来 */
+.ov-item.danger { background: color-mix(in srgb, var(--cp-err) 9%, transparent); }
 .ov-note { font-size: var(--fs-xs); color: var(--cp-text-mute); margin-top: 2px; }
 
 /* ---------- 状态仪表 + 监控 / 侧栏 两列（1Panel 首页是 el-col 16/8 = 2fr/1fr） ---------- */

@@ -3,6 +3,7 @@
 </p>
 
 <p align="center">
+  <a href="#界面预览">界面预览</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#首次访问与管理员账号">首次访问</a> ·
   <a href="#为什么选它">为什么选它</a> ·
@@ -30,9 +31,53 @@
 > **原生 Linux 服务器管理面板：跑在宿主机上，不依赖 Docker。**
 > 装完自带 `choyeonctl`：应用部署与回滚、systemd 服务、nginx 站点与证书、PostgreSQL/Redis、备份与异地对象存储、文件管理、Web 终端、防火墙与登录安全对账、22 项安全自检。
 
-<p align="center">
-  <img src="./assets/preview-dark.svg" alt="choyeon-panel 概览页（暗色主题）" width="100%" />
-</p>
+---
+
+## 界面预览
+
+> 以下截图取自真实运行实例（暗色主题，敏感信息已脱敏）。choyeon-panel 的网页端覆盖从部署、运维到安全的完整闭环：直接管理宿主机的 systemd / nginx / certbot / PostgreSQL / 文件与防火墙，不引入容器层。
+
+### 总览与监控
+
+| | |
+| --- | --- |
+| ![总览](assets/screenshots/dashboard.png) | ![系统服务](assets/screenshots/services.png) |
+
+### 应用与站点
+
+| | |
+| --- | --- |
+| ![应用管理](assets/screenshots/apps.png) | ![应用详情](assets/screenshots/app-detail.png) |
+| ![网站与证书](assets/screenshots/sites.png) |  |
+
+### 数据与备份
+
+| | |
+| --- | --- |
+| ![数据库](assets/screenshots/db.png) | ![备份](assets/screenshots/backups.png) |
+| ![备份文件](assets/screenshots/backups-files.png) | ![文件管理](assets/screenshots/files.png) |
+
+### 运维与安全
+
+| | |
+| --- | --- |
+| ![防火墙](assets/screenshots/firewall.png) | ![安全自检](assets/screenshots/doctor.png) |
+| ![定时任务](assets/screenshots/cron.png) | ![Web 终端](assets/screenshots/terminal.png) |
+
+### 日志与告警
+
+| | |
+| --- | --- |
+| ![告警中心](assets/screenshots/alerts.png) | ![面板日志](assets/screenshots/logs.png) |
+| ![日志中心](assets/screenshots/logsearch.png) |  |
+
+### 面板管理与安全
+
+| | |
+| --- | --- |
+| ![用户管理](assets/screenshots/users.png) | ![操作审计](assets/screenshots/audit.png) |
+| ![设置](assets/screenshots/settings.png) | ![二次确认弹窗](assets/screenshots/confirm-dialog.png) |
+| ![登录 / 初始化](assets/screenshots/login.png) |  |
 
 ---
 
@@ -406,10 +451,6 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push/PR 
 - 状态反馈：读取失败是持久错误条而非只有 3 秒 toast；加载中/空/失败三态分开画，刷新按钮转圈时禁用；登录与建号共用同一套用户名/口令校验和文案；原始 `fetch` 上传也复用统一的 401 登出与中文错误解析
 - `prefers-reduced-motion` 下动画自动关闭
 - ECharts 按需引入 + `ResizeObserver` 自适应；构建按变更频率分包（vue/naive/echarts/xterm）
-
-<p align="center">
-  <img src="./assets/preview-light.svg" alt="choyeon-panel 概览页（浅色主题）" width="100%" />
-</p>
 
 ---
 

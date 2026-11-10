@@ -444,6 +444,36 @@ button.cell-name > .n-button__content {
 }
 .section-title > * { flex-shrink: 0; }
 
+/* ---------- 眉标（eyebrow）：区块/卡片之上的小号分类标签，强化层级 ----------
+   与 .section-title（带竖条的主标题）配合使用：眉标是"分类"（主机信息 / 应用实例 /
+   系统服务 / 实时告警），竖条标题是"本节"。原型 dashboard-redesign.html 的 .page-eyebrow。 */
+.cp-eyebrow {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--cp-text-mute);
+  margin-bottom: var(--space-1);
+  line-height: 1.4;
+}
+
+/* ---------- 主卡 / 危险卡：品牌色描边 + 极淡顶光，用于"这一屏的关键信息"层级区分 ----------
+   只动描边与阴影，不碰 naive 卡片的圆角与内边距。原型 .card.primary / .metric.danger 同口径。
+   右侧信息区（系统信息 / 应用 / 服务健康 / 最近告警）挂主卡，与服务健康异常时叠加危险卡。
+   选择器写成 `.n-card.x` 两档（0,2,0），压过 naive 给卡片根节点的 `border-color`（0,1,0）。 */
+.n-card.cp-card-primary {
+  border-color: color-mix(in srgb, var(--cp-brand) 16%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--cp-brand) 10%, transparent);
+}
+/* 危险卡必须写在主卡之后：两者同特异度，靠先后决胜，服务健康异常时红描边要盖过品牌描边 */
+.n-card.cp-card-danger {
+  border-color: color-mix(in srgb, var(--cp-err) 42%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--cp-err) 12%, transparent);
+}
+/* 卡片头里"眉标 + 竖条标题"的纵向叠放：眉标一行、标题一行，不被 NCard 的 header flex 压扁 */
+.cp-card-head { display: flex; flex-direction: column; min-width: 0; }
+
 /* 指标读数芯片（监控条的 上行/下行/总发送/总接收）：1Panel 用的是 el-tag light primary ——
    淡蓝底 + 蓝描边 + 标签与数值同色，靠 32px 高度和 4px 圆角成形状。 */
 .cp-chip {

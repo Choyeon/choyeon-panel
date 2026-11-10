@@ -531,6 +531,66 @@ function toggleTheme(ev: MouseEvent) {
 .cp-sider :deep(.n-menu--collapsed) { padding: 0; }
 .cp-sider :deep(.n-menu--collapsed .n-menu-item-content) { margin: 6px 0; }
 .cp-sider :deep(.n-menu--collapsed .n-menu-item-content::before) { box-shadow: none; }
+/* 分组标题（网站与服务 / 数据与备份 …）做成原型同款眉标：小号、字距、弱化色，
+   与选中态竖条+描边一起构成"分组标签 + 选中态"的清晰层级。
+   注意：侧栏分组是 naive-ui 的**可折叠子菜单**（.n-submenu），不是 MenuOptionGroup，
+   所以真正承载"分组名"的是 `.n-submenu > .n-menu-item > .n-menu-item-content`，
+   而 `.n-menu-item-group-title` 在这里根本不存在（写了也不生效）。
+   做法：把父项从"可点击的胶囊菜单项"降级为"分组标签"——去掉胶囊底色与阴影，
+   文字弱化；子项保持原样。层级靠"父弱子强"读出来，而不是靠额外的标题行。 */
+.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content) {
+  margin: 14px 0 2px;
+  background: transparent;
+  border-radius: 0;
+  height: auto;
+  min-height: 22px;
+  padding: 0 9px;
+}
+/* 父项默认有 ::before 状态底色与胶囊阴影，分组标签不需要 hover 胶囊，只要一个更弱的反馈 */
+.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content::before) {
+  left: 0;
+  right: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+  background: transparent;
+}
+.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content:hover::before) {
+  background: var(--cp-hover);
+}
+/* 分组名文字：小号、大写、字距、弱化色 */
+.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content .n-menu-item-content-header) {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cp-text-mute);
+}
+/* 分组图标跟着弱化，否则图标的高饱和度会把"标签"读成"按钮" */
+.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content .n-menu-item-content__icon) {
+  opacity: 0.55;
+  font-size: 15px;
+}
+/* 子项缩进稍深一点，明确"属于上面的分组" */
+.cp-sider :deep(.n-menu .n-submenu-children .n-menu-item-content) {
+  margin: 3px 0;
+}
+/* 折叠态（只剩图标）里分组父项没有横向空间展示"标签"，恢复 naive 默认的图标菜单项样式 */
+.cp-sider :deep(.n-menu--collapsed .n-submenu > .n-menu-item > .n-menu-item-content) {
+  margin: 6px 0;
+  height: 42px;
+  min-height: 42px;
+  padding: 0 18px 0 16px;
+  background: var(--cp-menu-item-bg);
+  border-radius: var(--radius-lg);
+}
+.cp-sider :deep(.n-menu--collapsed .n-submenu > .n-menu-item > .n-menu-item-content .n-menu-item-content-header),
+.cp-sider :deep(.n-menu--collapsed .n-submenu > .n-menu-item > .n-menu-item-content .n-menu-item-content__icon) {
+  font-size: inherit;
+  opacity: 1;
+  color: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+}
 .logo {
   display: flex;
   align-items: center;
