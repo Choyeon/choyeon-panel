@@ -720,6 +720,33 @@
   3992 里含本批新增的两条守卫用例，2026-11-08 在部署机全量实测 `Ran 3992 tests ... OK (skipped=1)`。
 
 ### 修复
+- 备份单元失败状态长挂，服务健康卡片常驻红字（2026-11-10 生产实测）。生产上
+  `panel-backup-1/2.service` 每晚 03:30 失败，`failed-units` 告警（crit 级）跟着长亮，
+  而面板与备份本身一切正常——用户看到的是"服务器明明正常，却天天报这个错"。
+  根因是三件事叠在一起，缺一件都会继续报错：
+  ① **残留 unit 没人管**：`sync_all_timers()` 只遍历库里的 `backups` 行，
+  盘上"库中已无对应任务"的 unit 谁都不清理。面板换过安装前缀后，旧前缀渲染出来的
+  unit 留在 `/etc/systemd/system/` 里，timer 照常到点触发，runner 读不到任务退出码 2。
+  ② **oneshot 的 failed 不会自己消失**：`Type=oneshot` 失败后要挂到**下一次成功运行**
+  才被 systemd 清掉，而备份一天只跑一次（03:30 / 03:45）。于是失败一次，红字趴一整天；
+  unit 文件删了 failed 还在，单元都没了还在报。
+  ③ **生成时就错的 unit 覆盖不到**：`_write_if_changed` 只在"新内容与盘上不同"时写；
+  渲染那一刻用的目录本身就是旧的，两边一致，错得很稳。
+  现在 `sync_all_timers()` 改为**双向对账**：库里有→渲染并校正 `CP_DATA_DIR`；
+  盘上有而库里没有→停 timer、删 unit 文件、`reset-failed` 清历史状态。
+  新增 `_unit_data_dir_of()` / `_unit_needs_data_dir_fix()` 读盘上 unit 真实声明的
+  `CP_DATA_DIR` 与面板当前用的目录比对（realpath），不一致就强制重渲染，
+  兼容 `Environment="CP_DATA_DIR=…"` 与不带引号两种写法。
+  `_sync_timer()` / `delete_backup()` 在 unit 变更后主动 `reset-failed`——
+  unit 已与面板对齐后，之前那次失败留的是历史，不该继续占着告警位。
+  `backup_runner` 查不到任务时也不再只印一句 `backup not found`：新增
+  `_describe_missing_backup()` 报出"读的哪个库""那个库里有哪些任务 id"，
+  指错库时一眼能看出 `CP_DATA_DIR` 该改哪儿（库里为空时也明说）。
+  新增 `backend/tests/test_backup_unit_reconcile.py`（16 条）覆盖真实故障形态：
+  盘上 unit 指向旧前缀、库里没有的孤儿 unit、failed 状态归零；
+  已回退修复验证过——回退后对应用例立刻变红，确认测试能抓住原故障而非自证。
+  生产实测：注入孤儿 unit + 指向旧目录 + 制造 failed，重启面板后 failed 名单归空、
+  孤儿 unit 被清理、`backup-1` 的 `CP_DATA_DIR` 自动纠正回正确目录并手动跑通。
 - 全新安装的初始化与登录链路（批次117）：登录页原先只在 `onMounted` 调一次 `/api/auth/status`，
   服务刚起来还没就绪或网络抖动时只留一条死错误、表单停在「欢迎回来」，用户对着登录框以为装坏了。
   现在分「检测中 / 检测失败（带可点的重新检测）/ 表单」三态，检测失败不渲染表单；出错时焦点交给
