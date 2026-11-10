@@ -244,6 +244,129 @@ def _write_if_changed(path: str, content: str):
     write_secret_atomic(path, content)
 
 
+def _unit_data_dir_of(unit_path: str) -> str | None:
+    """从已落盘的 unit 里读出它声明的 CP_DATA_DIR；读不到就返回 None。
+
+    读的是 unit 文件里真实写着的那一行，不是我们"打算写什么"——这一对账
+    要能发现别人手改过的 unit，也要能发现换过安装前缀之后遗留的旧 unit。
+    """
+    try:
+        text = Path(unit_path).read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        # 两种写法都认：`Environment="CP_DATA_DIR=…"`（面板生成的）与
+        # `Environment=CP_DATA_DIR=…`（模板里的），引号可有可无。
+        if not line.startswith("Environment="):
+            continue
+        val = line[len("Environment="):].strip()
+        if val.startswith('"') and val.endswith('"') and len(val) >= 2:
+            val = val[1:-1]
+        if val.startswith("CP_DATA_DIR="):
+            return val[len("CP_DATA_DIR="):]
+    return None
+
+
+def _unit_needs_data_dir_fix(unit_path: str) -> bool:
+    """unit 声明的数据目录与面板当前用的不是同一个，就要重渲染。
+
+    这道对账是被真实故障逼出来的：生产机换过安装前缀
+    （/root/choyeon-panel → /root/www/choyeon-panel），盘上留着旧前缀渲染出来的
+    panel-backup-*.service，里面的 CP_DATA_DIR 仍指向旧目录。那个目录里的
+    panel.db 是上一代安装留下的另一份库，backups 表是空的——于是每晚 03:30
+    runner 都读到"没有这条任务"，退出码 2，systemd 把这两个 oneshot 挂在 failed 里。
+
+    而面板自己一切正常：它在读新库，备份任务也在新库里，界面上的定时备份
+    显示得好好的。只有 systemd 那边两个红字挂着，加上 failed-units 告警是 crit，
+    于是"服务器正常运行为什么会报错"的答案就是这一处。
+
+    旧前缀的 unit 之所以能活这么久，是因为渲染只发生在**增删改**备份任务时，
+    面板启动时的 sync_all_timers() 走同一条渲染路径——而那条路径只按当前
+    config.DATA_DIR 生成新内容，与盘上旧内容不一致时本该被 _write_if_changed
+    覆盖掉。真正漏掉的是另一种情形：unit 渲染对了，但**渲染它的那一次运行**
+    用的还是旧前缀（换前缀那一次的前缀还没改完就渲染了），此后没人再碰它，
+    于是它一直错着。显式对账把这类"生成时就错"的 unit 也纳入检查。
+    """
+    current = os.path.realpath(config.DATA_DIR)
+    declared = _unit_data_dir_of(unit_path)
+    if declared is None:
+        # 读不出声明值（文件不存在/没有这一行）：交给渲染路径重建，不在这里猜。
+        return False
+    try:
+        return os.path.realpath(declared) != current
+    except OSError:
+        return False
+
+
+def _orphan_unit_ids(unit_dir: str, known_ids: set[int]) -> list[int]:
+    """盘上有、库里没有的备份 unit id。
+
+    库里没有对应任务的 unit 是**残留**：任务被删了、或者面板换过数据目录读的是
+    另一份库。残留 unit 不会被 _sync_timer 碰到（它只遍历库里的行），于是它会
+    留在 /etc/systemd/system 里，timer 照样到点触发，runner 读不到那条任务就
+    退出码 2 —— 这正是生产上"每晚 03:30 两个备份单元 failed"的直接来源：
+    面板自己好好的（它读的是新库，备份也在新库里），红字全是这两个残留 unit 贡献的。
+
+    所以对账必须**双向**：库里有而盘上没有 → 渲染；盘上有而库里没有 → 清掉。
+    只做前者，就等于把"任务被删/换库"这类情况整个漏掉。
+    """
+    out: list[int] = []
+    try:
+        names = os.listdir(unit_dir)
+    except OSError:
+        return out
+    for name in names:
+        if not name.startswith("panel-backup-"):
+            continue
+        if not name.endswith(".service"):
+            continue
+        stem = name[len("panel-backup-"):-len(".service")]
+        if not stem.isdigit():
+            continue
+        if int(stem) not in known_ids:
+            out.append(int(stem))
+    return sorted(out)
+
+
+async def _remove_orphan_units(unit_dir: str, known_ids: set[int]) -> list[int]:
+    """删掉库里已不存在的备份 unit（含 timer），并清掉它的 failed 残留。
+
+    只删文件不 reset-failed 是不够的：oneshot 单元失败过一次后，failed 状态会
+    **一直挂到下一次成功运行为止**（Type=oneshot 只有成功运行才会把 failed 清掉）。
+    备份每天只跑一次（03:30 / 03:45），于是一次失败就能让服务健康卡片红上 24 小时，
+    并且 failed-units 告警是 crit 级，跟着一起长挂。文件删了但 failed 还在，
+    红字就还在——这正是用户看到"总是出现这个错误"的那一半原因。
+
+    所以这里三件事一起做：停 timer → 删 unit 文件 → reset-failed 清历史状态。
+    """
+    removed: list[int] = []
+    for bid in _orphan_unit_ids(unit_dir, known_ids):
+        u = _unit_base(bid)
+        try:
+            await run("systemctl", ["disable", "--now", f"{u}.timer"], timeout=30)
+        except Exception as e:  # noqa: BLE001
+            warn(f"orphan backup unit #{bid} disable failed: {e}")
+        for f in (f"{unit_dir}/{u}.service", f"{unit_dir}/{u}.timer"):
+            try:
+                if os.path.exists(f):
+                    os.unlink(f)
+            except OSError as e:
+                warn(f"orphan backup unit #{bid} 删除 {f} 失败：{e}")
+                continue
+        # 文件已经没了，systemd 里那份 loaded 副本和它的 failed 计数还留着；
+        # reset-failed 之后 failed 名单才是干净的。
+        await systemd_ops.reset_failed(f"{u}.service")
+        await systemd_ops.reset_failed(f"{u}.timer")
+        removed.append(bid)
+    if removed:
+        try:
+            await run("systemctl", ["daemon-reload"], timeout=30)
+        except Exception as e:  # noqa: BLE001
+            warn(f"orphan backup units daemon-reload failed: {e}")
+    return removed
+
+
 async def _sync_timer(b: dict):
     u = _unit_base(b["id"])
     unit_dir = _unit_dir()
@@ -255,6 +378,12 @@ async def _sync_timer(b: dict):
             if os.path.exists(f):
                 os.unlink(f)
         await run("systemctl", ["daemon-reload"])
+        # 任务停了/改成手动了，unit 文件删了，但它之前失败过一次留下的 failed
+        # 状态还在 systemd 里挂着（oneshot 的 failed 只在下次成功运行时清除，
+        # 而这个单元已经不会再被触发了）。不清掉的话，它就永久留在 failed 名单里，
+        # 服务健康卡片一直红着——unit 都已经不存在了，还在报。
+        await systemd_ops.reset_failed(f"{u}.service")
+        await systemd_ops.reset_failed(f"{u}.timer")
         return
     # 时区名和 cron 任务定时器共用一个出处（systemd_ops.timezone_name）：两处各推一遍，
     # 同一台机器上的两类定时器早晚会一个按本地时间、一个按 UTC 跑。
@@ -272,19 +401,36 @@ async def _sync_timer(b: dict):
     _wd = unit_pct_escape(BACKEND_DIR)
     _py = unit_pct_escape(PYTHON_BIN)
     _data = unit_env_value(data)
-    _write_if_changed(
-        svc,
+    svc_content = (
         f"[Unit]\nDescription=choyeon-panel backup #{b['id']}\n[Service]\nType=oneshot\n"
         f"WorkingDirectory={_wd}\n"
         f'ExecStart="{_py}" -m app.backup_runner {b["id"]}\n'
-        f'Environment="CP_DATA_DIR={_data}"\n',
+        f'Environment="CP_DATA_DIR={_data}"\n'
     )
+    # 盘上的 unit 声明了另一个数据目录时，必须覆盖重写——这是换过安装前缀之后
+    # 旧 unit 一直错着的那个洞（详见 _unit_needs_data_dir_fix 的说明）。
+    # _write_if_changed 本来就会按内容差异覆盖，但那只在「生成的内容与盘上的不同」
+    # 时才写；而 unit 生成时用的 CP_DATA_DIR 若本身就是旧前缀，两边一致，错得
+    # 很稳。这里的判据是「盘上声明的目录」与「面板当前用的目录」是否同一处，
+    # 与生成过程无关。
+    if _unit_needs_data_dir_fix(svc):
+        write_secret_atomic(svc, svc_content)
+    else:
+        _write_if_changed(svc, svc_content)
     _write_if_changed(
         tmr,
         f"[Unit]\nDescription=choyeon-panel backup timer #{b['id']}\n[Timer]\n"
         f"OnCalendar={cal}\nPersistent=true\n[Install]\nWantedBy=timers.target\n",
     )
     await run("systemctl", ["daemon-reload"])
+    # 顺手清掉这个单元的历史 failed 状态。Type=oneshot 的 failed **不会自己消失**：
+    # 只有下一次成功运行才会被 systemd 清掉，而备份一天只跑一次（03:30 / 03:45）。
+    # 于是"unit 已经修对了、备份也确实在正常跑"，服务健康卡片上的红字还要再趴
+    # 将近一天才消失，failed-units 告警（crit 级）也跟着一直亮——
+    # 用户看到的就是"服务器明明正常，却天天报这个错"。
+    # 这里在启动对账时把状态归零：unit 内容和数据目录都已经与面板对齐，
+    # 之前那次失败留下的是**历史**，不是当前状态，不该继续占着告警位。
+    await systemd_ops.reset_failed(f"{u}.service")
     r = await run("systemctl", ["enable", "--now", f"{u}.timer"], timeout=30)
     if b["enabled"] and r["code"] != 0:
         raise RuntimeError(r["out"])
@@ -505,6 +651,11 @@ async def delete_backup(bid: int):
         if os.path.exists(f):
             os.unlink(f)
     await run("systemctl", ["daemon-reload"])
+    # unit 文件删了，但它失败过一次留下的 failed 状态还挂在 systemd 里
+    # （oneshot 的 failed 只在下次成功运行时清掉，而这个单元已经不会被触发了）。
+    # 不清掉的话，它就永久留在 failed 名单里一直报——单元都没了还在报。
+    await systemd_ops.reset_failed(f"{u}.service")
+    await systemd_ops.reset_failed(f"{u}.timer")
     # 任务行与它的推送台账同一事务：只删掉任务而台账删失败，这些行既不会被
     # `already_pushed` 再查到（它按任务取产物名），又会让异地目标的 `pushed_count`
     # 一直虚高——用户看到"这个目标推过 40 份"，而目录里那条任务已经不存在，谁都无从核对。
@@ -1391,7 +1542,32 @@ async def run_backup_now(bid: int) -> dict:
 
 
 async def sync_all_timers():
-    for b in dbm.query("SELECT * FROM backups"):
+    """面板启动时与 systemd 对账：库里的任务要各有对应 unit，盘上的 unit 不能有孤儿。
+
+    这次对账是双向的，因为生产上真实踩过的坑两个方向都发生过：
+
+    - **库里有、盘上 unit 声明了别的数据目录**（换过安装前缀之后遗留的旧 unit）：
+      渲染路径会被覆盖，但只有"渲染那一刻用的目录就已经对了"才覆盖得到；
+      生成时就错的那一份，此后没人再碰它。
+    - **盘上有、库里没有**（任务被删、或面板换库后读的是另一份库）：
+      旧写法只遍历库里的行，孤儿 unit 谁都不管。它留在 /etc/systemd/system 里，
+      timer 照常到点触发，runner 读不到任务退出码 2，systemd 把 oneshot 挂成 failed
+      —— 而这个 failed 状态**要挂到下一次成功运行为止**，备份一天只跑一次，
+      于是红字在服务健康卡片上趴一整天，failed-units 告警也跟着长亮。
+      面板本身好好的，备份也在跑，红字全是这两个孤儿贡献的。
+
+    只修一个方向，就会剩另一半继续报错——所以这里两个方向一起做。
+    """
+    rows = dbm.query("SELECT * FROM backups")
+    known_ids = {int(b["id"]) for b in rows}
+    unit_dir = _unit_dir()
+    # 先清孤儿再渲染：孤儿清理要 disable 它的 timer，而渲染要给在库的任务
+    # enable timer；顺序反了会出现"刚 enable 的 timer 被随后的 disable 带走"。
+    orphans = await _remove_orphan_units(unit_dir, known_ids)
+    if orphans:
+        warn(f"清理残留备份 unit：{', '.join('#' + str(i) for i in orphans)}"
+             "（库中已无对应任务）")
+    for b in rows:
         try:
             await _sync_timer(b)
         except Exception as e:  # noqa: BLE001

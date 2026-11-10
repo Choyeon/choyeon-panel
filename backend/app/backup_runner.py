@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 from . import config, locks
 from . import database as dbm
@@ -433,6 +434,31 @@ def _record_run(bid: int, status: str, note: str = "") -> None:
         print(f"backup: 执行留痕写入失败：{type(e).__name__}: {e}", file=sys.stderr)
 
 
+def _describe_missing_backup(bid: int) -> str:
+    """查不到备份任务时，说清「读的哪个库」「那个库里有什么」。
+
+    只说「没找到」等于把排查成本整个推给运维：panel.db 有一份一模一样的备份，
+    只是 unit 里的 CP_DATA_DIR 指到了旧安装目录，日志里除了这一行没有任何线索
+    能指向真正的原因。这里把库路径、该库里实际存在的任务 id 一并给出——
+    看到「另一个库里有 id=1」时，CP_DATA_DIR 指错就一目了然。
+
+    读库本身再出错（文件不存在/损坏）也不能把真正的异常吞掉：那一句才是根因，
+    拼在后面当上下文。
+    """
+    db_path = str(Path(config.DATA_DIR, "panel.db"))
+    try:
+        ids = [int(r["id"]) for r in dbm.query("SELECT id FROM backups ORDER BY id")]
+    except Exception as e:  # noqa: BLE001 - 诊断信息读不出来时不能盖掉真正的异常
+        return f"backup not found: id={bid}（读 {db_path} 时出错：{type(e).__name__}: {e}）"
+    if ids:
+        return (f"backup not found: id={bid} 不在 {db_path} 里"
+                f"（这个库里有 id={','.join(map(str, ids))}）——"
+                f"多半是 unit 里的 CP_DATA_DIR 指到了别的数据目录")
+    return (f"backup not found: id={bid} 不在 {db_path} 里"
+            f"（这个库的 backups 表是空的）——"
+            f"多半是这个库不是面板在用的那个")
+
+
 def run_job(bid: int) -> int:
     """进程入口：按备份任务抢一把跨进程锁，再跑 `main()`。返回退出码。
 
@@ -456,7 +482,18 @@ def run_job(bid: int) -> int:
     """
     row = dbm.query_one("SELECT * FROM backups WHERE id=?", (bid,))
     if not row:
-        print("backup not found", file=sys.stderr)
+        # 「查不到这条任务」有两种完全不同的成因，处置方式也相反：
+        # - 库里根本没有这一行（任务被删了，unit 还留在盘上）：这是残留，该清 unit；
+        # - 任务在另一个库里（unit 里的 CP_DATA_DIR 指到了旧安装目录，比如换过
+        #   安装前缀 /root/choyeon-panel → /root/www/choyeon-panel 之后没重新渲染 unit）：
+        #   这是**指向错了**，任务好好的，只是这份进程读错了库。
+        # 以前两句都只印 "backup not found"，运维看到 journal 只知道"没找到"，
+        # 不知道该去哪儿找；于是这份 unit 每晚 03:30 失败一次，failed 状态在
+        # systemd 里一直挂着，面板的服务健康与告警项 failed-units 也就一直亮红——
+        # 而服务器其实一切正常，备份在别的库里也真的在跑。
+        # 所以这里把「读的哪个库」「那个库里有哪些任务」一起说出来：
+        # 指错了库时运维一眼能看出 CP_DATA_DIR 该改哪儿。
+        print(_describe_missing_backup(bid), file=sys.stderr)
         return 2
     try:
         guard = locks.acquire(locks.key_backup(bid), f"备份任务 {bid}", "system")
