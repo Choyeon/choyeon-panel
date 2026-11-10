@@ -317,8 +317,18 @@ class SshdProcScanTests(unittest.TestCase):
 
     def test_pending_audit_degrades_instead_of_500(self):
         # 整条读路径（含 nginx 与 sshd 两处 /proc 遍历）读不动时仍要回一份能渲染的数据
+        #
+        # 内核那一节必须 mock 掉：`_kernel_state` 读的是真机状态，而"装了新内核还没重启"
+        # 是一条 SEV_RISK 的 finding，会让 `doctor_item` 走早返回分支、只报那一条风险，
+        # 根本轮不到"读不到的节"那句。于是这条用例在**恰好装了新内核没重启**的机器上
+        # 会挂——生产机就这样挂过，而 GitHub runner 装完内核更新同样是这个状态，
+        # 于是 CI 会随机变红，而它想验的东西（/proc 读不到时的降级）与内核毫无关系。
+        # 这里把内核与 stale 两节都钉成"读得到且没有待生效的改动"，断言只针对降级路径。
         with mock.patch.object(ps.os, "listdir", side_effect=_DENY), \
-                mock.patch.object(ps, "_boot_epoch", lambda: 1790765667):
+                mock.patch.object(ps, "_boot_epoch", lambda: 1790765667), \
+                mock.patch.object(ps, "_kernel_state", lambda btime: {"ok": True, "running": "6.12.111",
+                                                                      "needs_reboot": False, "newer": []}), \
+                mock.patch.object(ps, "_scan_stale", lambda btime, unit: {"ok": True, "items": []}):
             data = ps._collect("choyeon-panel.service")
         for sec in ("nginx", "sshd"):
             self.assertFalse(data["reloads"][sec]["ok"])
@@ -337,6 +347,24 @@ class SshdProcScanTests(unittest.TestCase):
                 "findings": [], "counts": {}, "unreadable": [],
                 "reloads": {"nginx": {"ok": True}, "sshd": {"ok": True}, "systemd": {"ok": True}}}
         self.assertIn("nginx/sshd/systemd 都没有待重载", ps.doctor_item(data)["detail"])
+
+    def test_risky_finding_wins_over_the_pass_sentence(self):
+        """有 SEV_RISK 的 finding 时，这一项必须 fail 并点名那条风险。
+
+        上一条用例把内核状态 mock 掉了，所以"风险优先"这条分支就没人验了——
+        而它恰恰是 `doctor_item` 里最早 return 的一支。少了这条，
+        有人把早返回挪到后面，自检就会在"装了新内核没重启"的机器上把 fail 说成 pass，
+        而机器到底装没装新内核是机器事实，测试不该跟着机器走。
+        """
+        data = {"kernel": {"ok": True, "running": "6.12.111"}, "stale": {"ok": True},
+                "findings": [{"id": "reboot-kernel", "severity": ps.SEV_RISK,
+                              "title": "装了新内核，机器还没重启"}],
+                "counts": {}, "unreadable": [],
+                "reloads": {"nginx": {"ok": True}, "sshd": {"ok": True}, "systemd": {"ok": True}}}
+        item = ps.doctor_item(data)
+        self.assertEqual(item["status"], "fail")
+        self.assertIn("装了新内核，机器还没重启", item["detail"])
+        self.assertNotIn("都没有待重载", item["detail"])
 
     def test_readable_proc_still_walks(self):
         # 回归护栏：读得动的机器上这一段照常给出该给的东西，不因为加了 guard 就少说话。

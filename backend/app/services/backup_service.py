@@ -361,7 +361,10 @@ async def _remove_orphan_units(unit_dir: str, known_ids: set[int]) -> list[int]:
         removed.append(bid)
     if removed:
         try:
-            await run("systemctl", ["daemon-reload"], timeout=30)
+            # 不传 timeout：daemon-reload 是本机瞬时命令（生产实测 1.17s），
+            # 仓库规矩是这类命令走默认的 CTRL_TIMEOUT，不在调用点自己写裸数字
+            # （批次㊶）。同文件另外三处 daemon-reload 也是这么写的。
+            await run("systemctl", ["daemon-reload"])
         except Exception as e:  # noqa: BLE001
             warn(f"orphan backup units daemon-reload failed: {e}")
     return removed

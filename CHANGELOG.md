@@ -735,6 +735,27 @@
   阴影都没了），以及 `theme.ts` 里 `menuFor` 的未用参数与 `surfaces.*.menu` 三档。
 
 ### 修复
+- CI 后端两个 Python 版本连续三次红（2026-11-10 截图：Python 3.11 / 3.12 各挂 12 条）。
+  根因是三条守卫，不是同一件事：
+  ① **token 守卫把 naive-ui 的官方变量当成了我们的死 token**（本批侧栏重构引入）。
+     naive 把 `--n-item-text-color` 等主题变量**内联**在 `.n-menu` 元素上，普通 CSS 规则
+     盖不过它，只有 `!important` 能盖——所以覆盖它们是改 naive 主题的正规做法。但这批变量
+     是**库自己的命名空间**，消费方在 `node_modules` 里（`color: var(--n-item-text-color)`），
+     仓库源码永远搜不到对应的 `var(--n-*)`，于是被 `test_batch35` 判成"定义了没人用的死变量"。
+     改成：两个方向都排除 `--n-` 前缀（库消费的不算我们的 token），同时**补一条正向守卫**
+     `test_naive_overrides_come_from_our_tokens`——覆盖 naive 变量时值只能来自我们自己的
+     `var(--cp-*)`，不许写死色值。排除不等于放任。
+  ② **`backup_service.py` 写了裸数字超时**（上批 60afc3a 引入）。`systemctl daemon-reload`
+     是本机瞬时命令（生产实测 1.17s），仓库规矩（批次㊶）是这类命令走默认的 `CTRL_TIMEOUT`，
+     不在调用点自己写数。同文件另外三处 daemon-reload 都是这么写的，这一处漏了。
+  ③ **`test_batch75` 的一条用例跟着机器状态走**（生产机实测才暴露）。它想验的是
+     "/proc 读不到时自检降级而不是 500"，却没 mock 内核那一节：真机"装了新内核还没重启"
+     是一条 `SEV_RISK` finding，会让 `doctor_item` 走早返回分支只报那条风险，
+     根本轮不到用例断言的"读不到的节"那句。GitHub runner 装完内核更新同样是这个状态，
+     **CI 会随机变红**。改成把内核与 stale 两节都钉死，另补一条
+     `test_risky_finding_wins_over_the_pass_sentence` 单独锁住"风险优先"这条早返回分支
+     （否则 mock 之后那条分支就没人验了）。
+  部署机全量实测：`Ran 4024 tests ... OK (skipped=1)`；`ruff check` 全过。
 - 备份单元失败状态长挂，服务健康卡片常驻红字（2026-11-10 生产实测）。生产上
   `panel-backup-1/2.service` 每晚 03:30 失败，`failed-units` 告警（crit 级）跟着长亮，
   而面板与备份本身一切正常——用户看到的是"服务器明明正常，却天天报这个错"。

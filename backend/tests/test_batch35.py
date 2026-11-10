@@ -142,10 +142,19 @@ class TestTokenContract(unittest.TestCase):
 
     `(?<![\\w-])` 是必需的——naive 的 BEM 类名（`.n-menu-item-content--selected::before`）
     长得就像一条属性声明，不排掉会把类名当成"定义了没人用"的变量。
+
+    `--n-` 前缀是 naive-ui 自己的主题变量命名空间（官方文档就叫 naive CSS variables），
+    库在 `node_modules` 里消费它们（`color: var(--n-item-text-color)`），仓库源码里
+    永远搜不到对应的 `var(--n-*)`——所以这批变量两个方向都要排除，否则把它们
+    覆盖进自己的样式时会被判成"定义了没人用的死变量"。
+
+    排除不等于放任：覆盖这些变量时值必须来自我们自己的 token（见
+    `test_naive_overrides_come_from_our_tokens`），不许写死色值。
     """
 
     DEF = re.compile(r"(?<![\w-])(--[a-z0-9-]+)\s*:")
     USE = re.compile(r"var\(\s*(--[a-z0-9-]+)")
+    NAIVE_PREFIX = "--n-"
 
     def _pairs(self):
         used, defined = set(), set()
@@ -153,7 +162,33 @@ class TestTokenContract(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             used |= set(self.USE.findall(text))
             defined |= set(self.DEF.findall(text))
+        used = {v for v in used if not v.startswith(self.NAIVE_PREFIX)}
+        defined = {v for v in defined if not v.startswith(self.NAIVE_PREFIX)}
         return used, defined
+
+    def test_naive_overrides_come_from_our_tokens(self):
+        """覆盖 naive 主题变量时，值只能来自我们自己的 token。
+
+        naive 把这批变量**内联**在元素上（`.n-menu` 的 inline style），普通 CSS 规则
+        盖不过它，只有 `!important` 能盖——所以覆盖它们是我们改主题的正规做法。
+        但值一旦写死成 `#3d8eff`，暗色/亮色两套主题就再也分不开了：改一处主题
+        要去两个地方改，而这里正是当初 `--cp-*` 那套 token 要消灭的病根。
+        """
+        offenders = []
+        pattern = re.compile(
+            r"(?<![\w-])(--n-[a-z0-9-]+)\s*:\s*([^;]+);"
+        )
+        for path in SRC_FILES:
+            text = path.read_text(encoding="utf-8")
+            for name, value in pattern.findall(text):
+                value = value.strip()
+                if not value.startswith("var("):
+                    offenders.append(f"{path.name}: {name}: {value}")
+        self.assertEqual(
+            offenders, [],
+            "覆盖 naive 主题变量时值必须来自 var(--cp-*) 等自有 token：\n"
+            + "\n".join(offenders),
+        )
 
     def test_every_used_property_is_defined(self):
         used, defined = self._pairs()
