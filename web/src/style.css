@@ -69,10 +69,10 @@
   --header-h: 49px;
   --footer-h: 48px;
 
-  /* 侧栏菜单形态：1Panel 的菜单项是"胶囊"——每项自带底色+阴影，选中项再加
-     2px 内描边和 4×14px 竖条。naive 的 Menu 主题只能表达颜色，表达不了
-     margin/内描边/竖条，所以这几条由 Shell.vue 的 :deep() 写；横向内边距是
-     唯一还走变量的（--menu-pad-x），胶囊高度 42px 就在 Shell.vue 那条规则里。 */
+  /* 侧栏菜单形态：两级共用同一套"行"语言——常态无底、hover 淡底、选中品牌淡底 +
+     左侧竖条。层级只由字号/字重/缩进/图标尺寸表达，父强子弱。
+     naive 的 Menu 主题只能表达颜色，margin/字号/缩进/竖条都由 Shell.vue 的
+     :deep() 写；横向内边距是唯一还走变量的（--menu-pad-x）。 */
   --menu-pad-x: 7px;
   --cp-ring-track: rgba(0, 94, 235, 0.05);
 
@@ -138,10 +138,6 @@ html[data-theme='dark'] {
   --cp-selected: rgba(61, 142, 255, 0.18);
   --cp-ring-track: rgba(255, 255, 255, 0.06);
   --cp-menu-bg: #242633;
-  /* 胶囊常态底色画在菜单元素自身；hover / 选中两档在 theme.ts 的 Menu 变量里，
-     由 naive 的 ::before 上层覆盖（naive 没有 item 常态色变量，只有菜单容器色）。 */
-  --cp-menu-item-bg: #2e313d;
-  --cp-menu-shadow-color: rgba(36, 38, 51, 0.72);
   --cp-footer-border: #5b5e6a;
   --shadow-glow: 0 4px 18px rgba(61, 142, 255, 0.35);
   color-scheme: dark;
@@ -186,8 +182,6 @@ html[data-theme='light'] {
   --cp-selected: rgba(0, 94, 235, 0.12);
   --cp-ring-track: rgba(0, 94, 235, 0.05);
   --cp-menu-bg: rgba(0, 94, 235, 0.1);
-  --cp-menu-item-bg: rgba(255, 255, 255, 0.3);
-  --cp-menu-shadow-color: rgba(0, 94, 235, 0.1);
   --cp-footer-border: #e4e7ed;
   color-scheme: light;
 }

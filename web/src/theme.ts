@@ -61,9 +61,6 @@ const surfaces = {
     thColor: '#2e313d',
     inputColor: '#2e313d',
     menuBg: '#242633',
-    /* item 画在元素自身（style.css 的 --cp-menu-item-bg），hover/active 画在 naive 的
-       ::before 上层， opaque 直接覆盖，所以深色档三档都是实色。 */
-    menu: { item: '#2e313d', hover: '#434552', active: '#434552' },
     shadowCard: '0 0 4px rgba(36,38,51,0.72)',
   },
   light: {
@@ -76,33 +73,29 @@ const surfaces = {
     thColor: '#fafafa',
     inputColor: '#ffffff',
     menuBg: 'rgba(0,94,235,0.1)',
-    /* 1Panel 浅色 hover 只换文字/图标颜色，底色不动；那样 hover 完全看不出来，
-       所以给同一支白色提一档不透明度——仍是白胶囊，不引入 naive 的灰底。
-       0.35 是叠在 0.3 常态白之上的那一层，合成后约 0.55。 */
-    menu: { item: 'rgba(255,255,255,0.3)', hover: 'rgba(255,255,255,0.35)', active: '#ffffff' },
     shadowCard: '0 0 4px rgba(0,94,235,0.1)',
   },
 };
 
-/* 侧栏菜单：1Panel 的菜单项是一颗颗胶囊（42px 高、4px 圆角、自带底色），
-   选中项再加 2px 内描边 + 竖条。描边与竖条 naive 表达不了，在 Shell.vue 用 :deep() 补。
-   状态色（hover/选中）必须走这里而不是 CSS：naive 把它们画在
-   .n-menu-item-content::before 上，其中 :hover/--hover 两档的选择器权重不低于我们带
-   scoped 属性的写法，而它的 <style> 是运行时注入、排在构建 CSS 之后，平权重后者胜——
-   用 CSS 覆盖会在 hover 到选中项时被 naive 的灰底抢走。
-   但胶囊"常态"底色不能也放这里：naive 没有 item 常态色变量（实测 ::before 常态是
-   transparent，hover/选中才有 background-color），它唯一的 color 变量是菜单容器整块
-   背景——写成胶囊底色会把 7px 间距一起染掉，胶囊就糊成一片。所以这里把容器设透明，
-   常态底色由 Shell.vue 画在元素自身上（::before 是它的上层，状态色正好覆盖）。 */
-const menuFor = (p: typeof darkSemantic, m: { item: string; hover: string; active: string }): GlobalThemeOverrides['Menu'] => ({
-  itemHeight: '42px',
+/* 侧栏菜单：两级共用同一套"行"语言（常态无底、hover 淡底、选中品牌淡底 + 左侧竖条），
+   层级只由字号/字重/缩进/图标尺寸表达。形状（圆角/间距/字号/缩进）在 Shell.vue 用
+   :deep() 补，底色也在那里画。
+
+   底色分工（这一条是重构的关键，改之前先读）：
+   naive 把 hover / 选中两档底色画在 `.n-menu-item-content::before` 上，而且那一层
+   默认左右各缩 8px —— 一旦我们自己给菜单项画常态底色，这层就会变成"浮在胶囊中间
+   的一条窄带"，看着像 hover 不全。所以这里把 naive 的三个状态底色变量一律设成
+   transparent：**所有底色都由 Shell.vue 画在菜单项元素自身上**，两级共用同一套规则。
+   文字色仍走 naive 的变量（--n-item-text-color 等），naive 运行时注入的 style 排在
+   构建 CSS 之后，同权重时它赢，颜色就别在 CSS 里跟它抢。 */
+const menuFor = (p: typeof darkSemantic): GlobalThemeOverrides['Menu'] => ({
+  itemHeight: '40px',
   borderRadius: '4px',
-  /* m.item 不在这里用：它是胶囊常态底色，走 --cp-menu-item-bg（见 Shell.vue）。 */
   color: 'rgba(0,0,0,0)',
-  itemColorHover: m.hover,
-  itemColorActive: m.active,
-  itemColorActiveHover: m.active,
-  itemColorActiveCollapsed: m.active,
+  itemColorHover: 'transparent',
+  itemColorActive: 'transparent',
+  itemColorActiveHover: 'transparent',
+  itemColorActiveCollapsed: 'transparent',
   itemTextColorActive: p.brand,
   itemIconColorActive: p.brand,
   itemTextColorChildActive: p.brand,
@@ -126,7 +119,7 @@ export const darkOverrides: GlobalThemeOverrides = {
     headerColor: surfaces.dark.bg1,
     headerBorderColor: surfaces.dark.border,
   },
-  Menu: menuFor(darkSemantic, surfaces.dark.menu),
+  Menu: menuFor(darkSemantic),
 };
 
 export const lightOverrides: GlobalThemeOverrides = {
@@ -143,7 +136,7 @@ export const lightOverrides: GlobalThemeOverrides = {
     headerColor: surfaces.light.bg1,
     headerBorderColor: surfaces.light.border,
   },
-  Menu: menuFor(lightSemantic, surfaces.light.menu),
+  Menu: menuFor(lightSemantic),
 };
 
 /** 运行时读取当前主题的 CSS 变量（供 canvas / xterm 等 JS 侧配色使用） */

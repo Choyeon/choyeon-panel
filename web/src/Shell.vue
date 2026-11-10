@@ -126,17 +126,26 @@ const MENU_GROUPS: { label: string; icon: string; items: string[] }[] = [
   { label: '面板管理', icon: 'SettingsOutline', items: ['/users', '/audit', '/settings'] },
 ];
 
-function menuItem(k: string) {
-  return { label: TITLES[k], key: k, icon: ico(MENU_ICON[k], 18) };
+function menuItem(k: string, iconSize = 18) {
+  return { label: TITLES[k], key: k, icon: ico(MENU_ICON[k], iconSize) };
 }
 
+/* 两级图标不同尺寸：一级是章节块（18px），二级是细项（16px）——图标大小
+   也是层级语言的一部分，跟字号/缩进一起把"父强子弱"读出来。 */
 const menuOptions = computed(() => {
   const out: any[] = [menuItem('/dashboard')];
   for (const g of MENU_GROUPS) {
     const keys = g.items.filter((k) => !ADMIN_ONLY.includes(k) || isAdmin.value);
     if (!keys.length) continue;
     if (keys.length === 1) out.push(menuItem(keys[0]));
-    else out.push({ label: g.label, key: `grp:${g.label}`, icon: ico(g.icon, 18), children: keys.map(menuItem) });
+    else {
+      out.push({
+        label: g.label,
+        key: `grp:${g.label}`,
+        icon: ico(g.icon, 18),
+        children: keys.map((k) => menuItem(k, 16)),
+      });
+    }
   }
   return out;
 });
@@ -323,17 +332,19 @@ function toggleTheme(ev: MouseEvent) {
         <LogoMark />
         <span v-if="!collapsed" class="logo-text">choyeon <b>panel</b></span>
       </div>
-      <NMenu
-        :indent="16"
-        :collapsed-icon-size="19"
-        :collapsed="collapsed"
-        :collapsed-width="75"
-        :value="active"
-        :options="menuOptions"
-        :expanded-keys="expandedKeys"
-        @update:expanded-keys="(k: string[]) => (expandedKeys = k)"
-        @update:value="(k: string) => go(k)"
-      />
+      <div class="cp-nav">
+        <NMenu
+          :indent="18"
+          :collapsed-icon-size="19"
+          :collapsed="collapsed"
+          :collapsed-width="75"
+          :value="active"
+          :options="menuOptions"
+          :expanded-keys="expandedKeys"
+          @update:expanded-keys="(k: string[]) => (expandedKeys = k)"
+          @update:value="(k: string) => go(k)"
+        />
+      </div>
     </NLayoutSider>
 
     <NDrawer v-else v-model:show="drawer" :width="240" placement="left">
@@ -344,14 +355,16 @@ function toggleTheme(ev: MouseEvent) {
             <span class="logo-text">choyeon <b>panel</b></span>
           </div>
         </template>
-        <NMenu
-          :indent="14"
-          :value="active"
-          :options="menuOptions"
-          :expanded-keys="expandedKeys"
-          @update:expanded-keys="(k: string[]) => (expandedKeys = k)"
-          @update:value="(k: string) => go(k)"
-        />
+        <div class="cp-nav">
+          <NMenu
+            :indent="18"
+            :value="active"
+            :options="menuOptions"
+            :expanded-keys="expandedKeys"
+            @update:expanded-keys="(k: string[]) => (expandedKeys = k)"
+            @update:value="(k: string) => go(k)"
+          />
+        </div>
       </NDrawerContent>
     </NDrawer>
 
@@ -488,108 +501,114 @@ function toggleTheme(ev: MouseEvent) {
 <style scoped>
 .cp-shell { height: var(--viewport-h); }
 .cp-sider { background: var(--cp-menu-bg); }
-/* 菜单胶囊：1Panel 的每一项都是独立圆角块（42px、4px 圆角、7px 上下间距、
-   0 0 4px 外阴影），选中项再加 2px 内描边 + 竖条。naive 的 Menu themeOverrides
-   只能给颜色，形状只能在这里补。 */
-.cp-sider :deep(.n-menu) { padding: 0 var(--menu-pad-x); }
-.cp-sider :deep(.n-menu .n-menu-item-content) {
-  margin: 7px 0;
+
+/* ===========================================================
+   侧栏菜单：两级导航，一套"行"的语言
+   ===========================================================
+   改之前的问题是层级倒挂：顶级组名被做成 10.5px 的弱化眉标（还带 uppercase +
+   字距，中文完全用不上），组内子项反而是 14px 实心胶囊 —— 视觉上"父弱子强"，
+   两级像两套毫无关系的控件；顶级内部也不自洽（"总览"是实心胶囊，五个组名是
+   透明小字）。
+
+   现在两级共用同一套行语言：常态无底色（不再是一堵胶囊色块墙），hover 浮起淡底，
+   选中 = 品牌淡底 + 品牌文字 + 左侧竖条。层级差只由 字号 / 字重 / 缩进 / 图标尺寸
+   表达，父强子弱：
+     一级（总览 + 五个组名）：14px / 600 / 18px 图标
+     二级（组内子项）      ：13px / 400 / 16px 图标 / 缩进更深
+
+   颜色一律走 CSS 变量：naive 把 --n-item-text-color 等一批变量**内联**在 .n-menu
+   元素上（inline style），普通规则盖不过它，只有 !important 能盖；而这些变量又
+   被 .n-menu-item-content-header 消费。所以这里改的是"变量"而不是"规则"：
+   一级用主文字色、二级用次文字色，由容器继承生效 —— naive 自己算 hover/选中色
+   时读到的也是同一批变量，两级行为自然一致。 */
+.cp-nav :deep(.n-menu) {
+  padding: 0 var(--menu-pad-x);
+  --n-item-text-color: var(--cp-text) !important;
+  --n-item-icon-color: var(--cp-text) !important;
+  --n-arrow-color: var(--cp-text-mute) !important;
+}
+/* 二级：次级文字色 + 更弱的图标色（容器上重新定义变量，子项继承即可） */
+.cp-nav :deep(.n-submenu-children) {
+  --n-item-text-color: var(--cp-text-dim) !important;
+  --n-item-icon-color: var(--cp-text-mute) !important;
+}
+
+/* 行本身：常态无底色。hover 才浮起一层淡底 —— 常态有底会让 6 个顶级项 + 十几个
+   子项变成一堵"色块墙"，缩进关系反而读不出来。 */
+.cp-nav :deep(.n-menu-item-content) {
+  margin: 2px 0;
   border-radius: var(--radius-lg);
-  /* 常态底色只能画在元素上：naive 的 ::before 常态是 transparent，只有 hover/选中
-     才有 background-color，而它的容器色 --n-color（themeOverrides.Menu.color）是整块
-     菜单背景——用它当胶囊底色会把 7px 间距一起染掉，实测就是这样糊成一片的。 */
-  background: var(--cp-menu-item-bg);
 }
-/* naive 把状态底色画在 .n-menu-item-content::before 上，且默认 left/right 各缩 8px；
-   胶囊是整行的，所以这一层必须撑满——否则 hover/选中会在 166px 的胶囊里只盖住中间
-   150px，两边各留 8px 原色，看着像"hover 不全"。颜色交给 theme.ts 的 Menu 变量：
-   naive 的 :hover / --hover / 选中四态规则权重不低于这里，平权重时它运行时注入的
-   style 排在后面会赢，所以 CSS 只补形状和描边。 */
-.cp-sider :deep(.n-menu .n-menu-item-content::before) {
-  left: 0;
-  right: 0;
-  border-radius: var(--radius-lg);
-  box-shadow: 0 0 4px var(--cp-menu-shadow-color);
+.cp-nav :deep(.n-menu-item-content:hover) {
+  background: var(--cp-hover);
 }
-.cp-sider :deep(.n-menu .n-menu-item-content--selected::before) {
-  box-shadow: 0 0 4px var(--cp-menu-shadow-color), inset 0 0 0 2px var(--cp-brand);
+/* 选中：品牌淡底 + 左侧竖条。竖条画在 ::after 上——naive 占了 ::before 画状态底色，
+   不跟它抢那一层。 */
+.cp-nav :deep(.n-menu-item-content--selected) {
+  background: var(--cp-selected);
 }
-/* 选中竖条：图标从 16px 起，所以条放在 7px、宽 3px，中间留 6px 走道；
-   原来 12px 起、4px 宽会直接贴在图标左边，看着像多出来的一块色斑。 */
-.cp-sider :deep(.n-menu .n-menu-item-content--selected > .n-menu-item-content-header::before) {
+.cp-nav :deep(.n-menu-item-content--selected:hover) {
+  background: color-mix(in srgb, var(--cp-brand) 24%, transparent);
+}
+.cp-nav :deep(.n-menu-item-content--selected::after) {
   content: '';
   position: absolute;
-  left: 7px;
+  left: 6px;
   top: 50%;
   transform: translateY(-50%);
   width: 3px;
-  height: 16px;
+  height: 18px;
   border-radius: 2px;
   background: var(--cp-brand);
 }
-/* 折叠态下胶囊会挤成一条，去掉左右留白与竖条 */
-.cp-sider :deep(.n-menu--collapsed) { padding: 0; }
-.cp-sider :deep(.n-menu--collapsed .n-menu-item-content) { margin: 6px 0; }
-.cp-sider :deep(.n-menu--collapsed .n-menu-item-content::before) { box-shadow: none; }
-/* 分组标题（网站与服务 / 数据与备份 …）做成原型同款眉标：小号、字距、弱化色，
-   与选中态竖条+描边一起构成"分组标签 + 选中态"的清晰层级。
-   注意：侧栏分组是 naive-ui 的**可折叠子菜单**（.n-submenu），不是 MenuOptionGroup，
-   所以真正承载"分组名"的是 `.n-submenu > .n-menu-item > .n-menu-item-content`，
-   而 `.n-menu-item-group-title` 在这里根本不存在（写了也不生效）。
-   做法：把父项从"可点击的胶囊菜单项"降级为"分组标签"——去掉胶囊底色与阴影，
-   文字弱化；子项保持原样。层级靠"父弱子强"读出来，而不是靠额外的标题行。 */
-.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content) {
-  margin: 14px 0 2px;
-  background: transparent;
-  border-radius: 0;
-  height: auto;
-  min-height: 22px;
-  padding: 0 9px;
+/* 二级的竖条跟着二级缩进走（图标起点 34px，竖条退到图标左侧 9px） */
+.cp-nav :deep(.n-submenu-children .n-menu-item-content--selected::after) {
+  left: 25px;
 }
-/* 父项默认有 ::before 状态底色与胶囊阴影，分组标签不需要 hover 胶囊，只要一个更弱的反馈 */
-.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content::before) {
-  left: 0;
-  right: 0;
-  border-radius: var(--radius-lg);
-  box-shadow: none;
-  background: transparent;
+
+/* 一级：字号字重与缩进。naive 用 inline style 给 padding-left（一级 18px、
+   二级 36px），要自己定缩进就得 !important 盖掉它。 */
+.cp-nav :deep(.n-menu:not(.n-menu--collapsed) > .n-menu-item > .n-menu-item-content),
+.cp-nav :deep(.n-menu:not(.n-menu--collapsed) > .n-submenu > .n-menu-item > .n-menu-item-content) {
+  padding-left: 16px !important;
 }
-.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content:hover::before) {
-  background: var(--cp-hover);
+.cp-nav :deep(.n-menu:not(.n-menu--collapsed) .n-submenu-children > .n-menu-item > .n-menu-item-content) {
+  padding-left: 34px !important;
 }
-/* 分组名文字：小号、大写、字距、弱化色 */
-.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content .n-menu-item-content-header) {
-  font-size: 10.5px;
+/* 行高：一级 40px、二级 34px。naive 全部 42px，父子等高看着平；一级内容块的高度
+   由 .n-submenu > .n-menu-item-content 规则给（同样要盖掉），二级内容块另给。 */
+.cp-nav :deep(.n-menu > .n-menu-item),
+.cp-nav :deep(.n-menu > .n-submenu > .n-menu-item) {
+  height: 40px;
+}
+.cp-nav :deep(.n-menu > .n-submenu > .n-menu-item > .n-menu-item-content) {
+  height: 40px;
+}
+.cp-nav :deep(.n-submenu-children .n-menu-item) {
+  height: 34px;
+}
+.cp-nav :deep(.n-submenu-children .n-menu-item-content) {
+  height: 34px;
+}
+/* 组名是"章节"，与上一段留出呼吸空间 */
+.cp-nav :deep(.n-submenu) {
+  margin-top: 14px;
+}
+/* 折叠态：只剩图标，naive 自己居中，不要我们的一级/二级缩进插进来 */
+.cp-nav :deep(.n-menu--collapsed .n-menu-item-content) {
+  margin: 4px 0;
+}
+
+/* 文字：一级 14px/600，二级 13px/400 —— 层级只靠字重与字号拉开，
+   不再靠"弱化成眉标"（10.5px + uppercase 对中文毫无意义，还挤）。
+   也不加 letter-spacing：中文菜单里字距只会让字距不匀，不是"精致"。 */
+.cp-nav :deep(.n-menu-item-content-header) {
+  font-size: var(--fs-md);
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--cp-text-mute);
 }
-/* 分组图标跟着弱化，否则图标的高饱和度会把"标签"读成"按钮" */
-.cp-sider :deep(.n-menu .n-submenu > .n-menu-item > .n-menu-item-content .n-menu-item-content__icon) {
-  opacity: 0.55;
-  font-size: 15px;
-}
-/* 子项缩进稍深一点，明确"属于上面的分组" */
-.cp-sider :deep(.n-menu .n-submenu-children .n-menu-item-content) {
-  margin: 3px 0;
-}
-/* 折叠态（只剩图标）里分组父项没有横向空间展示"标签"，恢复 naive 默认的图标菜单项样式 */
-.cp-sider :deep(.n-menu--collapsed .n-submenu > .n-menu-item > .n-menu-item-content) {
-  margin: 6px 0;
-  height: 42px;
-  min-height: 42px;
-  padding: 0 18px 0 16px;
-  background: var(--cp-menu-item-bg);
-  border-radius: var(--radius-lg);
-}
-.cp-sider :deep(.n-menu--collapsed .n-submenu > .n-menu-item > .n-menu-item-content .n-menu-item-content-header),
-.cp-sider :deep(.n-menu--collapsed .n-submenu > .n-menu-item > .n-menu-item-content .n-menu-item-content__icon) {
-  font-size: inherit;
-  opacity: 1;
-  color: inherit;
-  letter-spacing: normal;
-  text-transform: none;
+.cp-nav :deep(.n-submenu-children .n-menu-item-content-header) {
+  font-size: var(--fs-sm);
+  font-weight: 400;
 }
 .logo {
   display: flex;
