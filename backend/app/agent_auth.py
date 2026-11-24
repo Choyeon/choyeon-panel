@@ -17,6 +17,9 @@ from . import database as dbm
 
 KEY_RE = re.compile(r"^cp_live_([a-f0-9]{16})\.([A-Za-z0-9_-]{32,})\Z")
 DEFAULT_SCOPES = ("system:read", "apps:read", "apps:write", "deploy:write")
+EXPIRY_DAYS_DEFAULT = 90
+EXPIRY_DAYS_MIN = 1
+EXPIRY_DAYS_MAX = 365
 ALL_SCOPES = frozenset(
     {
         "system:read",
@@ -38,9 +41,9 @@ def _hash_secret(secret: str) -> str:
 
 def _expiry(days: int | None) -> str | None:
     if days is None:
-        days = 90
-    if not isinstance(days, int) or days < 1 or days > 365:
-        raise ValueError("有效期必须是 1-365 天")
+        days = EXPIRY_DAYS_DEFAULT
+    if not isinstance(days, int) or days < EXPIRY_DAYS_MIN or days > EXPIRY_DAYS_MAX:
+        raise ValueError(f"有效期必须是 {EXPIRY_DAYS_MIN}-{EXPIRY_DAYS_MAX} 天")
     return (datetime.now(UTC) + timedelta(days=days)).replace(microsecond=0).isoformat()
 
 

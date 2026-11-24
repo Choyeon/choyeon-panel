@@ -91,12 +91,14 @@ const probeList = ref<{ name: string; expect: string }[]>([]);
 const probeDraft = ref({ name: '', expect: '' });
 const agentKeys = ref<any[]>([]);
 const agentScopes = ref<string[]>([]);
+const defaultAgentScopes = ref<string[]>([]);
+const expiryDays = ref({ default: 0, min: 0, max: 0 });
 const agentKeyError = ref('');
 const agentKeyOpen = ref(false);
 const agentKeyBusy = ref(false);
-const agentKeyDraft = ref({ name: '', scopes: ['system:read', 'apps:read', 'apps:write', 'deploy:write'], expires_days: 90 });
+const agentKeyDraft = ref({ name: '', scopes: [] as string[], expires_days: 0 });
 const newlyCreatedKey = ref('');
-const scopeOptions = [
+const allScopeOptions = [
   { label: '系统读取', value: 'system:read' },
   { label: '应用读取', value: 'apps:read' },
   { label: '应用写入', value: 'apps:write' },
@@ -106,6 +108,7 @@ const scopeOptions = [
   { label: '备份执行', value: 'backups:write' },
   { label: '审计读取', value: 'audit:read' },
 ];
+const scopeOptions = computed(() => allScopeOptions.filter((opt) => agentScopes.value.includes(opt.value)));
 
 watch(alerts, (v) => {
   // 空值在服务端就是「没有覆写」（_app_expectation 用 `or` 回落全局期望），
@@ -164,6 +167,10 @@ async function load() {
     if (isAdmin.value) await grab(() => api.agentKeys(), (v) => {
       agentKeys.value = v.items || [];
       agentScopes.value = v.available_scopes || [];
+      defaultAgentScopes.value = v.default_scopes || [];
+      expiryDays.value = v.expiry_days || { default: 0, min: 0, max: 0 };
+      if (!agentKeyDraft.value.expires_days) agentKeyDraft.value.expires_days = expiryDays.value.default;
+      if (!agentKeyDraft.value.scopes.length) agentKeyDraft.value.scopes = [...defaultAgentScopes.value];
     }, agentKeyError);
   } finally {
     pageLoading.value = false;
@@ -172,7 +179,11 @@ async function load() {
 
 function openAgentKey() {
   newlyCreatedKey.value = '';
-  agentKeyDraft.value = { name: '', scopes: ['system:read', 'apps:read', 'apps:write', 'deploy:write'], expires_days: 90 };
+  agentKeyDraft.value = {
+    name: '',
+    scopes: [...defaultAgentScopes.value],
+    expires_days: expiryDays.value.default,
+  };
   agentKeyOpen.value = true;
 }
 
@@ -184,7 +195,8 @@ async function createAgentKey() {
   try {
     const r = await api.createAgentKey({ ...agentKeyDraft.value, name: agentKeyDraft.value.name.trim() });
     newlyCreatedKey.value = r.token || '';
-    agentKeys.value = [r, ...agentKeys.value];
+    const { token: _token, ...safeKey } = r;
+    agentKeys.value = [safeKey, ...agentKeys.value];
     msg.success('API Key 已创建；完整密钥只显示这一次');
   } catch (e: any) {
     msg.error(e.message);
@@ -628,7 +640,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <div v-for="row in agentKeys" :key="row.id" class="agent-key-row">
             <div class="agent-key-main">
               <NText strong>{{ row.name }}</NText>
-              <NText depth="3" class="mono-dim">cp_live_{{ row.public_id }} · {{ row.active ? '有效' : '已撤销/过期' }}</NText>
+              <NText depth="3" class="mono-dim cp-break">cp_live_{{ row.public_id }} · {{ row.active ? '有效' : '已撤销/过期' }}</NText>
               <NText depth="3" class="cp-break">{{ (row.scopes || []).join(' · ') }} · 到期 {{ row.expires_at || '无' }}</NText>
             </div>
             <NPopconfirm v-if="row.active" @positive-click="revokeAgentKey(row)">
@@ -814,12 +826,23 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </template>
       </NDrawerContent>
     </NDrawer>
-    <NDrawer v-model:show="agentKeyOpen" :width="peDrawerW">
+    <NDrawer
+      v-model:show="agentKeyOpen"
+      :width="peDrawerW"
+      @update:show="(show: boolean) => { if (!show) newlyCreatedKey = ''; }"
+    >
       <NDrawerContent title="创建智能体 API Key" closable>
         <NForm label-placement="top" size="small">
           <NFormItem label="名称"><NInput v-model:value="agentKeyDraft.name" placeholder="例如 deploy-bot" maxlength="64" /></NFormItem>
-          <NFormItem label="权限域"><NSelect v-model:value="agentKeyDraft.scopes" multiple :options="scopeOptions" :max-tag-count="isMobile ? 1 : 4" /></NFormItem>
-          <NFormItem label="有效期（天）"><NInputNumber v-model:value="agentKeyDraft.expires_days" :min="1" :max="365" style="width: 140px" /></NFormItem>
+          <NFormItem label="权限域"><NSelect v-model:value="agentKeyDraft.scopes" multiple :options="scopeOptions" :max-tag-count="isMobile ? 1 : 4" :disabled="!agentScopes.length" /></NFormItem>
+          <NFormItem label="有效期（天）">
+            <NInputNumber
+              v-model:value="agentKeyDraft.expires_days"
+              :min="expiryDays.min"
+              :max="expiryDays.max"
+              style="width: 140px; max-width: 100%"
+            />
+          </NFormItem>
           <NAlert v-if="newlyCreatedKey" type="warning" :show-icon="false">
             <div>完整密钥只显示一次，请立即复制并保存到智能体的密钥管理器。</div>
             <div class="agent-token">{{ newlyCreatedKey }}</div>
@@ -829,7 +852,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         <template #footer>
           <NSpace justify="end" :size="8">
             <NButton size="small" @click="agentKeyOpen = false">关闭</NButton>
-            <NButton v-if="!newlyCreatedKey" size="small" type="primary" :loading="agentKeyBusy" :disabled="agentKeyBusy" @click="createAgentKey">创建</NButton>
+            <NButton v-if="!newlyCreatedKey" size="small" type="primary" :loading="agentKeyBusy" :disabled="agentKeyBusy || !expiryDays.max || !agentScopes.length" @click="createAgentKey">创建</NButton>
           </NSpace>
         </template>
       </NDrawerContent>

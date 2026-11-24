@@ -357,7 +357,16 @@ async def ssl_renew(app_id: int, req: Request):
 async def agent_keys_list(req: Request):
     if req.state.cp_role != "admin":
         return JSONResponse(status_code=403, content={"error": "需要管理员权限", "code": "forbidden"})
-    return {"items": agent_auth.list_keys(), "available_scopes": sorted(agent_auth.ALL_SCOPES)}
+    return {
+        "items": agent_auth.list_keys(),
+        "available_scopes": sorted(agent_auth.ALL_SCOPES),
+        "default_scopes": list(agent_auth.DEFAULT_SCOPES),
+        "expiry_days": {
+            "default": agent_auth.EXPIRY_DAYS_DEFAULT,
+            "min": agent_auth.EXPIRY_DAYS_MIN,
+            "max": agent_auth.EXPIRY_DAYS_MAX,
+        },
+    }
 
 
 @router.post("/api/agent-keys")
