@@ -631,7 +631,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <NButton v-else round size="small" tertiary type="warning" :icon="ico('ShieldOutline')" @click="openTwofa('disable')">关闭</NButton>
         </div>
         <span class="cp-help">
-          登录时需要口令和验证器动态码。开启/关闭需重新验证口令；关闭还需当前动态码。变更会使其他会话失效，绑定密钥只在流程中显示一次。
+          登录时需要口令和验证器动态码。开启/关闭需重新验证口令；关闭还需当前动态码。第二因子一换会使其他会话失效，绑定密钥只在流程中显示一次。
         </span>
         <NSpace vertical :size="8" style="margin-top: var(--space-3)">
           <NText v-if="twofa?.enabled" depth="3" style="font-size: var(--fs-xs)">
