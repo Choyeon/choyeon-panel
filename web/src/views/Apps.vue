@@ -476,10 +476,7 @@ onMounted(() => {
 
     <!-- 1Panel 把长说明从标题里挪到表头上方的 info alert，并在尾部给一个快捷跳转 -->
     <NAlert type="info" :bordered="false" class="apps-prompt">
-      <div class="apps-prompt-row">
-        <span>部署、启停、日志与域名反代集中在此管理；前后端分离项目会合并为一个条目展示，各组件仍可独立操作。</span>
-        <NButton text type="primary" size="small" :icon="ico('ArrowForwardOutline')" @click="router.push('/sites')">网站与证书</NButton>
-      </div>
+      部署、启停、日志与域名反代集中在此管理；前后端分离项目会合并为一个条目展示，各组件仍可独立操作。
     </NAlert>
 
     <CpToolbarCard>
@@ -646,7 +643,6 @@ onMounted(() => {
 <style scoped>
 /* 顶部提示与下方内容卡之间是 1Panel 的 common-prompt 间距 */
 .apps-prompt { margin-bottom: var(--space-5); }
-.apps-prompt-row { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; }
 /* 说明 alert 和工具行都排在表格之外，把它们占掉的像素补进 --table-h 的扣减项（1Panel 的 heightDiff 语义）；
    带 .cp-tbl 前缀是为了盖过 style.css 里 .tbl-apps 的 0px，不改共享文件。 */
 .cp-tbl.tbl-apps { --chrome-extra: 140px; }

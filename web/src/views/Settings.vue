@@ -1,23 +1,24 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
-  NSpace, useMessage, NInput, NForm, NFormItem,
+  NSpace, useMessage, NInput, NForm, NFormItem, NIcon,
   NInputNumber, NSwitch, NDrawer, NDrawerContent, NText, NAlert, NSelect, NPopconfirm,
 } from 'naive-ui';
-import { useRoute, useRouter } from 'vue-router';
 import { NButton, uncheckedNote, useDrawerWidth } from '../ui';
 import { api, getRole, getUsername, saveLoginData } from '../api';
-import { icon } from '../icons';
+import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
-import PageTabBar from '../components/PageTabBar.vue';
 import CpToolbarCard from '../components/CpToolbarCard.vue';
 import CpSettingRow from '../components/CpSettingRow.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
 const msg = useMessage();
-const route = useRoute();
-const router = useRouter();
 const isAdmin = computed(() => getRole() === 'admin');
+const settingsSubtitle = computed(() => isAdmin.value
+  ? '账号安全、告警、访问边界与证书维护'
+  : '管理本账号的登录安全设置');
+type SettingsSection = 'security' | 'alerts' | 'access' | 'certificates';
+const activeSection = ref<SettingsSection>('security');
 const renewing = ref(false);
 const renewLog = ref('');
 const renewSummary = ref('');
@@ -125,10 +126,16 @@ const mq = window.matchMedia('(max-width: 640px)');
 const isMobile = ref(mq.matches);
 const onMq = (e: MediaQueryListEvent) => { isMobile.value = e.matches; };
 
-const navTabs = computed(() => {
-  const t = [{ key: '/settings', label: '系统设置' }];
-  if (isAdmin.value) t.push({ key: '/users', label: '用户管理' }, { key: '/audit', label: '操作审计' }, { key: '/logs', label: '面板日志' });
-  return t;
+const settingsSections = computed(() => [
+  { key: 'security' as const, label: '账号安全', icon: icons.ShieldCheckmarkOutline },
+  ...(isAdmin.value ? [
+    { key: 'alerts' as const, label: '告警', icon: icons.AlertCircleOutline },
+    { key: 'access' as const, label: '访问边界', icon: icons.GlobeOutline },
+    { key: 'certificates' as const, label: '证书', icon: icons.ShieldOutline },
+  ] : []),
+]);
+watch(isAdmin, (admin) => {
+  if (!admin) activeSection.value = 'security';
 });
 
 // 敏感值只显示前 4 位，完整值只能在抽屉里看/改
@@ -588,16 +595,28 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 
 <template>
   <div>
-    <PageHeader title="系统设置" sub="本账号两步验证、告警通道、防火墙状态与证书维护；用户与审计已升级为独立页面">
+    <PageHeader title="系统设置" :sub="settingsSubtitle">
       <template #actions>
         <NButton size="small" tertiary :icon="ico('RefreshOutline')" :loading="pageLoading" :disabled="pageLoading" @click="load">刷新</NButton>
       </template>
     </PageHeader>
 
-    <PageTabBar :tabs="navTabs" :value="route.path" @update="(k: string) => router.push(k)" />
+    <div v-if="isAdmin" class="settings-nav cp-seg" role="group" aria-label="设置分类">
+      <button
+        v-for="item in settingsSections"
+        :key="item.key"
+        type="button"
+        :aria-pressed="activeSection === item.key"
+        :class="{ active: activeSection === item.key }"
+        @click="activeSection = item.key"
+      >
+        <NIcon :component="item.icon" :size="15" />
+        <span>{{ item.label }}</span>
+      </button>
+    </div>
 
     <CpToolbarCard class="cp-card-gap">
-      <section>
+      <section v-if="activeSection === 'security'">
         <div class="sec-head">
           <h2 class="sec-title">两步验证</h2>
           <NButton
@@ -612,29 +631,26 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <NButton v-else round size="small" tertiary type="warning" :icon="ico('ShieldOutline')" @click="openTwofa('disable')">关闭</NButton>
         </div>
         <span class="cp-help">
-          给这个账号加一枚登录动态口令：口令正确之后，还要验证器 App（Google Authenticator、Microsoft Authenticator、FreeOTP 都能扫）里当时那一串。
-          开启与关闭都要再输一次本账号口令，关闭还要一枚当前有效的动态口令——只攥着一枚偷来的令牌的人不该能顺手把主人的第二因子关掉。
-          第二因子一换（不论方向），这个账号已经签发的会话全部作废：本浏览器由服务端换发新令牌继续用，其它设备要重新登录一次——
-          在别的机器上偷到的那一张旧票不能因为「登录规则变了」还照着旧规则用。
-          密钥在服务端只有 totp_secret 这一列，任何页面与审计都不会再回显它；生成一次就要当场扫完，关掉这个抽屉密钥即失效。
-          管理员在「用户管理」页只看得到有没有开、不能替别人关：验证器丢了，请由 root 在服务器上执行
-          <span class="mono-dim cp-break">choyeonctl user 2fa-disable &lt;用户名&gt; --yes</span>，它同样会吊销该账号的全部会话。
+          登录时需要口令和验证器动态码。开启/关闭需重新验证口令；关闭还需当前动态码。变更会使其他会话失效，绑定密钥只在流程中显示一次。
         </span>
         <NSpace vertical :size="8" style="margin-top: var(--space-3)">
           <NText v-if="twofa?.enabled" depth="3" style="font-size: var(--fs-xs)">
             已开启：签发方 {{ twofa.issuer }}，每 {{ twofa.period }} 秒换一枚 {{ twofa.digits }} 位口令。
           </NText>
           <NText v-else depth="3" style="font-size: var(--fs-xs)">未开启：这个账号目前只要口令正确就能登录。</NText>
+          <NText depth="3" class="recovery-hint">
+            验证器丢失时，root 可执行 <span class="mono-dim cp-break">choyeonctl user 2fa-disable &lt;用户名&gt; --yes</span>，并吊销该账号所有会话。
+          </NText>
         </NSpace>
       </section>
 
-      <div v-if="isAdmin" class="cp-divider"></div>
-      <section v-if="isAdmin">
+      <div v-if="isAdmin && activeSection === 'security'" class="cp-divider"></div>
+      <section v-if="isAdmin && activeSection === 'security'">
         <div class="sec-head">
           <h2 class="sec-title">智能体 API</h2>
           <NButton round size="small" type="primary" tertiary :icon="ico('KeyOutline')" @click="openAgentKey">创建 API Key</NButton>
         </div>
-        <span class="cp-help">给自动化工具使用的长期凭证。密钥只在创建时显示一次；按权限域限制能力，撤销后立即失效。部署、回滚、备份和证书操作会返回 operation_id，供智能体轮询。</span>
+        <span class="cp-help">按权限域创建可过期、可撤销的凭证。完整密钥只显示一次；撤销后立即失效。</span>
         <NAlert v-if="agentKeyError" type="error" :show-icon="false" style="margin-top: var(--space-3)" :title="agentKeyError">API Key 列表读取失败，点上方刷新重试。</NAlert>
         <NSpace v-else-if="agentKeys.length" vertical :size="8" style="margin-top: var(--space-3)">
           <div v-for="row in agentKeys" :key="row.id" class="agent-key-row">
@@ -652,8 +668,8 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         <EmptyBox v-else text="还没有智能体 API Key" hint="创建后把密钥保存到智能体的安全凭证存储，不要写入仓库或日志。" />
       </section>
 
-      <div v-if="isAdmin" class="cp-divider"></div>
-      <section v-if="isAdmin">
+      <div v-if="isAdmin && activeSection === 'alerts'" class="cp-divider"></div>
+      <section v-if="isAdmin && activeSection === 'alerts'">
         <div class="sec-head">
           <h2 class="sec-title">告警通知</h2>
           <NSpace :size="8">
@@ -661,7 +677,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
             <NButton round size="small" tertiary :icon="ico('CloudUploadOutline')" :loading="testing" :disabled="testing" @click="testAlert">发送测试通知</NButton>
           </NSpace>
         </div>
-        <span class="cp-help">每 30 分钟自动巡检：磁盘、CPU、内存、负载、服务 failed、SSL 剩余天数，以及逐个应用的 HTTP 探活（只连 127.0.0.1 的端口，看它有没有应答）。触发后经 Telegram Bot、通用 Webhook 或邮件（SMTP）推送，同类告警每天最多一次；资源类阈值要连续两轮超标才推送，历史里当轮就留痕。</span>
+        <span class="cp-help">每 30 分钟检查系统资源、服务、证书和应用探活；达到条件后通过 Telegram、Webhook 或邮件通知。历史会保留每轮结果。</span>
         <!-- 阈值区间跟 /api/settings/alerts 的 limits 一起下发；这一轮没读到时下面八个数字框
              既没有值也没有可填区间（lim() 只能回退成 0..0），步进器点了不动。不说清楚，
              看起来像"这个页面坏了"或"这些阈值就是 0"。 -->
@@ -669,7 +685,8 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           告警配置这一轮没读到，下面的阈值区间是空的、暂时改不了。刷新这一页或等后端恢复后再来；
           这期间巡检仍然按服务端的默认阈值跑，不会因为页面显示不出来就不告警。
         </NAlert>
-        <NForm class="cp-set-form" size="small" :label-width="isMobile ? undefined : 150" :label-placement="isMobile ? 'top' : 'left'" style="margin-top: var(--space-3)">
+        <NForm class="cp-set-form alerts-form" size="small" :label-width="isMobile ? undefined : 142" :label-placement="isMobile ? undefined : 'left'" style="margin-top: var(--space-3)">
+          <div class="alert-subheading">通知通道</div>
           <CpSettingRow label="Telegram Bot Token" :value="mask(alerts.alert_telegram_bot)" @edit="openChan('alert_telegram_bot')" />
           <CpSettingRow label="Telegram Chat ID" :value="mask(alerts.alert_telegram_chat)" @edit="openChan('alert_telegram_chat')" />
           <CpSettingRow label="通用 Webhook URL" :value="mask(alerts.alert_webhook_url)" @edit="openChan('alert_webhook_url')" />
@@ -683,6 +700,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <CpSettingRow label="收件人" :value="chanText('alert_email_to')" @edit="openChan('alert_email_to')" />
           <CpSettingRow label="SMTP 用户名" :value="chanText('alert_email_user')" @edit="openChan('alert_email_user')" />
           <CpSettingRow label="SMTP 口令" :value="chanText('alert_email_pass')" @edit="openChan('alert_email_pass')" />
+          <div class="alert-subheading">告警阈值与探活</div>
           <CpSettingRow label="磁盘阈值 %" :help="critHint('alert_disk_pct')">
             <template #control>
               <NInputNumber :value="alerts.alert_disk_pct" :min="lim('alert_disk_pct').min" :max="lim('alert_disk_pct').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
@@ -728,7 +746,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
               <NInputNumber :value="alerts.alert_keep_rows" :min="lim('alert_keep_rows').min" :max="lim('alert_keep_rows').max" :step="100" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '告警历史最多保留行数' }" @update:value="commitNum('alert_keep_rows', $event)" />
             </template>
           </CpSettingRow>
-          <CpSettingRow label="按应用覆写期望状态码" help="探活只看端口是否应答：连不上或超时才算 crit，4xx/5xx 说明进程还在。覆写值留空即回落到上面的全局期望。">
+          <CpSettingRow class="alert-probes-row" label="按应用覆写期望状态码" help="探活只看端口是否应答：连不上或超时才算 crit，4xx/5xx 说明进程还在。覆写值留空即回落到上面的全局期望。">
             <template #control>
               <NSpace vertical :size="6" style="width: 100%">
                 <NSpace v-for="row in probeList" :key="row.name" align="center" :size="8">
@@ -749,13 +767,13 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </NForm>
       </section>
 
-      <div v-if="isAdmin" class="cp-divider"></div>
-      <section v-if="isAdmin">
+      <div v-if="isAdmin && activeSection === 'access'" class="cp-divider"></div>
+      <section v-if="isAdmin && activeSection === 'access'">
         <div class="sec-head">
           <h2 class="sec-title">防火墙</h2>
           <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? `${fw.tool === 'firewalld' ? 'firewalld' : fw.tool === 'ufw' ? 'ufw' : '未检测到'} ${fw.active ? '已启用' : '未启用'}` : fwError ? '状态没读到' : '检测中…' }}</span>
         </div>
-        <span class="cp-help">规则的增删与启停在侧栏「运维工具 → 防火墙」页做，这里只留状态摘要，避免两个入口改同一份配置。那一页会拒绝删掉 SSH、面板入口与你当前访问所用端口的唯一放行来源，所以不必担心一次误删把自己关在门外。</span>
+        <span class="cp-help">防火墙规则与启停状态在独立的「防火墙」页面管理；此处仅显示后端检测结果。</span>
         <NSpace vertical :size="12" style="margin-top: var(--space-3)">
           <div v-if="fw?.output" class="log-view" style="max-height: 220px">{{ fw.output }}</div>
           <!-- 摘要读不到时这里不能空着：空着和「还没读到」长得一样，而这一页只给摘要，
@@ -765,14 +783,14 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </NSpace>
       </section>
 
-      <div v-if="isAdmin" class="cp-divider"></div>
-      <section v-if="isAdmin">
+      <div v-if="isAdmin && activeSection === 'access'" class="cp-divider"></div>
+      <section v-if="isAdmin && activeSection === 'access'">
         <div class="sec-head">
           <h2 class="sec-title">面板入口</h2>
           <span class="st" :class="peTone"><span class="dot" :class="peTone"></span>{{ peStateText }}</span>
           <NButton round size="small" tertiary type="primary" :icon="ico('GlobeOutline')" :disabled="!canChangePe" @click="openPe">更换域名</NButton>
         </div>
-        <span class="cp-help">这里只改面板入口那份配置里的 server_name、证书路径与 certbot 的 $host 判断，listen / proxy_pass / 手工 location 一个字都不动。写入前先 nginx -t，写入后 reload 并做一次回环 HTTPS 复核（连证书链一起校），任何一步不过就整份放回去再 reload。面板不替你签发证书：新域名要先签好；复核绕过 DNS，切换前请确认它的公网解析已经指向本机，否则你会从公网失去入口。</span>
+        <span class="cp-help">只更新面板入口的域名与证书引用，不改监听和反代目标。变更会先校验配置、热加载并回环复核；新域名须已有证书且已解析到本机。</span>
         <NSpace vertical :size="12" style="margin-top: var(--space-3)">
           <EmptyBox v-if="panelEntryError" text="面板入口这一轮没读到" :hint="panelEntryError" />
           <NAlert v-else-if="panelEntry?.unreadable" type="warning" :bordered="false" size="small">{{ panelEntry.reason }}</NAlert>
@@ -791,13 +809,13 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </NSpace>
       </section>
 
-      <div v-if="isAdmin" class="cp-divider"></div>
-      <section v-if="isAdmin">
+      <div v-if="isAdmin && activeSection === 'certificates'" class="cp-divider"></div>
+      <section v-if="isAdmin && activeSection === 'certificates'">
         <div class="sec-head">
           <h2 class="sec-title">证书维护</h2>
           <NButton round size="small" tertiary type="primary" :loading="renewing" :disabled="renewing" :icon="ico('SyncOutline')" @click="renew">立即续期</NButton>
         </div>
-        <span class="cp-help">certbot renew 检查所有已安装证书并自动续期。是否真的有人定时跑它，看安全自检页的「证书续期」一项（它会去查 certbot.timer 与 crontab，查不到就如实标 warn）；这里只用于手动触发验证。</span>
+        <span class="cp-help">手动运行 certbot renew 并核对证书是否实际更新；自动续期状态见安全自检。</span>
         <NSpace vertical :size="12" style="margin-top: var(--space-3)">
           <NText v-if="renewSummary" depth="3" style="font-size: var(--fs-xs)">{{ renewSummary }}</NText>
           <div v-if="renewLog" class="log-view" style="max-height: 220px">{{ renewLog }}</div>
@@ -965,5 +983,21 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 .agent-key-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--cp-border); border-radius: var(--radius-md); background: var(--cp-bg-soft); }
 .agent-key-main { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .agent-token { margin: var(--space-2) 0; padding: var(--space-2); border-radius: var(--radius-sm); background: var(--cp-bg-soft); color: var(--cp-text-strong); font-family: var(--font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; user-select: all; }
-@media (max-width: 640px) { .agent-key-row { align-items: flex-start; } }
+.settings-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: fit-content; max-width: 100%; margin: 0 0 var(--space-3); }
+.settings-nav > button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-width: 112px; min-height: 36px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--cp-text-dim); font: inherit; font-size: var(--fs-xs); cursor: pointer; }
+.settings-nav > button[aria-pressed="true"] { background: var(--cp-elevated); color: var(--cp-brand); box-shadow: 0 1px 3px color-mix(in srgb, var(--cp-text) 10%, transparent); font-weight: 600; }
+.settings-nav > button:focus-visible { outline: 2px solid var(--cp-brand); outline-offset: 2px; }
+.settings-nav > button:hover:not([aria-pressed="true"]) { color: var(--cp-text); background: color-mix(in srgb, var(--cp-text) 5%, transparent); }
+.alerts-form { width: 100%; max-width: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-5); }
+.alert-subheading { grid-column: 1 / -1; padding: var(--space-2) 0 var(--space-1); border-bottom: 1px solid var(--cp-border); color: var(--cp-text-mute); font-size: var(--fs-2xs); font-weight: 600; }
+.alerts-form :deep(.alert-probes-row) { grid-column: 1 / -1; }
+@media (max-width: 640px) {
+  .agent-key-row { align-items: flex-start; }
+  .settings-nav { display: flex; width: 100%; }
+  .settings-nav > button { flex: 1 1 0; min-width: 0; padding-inline: var(--space-2); }
+}
+@media (max-width: 900px) {
+  .alerts-form { grid-template-columns: minmax(0, 1fr); }
+  .alert-subheading, .alerts-form :deep(.alert-probes-row) { grid-column: auto; }
+}
 </style>

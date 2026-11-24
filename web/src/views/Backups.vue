@@ -870,7 +870,6 @@ function confirmDeleteTarget(r: any) {
     <CpToolbarCard title="备份">
       <template #left>
         <NButton v-if="isAdmin" size="small" type="primary" :icon="icon('AddOutline', 14)" @click="openCreate">新建备份任务</NButton>
-        <NButton size="small" tertiary :icon="icon('FolderOpenOutline', 14)" @click="router.push('/backups/files')">备份文件</NButton>
       </template>
       <template #right>
         <NSelect v-model:value="autoSec" :options="AUTO_OPTS" size="small" style="width: 130px; max-width: 100%" aria-label="自动刷新间隔" />
