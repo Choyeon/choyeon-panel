@@ -259,16 +259,17 @@ jobs:
           grep -q "^ExecStart=$ROOT/repo/backend/\.venv/bin/python" "$UNIT_OUT"
           # verify 的退出码不够用：2026-10-20 在生产机上实测，MemoryMax=512Q 与
           # Restart=maybe 都只打印一句"ignoring"然后退 0——写错的 cgroup 上限照样"通过"。
-          # 所以任何输出都算失败，只放行 runner 的 systemd 版本比生产旧造成的 Unknown key
-          # （那不是 unit 的错，是 runner 的）。
+          # 所以任何输出都算失败，只放行 runner 自带的已知兼容性提示：版本差异造成的
+          # Unknown key，以及 GitHub runner 预装 unit 使用已移除的 CPUAccounting= 选项。
+          # 这两类提示来自 /usr/lib/systemd/system 的外部 unit，不是本项目渲染的 unit。
           RC=0
           OUT="$(systemd-analyze verify "$UNIT_OUT" 2>&1)" || RC=$?
           if [ -n "$OUT" ]; then
             printf '%s\n' "$OUT"
-            if printf '%s\n' "$OUT" | grep -qiv "Unknown key"; then
+            if printf '%s\n' "$OUT" | grep -qivE "Unknown key|Support for option CPUAccounting= has been removed and it is ignored"; then
               echo "::error ::unit 校验有告警以上输出（见上），修好再合"
               exit 1
             fi
-            echo "只有版本差异造成的 Unknown key，按通过处理"
+            echo "只有 runner 已知兼容性提示，按通过处理"
           fi
           [ "$RC" -eq 0 ] || { echo "::error ::systemd-analyze verify 退 $RC"; exit "$RC"; }

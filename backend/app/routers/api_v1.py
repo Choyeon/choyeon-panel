@@ -54,35 +54,18 @@ def _operation_view(row: dict | None) -> dict:
     }
 
 
-def _create_operation(kind: str, resource_type: str, resource_id: str, actor: str) -> str:
-    op_id = agent_auth.operation_id()
-    dbm.execute(
-        "INSERT INTO operations(id,kind,resource_type,resource_id,actor) VALUES(?,?,?,?,?)",
-        (op_id, kind, resource_type, resource_id, actor),
-    )
-    return op_id
-
-
-def _claim_idempotency(req: Request, op_id: str) -> dict | None:
-    key = req.headers.get("Idempotency-Key", "").strip()
-    if not key:
-        return None
-    if len(key) > 128:
-        raise ValueError("Idempotency-Key 不能超过 128 个字符")
-    principal = agent_auth.actor(req)
-    route = req.url.path
-    row = dbm.query_one(
-        "SELECT response,status_code FROM idempotency_keys WHERE principal=? AND route=? AND idem_key=?",
-        (principal, route, key),
-    )
-    if row:
-        return {"replayed": True, **json.loads(row["response"]), "status_code": row["status_code"]}
-    payload = json.dumps({"operation_id": op_id, "status": "queued"}, ensure_ascii=False)
-    dbm.execute(
-        "INSERT INTO idempotency_keys(principal,route,idem_key,operation_id,response) VALUES(?,?,?,?,?)",
-        (principal, route, key, op_id, payload),
-    )
-    return {"replayed": False, "operation_id": op_id, "status": "queued", "status_code": 202}
+def _clean_result(value):
+    if isinstance(value, dict):
+        return {
+            str(k): _clean_result(v)
+            for k, v in value.items()
+            if str(k).lower() not in {"password", "secret", "secret_key", "token", "env"}
+        }
+    if isinstance(value, list):
+        return [_clean_result(v) for v in value]
+    if isinstance(value, str):
+        return redact_creds(value)
+    return value
 
 
 def _new_operation(req: Request, kind: str, resource_type: str, resource_id: str) -> dict:
@@ -129,7 +112,7 @@ async def _run_operation(op_id: str, work):
     )
     dbm.execute("UPDATE operations SET status='running',updated_at=? WHERE id=?", (_now(), op_id))
     try:
-        result = await work()
+        result = _clean_result(await work())
         dbm.execute(
             "UPDATE operations SET status='succeeded',result=?,updated_at=?,finished_at=? WHERE id=?",
             (json.dumps(result or {}, ensure_ascii=False), _now(), _now(), op_id),
@@ -145,7 +128,11 @@ async def _run_operation(op_id: str, work):
         )
         dbm.execute(
             "INSERT INTO operation_events(operation_id,event,data) VALUES(?,?,?)",
-            (op_id, "failed", json.dumps({"error": str(exc)[:500]}, ensure_ascii=False)),
+            (
+                op_id,
+                "failed",
+                json.dumps({"error": redact_creds(public_message(exc, fallback="操作失败"))[:500]}, ensure_ascii=False),
+            ),
         )
 
 
@@ -291,17 +278,40 @@ async def operation_events(operation_id: str, req: Request, after: int = 0):
 async def app_create(req: Request):
     if r := _deny(req, "apps:write"):
         return r
+    key = req.headers.get("Idempotency-Key", "").strip()
+    if key and len(key) > 128:
+        return JSONResponse(
+            status_code=400, content={"error": "Idempotency-Key 不能超过 128 个字符", "code": "bad_input"}
+        )
+    principal = agent_auth.actor(req)
+    route = req.url.path
     try:
         body = await req.json()
         if not isinstance(body, dict):
             raise ValueError("请求体必须是 JSON 对象")
-        app = apps_service.create_app(apply_template(body))
-        dbm.audit(agent_auth.actor(req), "api-v1:app:create", app["name"])
-        app.pop("env", None)
-        app.pop("start_cmd", None)
-        app.pop("install_cmd", None)
-        app["repo_url"] = redact_creds(app.get("repo_url"))
-        return JSONResponse(status_code=201, content={"app": app})
+        with dbm._lock:
+            if key:
+                existing = dbm.conn.execute(
+                    "SELECT response,status_code FROM idempotency_keys WHERE principal=? AND route=? AND idem_key=?",
+                    (principal, route, key),
+                ).fetchone()
+                if existing:
+                    return JSONResponse(status_code=existing["status_code"], content=json.loads(existing["response"]))
+            app = apps_service.create_app(apply_template(body))
+            dbm.audit(principal, "api-v1:app:create", app["name"])
+            app.pop("env", None)
+            app.pop("start_cmd", None)
+            app.pop("install_cmd", None)
+            app["repo_url"] = redact_creds(app.get("repo_url"))
+            response = {"app": app}
+            if key:
+                dbm.conn.execute(
+                    "INSERT INTO idempotency_keys(principal,route,idem_key,operation_id,response,status_code) "
+                    "VALUES(?,?,?,?,?,201)",
+                    (principal, route, key, f"resource:{app['id']}", json.dumps(response, ensure_ascii=False)),
+                )
+                dbm.conn.commit()
+            return JSONResponse(status_code=201, content=response)
     except Exception as exc:  # noqa: BLE001
         return err_json(exc)
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 SESSION_DIR = tempfile.mkdtemp(prefix="cp_agent_api_")
-os.environ["CP_DATA_DIR"] = SESSION_DIR
+os.environ.setdefault("CP_DATA_DIR", SESSION_DIR)
 
 from app import agent_auth  # noqa: E402
 from app import database as dbm  # noqa: E402
