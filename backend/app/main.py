@@ -18,6 +18,7 @@ from .deps import AuthMiddleware, BodyCapMiddleware
 from .log import warn
 from .routers import (
     alerts,
+    api_v1,
     apps,
     backups,
     cron,
@@ -44,6 +45,10 @@ async def lifespan(_app: FastAPI):
     # 上次进程退出可能留下 running 状态的部署记录，标记为失败避免前端一直转圈
     try:
         dbm.execute("UPDATE deployments SET status='failed', finished_at=datetime('now') WHERE status='running'")
+        dbm.execute(
+            "UPDATE operations SET status='failed',error='面板重启时操作中断',updated_at=datetime('now'),"
+            "finished_at=datetime('now') WHERE status IN ('queued','running')"
+        )
     except Exception as e:  # noqa: BLE001
         warn("reset running deployments failed:", e)
 
@@ -140,7 +145,7 @@ async def auth_status():
     return {"needsSetup": not dbm.query_one("SELECT 1 FROM users LIMIT 1")}
 
 
-def _user_token(username: str, role: str, nickname: str = '', avatar: str = '') -> dict:
+def _user_token(username: str, role: str, nickname: str = "", avatar: str = "") -> dict:
     return {
         "token": security.sign_token(username, role),
         "role": role,
@@ -157,8 +162,10 @@ async def setup(req: Request):
     if not _setup_peer_allowed(req):
         return JSONResponse(
             status_code=403,
-            content={"error": "首次创建管理员只能从本机发起；请在服务器上执行 choyeonctl user create，"
-                              "或设置 CP_SETUP_ALLOW_REMOTE=1 后重试"},
+            content={
+                "error": "首次创建管理员只能从本机发起；请在服务器上执行 choyeonctl user create，"
+                "或设置 CP_SETUP_ALLOW_REMOTE=1 后重试"
+            },
         )
     ip = client_ip(req)
     # 与登录分开计桶：初始化时用户名/密码写错几次是常事，共用 IP 桶会把
@@ -254,8 +261,11 @@ async def login(req: Request):
                 # digits/period 一起下发：登录页输入框的位数与"多少秒换一枚"的提示都从这一份读，
                 # 前端抄一个"6"的话，改参数那天就是"输入框只让填 6 位、校验要 8 位"那种坏法。
                 # 这条响应只在口令已经对了之后才出现，多带三个公开参数不构成账号探测面。
-                content={"error": f"请输入验证器里的 {totp.DIGITS} 位动态口令",
-                         "code": "totp_required", **totp.totp_params()},
+                content={
+                    "error": f"请输入验证器里的 {totp.DIGITS} 位动态口令",
+                    "code": "totp_required",
+                    **totp.totp_params(),
+                },
             )
         if not totp.verify(secret, code, username=user["username"]):
             # 口令错与口令对但动态口令错，都要消耗账号桶的名额：动态口令只有 10^DIGITS 种，
@@ -264,8 +274,11 @@ async def login(req: Request):
             await aio_db.audit(user["username"], "login_totp_failed", ip)
             return JSONResponse(
                 status_code=401,
-                content={"error": "动态口令不正确或已过期，一枚口令只用一次；对不上表请等下一步再试",
-                         "code": "totp_invalid", **totp.totp_params()},
+                content={
+                    "error": "动态口令不正确或已过期，一枚口令只用一次；对不上表请等下一步再试",
+                    "code": "totp_invalid",
+                    **totp.totp_params(),
+                },
             )
     await aio_db.audit(user["username"], "login")
     security.clear_attempts(ip)
@@ -298,6 +311,7 @@ async def logout(req: Request):
 # 只有一个判据「第二因子换了」，网页自助、CLI 逃生口、未来任何新入口都得走同一把尺子；
 # 当前浏览器由响应里换发的新 token 继续，其它设备重新登录。
 
+
 @app.get("/api/auth/2fa")
 async def twofa_status(req: Request):
     """当前账号的两步验证状态。只回"开没开"与生效参数，密钥永不出库。"""
@@ -325,8 +339,12 @@ async def twofa_setup(req: Request):
         return JSONResponse(status_code=400, content={"error": "口令不正确，未生成密钥"})
     secret = totp.new_secret()
     await aio_db.audit(me["username"], "twofa_setup", "生成新密钥（未生效）")
-    return {"secret": secret, "account": me["username"],
-            "otpauth": totp.provisioning_uri(secret, me["username"]), **totp.totp_params()}
+    return {
+        "secret": secret,
+        "account": me["username"],
+        "otpauth": totp.provisioning_uri(secret, me["username"]),
+        **totp.totp_params(),
+    }
 
 
 @app.post("/api/auth/2fa/enable")
@@ -356,18 +374,23 @@ async def twofa_enable(req: Request):
     # 的人会得到最没用的加固——库里从此要动态口令，而偷到手那张票还剩满 TTL 只用口令就能进。
     # （CLI 的 user 2fa-disable 早就连会话一起吊销；同一件事两条路两个判据也是这次一起收的。）
     epoch_key = security.user_epoch_key(me["username"])
-    rows = await aio_db.execute_many([
-        dbm.set_totp_stmt(me["username"], secret),
-        security.user_epoch_stmt(me["username"]),
-    ], (epoch_key,))
+    rows = await aio_db.execute_many(
+        [
+            dbm.set_totp_stmt(me["username"], secret),
+            security.user_epoch_stmt(me["username"]),
+        ],
+        (epoch_key,),
+    )
     if not rows[0]:
         return JSONResponse(status_code=404, content={"error": "用户不存在"})
     await aio_db.audit(me["username"], "twofa_enable", "两步验证已开启，会话全部吊销")
     # 本人这一路刚验过口令＋动态口令，换发一枚新 token 让他继续用；其余设备全部作废。
-    return {"ok": True, "enabled": True,
-            **_user_token(me["username"], me["role"] or "admin",
-                          me.get("nickname", ""), me.get("avatar", "")),
-            **totp.totp_params()}
+    return {
+        "ok": True,
+        "enabled": True,
+        **_user_token(me["username"], me["role"] or "admin", me.get("nickname", ""), me.get("avatar", "")),
+        **totp.totp_params(),
+    }
 
 
 @app.post("/api/auth/2fa/disable")
@@ -388,25 +411,31 @@ async def twofa_disable(req: Request):
         await aio_db.audit(me["username"], "twofa_disable_failed", ip)
         return JSONResponse(
             status_code=400,
-            content={"error": "动态口令不正确或已过期。手机不在手边请由 root 在服务器上执行 "
-                              "choyeonctl user 2fa-disable 关闭"},
+            content={
+                "error": "动态口令不正确或已过期。手机不在手边请由 root 在服务器上执行 choyeonctl user 2fa-disable 关闭"
+            },
         )
     # 关闭同样吊销：这条规则不看方向，只看"第二因子换了"。摘掉验证器往往正因为手机丢了，
     # 而丢的那台手机上可能正好存着一枚还能用的 token；吊销之后库里只用口令，但每个会话都得
     # 重新登录一次才能继续。
     epoch_key = security.user_epoch_key(me["username"])
-    rows = await aio_db.execute_many([
-        dbm.set_totp_stmt(me["username"], ""),
-        security.user_epoch_stmt(me["username"]),
-    ], (epoch_key,))
+    rows = await aio_db.execute_many(
+        [
+            dbm.set_totp_stmt(me["username"], ""),
+            security.user_epoch_stmt(me["username"]),
+        ],
+        (epoch_key,),
+    )
     if not rows[0]:
         return JSONResponse(status_code=404, content={"error": "用户不存在"})
     totp.forget_used(me["username"])
     await aio_db.audit(me["username"], "twofa_disable", "两步验证已关闭，会话全部吊销")
-    return {"ok": True, "enabled": False,
-            **_user_token(me["username"], me["role"] or "admin",
-                          me.get("nickname", ""), me.get("avatar", "")),
-            **totp.totp_params()}
+    return {
+        "ok": True,
+        "enabled": False,
+        **_user_token(me["username"], me["role"] or "admin", me.get("nickname", ""), me.get("avatar", "")),
+        **totp.totp_params(),
+    }
 
 
 async def _password_ok(me: dict, raw: object) -> bool:
@@ -466,7 +495,7 @@ def client_ip(req: Request) -> str:
         fwd = req.headers.get("x-forwarded-for")
         if fwd:
             for chunk in reversed(fwd.split(",")):
-                if (ip := chunk.strip()):
+                if ip := chunk.strip():
                     return ip
     return peer or "?"
 
@@ -478,8 +507,12 @@ async def change_password(req: Request):
     body = await _json_body(req)
     old = str(body.get("old") or "")
     # 与登录同一把尺子：原密码长到离谱就当不对，不进 scrypt
-    ok = bool(me) and bool(old) and len(old) <= security.LOGIN_PW_MAX_LEN \
+    ok = (
+        bool(me)
+        and bool(old)
+        and len(old) <= security.LOGIN_PW_MAX_LEN
         and await security.check_pass_async(old, me["pass_hash"])
+    )
     if not ok:
         return JSONResponse(status_code=400, content={"error": "原密码错误"})
     pw_err = security.password_error(body.get("new"), "新密码")
@@ -491,10 +524,13 @@ async def change_password(req: Request):
     # "新口令已经生效、旧票还能再用 72 小时"，而这个人改口令多半正因为怀疑手里那张票泄露了。
     # 反过来 bump 成功、UPDATE 失败也一样坏：库里还是旧口令，人却被踢下线，重登时用新口令进不去。
     epoch_key = security.user_epoch_key(me["username"])
-    await aio_db.execute_many([
-        ("UPDATE users SET pass_hash=? WHERE username=?", (new_hash, me["username"])),
-        security.user_epoch_stmt(me["username"]),
-    ], (epoch_key,))
+    await aio_db.execute_many(
+        [
+            ("UPDATE users SET pass_hash=? WHERE username=?", (new_hash, me["username"])),
+            security.user_epoch_stmt(me["username"]),
+        ],
+        (epoch_key,),
+    )
     # 立即签发新 token，避免用户被踢下线
     await aio_db.audit(me["username"], "password_change")
     return _user_token(me["username"], role, me.get("nickname", ""), me.get("avatar", ""))
@@ -605,6 +641,7 @@ app.include_router(alerts.router)
 app.include_router(cron.router)
 app.include_router(sites.router)
 app.include_router(metrics.router)
+app.include_router(api_v1.router)
 
 
 # ---------- background housekeeping ----------

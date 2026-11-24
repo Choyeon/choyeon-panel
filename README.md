@@ -225,7 +225,7 @@ choyeonctl upgrade --no-pull  # 只改了配置时：跳过拉代码，仅重建
   <img src="./assets/architecture.svg" alt="choyeon-panel 架构：入口层（浏览器 SPA / choyeonctl / nginx 反代）→ 面板核心（认证中间件、routers、services、SQLite 与指标库）→ 被管资源（systemd、nginx+certbot、PostgreSQL/Redis、文件白名单、备份与告警）" width="100%" />
 </p>
 
-1. **一个进程，两类入口。** 后端是单个 FastAPI/Uvicorn 进程，同时托管 SPA 静态产物与 `/api`；`choyeonctl` 复用同一套 service 层，所以 CLI 覆盖的是网页端的同一批操作，不存在「只有 UI 里有」的能力。
+1. **一个进程，多类入口。** 后端是单个 FastAPI/Uvicorn 进程，同时托管 SPA 静态产物与 `/api`；网页、`choyeonctl` 和稳定版 `/api/v1` 智能体接口都复用同一套 service 层，不存在「只有 UI 里有」的部署能力。
 2. **直接调用宿主机命令。** systemd、nginx、certbot、pg_dump 都在这台机器上被执行：exec 一律走参数数组 + 名称/域名/unit 正则白名单，子进程统一 `start_new_session` 并在超时时 `killpg`。
 3. **状态只有一个 SQLite 文件。** 面板自身数据是 WAL 模式的 `panel.db` + `.env`，都在 `CP_DATA_DIR` 下；备份走 SQLite 在线备份 API，不用 `cp`。指标历史进同一个库，`doctor` 查的就是这些事实是否自相一致。
 
@@ -246,6 +246,7 @@ choyeonctl upgrade --no-pull  # 只改了配置时：跳过拉代码，仅重建
 | 文件管理 | 白名单根目录内浏览/编辑/多文件上传/下载/打包/解压/重命名/删除，带体积上限；解压拒绝越界路径与符号链接 |
 | Web 终端 | pty + xterm.js，仅管理员，带并发会话上限与空闲回收 |
 | 用户与审计 | admin/viewer 两级（viewer 只读），全量操作审计日志（自动裁剪与脱敏）；破坏性操作统一走确认弹窗 |
+| 智能体 API | `/api/v1` 稳定接口；可撤销、可过期、按权限域限制的 API Key；应用部署/启停/回滚、备份、站点、证书、审计与 operation 状态查询；写操作支持 `Idempotency-Key` |
 | 告警 | 磁盘水位、SSL 到期、服务掉线、CPU/内存/负载阈值、应用 HTTP 探活 → Telegram / Webhook / 邮件 SMTP；告警入库可追溯、可确认 |
 | 定时任务 | cron 表达式在面板里登记（渲染成 systemd timer），命令走固定 argv 白名单，可立即执行并留下末段日志 |
 
@@ -261,6 +262,7 @@ choyeonctl upgrade --no-pull  # 只改了配置时：跳过拉代码，仅重建
 | --- | --- |
 | 生命周期 | `deploy` · `upgrade` · `status` · `doctor` · `start` · `stop` · `restart` · `logs` · `schema` |
 | 账号 | `user list\|create\|reset\|revoke\|2fa-disable\|delete` |
+| 智能体凭证 | `api-key list\|create\|revoke` |
 | 应用 | `app templates\|list\|create\|deploy\|rollback\|logs` |
 | 备份 | `backup run\|list\|jobs\|targets\|add-target\|edit-target\|del-target\|test-target\|push\|link\|cloud-list\|cloud-pull` |
 | 防火墙 / 封禁 | `firewall list\|allow\|deny\|remove\|on\|off` · `ban list\|add\|rm` |
@@ -283,6 +285,7 @@ choyeonctl ports --json / choyeonctl updates --json  # 端口暴露面 / 待装�
 choyeonctl webstats --list --json                    # 访问统计：状态码分布、TOP 路径 / 客户端、每分钟请求数
 
 printf '%s' "$PW" | choyeonctl user create admin --password-stdin --json
+choyeonctl api-key create --name deploy-bot --scope system:read --scope apps:read --scope deploy:write --json
 choyeonctl app templates                             # node-service / node-next / python-fastapi / static-site
 choyeonctl app create my-api --template python-fastapi \
   --repo https://github.com/you/repo.git --port 8000 --json
@@ -299,6 +302,19 @@ choyeonctl firewall allow --port 8080 --json
 choyeonctl ban add 203.0.113.9 --json                # 只封单个公网地址
 choyeonctl site claim-all --json
 choyeonctl schema --json                             # 输出完整命令契约
+```
+
+### 智能体 API 快速调用
+
+API Key 只在创建时显示一次，调用时放在 `X-API-Key` 或 `Authorization: ApiKey ...` 头中。长任务返回 `operation_id`，用 `GET /api/v1/operations/{id}` 轮询；所有部署、回滚、备份等写请求应带唯一的 `Idempotency-Key`，避免网络重试造成重复执行。
+
+```bash
+curl -H "X-API-Key: cp_live_<public-id>.<secret>" \
+  https://panel.example.com/api/v1/apps
+
+curl -X POST -H "X-API-Key: cp_live_<public-id>.<secret>" \
+  -H "Idempotency-Key: deploy-app-1-2026-11-24" \
+  https://panel.example.com/api/v1/apps/1/deploy
 ```
 
 完整参数与失败处置表见 [AGENTS.md](AGENTS.md)；排障细节见 [RUNBOOK.md](RUNBOOK.md)。

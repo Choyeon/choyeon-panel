@@ -8,7 +8,7 @@ from starlette.datastructures import Headers, MutableHeaders, QueryParams
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from . import config, security
+from . import agent_auth, config, security
 from .errors import Forbidden
 from .log import log
 
@@ -238,6 +238,14 @@ def _extract_token(headers: Headers, query: QueryParams, allow_query: bool) -> s
     return query.get("token", "") if allow_query else ""
 
 
+def _extract_api_key(headers: Headers) -> str:
+    value = headers.get("x-api-key", "").strip()
+    if value:
+        return value
+    auth = headers.get("authorization", "")
+    return auth[7:].strip() if auth.lower().startswith("apikey ") else ""
+
+
 def _same_origin(headers: Headers) -> bool:
     """WebSocket 握手没有 Authorization，也没有 CORS 保护，只能自己验 Origin。
 
@@ -292,7 +300,19 @@ class AuthMiddleware:
         is_public = any(path == p or path.startswith(p + "/") for p in PUBLIC_PREFIXES)
         started = time.perf_counter()
 
-        if path.startswith("/api/") and not is_public:
+        if path.startswith("/api/v1/"):
+            key = agent_auth.authenticate(_extract_api_key(headers))
+            if not key:
+                await _settled_json(401, "API Key 无效、已过期或已撤销", scope, receive, send)
+                return
+            if agent_auth.rate_limited(key["id"], scope.get("method", "GET")):
+                await _settled_json(429, "API Key 请求过于频繁，请稍后重试", scope, receive, send)
+                return
+            scope["state"]["cp_sub"] = f"api-key:{key['public_id']}"
+            scope["state"]["cp_role"] = "api"
+            scope["state"]["cp_scopes"] = key["scopes"]
+            scope["state"]["cp_api_key"] = key
+        elif path.startswith("/api/") and not is_public:
             is_ws = scope["type"] == "websocket"
             if is_ws and not _same_origin(headers):
                 await _ws_close(send, 4498)

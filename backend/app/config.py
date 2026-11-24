@@ -178,4 +178,4 @@ CLOUD_PROBE_TIMEOUT_SEC = _int("CP_CLOUD_PROBE_TIMEOUT_SEC", 20, 3, 300)
 # 是否发送 HSTS 头（仅在 HTTPS 直接暴露时开启；反代场景由 nginx 负责）
 HSTS = _bool("CP_HSTS")
 
-VERSION = "1.1.10"
+VERSION = "1.2.0"

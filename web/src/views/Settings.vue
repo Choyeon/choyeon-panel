@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   NSpace, useMessage, NInput, NForm, NFormItem,
-  NInputNumber, NSwitch, NDrawer, NDrawerContent, NText, NAlert,
+  NInputNumber, NSwitch, NDrawer, NDrawerContent, NText, NAlert, NSelect, NPopconfirm,
 } from 'naive-ui';
 import { useRoute, useRouter } from 'vue-router';
 import { NButton, uncheckedNote, useDrawerWidth } from '../ui';
@@ -89,6 +89,23 @@ const alertsError = ref('');
 const fwError = ref('');
 const probeList = ref<{ name: string; expect: string }[]>([]);
 const probeDraft = ref({ name: '', expect: '' });
+const agentKeys = ref<any[]>([]);
+const agentScopes = ref<string[]>([]);
+const agentKeyError = ref('');
+const agentKeyOpen = ref(false);
+const agentKeyBusy = ref(false);
+const agentKeyDraft = ref({ name: '', scopes: ['system:read', 'apps:read', 'apps:write', 'deploy:write'], expires_days: 90 });
+const newlyCreatedKey = ref('');
+const scopeOptions = [
+  { label: '系统读取', value: 'system:read' },
+  { label: '应用读取', value: 'apps:read' },
+  { label: '应用写入', value: 'apps:write' },
+  { label: '部署与回滚', value: 'deploy:write' },
+  { label: '站点与证书', value: 'sites:write' },
+  { label: '备份读取', value: 'backups:read' },
+  { label: '备份执行', value: 'backups:write' },
+  { label: '审计读取', value: 'audit:read' },
+];
 
 watch(alerts, (v) => {
   // 空值在服务端就是「没有覆写」（_app_expectation 用 `or` 回落全局期望），
@@ -144,8 +161,60 @@ async function load() {
     if (isAdmin.value) await grab(() => api.firewall(), (v) => (fw.value = v), fwError);
     // 面板入口同样是 admin 口径：域名本身就是攻击面信息，后端 GET 也是这么收的。
     if (isAdmin.value) await grab(() => api.panelEntry(), (v) => (panelEntry.value = v), panelEntryError);
+    if (isAdmin.value) await grab(() => api.agentKeys(), (v) => {
+      agentKeys.value = v.items || [];
+      agentScopes.value = v.available_scopes || [];
+    }, agentKeyError);
   } finally {
     pageLoading.value = false;
+  }
+}
+
+function openAgentKey() {
+  newlyCreatedKey.value = '';
+  agentKeyDraft.value = { name: '', scopes: ['system:read', 'apps:read', 'apps:write', 'deploy:write'], expires_days: 90 };
+  agentKeyOpen.value = true;
+}
+
+async function createAgentKey() {
+  if (agentKeyBusy.value) return;
+  if (!agentKeyDraft.value.name.trim()) return msg.warning('请填写 API Key 名称');
+  if (!agentKeyDraft.value.scopes.length) return msg.warning('至少选择一个权限域');
+  agentKeyBusy.value = true;
+  try {
+    const r = await api.createAgentKey({ ...agentKeyDraft.value, name: agentKeyDraft.value.name.trim() });
+    newlyCreatedKey.value = r.token || '';
+    agentKeys.value = [r, ...agentKeys.value];
+    msg.success('API Key 已创建；完整密钥只显示这一次');
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    agentKeyBusy.value = false;
+  }
+}
+
+async function revokeAgentKey(row: any) {
+  if (agentKeyBusy.value) return;
+  agentKeyBusy.value = true;
+  try {
+    await api.revokeAgentKey(row.id);
+    row.revoked_at = new Date().toISOString();
+    row.active = false;
+    msg.success(`已撤销 ${row.name}`);
+  } catch (e: any) {
+    msg.error(e.message);
+  } finally {
+    agentKeyBusy.value = false;
+  }
+}
+
+async function copyAgentKey() {
+  if (!newlyCreatedKey.value) return;
+  try {
+    await navigator.clipboard.writeText(newlyCreatedKey.value);
+    msg.success('API Key 已复制');
+  } catch {
+    msg.warning('浏览器不允许复制，请手工选中密钥');
   }
 }
 function openPe() {
@@ -550,6 +619,30 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       <div v-if="isAdmin" class="cp-divider"></div>
       <section v-if="isAdmin">
         <div class="sec-head">
+          <h2 class="sec-title">智能体 API</h2>
+          <NButton round size="small" type="primary" tertiary :icon="ico('KeyOutline')" @click="openAgentKey">创建 API Key</NButton>
+        </div>
+        <span class="cp-help">给自动化工具使用的长期凭证。密钥只在创建时显示一次；按权限域限制能力，撤销后立即失效。部署、回滚、备份和证书操作会返回 operation_id，供智能体轮询。</span>
+        <NAlert v-if="agentKeyError" type="error" :show-icon="false" style="margin-top: var(--space-3)" :title="agentKeyError">API Key 列表读取失败，点上方刷新重试。</NAlert>
+        <NSpace v-else-if="agentKeys.length" vertical :size="8" style="margin-top: var(--space-3)">
+          <div v-for="row in agentKeys" :key="row.id" class="agent-key-row">
+            <div class="agent-key-main">
+              <NText strong>{{ row.name }}</NText>
+              <NText depth="3" class="mono-dim">cp_live_{{ row.public_id }} · {{ row.active ? '有效' : '已撤销/过期' }}</NText>
+              <NText depth="3" class="cp-break">{{ (row.scopes || []).join(' · ') }} · 到期 {{ row.expires_at || '无' }}</NText>
+            </div>
+            <NPopconfirm v-if="row.active" @positive-click="revokeAgentKey(row)">
+              <template #trigger><NButton size="tiny" tertiary type="error" :loading="agentKeyBusy">撤销</NButton></template>
+              撤销后使用这个密钥的智能体会立即失去访问权限，继续吗？
+            </NPopconfirm>
+          </div>
+        </NSpace>
+        <EmptyBox v-else text="还没有智能体 API Key" hint="创建后把密钥保存到智能体的安全凭证存储，不要写入仓库或日志。" />
+      </section>
+
+      <div v-if="isAdmin" class="cp-divider"></div>
+      <section v-if="isAdmin">
+        <div class="sec-head">
           <h2 class="sec-title">告警通知</h2>
           <NSpace :size="8">
             <NButton round size="small" tertiary :icon="ico('PulseOutline')" :loading="checking" :disabled="checking" @click="runChecks">立即巡检</NButton>
@@ -721,6 +814,26 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </template>
       </NDrawerContent>
     </NDrawer>
+    <NDrawer v-model:show="agentKeyOpen" :width="peDrawerW">
+      <NDrawerContent title="创建智能体 API Key" closable>
+        <NForm label-placement="top" size="small">
+          <NFormItem label="名称"><NInput v-model:value="agentKeyDraft.name" placeholder="例如 deploy-bot" maxlength="64" /></NFormItem>
+          <NFormItem label="权限域"><NSelect v-model:value="agentKeyDraft.scopes" multiple :options="scopeOptions" :max-tag-count="isMobile ? 1 : 4" /></NFormItem>
+          <NFormItem label="有效期（天）"><NInputNumber v-model:value="agentKeyDraft.expires_days" :min="1" :max="365" style="width: 140px" /></NFormItem>
+          <NAlert v-if="newlyCreatedKey" type="warning" :show-icon="false">
+            <div>完整密钥只显示一次，请立即复制并保存到智能体的密钥管理器。</div>
+            <div class="agent-token">{{ newlyCreatedKey }}</div>
+            <NButton size="small" tertiary :icon="ico('CopyOutline')" @click="copyAgentKey">复制完整密钥</NButton>
+          </NAlert>
+        </NForm>
+        <template #footer>
+          <NSpace justify="end" :size="8">
+            <NButton size="small" @click="agentKeyOpen = false">关闭</NButton>
+            <NButton v-if="!newlyCreatedKey" size="small" type="primary" :loading="agentKeyBusy" :disabled="agentKeyBusy" @click="createAgentKey">创建</NButton>
+          </NSpace>
+        </template>
+      </NDrawerContent>
+    </NDrawer>
     <NDrawer v-model:show="chanOpen" :width="chanDrawerW">
       <NDrawerContent :title="chanMeta.label" closable>
         <NForm label-placement="top" size="small">
@@ -826,4 +939,8 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 .pe-k { flex: 0 0 56px; color: var(--cp-text-dim); }
 /* 拒绝文案里有 certbot 命令，必须原样可读可复制 */
 .pe-alert { white-space: pre-wrap; word-break: break-word; }
+.agent-key-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--cp-border); border-radius: var(--radius-md); background: var(--cp-bg-soft); }
+.agent-key-main { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.agent-token { margin: var(--space-2) 0; padding: var(--space-2); border-radius: var(--radius-sm); background: var(--cp-bg-soft); color: var(--cp-text-strong); font-family: var(--font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; user-select: all; }
+@media (max-width: 640px) { .agent-key-row { align-items: flex-start; } }
 </style>

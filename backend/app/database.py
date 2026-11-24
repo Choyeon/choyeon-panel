@@ -157,6 +157,51 @@ CREATE TABLE IF NOT EXISTS site_claims(
   note TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now'))
 );
+-- Long-lived automation credentials.  The raw secret is never stored; only the
+-- public id and a SHA-256 digest are persisted.
+CREATE TABLE IF NOT EXISTS api_keys(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  secret_hash TEXT NOT NULL,
+  scopes TEXT NOT NULL DEFAULT '[]',
+  expires_at TEXT,
+  last_used_at TEXT,
+  revoked_at TEXT,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS operations(
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  resource_type TEXT NOT NULL DEFAULT '',
+  resource_id TEXT NOT NULL DEFAULT '',
+  deployment_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'queued',
+  result TEXT NOT NULL DEFAULT '{}',
+  error TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  finished_at TEXT
+);
+CREATE TABLE IF NOT EXISTS operation_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_id TEXT NOT NULL,
+  event TEXT NOT NULL,
+  data TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS idempotency_keys(
+  principal TEXT NOT NULL,
+  route TEXT NOT NULL,
+  idem_key TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  response TEXT NOT NULL DEFAULT '{}',
+  status_code INTEGER NOT NULL DEFAULT 202,
+  created_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY(principal, route, idem_key)
+);
 """
 
 MAX_DEPLOY_LOG = 256 * 1024  # 单条部署日志上限，防止失控增长
@@ -250,6 +295,9 @@ def migrate() -> None:
         # 告警历史只按时间倒序翻页，metrics 只按 (gran, ts) 区间取窗口——两个都是覆盖查询的入口。
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts_log(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_open ON alerts_log(acked, ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(revoked_at, expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_updated ON operations(updated_at, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at)")
         conn.commit()
 
 
