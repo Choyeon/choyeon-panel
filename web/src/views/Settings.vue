@@ -638,7 +638,7 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
             已开启：签发方 {{ twofa.issuer }}，每 {{ twofa.period }} 秒换一枚 {{ twofa.digits }} 位口令。
           </NText>
           <NText v-else depth="3" style="font-size: var(--fs-xs)">未开启：这个账号目前只要口令正确就能登录。</NText>
-          <NText depth="3" class="recovery-hint">
+          <NText depth="3">
             验证器丢失时，root 可执行 <span class="mono-dim cp-break">choyeonctl user 2fa-disable &lt;用户名&gt; --yes</span>，并吊销该账号所有会话。
           </NText>
         </NSpace>
