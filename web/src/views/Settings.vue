@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
-  NSpace, useMessage, NInput, NForm, NFormItem, NIcon,
+  NSpace, useMessage, NInput, NForm, NFormItem, NIcon, NCard,
   NInputNumber, NSwitch, NDrawer, NDrawerContent, NText, NAlert, NSelect, NPopconfirm,
 } from 'naive-ui';
 import { NButton, uncheckedNote, useDrawerWidth } from '../ui';
 import { api, getRole, getUsername, saveLoginData } from '../api';
 import { icon, icons } from '../icons';
 import PageHeader from '../components/PageHeader.vue';
-import CpToolbarCard from '../components/CpToolbarCard.vue';
 import CpSettingRow from '../components/CpSettingRow.vue';
 import EmptyBox from '../components/EmptyBox.vue';
 
@@ -127,13 +126,14 @@ const isMobile = ref(mq.matches);
 const onMq = (e: MediaQueryListEvent) => { isMobile.value = e.matches; };
 
 const settingsSections = computed(() => [
-  { key: 'security' as const, label: '账号安全', icon: icons.ShieldCheckmarkOutline },
+  { key: 'security' as const, label: '账号安全', description: '登录保护与自动化凭证', icon: icons.ShieldCheckmarkOutline },
   ...(isAdmin.value ? [
-    { key: 'alerts' as const, label: '告警', icon: icons.AlertCircleOutline },
-    { key: 'access' as const, label: '访问边界', icon: icons.GlobeOutline },
-    { key: 'certificates' as const, label: '证书', icon: icons.ShieldOutline },
+    { key: 'alerts' as const, label: '告警', description: '通知通道、阈值与探活', icon: icons.AlertCircleOutline },
+    { key: 'access' as const, label: '访问边界', description: '防火墙与面板入口', icon: icons.GlobeOutline },
+    { key: 'certificates' as const, label: '证书', description: '证书续期与结果', icon: icons.ShieldOutline },
   ] : []),
 ]);
+const activeSettingsSection = computed(() => settingsSections.value.find((item) => item.key === activeSection.value) || settingsSections.value[0]);
 watch(isAdmin, (admin) => {
   if (!admin) activeSection.value = 'security';
 });
@@ -601,22 +601,33 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
       </template>
     </PageHeader>
 
-    <div v-if="isAdmin" class="settings-nav cp-seg" role="group" aria-label="设置分类">
-      <button
-        v-for="item in settingsSections"
-        :key="item.key"
-        type="button"
-        :aria-pressed="activeSection === item.key"
-        :class="{ active: activeSection === item.key }"
-        @click="activeSection = item.key"
-      >
-        <NIcon :component="item.icon" :size="15" />
-        <span>{{ item.label }}</span>
-      </button>
-    </div>
+    <div class="settings-workspace">
+      <nav v-if="isAdmin" class="settings-nav" aria-label="设置分类">
+        <span class="settings-nav-caption">分类</span>
+        <button
+          v-for="item in settingsSections"
+          :key="item.key"
+          type="button"
+          :aria-current="activeSection === item.key ? 'page' : undefined"
+          :class="{ active: activeSection === item.key }"
+          @click="activeSection = item.key"
+        >
+          <NIcon :component="item.icon" :size="17" />
+          <span>{{ item.label }}</span>
+        </button>
+      </nav>
 
-    <CpToolbarCard class="cp-card-gap">
-      <section v-if="activeSection === 'security'">
+      <main class="settings-main">
+        <header class="settings-pane-head">
+          <div>
+            <h2>{{ activeSettingsSection.label }}</h2>
+            <p>{{ activeSettingsSection.description }}</p>
+          </div>
+        </header>
+
+        <div v-if="activeSection === 'security'" class="settings-grid">
+      <NCard size="small" class="settings-panel">
+      <section>
         <div class="sec-head">
           <h2 class="sec-title">两步验证</h2>
           <NButton
@@ -643,9 +654,9 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           </NText>
         </NSpace>
       </section>
-
-      <div v-if="isAdmin && activeSection === 'security'" class="cp-divider"></div>
-      <section v-if="isAdmin && activeSection === 'security'">
+      </NCard>
+      <NCard v-if="isAdmin" size="small" class="settings-panel">
+      <section>
         <div class="sec-head">
           <h2 class="sec-title">智能体 API</h2>
           <NButton round size="small" type="primary" tertiary :icon="ico('KeyOutline')" @click="openAgentKey">创建 API Key</NButton>
@@ -667,9 +678,12 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
         </NSpace>
         <EmptyBox v-else text="还没有智能体 API Key" hint="创建后把密钥保存到智能体的安全凭证存储，不要写入仓库或日志。" />
       </section>
+      </NCard>
+        </div>
 
-      <div v-if="isAdmin && activeSection === 'alerts'" class="cp-divider"></div>
-      <section v-if="isAdmin && activeSection === 'alerts'">
+        <div v-if="isAdmin && activeSection === 'alerts'" class="settings-grid settings-grid-single">
+      <NCard size="small" class="settings-panel">
+      <section>
         <div class="sec-head">
           <h2 class="sec-title">告警通知</h2>
           <NSpace :size="8">
@@ -766,9 +780,12 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           </CpSettingRow>
         </NForm>
       </section>
+      </NCard>
+        </div>
 
-      <div v-if="isAdmin && activeSection === 'access'" class="cp-divider"></div>
-      <section v-if="isAdmin && activeSection === 'access'">
+        <div v-if="isAdmin && activeSection === 'access'" class="settings-grid">
+      <NCard size="small" class="settings-panel">
+      <section>
         <div class="sec-head">
           <h2 class="sec-title">防火墙</h2>
           <span class="st" :class="fw?.active ? 'ok' : 'err'"><span class="dot" :class="fw?.active ? 'ok' : 'err'"></span>{{ fw ? `${fw.tool === 'firewalld' ? 'firewalld' : fw.tool === 'ufw' ? 'ufw' : '未检测到'} ${fw.active ? '已启用' : '未启用'}` : fwError ? '状态没读到' : '检测中…' }}</span>
@@ -782,9 +799,9 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <EmptyBox v-else-if="fw" text="既没有 ufw 也没有 firewalld；装好任意一个后到「防火墙」页管理规则" />
         </NSpace>
       </section>
-
-      <div v-if="isAdmin && activeSection === 'access'" class="cp-divider"></div>
-      <section v-if="isAdmin && activeSection === 'access'">
+      </NCard>
+      <NCard size="small" class="settings-panel">
+      <section>
         <div class="sec-head">
           <h2 class="sec-title">面板入口</h2>
           <span class="st" :class="peTone"><span class="dot" :class="peTone"></span>{{ peStateText }}</span>
@@ -808,9 +825,12 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <EmptyBox v-else text="正在读取面板入口…" />
         </NSpace>
       </section>
+      </NCard>
+        </div>
 
-      <div v-if="isAdmin && activeSection === 'certificates'" class="cp-divider"></div>
-      <section v-if="isAdmin && activeSection === 'certificates'">
+        <div v-if="isAdmin && activeSection === 'certificates'" class="settings-grid settings-grid-single">
+      <NCard size="small" class="settings-panel settings-panel-narrow">
+      <section>
         <div class="sec-head">
           <h2 class="sec-title">证书维护</h2>
           <NButton round size="small" tertiary type="primary" :loading="renewing" :disabled="renewing" :icon="ico('SyncOutline')" @click="renew">立即续期</NButton>
@@ -822,7 +842,10 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           <EmptyBox v-else text="本次会话还没有执行过续期，点击上方按钮后即可看到 certbot 输出" />
         </NSpace>
       </section>
-    </CpToolbarCard>
+      </NCard>
+        </div>
+      </main>
+    </div>
 
     <NDrawer v-model:show="peOpen" :width="peDrawerW">
       <NDrawerContent title="更换面板入口域名" closable>
@@ -983,18 +1006,41 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 .agent-key-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--cp-border); border-radius: var(--radius-md); background: var(--cp-bg-soft); }
 .agent-key-main { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .agent-token { margin: var(--space-2) 0; padding: var(--space-2); border-radius: var(--radius-sm); background: var(--cp-bg-soft); color: var(--cp-text-strong); font-family: var(--font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; user-select: all; }
-.settings-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: fit-content; max-width: 100%; margin: 0 0 var(--space-3); }
-.settings-nav > button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-width: 112px; min-height: 36px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--cp-text-dim); font: inherit; font-size: var(--fs-xs); cursor: pointer; }
-.settings-nav > button[aria-pressed="true"] { background: var(--cp-elevated); color: var(--cp-brand); box-shadow: 0 1px 3px color-mix(in srgb, var(--cp-text) 10%, transparent); font-weight: 600; }
+.settings-workspace { display: grid; grid-template-columns: 196px minmax(0, 1fr); align-items: start; gap: var(--space-5); min-width: 0; }
+.settings-nav { position: sticky; top: var(--space-3); display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: var(--space-2); border-right: 1px solid var(--cp-border); }
+.settings-nav-caption { padding: var(--space-2) var(--space-3); color: var(--cp-text-mute); font-size: var(--fs-2xs); font-weight: 600; }
+.settings-nav > button { display: flex; align-items: center; justify-content: flex-start; gap: var(--space-2); width: 100%; min-width: 0; min-height: 40px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--cp-text-dim); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
+.settings-nav > button > span { min-width: 0; overflow-wrap: anywhere; }
+.settings-nav > button[aria-current="page"] { background: color-mix(in srgb, var(--cp-brand) 10%, transparent); color: var(--cp-brand); font-weight: 600; }
 .settings-nav > button:focus-visible { outline: 2px solid var(--cp-brand); outline-offset: 2px; }
-.settings-nav > button:hover:not([aria-pressed="true"]) { color: var(--cp-text); background: color-mix(in srgb, var(--cp-text) 5%, transparent); }
+.settings-nav > button:hover:not([aria-current="page"]) { color: var(--cp-text); background: color-mix(in srgb, var(--cp-text) 5%, transparent); }
+.settings-main { min-width: 0; }
+.settings-pane-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-3); margin: 0 0 var(--space-4); padding: 0 0 var(--space-3); border-bottom: 1px solid var(--cp-border); }
+.settings-pane-head h2 { margin: 0; color: var(--cp-text-strong); font-size: var(--fs-xl); line-height: 1.25; font-weight: 600; }
+.settings-pane-head p { margin: var(--space-1) 0 0; color: var(--cp-text-mute); font-size: var(--fs-xs); }
+.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: var(--space-3); min-width: 0; }
+.settings-grid-single { grid-template-columns: minmax(0, 900px); }
+.settings-panel { min-width: 0; }
+.settings-panel :deep(.n-card__content) { padding: 18px 20px; }
+.settings-panel-narrow { max-width: 900px; }
+.settings-panel .sec-head { margin-bottom: var(--space-2); }
 .alerts-form { width: 100%; max-width: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-5); }
 .alert-subheading { grid-column: 1 / -1; padding: var(--space-2) 0 var(--space-1); border-bottom: 1px solid var(--cp-border); color: var(--cp-text-mute); font-size: var(--fs-2xs); font-weight: 600; }
 .alerts-form :deep(.alert-probes-row) { grid-column: 1 / -1; }
+@media (max-width: 1100px) {
+  .settings-workspace { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
+  .settings-nav { position: static; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-right: 0; border-bottom: 1px solid var(--cp-border); padding: 0 0 var(--space-2); }
+  .settings-nav-caption { display: none; }
+  .settings-nav > button { justify-content: center; padding-inline: var(--space-2); font-size: var(--fs-xs); }
+}
 @media (max-width: 640px) {
   .agent-key-row { align-items: flex-start; }
-  .settings-nav { display: flex; width: 100%; }
-  .settings-nav > button { flex: 1 1 0; min-width: 0; padding-inline: var(--space-2); }
+  .settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .settings-nav { gap: 2px; }
+  .settings-nav > button { min-height: 40px; flex-direction: column; gap: 2px; line-height: 1.1; }
+  .settings-pane-head { align-items: flex-start; }
+  .settings-pane-head h2 { font-size: var(--fs-lg); }
+  .settings-panel :deep(.n-card__content) { padding: var(--space-3); }
 }
 @media (max-width: 900px) {
   .alerts-form { grid-template-columns: minmax(0, 1fr); }

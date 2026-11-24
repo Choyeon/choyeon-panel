@@ -19,9 +19,13 @@ test('settings no longer duplicates standalone routes as page tabs', () => {
 
 test('settings section switcher is admin-only, while account security remains available to viewers', () => {
   const settings = read('views/Settings.vue');
-  assert.match(settings, /<div v-if="isAdmin" class="settings-nav/);
-  assert.match(settings, /<section v-if="activeSection === 'security'">/);
+  assert.match(settings, /<nav v-if="isAdmin" class="settings-nav/);
+  assert.match(settings, /<div v-if="activeSection === 'security'" class="settings-grid">/);
+  assert.match(settings, /class="settings-panel"/);
   assert.match(settings, /if \(!admin\) activeSection\.value = 'security'/);
+  assert.match(settings, /settings-workspace \{ display: grid; grid-template-columns: 196px minmax\(0, 1fr\)/);
+  assert.match(settings, /\.settings-grid \{ display: grid; grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(settings, /\.settings-grid \{ grid-template-columns: minmax\(0, 1fr\); \}/);
 });
 
 test('top-level apps and backups pages do not duplicate sidebar destinations', () => {
