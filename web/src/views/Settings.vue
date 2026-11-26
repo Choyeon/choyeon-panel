@@ -699,85 +699,124 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
           告警配置这一轮没读到，下面的阈值区间是空的、暂时改不了。刷新这一页或等后端恢复后再来；
           这期间巡检仍然按服务端的默认阈值跑，不会因为页面显示不出来就不告警。
         </NAlert>
-        <NForm class="cp-set-form alerts-form" size="small" :label-width="isMobile ? undefined : 142" :label-placement="isMobile ? undefined : 'left'" style="margin-top: var(--space-3)">
-          <div class="alert-subheading">通知通道</div>
-          <CpSettingRow label="Telegram Bot Token" :value="mask(alerts.alert_telegram_bot)" @edit="openChan('alert_telegram_bot')" />
-          <CpSettingRow label="Telegram Chat ID" :value="mask(alerts.alert_telegram_chat)" @edit="openChan('alert_telegram_chat')" />
-          <CpSettingRow label="通用 Webhook URL" :value="mask(alerts.alert_webhook_url)" @edit="openChan('alert_webhook_url')" />
-          <CpSettingRow label="邮件服务器" :value="chanText('alert_email_host')" @edit="openChan('alert_email_host')" />
-          <CpSettingRow label="SMTP 端口" help="465 走隐式 TLS；其余端口必须服务器支持 STARTTLS，否则面板不会把口令带上明文连接。">
-            <template #control>
-              <NInputNumber :value="alerts.alert_email_port" :min="lim('alert_email_port').min" :max="lim('alert_email_port').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': 'SMTP 端口' }" @update:value="commitNum('alert_email_port', $event)" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="发件人" :value="chanText('alert_email_from')" @edit="openChan('alert_email_from')" />
-          <CpSettingRow label="收件人" :value="chanText('alert_email_to')" @edit="openChan('alert_email_to')" />
-          <CpSettingRow label="SMTP 用户名" :value="chanText('alert_email_user')" @edit="openChan('alert_email_user')" />
-          <CpSettingRow label="SMTP 口令" :value="chanText('alert_email_pass')" @edit="openChan('alert_email_pass')" />
-          <div class="alert-subheading">告警阈值与探活</div>
-          <CpSettingRow label="磁盘阈值 %" :help="critHint('alert_disk_pct')">
-            <template #control>
-              <NInputNumber :value="alerts.alert_disk_pct" :min="lim('alert_disk_pct').min" :max="lim('alert_disk_pct').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="SSL 剩余天数">
-            <template #control>
-              <NInputNumber :value="alerts.alert_ssl_days" :min="lim('alert_ssl_days').min" :max="lim('alert_ssl_days').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" @update:value="commitNum('alert_ssl_days', $event)" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="CPU 阈值 %" :help="critHint('alert_cpu_pct')">
-            <template #control>
-              <NInputNumber :value="alerts.alert_cpu_pct" :min="lim('alert_cpu_pct').min" :max="lim('alert_cpu_pct').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': 'CPU 使用率阈值百分比' }" @update:value="commitNum('alert_cpu_pct', $event)" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="内存阈值 %" :help="critHint('alert_mem_pct')">
-            <template #control>
-              <NInputNumber :value="alerts.alert_mem_pct" :min="lim('alert_mem_pct').min" :max="lim('alert_mem_pct').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '内存使用率阈值百分比' }" @update:value="commitNum('alert_mem_pct', $event)" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="load1 ×核数" help="这一条只决定告警。概览的负载环按物理饱和度变色（满一格是每核一个排队任务），不会跟着这个倍数走。">
-            <template #control>
-              <NInputNumber :value="alerts.alert_load1_x" :min="lim('alert_load1_x').min" :max="lim('alert_load1_x').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '一分钟负载阈值倍数' }" @update:value="commitNum('alert_load1_x', $event)" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="应用探活">
-            <template #control>
-              <NSwitch :value="String(alerts.alert_probe) !== '0'" size="small" aria-label="是否启用应用 HTTP 探活" @update:value="commitProbe" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="期望状态码" help="失焦或回车即保存">
-            <template #control>
-              <NInput :value="alerts.alert_probe_expect" size="small" style="width: 130px; max-width: 100%" placeholder="2xx/3xx" :input-props="{ 'aria-label': '全局探活期望状态码' }" @change="commitExpect" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="历史保留天数">
-            <template #control>
-              <NInputNumber :value="alerts.alert_keep_days" :min="lim('alert_keep_days').min" :max="lim('alert_keep_days').max" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '告警历史保留天数' }" @update:value="commitNum('alert_keep_days', $event)" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow label="历史上限行">
-            <template #control>
-              <NInputNumber :value="alerts.alert_keep_rows" :min="lim('alert_keep_rows').min" :max="lim('alert_keep_rows').max" :step="100" style="width: 118px; max-width: 100%" :input-props="{ 'aria-label': '告警历史最多保留行数' }" @update:value="commitNum('alert_keep_rows', $event)" />
-            </template>
-          </CpSettingRow>
-          <CpSettingRow class="alert-probes-row" label="按应用覆写期望状态码" help="探活只看端口是否应答：连不上或超时才算 crit，4xx/5xx 说明进程还在。覆写值留空即回落到上面的全局期望。">
-            <template #control>
-              <NSpace vertical :size="6" style="width: 100%">
-                <NSpace v-for="row in probeList" :key="row.name" align="center" :size="8">
-                  <span class="mono-dim cp-break" style="min-width: 148px">{{ row.name }}</span>
+        <NForm class="cp-set-form alerts-form" size="small" label-placement="top" style="margin-top: var(--space-4)">
+          <section class="alert-form-section">
+            <div class="alert-section-head">
+              <h3 class="alert-section-title">通知渠道</h3>
+              <span>设置一种或多种通知方式，配置会分别保存。</span>
+            </div>
+            <div class="alert-fields-grid">
+              <CpSettingRow label="Telegram Bot Token" :value="mask(alerts.alert_telegram_bot)" @edit="openChan('alert_telegram_bot')" />
+              <CpSettingRow label="Telegram Chat ID" :value="mask(alerts.alert_telegram_chat)" @edit="openChan('alert_telegram_chat')" />
+              <CpSettingRow label="通用 Webhook URL" :value="mask(alerts.alert_webhook_url)" @edit="openChan('alert_webhook_url')" />
+              <CpSettingRow label="邮件服务器" :value="chanText('alert_email_host')" @edit="openChan('alert_email_host')" />
+              <CpSettingRow label="SMTP 端口" help="465 走隐式 TLS；其余端口必须服务器支持 STARTTLS，否则面板不会把口令带上明文连接。">
+                <template #control>
+                  <NInputNumber :value="alerts.alert_email_port" :min="lim('alert_email_port').min" :max="lim('alert_email_port').max" style="width: 148px; max-width: 100%" :input-props="{ 'aria-label': 'SMTP 端口' }" @update:value="commitNum('alert_email_port', $event)" />
+                </template>
+              </CpSettingRow>
+              <CpSettingRow label="发件人" :value="chanText('alert_email_from')" @edit="openChan('alert_email_from')" />
+              <CpSettingRow label="收件人" :value="chanText('alert_email_to')" @edit="openChan('alert_email_to')" />
+              <CpSettingRow label="SMTP 用户名" :value="chanText('alert_email_user')" @edit="openChan('alert_email_user')" />
+              <CpSettingRow label="SMTP 口令" :value="chanText('alert_email_pass')" @edit="openChan('alert_email_pass')" />
+            </div>
+          </section>
+
+          <section class="alert-form-section">
+            <div class="alert-section-head">
+              <h3 class="alert-section-title">资源与证书阈值</h3>
+              <span>达到阈值时发送通知。</span>
+            </div>
+            <div class="alert-fields-grid">
+              <CpSettingRow label="磁盘阈值 %" :help="critHint('alert_disk_pct')">
+                <template #control>
+                  <NInputNumber :value="alerts.alert_disk_pct" :min="lim('alert_disk_pct').min" :max="lim('alert_disk_pct').max" style="width: 148px; max-width: 100%" :input-props="{ 'aria-label': '磁盘使用率阈值百分比' }" @update:value="commitNum('alert_disk_pct', $event)" />
+                </template>
+              </CpSettingRow>
+              <CpSettingRow label="CPU 阈值 %" :help="critHint('alert_cpu_pct')">
+                <template #control>
+                  <NInputNumber :value="alerts.alert_cpu_pct" :min="lim('alert_cpu_pct').min" :max="lim('alert_cpu_pct').max" style="width: 148px; max-width: 100%" :input-props="{ 'aria-label': 'CPU 使用率阈值百分比' }" @update:value="commitNum('alert_cpu_pct', $event)" />
+                </template>
+              </CpSettingRow>
+              <CpSettingRow label="内存阈值 %" :help="critHint('alert_mem_pct')">
+                <template #control>
+                  <NInputNumber :value="alerts.alert_mem_pct" :min="lim('alert_mem_pct').min" :max="lim('alert_mem_pct').max" style="width: 148px; max-width: 100%" :input-props="{ 'aria-label': '内存使用率阈值百分比' }" @update:value="commitNum('alert_mem_pct', $event)" />
+                </template>
+              </CpSettingRow>
+              <CpSettingRow label="load1 ×核数" help="这一条只决定告警。概览的负载环按物理饱和度变色（满一格是每核一个排队任务），不会跟着这个倍数走。">
+                <template #control>
+                  <NInputNumber :value="alerts.alert_load1_x" :min="lim('alert_load1_x').min" :max="lim('alert_load1_x').max" style="width: 148px; max-width: 100%" :input-props="{ 'aria-label': '一分钟负载阈值倍数' }" @update:value="commitNum('alert_load1_x', $event)" />
+                </template>
+              </CpSettingRow>
+              <CpSettingRow label="SSL 剩余天数">
+                <template #control>
+                  <NInputNumber :value="alerts.alert_ssl_days" :min="lim('alert_ssl_days').min" :max="lim('alert_ssl_days').max" style="width: 148px; max-width: 100%" :input-props="{ 'aria-label': 'SSL 剩余天数阈值' }" @update:value="commitNum('alert_ssl_days', $event)" />
+                </template>
+              </CpSettingRow>
+            </div>
+          </section>
+
+          <section class="alert-form-section">
+            <div class="alert-section-head">
+              <h3 class="alert-section-title">应用探活</h3>
+              <span>连不上或超时才算异常；收到 4xx / 5xx 仍表示应用有响应。</span>
+            </div>
+            <div class="alert-fields-grid alert-probe-fields">
+              <CpSettingRow label="启用应用探活">
+                <template #control>
+                  <NSwitch :value="String(alerts.alert_probe) !== '0'" size="small" aria-label="是否启用应用 HTTP 探活" @update:value="commitProbe" />
+                </template>
+              </CpSettingRow>
+              <CpSettingRow label="全局期望状态码" help="失焦或回车即保存">
+                <template #control>
+                  <NInput :value="alerts.alert_probe_expect" size="small" style="width: 148px; max-width: 100%" placeholder="2xx/3xx" :input-props="{ 'aria-label': '全局探活期望状态码' }" @change="commitExpect" />
+                </template>
+              </CpSettingRow>
+            </div>
+            <div class="alert-override-block">
+              <div class="alert-override-head">
+                <h4>按应用覆写期望状态码</h4>
+                <p>覆写值留空时使用上方的全局期望状态码。</p>
+              </div>
+              <div class="alert-override-list">
+                <div v-for="row in probeList" :key="row.name" class="alert-probe-row">
+                  <span class="mono-dim cp-break alert-probe-name">{{ row.name }}</span>
                   <NInput :value="row.expect" size="tiny" style="width: 132px; max-width: 100%" placeholder="200 204" :input-props="{ 'aria-label': `${row.name} 的期望状态码` }" @update:value="(v: string) => { row.expect = v; }" />
-                  <NButton size="tiny" tertiary :icon="ico('SaveOutline', 12)" :loading="probeRowBusy === row.name" :disabled="probeRowBusy !== null || probeAdding" @click="saveProbeRow(row)">保存</NButton>
-                  <NButton size="tiny" tertiary :icon="ico('TrashOutline', 12)" aria-label="删除该覆写" :loading="probeRowBusy === row.name" :disabled="probeRowBusy !== null || probeAdding" @click="dropProbeRow(row.name)">删除</NButton>
-                </NSpace>
-                <EmptyBox v-if="!probeList.length" text="还没有按应用覆写，默认全部走全局期望状态码" />
-                <NSpace align="center" :size="8">
+                  <div class="alert-probe-actions">
+                    <NButton size="tiny" tertiary :icon="ico('SaveOutline', 12)" :loading="probeRowBusy === row.name" :disabled="probeRowBusy !== null || probeAdding" @click="saveProbeRow(row)">保存</NButton>
+                    <NButton size="tiny" tertiary :icon="ico('TrashOutline', 12)" aria-label="删除该覆写" :loading="probeRowBusy === row.name" :disabled="probeRowBusy !== null || probeAdding" @click="dropProbeRow(row.name)">删除</NButton>
+                  </div>
+                </div>
+                <div v-if="!probeList.length" class="alert-override-empty">
+                  <EmptyBox text="还没有按应用覆写，默认全部走全局期望状态码" />
+                </div>
+                <div class="alert-probe-add">
                   <NInput v-model:value="probeDraft.name" size="tiny" style="width: 148px; max-width: 100%" placeholder="应用名" :input-props="{ 'aria-label': '新增覆写的应用名' }" @keyup.enter="addProbeRow" />
                   <NInput v-model:value="probeDraft.expect" size="tiny" style="width: 132px; max-width: 100%" placeholder="200 204" :input-props="{ 'aria-label': '新增覆写的期望状态码' }" @keyup.enter="addProbeRow" />
                   <NButton size="tiny" tertiary :icon="ico('AddOutline', 12)" :loading="probeAdding" :disabled="probeAdding || probeRowBusy !== null" @click="addProbeRow">新增覆写</NButton>
-                </NSpace>
-              </NSpace>
-            </template>
-          </CpSettingRow>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="alert-form-section">
+            <div class="alert-section-head">
+              <h3 class="alert-section-title">历史留存</h3>
+              <span>限制告警记录的保存时间与数量。</span>
+            </div>
+            <div class="alert-fields-grid">
+              <CpSettingRow label="历史保留天数">
+                <template #control>
+                  <NInputNumber :value="alerts.alert_keep_days" :min="lim('alert_keep_days').min" :max="lim('alert_keep_days').max" style="width: 148px; max-width: 100%" :input-props="{ 'aria-label': '告警历史保留天数' }" @update:value="commitNum('alert_keep_days', $event)" />
+                </template>
+              </CpSettingRow>
+              <CpSettingRow label="历史上限行">
+                <template #control>
+                  <NInputNumber :value="alerts.alert_keep_rows" :min="lim('alert_keep_rows').min" :max="lim('alert_keep_rows').max" :step="100" style="width: 148px; max-width: 100%" :input-props="{ 'aria-label': '告警历史最多保留行数' }" @update:value="commitNum('alert_keep_rows', $event)" />
+                </template>
+              </CpSettingRow>
+            </div>
+          </section>
         </NForm>
       </section>
       </NCard>
@@ -1024,9 +1063,25 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
 .settings-panel :deep(.n-card__content) { padding: 18px 20px; }
 .settings-panel-narrow { max-width: 900px; }
 .settings-panel .sec-head { margin-bottom: var(--space-2); }
-.alerts-form { width: 100%; max-width: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-5); }
-.alert-subheading { grid-column: 1 / -1; padding: var(--space-2) 0 var(--space-1); border-bottom: 1px solid var(--cp-border); color: var(--cp-text-mute); font-size: var(--fs-2xs); font-weight: 600; }
-.alerts-form :deep(.alert-probes-row) { grid-column: 1 / -1; }
+.alerts-form { width: 100%; max-width: none; display: flex; flex-direction: column; gap: 24px; }
+.alert-form-section { min-width: 0; }
+.alert-section-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 16px; padding-bottom: 9px; border-bottom: 1px solid var(--cp-border); }
+.alert-section-title { margin: 0; color: var(--cp-text-strong); font-size: 15px; font-weight: 600; line-height: 1.4; }
+.alert-section-head > span { color: var(--cp-text-mute); font-size: var(--fs-xs); line-height: 1.5; }
+.alert-fields-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; row-gap: 18px; }
+.alert-fields-grid :deep(.n-form-item) { margin-bottom: 0; }
+.alert-fields-grid :deep(.n-form-item-label) { color: var(--cp-text-dim); font-size: var(--fs-xs); font-weight: 600; line-height: 1.4; padding-bottom: 5px; }
+.alert-fields-grid :deep(.cp-set-main) { gap: 2px; }
+.alert-override-block { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--cp-border); }
+.alert-override-head h4 { margin: 0; color: var(--cp-text-strong); font-size: var(--fs-sm); font-weight: 600; }
+.alert-override-head p { margin: 3px 0 0; color: var(--cp-text-mute); font-size: var(--fs-xs); line-height: 1.5; }
+.alert-override-list { display: grid; gap: 8px; margin-top: 12px; }
+.alert-probe-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 8px 10px; border: 1px solid var(--cp-border); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--cp-bg-soft) 55%, transparent); }
+.alert-probe-name { flex: 1 1 148px; }
+.alert-probe-actions { display: inline-flex; align-items: center; gap: 4px; }
+.alert-override-empty { padding: 8px 0; color: var(--cp-text-mute); }
+.alert-probe-add { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+.alert-fields-grid :deep(.n-form-item-feedback-wrapper) { min-height: 0; }
 @media (max-width: 1100px) {
   .settings-workspace { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
   .settings-nav { position: static; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-right: 0; border-bottom: 1px solid var(--cp-border); padding: 0 0 var(--space-2); }
@@ -1042,8 +1097,12 @@ onBeforeUnmount(() => mq.removeEventListener('change', onMq));
   .settings-pane-head h2 { font-size: var(--fs-lg); }
   .settings-panel :deep(.n-card__content) { padding: var(--space-3); }
 }
-@media (max-width: 900px) {
-  .alerts-form { grid-template-columns: minmax(0, 1fr); }
-  .alert-subheading, .alerts-form :deep(.alert-probes-row) { grid-column: auto; }
+@media (max-width: 640px) {
+  .alerts-form { gap: 20px; }
+  .alert-section-head { align-items: flex-start; flex-direction: column; gap: 3px; margin-bottom: 13px; }
+  .alert-fields-grid { grid-template-columns: minmax(0, 1fr); row-gap: 15px; }
+  .alert-probe-row { align-items: flex-start; }
+  .alert-probe-name { flex-basis: 100%; }
+  .alert-probe-add > :deep(.n-input) { flex: 1 1 130px; }
 }
 </style>

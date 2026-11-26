@@ -22,6 +22,11 @@ test('settings section switcher is admin-only, while account security remains av
   assert.match(settings, /<nav v-if="isAdmin" class="settings-nav/);
   assert.match(settings, /<div v-if="activeSection === 'security'" class="settings-grid">/);
   assert.match(settings, /class="settings-panel"/);
+  assert.match(settings, /class="alert-fields-grid"/);
+  assert.match(settings, /alert-section-title">通知渠道/);
+  assert.match(settings, /alert-section-title">资源与证书阈值/);
+  assert.match(settings, /alert-section-title">应用探活/);
+  assert.match(settings, /alert-section-title">历史留存/);
   assert.match(settings, /if \(!admin\) activeSection\.value = 'security'/);
   assert.match(settings, /settings-workspace \{ display: grid; grid-template-columns: 196px minmax\(0, 1fr\)/);
   assert.match(settings, /\.settings-grid \{ display: grid; grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
